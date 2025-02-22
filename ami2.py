@@ -8,4 +8,4 @@ def generate_response_v2(prompt):
    for chunk in response:
       print("Chunk received:", chunk)
       if chunk.content:
-         yield chunk.content + "\n"
+         yield chunk.content
