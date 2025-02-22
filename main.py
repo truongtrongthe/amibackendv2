@@ -7,7 +7,7 @@ from ami2 import generate_response_v2
 app = Flask(__name__)
 
 # Enable CORS for all routes and specify allowed origins
-CORS(app, resources={r"/stream": {"origins": "*", "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
 
 # Load environment variables from .env file
 load_dotenv()
