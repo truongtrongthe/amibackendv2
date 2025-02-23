@@ -58,10 +58,18 @@ def save_response():
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
 
-
 @app.route('/save-knowledge', methods=['OPTIONS'])
 def options_response():
     return Response(status=200)
+
+@app.route('/<path:path>', methods=['OPTIONS'])
+def options_response(path):
+    return Response(status=200)
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
 
 @app.route('/')
 def home():
