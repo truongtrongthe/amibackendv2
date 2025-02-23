@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 from flask import Flask, Response, stream_with_context, request, jsonify
 from flask_cors import CORS  # Import CORS
-from ami import generate_response
 from ami2 import ami_response
 from knowledge import tobrain
 from summarizer import summarize_text
@@ -14,17 +13,6 @@ CORS(app, resources={r"/*": {"origins": "*", "methods": ["POST", "OPTIONS"], "al
 
 # Load environment variables from .env file
 load_dotenv()
-
-@app.route('/stream', methods=['POST'])
-def stream_response():
-    data = request.get_json()
-    prompt = data.get("prompt", "Tell me about Ami.")
-
-    return Response(
-        stream_with_context(generate_response(prompt)),
-        content_type='text/plain',
-        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
-    )
 
 @app.route('/chat', methods=['POST'])
 def chat_response():
@@ -41,9 +29,8 @@ def chat_response():
 def spell_response():
     data = request.get_json()
     prompt = data.get("prompt")
-
     return Response(
-        stream_with_context(ami_telling(prompt)),
+        stream_with_context((chunk.content for chunk in ami_telling(prompt))),  # Access content directly
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
@@ -63,15 +50,16 @@ def preview_response():
 def save_response():
     data = request.get_json()
     new_knowledge = data.get("new_knowledge")
+    raw_content = data.get("raw_content")
 
     return Response(
-        stream_with_context(tobrain(new_knowledge)),
+        stream_with_context(tobrain(new_knowledge, raw_content)),
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
 
 
-@app.route('/stream', methods=['OPTIONS'])
+@app.route('/save-knowledge', methods=['OPTIONS'])
 def options_response():
     return Response(status=200)
 
