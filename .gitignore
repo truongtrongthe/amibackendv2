@@ -44,3 +44,6 @@ wheels/
 
 # Other files to ignore
 *.DS_Store
+hito_index/
+*.DS_Store
+.venv/

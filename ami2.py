@@ -45,3 +45,4 @@ def ami_response(query):  # Replace with your actual new function name
     print("Updated Memory:", memory.load_memory_variables({}))
     
     yield response  # Yield the single response
+

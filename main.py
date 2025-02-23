@@ -4,6 +4,7 @@ from flask import Flask, Response, stream_with_context, request, jsonify
 from flask_cors import CORS  # Import CORS
 from ami import generate_response
 from ami2 import ami_response
+
 app = Flask(__name__)
 
 # Enable CORS for all routes and specify allowed origins
@@ -33,6 +34,18 @@ def chat_response():
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
+
+@app.route('/ami-spell', methods=['POST'])
+def chat_response():
+    data = request.get_json()
+    prompt = data.get("prompt")
+
+    return Response(
+        stream_with_context(ami_telling(prompt)),
+        content_type='text/plain',
+        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
+    )
+
 
 @app.route('/stream', methods=['OPTIONS'])
 def options_response():
