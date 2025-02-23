@@ -9,7 +9,7 @@ from brain import ami_telling
 app = Flask(__name__)
 
 # Enable CORS for all routes and specify allowed origins
-CORS(app, resources={r"/*": {"origins": ["http://localhost", "http://localhost:5173"], "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
+CORS(app, resources={r"/*": {"origins": ["*"], "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
 
 # Load environment variables from .env file
 load_dotenv()
