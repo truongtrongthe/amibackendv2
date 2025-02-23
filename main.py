@@ -9,7 +9,7 @@ from brain import ami_telling
 app = Flask(__name__)
 
 # Enable CORS for all routes and allow all origins
-CORS(app, resources={r"/*": {"origins": "*", "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
+CORS(app)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,8 +46,11 @@ def preview_response():
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
 
-@app.route('/save-knowledge', methods=['POST'])
+
+@app.route('/save-knowledge', methods=['POST', 'OPTIONS'])
 def save_response():
+    if request.method == "OPTIONS":
+        return Response(status=200)
     data = request.get_json()
     new_knowledge = data.get("new_knowledge")
     raw_content = data.get("raw_content")
@@ -58,9 +61,7 @@ def save_response():
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
 
-@app.route('/save-knowledge', methods=['OPTIONS'])
-def options_response():
-    return Response(status=200)
+
 
 @app.route('/<path:path>', methods=['OPTIONS'])
 def options_response1(path):
@@ -69,6 +70,8 @@ def options_response1(path):
 @app.after_request
 def add_cors_headers(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     return response
 
 @app.route('/')
