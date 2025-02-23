@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, stream_with_context, request, jsonify
 from flask_cors import CORS  # Import CORS
 from ami import generate_response
-from ami2 import generate_response_v2
+from ami2 import ami_response
 app = Flask(__name__)
 
 # Enable CORS for all routes and specify allowed origins
@@ -29,7 +29,7 @@ def chat_response():
     prompt = data.get("prompt")
 
     return Response(
-        stream_with_context(generate_response_v2(prompt)),
+        stream_with_context(ami_response(prompt)),
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
