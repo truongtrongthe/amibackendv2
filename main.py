@@ -6,7 +6,7 @@ from ami import generate_response
 from ami2 import ami_response
 from knowledge import tobrain
 from summarizer import summarize_text
-
+from brain import ami_telling
 app = Flask(__name__)
 
 # Enable CORS for all routes and specify allowed origins
@@ -38,7 +38,7 @@ def chat_response():
     )
 
 @app.route('/ami-spell', methods=['POST'])
-def chat_response():
+def spell_response():
     data = request.get_json()
     prompt = data.get("prompt")
 
@@ -49,7 +49,7 @@ def chat_response():
     )
 
 @app.route('/preview-knowledge', methods=['POST'])
-def chat_response():
+def preview_response():
     data = request.get_json()
     rawknowledge = data.get("raw_knowledge")
 
@@ -60,7 +60,7 @@ def chat_response():
     )
 
 @app.route('/save-knowledge', methods=['POST'])
-def chat_response():
+def save_response():
     data = request.get_json()
     new_knowledge = data.get("new_knowledge")
 
