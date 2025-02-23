@@ -8,8 +8,8 @@ from summarizer import summarize_text
 from brain import ami_telling
 app = Flask(__name__)
 
-# Enable CORS for all routes and specify allowed origins
-CORS(app, resources={r"/*": {"origins": ["*"], "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
+# Enable CORS for all routes and allow all origins
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["POST", "OPTIONS"], "allow_headers": "*"}})
 
 # Load environment variables from .env file
 load_dotenv()
