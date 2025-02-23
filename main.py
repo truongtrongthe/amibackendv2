@@ -63,7 +63,7 @@ def options_response():
     return Response(status=200)
 
 @app.route('/<path:path>', methods=['OPTIONS'])
-def options_response(path):
+def options_response1(path):
     return Response(status=200)
 
 @app.after_request
