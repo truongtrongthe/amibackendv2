@@ -4,6 +4,8 @@ from flask import Flask, Response, stream_with_context, request, jsonify
 from flask_cors import CORS  # Import CORS
 from ami import generate_response
 from ami2 import ami_response
+from knowledge import tobrain
+from summarizer import summarize_text
 
 app = Flask(__name__)
 
@@ -42,6 +44,28 @@ def chat_response():
 
     return Response(
         stream_with_context(ami_telling(prompt)),
+        content_type='text/plain',
+        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
+    )
+
+@app.route('/preview-knowledge', methods=['POST'])
+def chat_response():
+    data = request.get_json()
+    rawknowledge = data.get("raw_knowledge")
+
+    return Response(
+        stream_with_context(summarize_text(rawknowledge)),
+        content_type='text/plain',
+        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
+    )
+
+@app.route('/save-knowledge', methods=['POST'])
+def chat_response():
+    data = request.get_json()
+    new_knowledge = data.get("new_knowledge")
+
+    return Response(
+        stream_with_context(tobrain(new_knowledge)),
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
