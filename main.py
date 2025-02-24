@@ -6,6 +6,7 @@ from ami2 import ami_response
 from knowledge import tobrain
 from summarizer import summarize_text
 from brain import ami_telling
+from database import insert_knowledge_entry, get_knowledge_entries
 app = Flask(__name__)
 
 # Enable CORS for all routes and allow all origins
@@ -57,6 +58,8 @@ def save_response():
 
     try:
         tobrain(new_knowledge, raw_content)
+        insert_knowledge_entry(raw_content, new_knowledge)
+        print("summary generated:", new_knowledge)
         return Response(
             "Memory saved successfully!",
             content_type='text/plain',
@@ -66,7 +69,14 @@ def save_response():
         # Handle the exception (log it, return an error response, etc.)
         return Response(str(e), status=500)  # Return 500 if there's an error
 
-
+@app.route('/get-knowledge-entries', methods=['GET'])
+def get_knowledge_response():
+    """Retrieve all knowledge entries."""
+    try:
+        entries = get_knowledge_entries()  # Fetch all knowledge entries
+        return jsonify(entries.data), 200  # Return the entries as JSON
+    except Exception as e:
+        return Response(str(e), status=500)  # Return 500 if there's an error
 
 @app.route('/<path:path>', methods=['OPTIONS'])
 def options_response1(path):
@@ -75,7 +85,7 @@ def options_response1(path):
 @app.after_request
 def add_cors_headers(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS, GET')  # Ensure GET is included
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     return response
 
