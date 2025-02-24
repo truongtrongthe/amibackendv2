@@ -1,4 +1,4 @@
-import os
+import os   
 from dotenv import load_dotenv
 from flask import Flask, Response, stream_with_context, request, jsonify
 from flask_cors import CORS  # Import CORS
@@ -55,11 +55,16 @@ def save_response():
     new_knowledge = data.get("new_knowledge")
     raw_content = data.get("raw_content")
 
-    return Response(
-        stream_with_context(tobrain(new_knowledge, raw_content)),
-        content_type='text/plain',
-        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
-    )
+    try:
+        tobrain(new_knowledge, raw_content)
+        return Response(
+            "Memory saved successfully!",
+            content_type='text/plain',
+            headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
+        ), 200  # Return 200 if streaming is successful
+    except Exception as e:
+        # Handle the exception (log it, return an error response, etc.)
+        return Response(str(e), status=500)  # Return 500 if there's an error
 
 
 

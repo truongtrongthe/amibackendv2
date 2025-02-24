@@ -16,6 +16,7 @@ Context:
 {context}
 
 User: {user_input}
+Make sure to answer in the same language as the user. Ensure the answer is concise and to the point.
 Ami:"""
 )
 
@@ -24,7 +25,7 @@ memory = ConversationBufferMemory(memory_key="history", return_messages=True)
 
 def retrieve_context(user_input):
     """Retrieve relevant context from Pinecone and format it."""
-    retrieved_info = retrieve_relevant_infov2(user_input, top_k=5)  # Ensure correct param name `top_k`
+    retrieved_info = retrieve_relevant_infov2(user_input, top_k=10)  # Ensure correct param name `top_k`
     
     if retrieved_info:
         # Extract the 'content' field safely

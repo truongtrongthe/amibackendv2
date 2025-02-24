@@ -7,7 +7,8 @@ summarization_llm = ChatOpenAI(model="gpt-4o")
 
 def summarize_text(text):
     prompt = f"""
-    Summarize the following text in a concise and structured format. Remember to extract the most important information and make it easy to understand.
+    Summarize the following text in a concise and structured format. 
+    Remember to extract the most important information and make it easy to understand.
     {text}
     """
     response = summarization_llm.invoke(prompt)

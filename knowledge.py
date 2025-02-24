@@ -61,8 +61,6 @@ def tobrain(summary, raw_content):
     # Upsert into Pinecone
     index.upsert(vectors)
 
-    return("✅ Memory saved successfully!")
-
 def retrieve_relevant_info(query, k=1):
     index = pc.Index(index_name)
     query_embedding = embeddings.embed_query(query)
