@@ -149,7 +149,7 @@ def summarize_content(text):
     summary = llm.invoke(prompt).content.strip()
     return summary
 
-def expert_chat_function(user_input: str, expert_id="thetruong"):
+def expert_chat_function_old(user_input: str, expert_id="thetruong"):
     global conversation_state  
 
     history = memory.load_memory_variables({}).get("history", [])
@@ -229,6 +229,96 @@ def expert_chat_function(user_input: str, expert_id="thetruong"):
     else:
         return None  
 
+def expert_chat_function(user_input: str, expert_id="thetruong"):
+    global conversation_state  
+
+    history = memory.load_memory_variables({}).get("history", [])
+
+    # Kiểm tra nếu đang chờ user xác nhận kiến thức
+    if conversation_state.get("waiting_for_confirmation"):
+        print("waiting for confirmation here")
+        return confirm_knowledge(user_input, expert_id)
+
+    # Phân loại tin nhắn (Giao tiếp / Kiến thức)
+    message_type = classify_message(user_input)
+
+    if message_type == "conversation":
+        print("answering for conversation")
+        
+        prompt = f"""
+        Đây là cuộc hội thoại giữa tôi và chuyên gia. Hãy trả lời một cách tự nhiên, phù hợp với ngữ cảnh:
+
+        📜 **Lịch sử hội thoại**:
+        {history}
+
+        🗣 **Tin nhắn mới từ chuyên gia**:
+        "{user_input}"
+
+        🎯 **Cách phản hồi mong muốn**:
+        - Nếu tin nhắn là lời chào hoặc giao tiếp thông thường → Hãy trả lời NGẮN GỌN, ẤM ÁP, TÍCH CỰC, và **kèm theo một câu khơi gợi hội thoại**.
+        - Luôn đóng vai trò là AMI, một trợ lý AI ham học hỏi.  
+        - KHÔNG BAO GIỜ trả lời rằng "chưa có thông tin để phản hồi".  
+        - Nếu có thể, hãy chủ động hỏi thêm chuyên gia về một chủ đề liên quan.  
+
+        🚀 **Ví dụ cách trả lời**:
+        - User: "Good morning" → AMI: "Chào buổi sáng! Hôm nay anh có điều gì thú vị muốn chia sẻ không?"
+        - User: "Chào AMI!" → AMI: "Chào anh! Tôi đang sẵn sàng để học thêm kiến thức mới từ anh đây!"  
+        """
+
+        response = llm.invoke(prompt)
+        memory.save_context({"input": user_input}, {"output": response.content})
+        return response.content
+
+    elif message_type == "knowledge":
+        key_points = extract_key_points(user_input)
+        index = pc.Index(index_name)
+        topic_id = find_similar_topic(user_input)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        if topic_id:
+            existing_metadata = fetch_metadata(topic_id)
+            updated_content = existing_metadata.get("content", "") + "\n" + user_input
+            summary = summarize_content(updated_content)  
+            
+            # Kiểm tra skill mới
+            new_skills = extract_new_skills(summary, existing_metadata.get("skills", []))
+            if new_skills:
+                existing_metadata["skills"].extend(new_skills)
+            
+            updated_metadata = {
+                "content": updated_content,
+                "summary": summary,
+                "skills": existing_metadata.get("skills", []),  # Cập nhật danh sách skill
+                "last_updated": timestamp
+            }
+            index.upsert([(topic_id, get_embedding(updated_metadata["content"]), updated_metadata)])
+            response_message = f"✅ Đã cập nhật kiến thức vào chủ đề: {topic_id}"
+        else:
+            new_id = f"topic-{uuid.uuid4().hex}"
+            summary = summarize_content(user_input)  
+            new_skills = extract_new_skills(summary, [])
+            
+            new_metadata = {
+                "content": user_input,
+                "summary": summary,
+                "skills": new_skills,  # Lưu skill mới nếu có
+                "last_updated": timestamp
+            }
+            index.upsert([(new_id, get_embedding(user_input), new_metadata)])
+            response_message = f"✅ Tạo chủ đề mới: {new_id}"
+
+        conversation_state.update({
+            "waiting_for_confirmation": True,
+            "pending_knowledge": user_input,
+            "extracted_key_points": key_points
+        })
+
+        return response_message + "\nBạn có muốn bổ sung hoặc thay đổi gì không? (Nhập nội dung bổ sung hoặc 'Không' để xác nhận.)"
+    elif message_type == "ambiguous":
+        return f'🤔 Tôi chưa hiểu rõ ý của bạn. Bạn có thể giải thích thêm về câu này không? "{user_input}"'
+
+    else:
+        return None
 
 def confirm_knowledge(user_input: str, expert_id="thetruong"):
     print("confirming knowledge here")
@@ -384,23 +474,35 @@ def summarize_topic(topic_id):
     print(f"📌 Tóm tắt lưu vào Pinecone: {summary}")
 
 def process_message(message):
-
-    index = pc.Index(index_name)
-    if should_close_topic(message):
-        print("🔹 Chủ đề kết thúc, tổng hợp kiến thức...")
-        topic_id = find_similar_topic(message)
-        if topic_id:
-            existing_metadata = index.fetch([topic_id])["vectors"][topic_id]["metadata"]
-            summary = summarize_topic(existing_metadata["content"])
-            print(f"📌 Tóm tắt kiến thức:\n{summary}")
-        return
-
-def process_messagev2(message):
     if should_close_topic(message):
         print("🔹 Chủ đề kết thúc, tổng hợp kiến thức...")
         topic_id = find_similar_topic(message)
         if topic_id:
             summarize_topic(topic_id)
         return
-
     update_or_create_topic(message)
+import numpy as np
+from typing import List, Dict
+def is_related(new_text: str, topic_embedding: List[float], threshold: float = 0.75) -> bool:
+    new_embedding = np.array(get_embedding(new_text))
+    topic_embedding = np.array(topic_embedding)
+    similarity = np.dot(new_embedding, topic_embedding) / (np.linalg.norm(new_embedding) * np.linalg.norm(topic_embedding))
+    return similarity >= threshold
+def extract_new_skills(summary: str, existing_skills: list):
+    """Tự động phát hiện skill mới từ nội dung tóm tắt."""
+    extracted_skills = skill_extractor(summary)  # Hàm này cần định nghĩa
+    new_skills = [skill for skill in extracted_skills if skill not in existing_skills]
+    return new_skills
+def skill_extractor(summary: str):
+    """Dùng LLM để trích xuất danh sách các skill từ nội dung tóm tắt."""
+    prompt = f"""
+    Dựa trên đoạn nội dung sau, hãy liệt kê các kỹ năng (skills) có thể học được. 
+    Chỉ trả về danh sách các skill, không giải thích thêm.
+
+    Nội dung:
+    "{summary}"
+
+    Danh sách kỹ năng:
+    """
+    response = llm.invoke(prompt)
+    return [skill.strip() for skill in response.content.split("\n") if skill.strip()]

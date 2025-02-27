@@ -125,22 +125,3 @@ def ami_selling_old(query):
     memory.save_context({"input": query}, {"output": last_response.strip()})
     
 
-
-def ami_respond(user_input: str):
-    """AMI phản hồi với kiến thức liên quan nhất."""
-    
-    relevant_knowledge = search_relevant_knowledge(user_input)
-
-    if relevant_knowledge:
-        prompt = f"""
-        Dựa trên các kỹ năng bán hàng đã học từ chuyên gia, hãy sử dụng thông tin sau:
-        "{relevant_knowledge}"
-
-        Hãy tổng hợp lại một câu trả lời hiệu quả nhất cho câu hỏi sau:
-        {user_input}
-        """
-    else:
-        prompt = f"Hãy phản hồi cho câu hỏi sau một cách tự nhiên nhất:\n{user_input}"
-
-    response = llm.invoke(prompt)
-    return {"response": response.content}
