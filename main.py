@@ -7,6 +7,7 @@ from knowledge import tobrain
 from summarizer import summarize_text
 from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries
+from experts import expert_chat_function
 app = Flask(__name__)
 
 # Enable CORS for all routes and allow all origins
@@ -45,7 +46,31 @@ def preview_response():
         stream_with_context(summarize_text(rawknowledge)),
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
-    )
+    ),200
+
+
+@app.route('/expert-chat', methods=['POST'])
+def expert_chat():
+    try:
+        # 1️⃣ Nhận input từ request
+        data = request.get_json()
+        user_input = data.get("user_input", "").strip()  # Đảm bảo không có None
+        if not user_input:
+            return jsonify({"error": "user_input is required"}), 400  # Bad request nếu thiếu input
+
+        # 2️⃣ Gọi expert_chat_function() để xử lý logic
+        response_text = expert_chat_function(user_input)
+
+        # 3️⃣ Chuẩn bị phản hồi API
+        response_data = {
+            "status": "success",
+            "response": response_text
+        }
+        return jsonify(response_data), 200  
+
+    except Exception as e:
+        print(f"Error in expert_chat: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/save-knowledge', methods=['POST', 'OPTIONS'])
@@ -92,6 +117,10 @@ def add_cors_headers(response):
 @app.route('/')
 def home():
     return "Hello, It's me Ami!"
+
+@app.route('/ping', methods=['POST'])
+def ping():
+    return "Pong"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001)

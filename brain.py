@@ -20,7 +20,7 @@ Make sure to answer in the same language as the user. Ensure the answer is conci
 Ami:"""
 )
 
-prompt = PromptTemplate(
+prompt_ok = PromptTemplate(
     input_variables=["history", "user_input", "context"],
     template="""Dưới đây là một số thông tin liên quan đến câu hỏi của bạn:
 
@@ -30,6 +30,22 @@ prompt = PromptTemplate(
 
     Người dùng: {user_input}
     Ami:"""
+)
+prompt = PromptTemplate(
+    input_variables=["history", "user_input", "context", "user_style"],
+    template="""
+Dựa vào các thông tin trước đây của người dùng, hãy đảm bảo câu trả lời phù hợp với phong cách của họ.
+Lịch sử cuộc trò chuyện:
+{history}
+
+Ngữ cảnh liên quan:
+{context}
+
+Phong cách phản hồi của người dùng trước đây:
+{user_style}
+
+Người dùng: {user_input}
+AMI (giữ nguyên phong cách của người dùng):"""
 )
 
 memory = ConversationBufferMemory(memory_key="history", return_messages=True)
@@ -85,7 +101,3 @@ def ami_telling(query):
         last_response += chunk.content  # Accumulate responses
     memory.save_context({"input": query}, {"output": last_response.strip()})
     
-# Example usage
-#query = "How to get taller by 5cm in Tokyo?"
-#for chunk in ami_telling(query):
-#    print(chunk.content, end="", flush=True)

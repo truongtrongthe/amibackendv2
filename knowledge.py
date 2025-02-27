@@ -1,7 +1,8 @@
 from langchain_text_splitters import CharacterTextSplitter
 import os
 from pinecone import Pinecone, ServerlessSpec
-from langchain.embeddings.openai import OpenAIEmbeddings
+#from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.schema import Document
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
@@ -59,6 +60,10 @@ def tobrain(summary, raw_content):
     ]
 
     # Upsert into Pinecone
+    index.upsert(vectors)
+
+def save_to_pinecone(user_id, embedding):
+    index = pc.Index(index_name)
     index.upsert(vectors)
 
 def retrieve_relevant_info(query, k=1):
