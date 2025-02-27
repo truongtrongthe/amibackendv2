@@ -7,6 +7,7 @@ from knowledge import tobrain
 from summarizer import summarize_text
 from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries
+from amibrainv3 import ami_selling
 from experts import expert_chat_function
 app = Flask(__name__)
 
@@ -33,6 +34,16 @@ def spell_response():
     prompt = data.get("prompt")
     return Response(
         stream_with_context((chunk.content for chunk in ami_telling(prompt))),  # Access content directly
+        content_type='text/plain',
+        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
+    )
+
+@app.route('/ami-selling', methods=['POST'])
+def ami_selling_response():
+    data = request.get_json()
+    prompt = data.get("prompt")
+    return Response(
+        stream_with_context((chunk.content for chunk in ami_selling(prompt))),
         content_type='text/plain',
         headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
     )
