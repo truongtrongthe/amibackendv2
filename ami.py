@@ -209,6 +209,7 @@ def handle_sales(user_message, user_context, company_goal, product_info):
     print("customer_stage:", customer_stage)
 
     next_stop = get_customer_next_stop(customer_stage)
+    print("next_stop:", next_stop)
 
     # Step 3: Identify conversation goal
     convo_goal = get_conversation_goal(customer_info, user_message, customer_stage, next_stop)
@@ -235,6 +236,7 @@ def handle_sales(user_message, user_context, company_goal, product_info):
     - **💡 Chiến thuật tiếp cận:** {best_approach}  
     - **💡 Hướng dẫn phản hồi:** {instruction}  
 
+    Có thể sử dụng câu dưới đây:
     ---
     """
 
@@ -264,6 +266,7 @@ def generate_conversation_response(user_message, customer_info, best_approach, i
     🔹 **Tích hợp Best Approach một cách tinh tế**, không lặp lại nguyên văn.
     🔹 **Tuân theo hướng dẫn trong Instruction** để đảm bảo phản hồi có chiến thuật phù hợp.
     🔹 Đừng tạo phản hồi quá dài – tối đa 3 câu.
+    
 
     📝 Trả lời:
     """
@@ -316,14 +319,16 @@ def get_customer_stage(chat_history, company_goal="khách chuyển khoản"):
     return response.strip()
 
 def get_customer_next_stop(current_stop):
-        if current_stop == "Awareness":
-            return "Interest"
-        elif current_stop == "Interest":
-            return "Consideration"
-        elif current_stop == "Consideration":
-            return "Decision"
-        elif current_stop == "Decision":
-            return "Action"
+    if "Awareness" in current_stop:
+        return "Interest"
+    elif "Interest" in current_stop:
+        return "Consideration"
+    elif "Consideration" in current_stop:
+        return "Decision"
+    elif "Decision" in current_stop:
+        return "Action"
+    else:
+        return "Unknown Stage"  # Default case to handle unexpected stages
     
 def customer_emotion(chat_history):
    
@@ -482,7 +487,7 @@ import re
 import json
 import re
 
-def analyse_approach(customer_stage, conversation_goal, customer_info, product_info):
+def analyse_approach(customer_stage,conversation_goal, customer_info, product_info):
     """
     Sử dụng LLM để suy luận chiến thuật tiếp cận khách hàng và tạo hướng dẫn cho response prompt.
     
