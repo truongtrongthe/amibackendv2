@@ -7,7 +7,7 @@ from knowledge import tobrain
 from summarizer import summarize_text
 from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries
-from amibrainv4 import ami_selling
+from amibrainv5 import ami_selling
 from experts import expert_chat_function
 app = Flask(__name__)
 
