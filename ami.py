@@ -12,6 +12,14 @@ import logging
 from typing import Dict, Any
 from openai import OpenAI
 logging.basicConfig(level=logging.INFO)
+import json
+
+
+# Initialize conversation memory
+memory = ConversationBufferMemory(return_messages=True)
+
+# Declare user_context as a global variable
+user_context = {"customer_info": {}}
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 PINECONE_ENV = "us-east-1"  # Check Pinecone console for your region
@@ -38,14 +46,8 @@ prompt = PromptTemplate(
     """
 )
 
-#  chat_history = ChatMessageHistory()
+# Initialize chat history
 chat_history = ChatMessageHistory()
-
-memory = ConversationBufferMemory(
-    chat_memory=chat_history,
-    memory_key="history",  # REQUIRED in newer versions
-    return_messages=True
-)
 
 def retrieve_product(user_input):
     """Retrieve relevant context from Pinecone and return a structured summary."""
@@ -89,8 +91,14 @@ def detect_customer_intent_dynamic(message: str) -> Dict[str, Any]:
             {"role": "user", "content": f"Analyze intent from this message: {message}"}
         ]
     )
-    intent_data = response.choices[0].message.content
-    return eval(intent_data)  # Giả sử output là dictionary JSON
+    intent_data = response.choices[0].message.content.strip()
+    
+    # Attempt to parse the intent_data as JSON
+    try:
+        return json.loads(intent_data)  # Use json.loads instead of eval
+    except json.JSONDecodeError as e:
+        print("JSON decoding error:", e)
+        return {"intent": "unknown", "intent_group": "general_conversation"}  # Return a default value in case of error
    
 def ami_drive(user_message, user_context,company_goal,product_info):
     """
@@ -113,15 +121,31 @@ def ami_drive(user_message, user_context,company_goal,product_info):
     else:
         return "Xin lỗi, tôi chưa hiểu rõ câu hỏi của bạn. Bạn có thể nói rõ hơn không?"
 
-
 def handle_general_conversation(intent, sub_intent, user_message, user_context):
+    # Load chat history from memory
+    chat_history_list = memory.load_memory_variables({})["history"]
+    
+
+    # Append the new user message to the chat history
+    chat_history_list.append(f"User: {user_message}")
+    print(chat_history_list)
+    print([type(msg) for msg in chat_history_list])
+
+    # Join the chat history into a single string
+    # chat_history_str = "\n".join(chat_history_list)
+    # chat_history_str = "\n".join([message.content for message in chat_history_list if hasattr(message, 'content')])
+    #chat_history_str = "\n".join(msg.content for msg in chat_history_list)
+    chat_history_str = "\n".join(
+    msg.content if hasattr(msg, "content") else msg for msg in chat_history_list
+    )
+
+
+    
+    # Save the joined chat history to memory
+    memory.save_context({"input": "chat_history"}, {"output": chat_history_str})
+
     # Lấy thông tin khách hàng từ user_context
     customer_info = user_context.get("customer_info", {})
-    chat_history = user_context.get("chat_history", "")
-
-    # Cập nhật lịch sử hội thoại
-    chat_history += f"\nUser: {user_message}"
-    user_context["chat_history"] = chat_history  
 
     # **Danh sách thông tin cần thu thập**
     required_fields = ["name", "age", "occupation", "interests"]
@@ -130,7 +154,7 @@ def handle_general_conversation(intent, sub_intent, user_message, user_context):
     # **Chỉ hỏi tên nếu thật sự chưa có**
     if "name" in missing_fields:
         probing_prompt = f"""
-        Lịch sử hội thoại: {chat_history}
+        Lịch sử hội thoại: {chat_history_str}
         Thông tin khách hàng hiện có: {customer_info}
         Bạn là một trợ lý AI. Khách hàng chưa cung cấp tên. Hãy đặt một câu hỏi lịch sự để hỏi tên.
         """
@@ -139,7 +163,7 @@ def handle_general_conversation(intent, sub_intent, user_message, user_context):
     # **Nếu đã có tên nhưng còn thiếu thông tin khác → Hỏi tiếp thông tin còn thiếu**
     if missing_fields:
         probing_prompt = f"""
-        Lịch sử hội thoại: {chat_history}
+        Lịch sử hội thoại: {chat_history_str}
         Thông tin khách hàng hiện có: {customer_info}
         Thông tin còn thiếu: {missing_fields}
         Hãy đặt một câu hỏi tự nhiên để khai thác một trong các thông tin còn thiếu mà không làm khách hàng khó chịu.
@@ -148,48 +172,126 @@ def handle_general_conversation(intent, sub_intent, user_message, user_context):
 
     # **Nếu đã có đủ thông tin → Trả lời theo ngữ cảnh**
     response_prompt = f"""
-    Tóm tắt hội thoại: {chat_history}
+    Tóm tắt hội thoại: {chat_history_str}
     Thông tin khách hàng: {customer_info}
     Câu khách hàng vừa hỏi: {user_message}
     Hãy phản hồi một cách tự nhiên, phù hợp với thông tin khách hàng, giữ cuộc trò chuyện mượt mà.
     """
     extract_prompt = f"""
-    Hội thoại: {chat_history}
+    Hội thoại: {chat_history_str}
     Thông tin hiện có: {user_context.get("customer_info", {})}
     Hãy cập nhật thông tin khách hàng dựa trên hội thoại mới. 
     Chú ý: Nếu đã có thông tin, không được làm mất thông tin cũ. Chỉ bổ sung phần còn thiếu.
     """
 
     return llm.invoke(response_prompt).content
+import json
 
+def handle_sales(user_message, user_context, company_goal, product_info):
+    """
+    Xử lý tin nhắn từ người dùng, kết hợp Best Approach vào phản hồi.
+    """
 
-def handle_sales(user_message, user_context,company_goal,product_info):
-    """
-    Xử lý tin nhắn từ người dùng, xác định mục tiêu, tạo Best_map và dẫn dắt hội thoại.
-    """
-    # Bước 1: Lấy thông tin khách hàng từ user_context
+    # Step 1: Retrieve customer info
     customer_info = user_context.get("customer_info", {})
-    chat_history = user_context.get("chat_history", "")
-    chat_history += f"\nUser: {user_message}"
-    user_context["chat_history"] = chat_history  # Cập nhật lịch sử hội thoại
-    
-    # Bước 2: Xác định customer_stage từ lịch sử hội thoại
-    customer_stage = get_customer_stage(chat_history)
+    chat_history_list = memory.load_memory_variables({})["history"]
+    chat_history_list.append(f"User: {user_message}")
+
+    # Convert chat history to a string and save
+    chat_history_str = "\n".join(
+        msg.content if hasattr(msg, "content") else msg for msg in chat_history_list
+    )
+    memory.save_context({"input": "chat_history"}, {"output": chat_history_str})
+
+    # Step 2: Determine customer stage
+    customer_stage = get_customer_stage(chat_history_list)
     user_context["customer_stage"] = customer_stage
     print("customer_stage:", customer_stage)
 
-    # Bước 3: Xác định mục tiêu hội thoại
-    cg = get_conversation_goal(customer_info, user_message, customer_stage)
-    print("conversation_goal in handle_user_message:", cg)
+    next_stop = get_customer_next_stop(customer_stage)
 
-    # Bước 3: Cập nhật customer_info với customer_stage
-    customer_info["customer_stage"] = customer_stage
-    # Bước 4: Tạo Best_map
-    best_map = create_best_map(cg, customer_info,company_goal,product_info)
-    print("best_map in handle_user_message:", best_map)
+    # Step 3: Identify conversation goal
+    convo_goal = get_conversation_goal(customer_info, user_message, customer_stage, next_stop)
 
-    response = generate_response(best_map, company_goal, customer_info)
-    return response
+    # Step 4: Get Best Approach & Instruction
+    approach_data = analyse_approach(customer_stage, convo_goal, customer_info, product_info)
+
+    # 🔍 Ensure response is valid
+    if not approach_data or not isinstance(approach_data, dict):
+        print("⚠️ Warning: analyse_approach returned an invalid response!")
+        approach_data = {
+            "best_approach": "Hãy tạo sự tin tưởng và khuyến khích khách hàng.",
+            "instruction": "Hãy phản hồi lịch sự, tạo sự tin tưởng và cung cấp thêm thông tin hữu ích."
+        }
+
+    best_approach = approach_data.get("best_approach", "Hãy tạo sự tin tưởng và khuyến khích khách hàng.")
+    instruction = approach_data.get("instruction", "Hãy phản hồi lịch sự, tạo sự tin tưởng và cung cấp thêm thông tin hữu ích.")
+
+    # 🔹 Markdown Analysis
+    analysis_markdown = f"""
+    **📊 Phân tích chiến lược:**  
+    - **📍 Giai đoạn khách hàng:** {customer_stage}  
+    - **🎯 Điểm đến tiếp theo:** {next_stop}  
+    - **💡 Chiến thuật tiếp cận:** {best_approach}  
+    - **💡 Hướng dẫn phản hồi:** {instruction}  
+
+    ---
+    """
+
+    # Step 5: Generate Final Response
+    final_response = generate_conversation_response(user_message, customer_info, best_approach, instruction)
+
+    return analysis_markdown + final_response
+
+
+def generate_conversation_response(user_message, customer_info, best_approach, instruction):
+    """
+    Tạo phản hồi hội thoại dựa trên Best Approach, Instruction và thông tin khách hàng.
+    - Best Approach: hướng tiếp cận phù hợp.
+    - Instruction: chỉ dẫn chi tiết về cách phản hồi.
+    """
+
+    print("Best Approach in generate_conversation_response:", best_approach)
+    print("Instruction in generate_conversation_response:", instruction)
+
+    prompt = f"""
+    🗣️ Tin nhắn khách hàng: "{user_message}"
+    👤 Thông tin khách hàng: {json.dumps(customer_info, ensure_ascii=False)}
+    💡 Best Approach: "{best_approach}"
+    🎯 Instruction: "{instruction}"
+
+    🔹 Hãy tạo một phản hồi **tự nhiên, thân thiện, gần gũi**, phản ánh phong cách nói chuyện của khách hàng.
+    🔹 **Tích hợp Best Approach một cách tinh tế**, không lặp lại nguyên văn.
+    🔹 **Tuân theo hướng dẫn trong Instruction** để đảm bảo phản hồi có chiến thuật phù hợp.
+    🔹 Đừng tạo phản hồi quá dài – tối đa 3 câu.
+
+    📝 Trả lời:
+    """
+
+    response = llm.invoke(prompt)
+
+    if not response or not response.content.strip():
+        print("⚠️ LLM response is empty or None")
+        return "Đây là một sản phẩm rất tốt, bạn có thể tham khảo thêm nhé!"
+
+    return response.content.strip()
+
+
+def generate_response(best_map, next_stop, customer_info):
+    """
+    Sinh phản hồi dựa trên Best_map + hướng khách hàng đến đích đến.
+    """
+    print("best_map in generate_response:", best_map)
+    prompt = f"""
+    Khách hàng: {customer_info}
+    Best_map: "{best_map}"
+    Company_goal: "{next_stop}"
+
+    Hãy tạo một phản hồi tự nhiên, thân thiện, dẫn dắt khách hàng theo Best_map và hướng họ đến {next_stop}. Hãy trả lời dùng ngôn ngữ của dùng.
+    """
+
+    response = llm.invoke(prompt).content  # Gọi OpenAI hoặc mô hình AI khác để sinh phản hồi
+    return response.strip()
 
 def get_customer_stage(chat_history, company_goal="khách chuyển khoản"):
     """
@@ -213,8 +315,17 @@ def get_customer_stage(chat_history, company_goal="khách chuyển khoản"):
     response= llm.invoke(prompt).content
     return response.strip()
 
-
-def get_customer_emotion(chat_history):
+def get_customer_next_stop(current_stop):
+        if current_stop == "Awareness":
+            return "Interest"
+        elif current_stop == "Interest":
+            return "Consideration"
+        elif current_stop == "Consideration":
+            return "Decision"
+        elif current_stop == "Decision":
+            return "Action"
+    
+def customer_emotion(chat_history):
    
     prompt = f"""
     Bạn là một chuyên gia tâm lý tinh tế. Hãy phát hiện cảm xúc hiện tại của khách hàng dựa trên lịch sử hội thoại:
@@ -224,81 +335,89 @@ def get_customer_emotion(chat_history):
     response= llm.invoke(prompt).content
     return response.strip()
 
-def get_customer_info(chat_history, user_context):
-    print("chat_history in the extract_customer_info:", chat_history)
-    
+def get_customer_info():
     """
     Dùng LLM để phân tích lịch sử hội thoại và trích xuất thông tin khách hàng.
     """
+    # Load the entire chat history from memory
+    chat_history = memory.load_memory_variables({})["history"]
     
-    # Lấy thông tin khách hàng đã có
-    existing_info = user_context.get("customer_info", {})
+    # Extract text from each message in the chat history
+    chat_history_str = "\n".join([message.content for message in chat_history if hasattr(message, 'content')])
+    print("Formatted chat_history_str:", repr(chat_history_str))
 
-    extract_prompt = f"""
-    Hội thoại giữa AI và khách hàng:
-        {chat_history}
+    prompt = f"""
+    
+    Dưới đây là lịch sử hội thoại giữa AI và khách hàng:
+   {chat_history_str}
 
-        Thông tin khách hàng đã có: {user_context.get("customer_info", {})}
+   Hãy trích xuất các thông tin sau từ cuộc trò chuyện:
+   - Tên khách hàng (name)
+   - Tuổi (age)
+   - Giới tính (gender)
+   - Nghề nghiệp (occupation)
+   - Sở thích (interests)
+   - Lịch sử mua hàng (purchase_history)
+    Nếu chưa có đủ thông tin, hãy dự đoán dựa trên ngữ cảnh hoặc để trống.
 
-        Hãy **chỉ trả về JSON thuần** với định dạng sau:
-        ```json
-        {{
-            "name": "...",
-            "age": "...",
-            "gender": "...",
-            "occupation": "...",
-            "interests": [...],
-            "purchase_history": [...]
-        }}```
+    Trả về một JSON với các trường:
+    - name (nếu có thể suy luận)
+    - age (nếu có thể suy luận)
+    - gender (nếu có thể suy luận)
+    - occupation (nếu có thể suy luận)
+    - interests (nếu có thể suy luận)
+    - purchase_history (nếu có thể suy luận)
     """
 
-    # Gọi LLM để phân tích thông tin
-    response = llm.invoke(extract_prompt).content  
-    print("Raw response from LLM:", response)
-
+    response = llm.invoke(prompt).content  # Gọi LLM để phân tích
+    print("response in the get_customer_info:", response)
 
     try:
-        # Làm sạch chuỗi JSON nếu có dấu ```json hoặc ``` thừa
+        # Clean the JSON string if it has extra formatting
         json_start = response.find("{")
         json_end = response.rfind("}") + 1
         clean_json = response[json_start:json_end]
+
+        # Ensure the JSON is properly formatted
+        clean_json = clean_json.replace("'", '"')  # Replace single quotes with double quotes
 
         # Parse JSON
         extracted_info = json.loads(clean_json)
         print("Extracted customer info:", extracted_info)
 
-        # Hợp nhất dữ liệu cũ với dữ liệu mới
-        updated_info = existing_info.copy()
+        # Convert extracted_info to a JSON string
+        if not extracted_info or all(value == "" for value in extracted_info.values()):
+            extracted_info_str = "No customer information extracted."
+        else:
+            extracted_info_str = json.dumps(extracted_info)
 
-        for key, value in extracted_info.items():
-            if value:  # Chỉ cập nhật nếu có giá trị
-                if key == "interests" and isinstance(value, list):
-                    updated_info.setdefault("interests", []).extend(value)  # Thêm vào danh sách cũ
-                    updated_info["interests"] = list(set(updated_info["interests"]))  # Loại bỏ trùng lặp
-                else:
-                    updated_info[key] = value  # Cập nhật các trường khác
+        # Save the context with the string representation
+        memory.save_context({"input": "customer_info"}, {"output": extracted_info_str})
 
-        return updated_info
-
+        return extracted_info
     except json.JSONDecodeError as e:
         print("JSON decoding error:", e)
-        return existing_info  # Trả về dữ liệu cũ nếu gặp lỗi
+        return {}
 
-def update_customer_info(user_context, extracted_info):
-    """ Cập nhật thông tin khách hàng bằng cách hợp nhất dữ liệu mới vào dữ liệu cũ """
-    if "customer_info" not in user_context:
-        user_context["customer_info"] = {}
+def update_customer_info(current_info, new_info):
+    """
+    Cập nhật thông tin khách hàng với dữ liệu mới mà không làm mất thông tin cũ.
+    """
+    for key, value in new_info.items():
+        if value:  # Chỉ cập nhật nếu có thông tin mới
+            current_info[key] = value
+    
+    # Kiểm tra nếu vẫn còn missing fields
+    missing_fields = [key for key, value in current_info.items() if not value]
+    if missing_fields:
+        current_info["status"] = "missing_info"
+        current_info["missing_fields"] = missing_fields
+    else:
+        current_info["status"] = "completed"
 
-    for key, value in extracted_info.items():
-        if value:  # Chỉ cập nhật nếu có dữ liệu mới
-            if isinstance(user_context["customer_info"].get(key), list):
-                if value not in user_context["customer_info"][key]:
-                    user_context["customer_info"][key].append(value)  # Thêm vào danh sách
-            else:
-                user_context["customer_info"][key] = value  # Ghi đè giá trị mới
+    return current_info
 
-
-def get_conversation_goal(customer_info, user_message, customer_stage):
+def get_conversation_goal(customer_info, user_message, customer_stage,next_stop):
     """
     Xác định mục tiêu hội thoại dựa trên thông tin khách hàng, nội dung tin nhắn và giai đoạn khách hàng.
     """
@@ -307,13 +426,10 @@ def get_conversation_goal(customer_info, user_message, customer_stage):
     print("customer_stage in the determine_conversation_goal:", customer_stage)
 
     # Nếu thông tin khách còn thiếu, cần tiếp tục hỏi để hoàn chỉnh
-    if "missing_fields" in customer_info and len(customer_info["missing_fields"]) > 0:
-        return "Khởi tạo hội thoại chung"
-
     # Xác định mục tiêu tiếp theo bằng cách suy luận từ company_goal
     prompt = f"""
     Dựa trên giai đoạn khách hàng trong hành trình mua hàng: "{customer_stage}", 
-    và tin nhắn: "{user_message}", hãy xác định bước hợp lý tiếp theo để dẫn khách hàng đến mục tiêu "Chuyển khoản".
+    và tin nhắn: "{user_message}", hãy xác định bước hợp lý tiếp theo để dẫn khách hàng đến mục tiêu tiến tới được {next_stop} .
     
     Trả về chỉ một mục tiêu hội thoại cụ thể (không giải thích), ví dụ: "Giới thiệu sản phẩm", "Thuyết phục khách hàng", "Hướng dẫn thanh toán".
     """
@@ -323,30 +439,116 @@ def get_conversation_goal(customer_info, user_message, customer_stage):
 
     return response.strip()
 
-def create_best_map(conversation_goal, customer_info, company_goal, product_info):
+
+def propose_best_approach(conversation_goal, customer_info, product_info):
     """
-    Sử dụng LLM để suy luận Best_map phù hợp dựa trên conversation_goal, customer_info và company_goal.
+    Sử dụng LLM để suy luận Best Approach phù hợp dựa trên conversation_goal, customer_info và product_info.
     """
+
+    print("customer_info in propose_best_approach:", customer_info)
+
     prompt = f"""
-    🛒 Khách hàng đang ở giai đoạn: "{customer_info.get('customer_stage', 'Unknown')}"
-    🎯 Mục tiêu hội thoại: "{conversation_goal}"
-    🏆 Mục tiêu cuối cùng của công ty: "{company_goal}"
-    👤 Thông tin khách hàng: {customer_info}
-    📦 Thông tin sản phẩm công ty: {product_info}
+    🏆 Mục tiêu hội thoại: "{conversation_goal}"
+    👤 Thông tin khách hàng: {json.dumps(customer_info, ensure_ascii=False)}
+    📦 Thông tin sản phẩm: {json.dumps(product_info, ensure_ascii=False)}
 
-    ✅ Hãy tạo một hướng dẫn phản hồi tốt nhất (Best_map) giúp nhân viên bán hàng nói chuyện hợp lý và hướng khách hàng đến {company_goal}.
-    ✅ Điều chỉnh phản hồi dựa trên cảm xúc và giai đoạn của khách hàng:
-    - Nếu chưa biết tên khách hàng, hãy hỏi tên khách hàng trước.
-    - Nếu khách hàng còn phân vân, hãy nhấn mạnh lợi ích của sản phẩm.
-    - Nếu khách hàng có hứng thú, hãy gợi mở một lý do mạnh mẽ để hành động ngay.
-    - Nếu khách hàng có lo ngại, hãy trấn an và cung cấp thông tin hỗ trợ.
+    ✅ Hãy tạo một hướng dẫn (Best Approach) giúp nhân viên bán hàng nói chuyện hợp lý với khách.
+    ✅ Best Approach không phải là câu trả lời trực tiếp, mà là cách tiếp cận tổng quan giúp cuộc trò chuyện hiệu quả hơn.
 
-    🎤 Nếu biết tên khách hàng, hãy xưng hô thân thiện.
-    📢 Trả về một đoạn văn ngắn, không quá 3 câu, với phong cách giao tiếp thường thức (casual).
+    🔹 Trả lời CHỈ DƯỚI ĐỊNH DẠNG JSON như sau:
+    ```json
+    {{ "best_approach": "<Hướng dẫn ngắn gọn, súc tích, tối đa 2 câu>" }}
+    ```
+    🚫 Không thêm bất kỳ văn bản nào bên ngoài JSON.
     """
-    response = llm.invoke(prompt).content  # Gọi OpenAI hoặc mô hình AI khác
-    return response.strip()
 
+    response = llm.invoke(prompt).content  # Gọi LLM
+
+    try:
+        # 💡 Fix: Clean and parse JSON response
+        json_str = response.strip().strip("```json").strip("```").strip()
+        best_approach_data = json.loads(json_str)  # Parse cleaned JSON
+
+        if "best_approach" not in best_approach_data:
+            raise ValueError("Missing 'best_approach' in response")
+
+        return best_approach_data["best_approach"]
+
+    except Exception as e:
+        print(f"⚠️ Error parsing best_approach: {e}, raw response: {response}")
+        return "Hãy tạo sự tin tưởng và khuyến khích khách hàng."  # Fallback approach
+import json
+import re
+import json
+import re
+
+def analyse_approach(customer_stage, conversation_goal, customer_info, product_info):
+    """
+    Sử dụng LLM để suy luận chiến thuật tiếp cận khách hàng và tạo hướng dẫn cho response prompt.
+    
+    📌 Output gồm:
+    - best_approach: Cách tiếp cận ngắn gọn để đạt conversation_goal.
+    - instruction: Hướng dẫn cụ thể để truyền vào response prompt.
+    """
+
+    print("customer_info in analyse_approach:", customer_info)
+
+    prompt = f"""
+    🏆 Mục tiêu hội thoại: "{conversation_goal}"
+    📌 Giai đoạn khách hàng: "{customer_stage}"
+    👤 Thông tin khách hàng: {json.dumps(customer_info, ensure_ascii=False)}
+    📦 Thông tin sản phẩm: {json.dumps(product_info, ensure_ascii=False)}
+
+    ✅ Hãy phân tích hiện trạng khách hàng và đề xuất cách tiếp cận hiệu quả để đạt mục tiêu hội thoại.
+    ✅ Sau đó, tạo hướng dẫn (instruction) giúp AI sinh ra phản hồi hợp lý trong cuộc trò chuyện.
+
+    🔹 Trả lời CHỈ DƯỚI ĐỊNH DẠNG JSON như sau:
+    ```json
+    {{
+        "best_approach": "<Hướng dẫn tiếp cận ngắn gọn, tối đa 2 câu>",
+        "instruction": "<Hướng dẫn chi tiết để truyền vào response prompt>"
+    }}
+    ```
+    🚫 Không thêm bất kỳ văn bản nào bên ngoài JSON.
+    """
+
+    response = llm.invoke(prompt)
+
+    if not response or not response.content:
+        print("⚠️ LLM response is empty or None")
+        return {
+            "best_approach": "Hãy tạo sự tin tưởng và khuyến khích khách hàng.",
+            "instruction": "Hãy phản hồi lịch sự, tạo sự tin tưởng và cung cấp thêm thông tin hữu ích."
+        }
+
+    raw_response = response.content.strip()
+    
+    # 💡 Sử dụng regex để lấy JSON chính xác (phòng khi LLM trả về text lẫn JSON)
+    match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+
+    if not match:
+        print(f"⚠️ No valid JSON found in response: {raw_response}")
+        return {
+            "best_approach": "Hãy tạo sự tin tưởng và khuyến khích khách hàng.",
+            "instruction": "Hãy phản hồi lịch sự, tạo sự tin tưởng và cung cấp thêm thông tin hữu ích."
+        }
+
+    json_str = match.group(0)
+
+    try:
+        result = json.loads(json_str)  # Parse JSON
+
+        if "best_approach" not in result or "instruction" not in result:
+            raise ValueError("Missing keys in JSON response")
+
+        return result
+
+    except Exception as e:
+        print(f"⚠️ JSON parsing error: {e}, raw response: {json_str}")
+        return {
+            "best_approach": "Hãy tạo sự tin tưởng và khuyến khích khách hàng.",
+            "instruction": "Hãy phản hồi lịch sự, tạo sự tin tưởng và cung cấp thêm thông tin hữu ích."
+        }
 
 def search_sales_skills(query_text, max_skills=3):
     """ 
@@ -383,53 +585,38 @@ chain = (
     | prompt
     | llm
 )
-def ami_selling(user_message, user_context=None):
+
+def ami_selling(user_message):
     """
-    Hàm chính xử lý hội thoại bán hàng của Ami.
+    Hàm chính xử lý hội thoại bán hàng của AMI.
     """
-    if user_context is None:
-        user_context = {}
+    global memory  # Ensure we are using the global memory instance
 
-    print("user_message in the ami_selling:", user_message)
+    # Save the user message to memory
+    memory.save_context({"input": user_message}, {"output": ""})
 
-    # Trích xuất thông tin khách hàng và cập nhật vào user_context
-    extracted_info = get_customer_info(user_message, user_context)
-    print("extracted_info in the ami_selling:", extracted_info)
+    # Load the entire chat history
+    chat_history_list = memory.load_memory_variables({})["history"]
 
-    if "customer_info" not in user_context:
-        user_context["customer_info"] = {}
-
-    # Cập nhật user_context với thông tin mới (không ghi đè giá trị cũ)
-    for key, value in extracted_info.items():
-        if value:  # Chỉ cập nhật nếu có giá trị
-            if key == "interests" and isinstance(value, list):
-                user_context["customer_info"].setdefault("interests", []).extend(value)
-                user_context["customer_info"]["interests"] = list(set(user_context["customer_info"]["interests"]))  # Loại bỏ trùng lặp
-            else:
-                user_context["customer_info"][key] = value
+    
+    # Extract customer information from the chat history
+    extracted_info = get_customer_info()
+    
+    # Update memory with extracted customer information (if needed)
+    if extracted_info:
+        extracted_info_str = json.dumps(extracted_info)
+        memory.save_context({"input": "customer_info"}, {"output": extracted_info_str})
+        user_context["customer_info"] = extracted_info
+    else:
+        memory.save_context({"input": "customer_info"}, {"output": "No customer information extracted."})
 
     print("Updated user_context:", user_context)
 
     company_goal = "Khách chuyển khoản"
     product_info = retrieve_product(user_message)
 
-    # Gọi ami_drive để lấy phản hồi chính
+    # Gọi handle_user_message để lấy phản hồi chính theo Best_map
     response = ami_drive(user_message, user_context, company_goal, product_info)
 
     return response
 
-
-def generate_response(best_map, company_goal, customer_info):
-    """
-    Sinh phản hồi dựa trên Best_map + hướng khách hàng đến company_goal.
-    """
-    prompt = f"""
-    Khách hàng: {customer_info}
-    Best_map: "{best_map}"
-    Company_goal: "{company_goal}"
-
-    Hãy tạo một phản hồi tự nhiên, thân thiện, dẫn dắt khách hàng theo Best_map và hướng họ đến {company_goal}.
-    """
-
-    response = llm.invoke(prompt).content  # Gọi OpenAI hoặc mô hình AI khác để sinh phản hồi
-    return response.strip()
