@@ -4,15 +4,14 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain.memory import ConversationBufferMemory
 from langchain_community.chat_message_histories import ChatMessageHistory
-import os
 from langchain_openai import OpenAIEmbeddings
 from pinecone import Pinecone, ServerlessSpec
-import json
 import logging
 from typing import Dict, Any
 from openai import OpenAI
 logging.basicConfig(level=logging.INFO)
-import json
+from skills import search_sales_skills_pinecone
+import re
 
 
 # Initialize conversation memory
@@ -21,9 +20,6 @@ memory = ConversationBufferMemory(return_messages=True)
 # Declare user_context as a global variable
 user_context = {"customer_info": {}}
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-PINECONE_ENV = "us-east-1"  # Check Pinecone console for your region
-index_name = "ami-knowledge"
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 client = OpenAI()
 prompt = PromptTemplate(
@@ -65,18 +61,6 @@ def retrieve_product(user_input):
         if content:
             structured_summary.append(content)
     return "\n\n".join(structured_summary) if structured_summary else "Không tìm thấy sản phẩm phù hợp."
-
-pc = Pinecone(api_key=PINECONE_API_KEY)
-
-# Check if index exists
-existing_indexes = [i['name'] for i in pc.list_indexes()]
-if index_name not in existing_indexes:
-    pc.create_index(
-        name=index_name,
-        dimension=1536,  # Ensure this matches your model's output dimension
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
 
 def detect_customer_intent_dynamic(message: str) -> Dict[str, Any]:
     response = client.chat.completions.create(
@@ -138,8 +122,6 @@ def handle_general_conversation(intent, sub_intent, user_message, user_context):
     chat_history_str = "\n".join(
     msg.content if hasattr(msg, "content") else msg for msg in chat_history_list
     )
-
-
     
     # Save the joined chat history to memory
     memory.save_context({"input": "chat_history"}, {"output": chat_history_str})
@@ -279,22 +261,6 @@ def generate_conversation_response(user_message, customer_info, best_approach, i
 
     return response.content.strip()
 
-
-def generate_response(best_map, next_stop, customer_info):
-    """
-    Sinh phản hồi dựa trên Best_map + hướng khách hàng đến đích đến.
-    """
-    print("best_map in generate_response:", best_map)
-    prompt = f"""
-    Khách hàng: {customer_info}
-    Best_map: "{best_map}"
-    Company_goal: "{next_stop}"
-
-    Hãy tạo một phản hồi tự nhiên, thân thiện, dẫn dắt khách hàng theo Best_map và hướng họ đến {next_stop}. Hãy trả lời dùng ngôn ngữ của dùng.
-    """
-
-    response = llm.invoke(prompt).content  # Gọi OpenAI hoặc mô hình AI khác để sinh phản hồi
-    return response.strip()
 
 def get_customer_stage(chat_history, company_goal="khách chuyển khoản"):
     """
@@ -482,10 +448,7 @@ def propose_best_approach(conversation_goal, customer_info, product_info):
     except Exception as e:
         print(f"⚠️ Error parsing best_approach: {e}, raw response: {response}")
         return "Hãy tạo sự tin tưởng và khuyến khích khách hàng."  # Fallback approach
-import json
-import re
-import json
-import re
+
 
 def analyse_approach(customer_stage,conversation_goal, customer_info, product_info):
     """
@@ -555,36 +518,11 @@ def analyse_approach(customer_stage,conversation_goal, customer_info, product_in
             "instruction": "Hãy phản hồi lịch sự, tạo sự tin tưởng và cung cấp thêm thông tin hữu ích."
         }
 
-def search_sales_skills(query_text, max_skills=3):
-    """ 
-    Truy vấn kỹ năng từ Pinecone với độ chính xác cao hơn. 
-    """
-    embedding_model = OpenAIEmbeddings(model="text-embedding-3-large", dimensions=1536)
-    query_embedding = embedding_model.embed_query(query_text)
-
-    index = pc.Index(index_name)
-    response = index.query(
-        vector=query_embedding,
-        top_k=max_skills,
-        include_metadata=True  
-    )
-
-    skills = []
-    if response and "matches" in response:
-        for match in response["matches"]:
-            skill_text = match.get("metadata", {}).get("content")
-            if skill_text:
-                skills.append(skill_text)
-
-    return skills if skills else ["Không tìm thấy kỹ năng phù hợp."]
-
-
-
 chain = (
     RunnablePassthrough.assign(
         history=lambda _: memory.load_memory_variables({}).get("history", []),
         products=lambda x: retrieve_product(x["user_input"]),
-        sales_skills=lambda x: ", ".join(search_sales_skills(x["user_input"], max_skills=3)),  # Lấy kỹ năng từ Pinecone
+        sales_skills=lambda x: ", ".join(search_sales_skills_pinecone(x["user_input"], max_skills=3)),  # Lấy kỹ năng từ Pinecone
         user_style=lambda _: "lịch sự"
     )  
     | prompt

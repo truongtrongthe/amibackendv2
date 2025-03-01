@@ -7,7 +7,8 @@ from knowledge import tobrain
 from summarizer import summarize_text
 from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries
-from ami import ami_selling
+#from ami import ami_selling
+from conversationflow import event_stream
 from experts import expert_chat_function
 app = Flask(__name__)
 
@@ -42,13 +43,9 @@ def spell_response():
 def ami_selling_response():
     data = request.get_json()
     prompt = data.get("prompt")
-    response_text = ami_selling(prompt)
-    return Response(
-        #stream_with_context((chunk.content for chunk in ami_selling(prompt))),
-        response_text,
-        content_type='text/plain',
-        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
-    )
+    return Response(event_stream(user_input=prompt), content_type="text/event-stream")
+    #return stream_graph_updates(prompt)
+
 
 @app.route('/preview-knowledge', methods=['POST'])
 def preview_response():

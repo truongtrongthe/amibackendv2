@@ -4,8 +4,28 @@ from openai import OpenAI
 import json
 from datetime import datetime
 import uuid
+from pinecone import Pinecone
+from pinecone import ServerlessSpec
 
 client = OpenAI()
+from langchain_openai import OpenAIEmbeddings
+
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+PINECONE_ENV = "us-east-1"  # Check Pinecone console for your region
+index_name = "ami-knowledge"
+
+pc = Pinecone(api_key=PINECONE_API_KEY)
+
+# Check if index exists
+existing_indexes = [i['name'] for i in pc.list_indexes()]
+if index_name not in existing_indexes:
+    pc.create_index(
+        name=index_name,
+        dimension=1536,  # Ensure this matches your model's output dimension
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
 
 # Kết nối Supabase
 supabase_url = os.getenv("SUPABASE_URL")
@@ -78,6 +98,30 @@ def search_sales_skill(query_text):
 
         return skill_text
     return "Không tìm thấy kỹ năng phù hợp."
+
+
+def search_sales_skills_pinecone(query_text, max_skills=3):
+    """ 
+    Truy vấn kỹ năng từ Pinecone với độ chính xác cao hơn. 
+    """
+    embedding_model = OpenAIEmbeddings(model="text-embedding-3-large", dimensions=1536)
+    query_embedding = embedding_model.embed_query(query_text)
+
+    index = pc.Index(index_name)
+    response = index.query(
+        vector=query_embedding,
+        top_k=max_skills,
+        include_metadata=True  
+    )
+
+    skills = []
+    if response and "matches" in response:
+        for match in response["matches"]:
+            skill_text = match.get("metadata", {}).get("content")
+            if skill_text:
+                skills.append(skill_text)
+
+    return skills if skills else ["Không tìm thấy kỹ năng phù hợp."]
 
 def update_sales_skill(skill_id, new_text, user_input, original_response, feedback, updated_by="expert"):
     # Lưu lịch sử chỉnh sửa
