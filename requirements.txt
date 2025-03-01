@@ -9,3 +9,5 @@ langchain-text-splitters
 pinecone
 supabase
 pinecone-grpc
+tavily-api
+langgraph
