@@ -1,36 +1,29 @@
-from graph import app  # Assuming this is your compiled LangGraph chatbot
 import json
 from flask import Response
-config = {"configurable": {"thread_id": "1"}}
-
+from langchain.schema import AIMessage
+from graph import g_app  # Assuming this is your compiled LangGraph chatbot
+import uuid
 
 def event_stream(user_input):
-    """
-    Streams chatbot responses using Server-Sent Events (SSE).
-    """
-    events = app.stream(
+    config = {"configurable": {"thread_id": 1}}
+    print(f"Sending user input to AI model: {user_input}")
+    events = g_app.stream(
         {"messages": [{"role": "user", "content": user_input}]},
         config,
         stream_mode="values",
     )
-    
+
+    latest_ai_content = None
     for event in events:
         print("Received event:", event)
-        
-        if "messages" in event and event["messages"]:
-            last_message = event["messages"][-1]
-            # Try to access content as an attribute first
-            if hasattr(last_message, "content"):
-                message = last_message.content
-                yield f"data: {json.dumps({'message': message})}\n\n"
-            else:
-                # Fallback in case it's a dict
-                try:
-                    message = last_message["content"]
-                    yield f"data: {json.dumps({'message': message})}\n\n"
-                except (TypeError, KeyError):
-                    print("Warning: 'content' key missing in last_message:", last_message)
-        else:
-            print("Warning: 'messages' key missing or empty in event:", event)
-        
-        #time.sleep(0.1)  # Simulate real-time delay
+        if "messages" in event and isinstance(event["messages"], list):
+            # Get all AIMessages and pick the last one
+            ai_messages = [msg for msg in event["messages"] if isinstance(msg, AIMessage)]
+            if ai_messages:
+                latest_ai_content = ai_messages[-1].content  # Take the last AIMessage
+
+    if latest_ai_content:
+        print("Latest AI message:", latest_ai_content)
+        yield f"data: {json.dumps({'message': latest_ai_content})}\n\n"
+    else:
+        yield f"data: {json.dumps({'message': 'No response generated'})}\n\n"

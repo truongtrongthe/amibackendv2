@@ -32,7 +32,7 @@ prompt_ok = PromptTemplate(
     Ami:"""
 )
 prompt = PromptTemplate(
-    input_variables=["history", "user_input", "context", "user_style"],
+    input_variables=["history", "user_input", "context"],
     template="""
 Dựa vào các thông tin trước đây của người dùng, hãy đảm bảo câu trả lời phù hợp với phong cách của họ.
 Lịch sử cuộc trò chuyện:
@@ -40,9 +40,6 @@ Lịch sử cuộc trò chuyện:
 
 Ngữ cảnh liên quan:
 {context}
-
-Phong cách phản hồi của người dùng trước đây:
-{user_style}
 
 Người dùng: {user_input}
 AMI (giữ nguyên phong cách của người dùng):"""

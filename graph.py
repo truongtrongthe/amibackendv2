@@ -23,5 +23,5 @@ graph_builder.add_node("chatbot", chatbot)
 
 graph_builder.add_edge(START, "chatbot")
 memory = MemorySaver()
-app = graph_builder.compile(checkpointer=memory)
+g_app = graph_builder.compile(checkpointer=memory)
 
