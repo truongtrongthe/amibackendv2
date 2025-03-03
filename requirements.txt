@@ -11,3 +11,6 @@ supabase
 pinecone-grpc
 tavily-api
 langgraph
+spacy
+maturin
+underthesea
