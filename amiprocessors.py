@@ -3,7 +3,7 @@ import os
 from supabase import create_client
 from langmem import LangMem
 
-llm = OpenAI(model="gpt-4.5-preview")
+llm = OpenAI(model="gpt-4o")
 
 def extract_customer_info(message):
     """Extracts customer name, interest, and sentiment from chat."""

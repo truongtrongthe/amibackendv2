@@ -1,11 +1,12 @@
 import json
 from langchain.schema import AIMessage
-from graphv2 import g_app  # Assuming this is your compiled LangGraph chatbot
+#from graphv2 import g_app  # Assuming this is your compiled LangGraph chatbot
+from graph3 import convo_graph
 config = {"configurable": {"thread_id": "global_ami"}}
 
 def event_stream(user_input):
     print(f"Sending user input to AI model: {user_input}")
-    events = g_app.stream(
+    events = convo_graph.stream(
         {"messages": [{"role": "user", "content": user_input}]},
         {"configurable": {"thread_id": "global_thread"}},
         stream_mode="values",
