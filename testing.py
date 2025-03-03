@@ -1,21 +1,26 @@
-import spacy
-class State:
-    text = ""      # Alex’s input + Ami’s response
-    topics = {}    # e.g., {"Pitching": "Chào hàng bằng câu hỏi"}
-    history = []   # Your FAISS-stored chat history
+from graph3 import conversation_flow
+from langchain.schema import SystemMessage, HumanMessage, AIMessage
 
-nlp = spacy.load("en_core_web_sm")
+# Initialize conversation
+state = {"history": []}
+langmem_store = []
+# Simulate conversation
+while True:
+    # Run a single step of the graph
+    state = conversation_flow.invoke(state)
+    
+    # Display AMI's response
+    response = state["history"][-1].content
+    print("🤖 AMI:", response)
 
-def tag_topics(state):
-    doc = nlp(input)  # Extract Alex’s input
-    sales_terms = {
-        "pitch": "Pitching", 
-        "objection": "Objections", 
-        "close": "Closing",
-        "qualifying":"Qualifying"
-        }
-    for token in doc:
-        if token.text.lower() in sales_terms:
-            state.topics[sales_terms[token.text.lower()]] = state.text
-    return state
+    # Get expert input (simulate human response)
+    user_input = input("👤 Expert: ")
+    
+    # Add expert response to history
+    state["history"].append(HumanMessage(content=user_input))
+
+    # Exit condition (user types 'exit')
+    if user_input.lower() == "exit":
+        print("🚀 Conversation ended. Saved knowledge:", langmem_store)
+        break
 

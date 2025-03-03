@@ -37,44 +37,6 @@ else:
 def cosine_similarity(vec1, vec2):
     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
-def chatbot1(state: State):
-    latest_message = state["messages"][-1].content
-    current_topic = state.get("current_topic")
-    topic_embedding = state.get("topic_embedding")
-
-    if "what topics" in latest_message.lower():
-        topic_docs = vector_store.similarity_search("", k=100, filter={"source": "summary"})
-        topics = [f"{doc.metadata.get('timestamp')} - {doc.metadata.get('topic', 'Unnamed')}" 
-                  for doc in topic_docs if "topic" in doc.metadata]
-        response = "Here are your historic topics:\n" + "\n".join(topics) if topics else "No topics saved yet."
-        return {"messages": [AIMessage(content=response)]}
-
-    latest_embedding = embeddings.embed_query(latest_message)
-
-    if current_topic and topic_embedding:
-        similarity = cosine_similarity(latest_embedding, topic_embedding)
-        if similarity < 0.7:
-            response = f"New topic detected! Save '{current_topic}' and brainstorm '{latest_message}'? (Yes/No)"
-            return {
-                "messages": [AIMessage(content=response)],
-                "interrupt": {"query": "save_topic", "current_topic": current_topic, "new_topic": latest_message}
-            }
-
-    timestamp = datetime.now().isoformat()
-    doc = Document(page_content=latest_message, metadata={"timestamp": timestamp, "source": "user"})
-    vector_store.add_documents([doc])
-    vector_store.save_local(faiss_index_path)
-
-    relevant_docs = vector_store.similarity_search(latest_message, k=5)
-    context = "\n".join([f"[{doc.metadata.get('timestamp', 'unknown')}] {doc.page_content}" 
-                        for doc in relevant_docs if doc.page_content])
-    prompt = f"Conversation history:\n{context}\n\nUser: {latest_message}"
-    response = llm.invoke(prompt).content
-    return {
-        "messages": [AIMessage(content=response)],
-        "current_topic": latest_message if not current_topic else current_topic,
-        "topic_embedding": latest_embedding if not topic_embedding else topic_embedding
-    }
 def chatbot(state: State):
     print("Chatbot node running with state:", state)
     latest_message = state["messages"][-1].content
@@ -110,7 +72,11 @@ def chatbot(state: State):
     context = "\n".join([f"[{doc.metadata.get('timestamp', 'unknown')}] {doc.page_content}" 
                         for doc in relevant_docs if doc.page_content])
     prompt = f"Conversation history:\n{context}\n\nUser: {latest_message}"
-    response = llm.invoke(prompt).content
+    #response = llm.invoke(prompt).content
+    response_chunks = []
+    for chunk in llm.stream(prompt):
+        response_chunks.append(chunk.content)
+    response = "".join(response_chunks)
     print("Chatbot response:", response)
     return {
         "messages": [AIMessage(content=response)],

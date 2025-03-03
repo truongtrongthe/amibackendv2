@@ -2,29 +2,6 @@ import json
 from langchain.schema import AIMessage
 from graphv2 import g_app  # Assuming this is your compiled LangGraph chatbot
 config = {"configurable": {"thread_id": "global_ami"}}
-def event_stream_v1(user_input):
-    print(f"Sending user input to AI model: {user_input}")
-    events = g_app.stream(
-        {"messages": [{"role": "user", "content": user_input}]},
-        config,
-        stream_mode="values",
-    )
-    latest_ai_content = None
-    for event in events:
-        print("Received event:", event)
-        chatbot_data = event.get("chatbot", {})
-        if "messages" in chatbot_data and isinstance(chatbot_data["messages"], list):
-            # Messages are strings, not AIMessage objects
-            messages = chatbot_data["messages"]
-            if messages:
-                latest_ai_content = messages[-1]  # Take the last message (AI response)
-            
-    if latest_ai_content:
-        print("Latest AI message:", latest_ai_content)
-        yield f"data: {json.dumps({'message': latest_ai_content})}\n\n"
-    else:
-        yield f"data: {json.dumps({'message': 'No response generated'})}\n\n"
-
 
 def event_stream(user_input):
     print(f"Sending user input to AI model: {user_input}")
