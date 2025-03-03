@@ -19,7 +19,7 @@ class State(TypedDict):
     interrupt: dict  # For HITL interrupts
 
 # Initialize LLM and embeddings
-llm = ChatOpenAI(model="gpt-4.5-preview", streaming=True)
+llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
 faiss_index_path = "faiss_index"
