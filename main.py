@@ -28,11 +28,11 @@ def spell_response():
 @app.route('/ami-convo', methods=['POST'])
 def ami_convo_response():
     data = request.get_json()
-    prompt = data.get("prompt")
+    user_input = data.get("user_input")
     #user_id ="tfl"
     user_id = data.get("user_id", "tfl")  # Allow client to specify, default to "tfl"
     thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
-    return Response(event_stream(prompt, user_id, thread_id), mimetype='text/event-stream')
+    return Response(event_stream(user_input, user_id, thread_id), mimetype='text/event-stream')
 
     #resp = Response(event_stream(prompt,user_id), mimetype='text/event-stream')
     #return resp
