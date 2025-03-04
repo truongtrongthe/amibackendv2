@@ -48,6 +48,8 @@ def chatbot(state: State):
             k=10,
             filter={"user_id": user_id}
         )
+        if relevant_docs and len(relevant_docs>0):
+            print("Found relevant info:",len(relevant_docs))
         seen = set() #recent message is supposed to be seen
         memory_context_lines = []
         for doc in relevant_docs:
@@ -60,24 +62,21 @@ def chatbot(state: State):
     except Exception as e:
         print(f"Error retrieving memories: {e}")
         memory_context = "Memory retrieval failed."
-    print("Long-term Context:", memory_context) 
+    print("Relevant memory:", memory_context) 
 
-    convo_history = "\n".join([f"{m.type}: {m.content}" for m in state["messages"]])
+    #convo_history = "\n".join([f"{m.type}: {m.content}" for m in state["messages"]])
 
     #prompt = f"Conversation history:\n{memory_context}\n\nUser: {latest_message}"
     prompt = f"""
-    You are Ami, an assistant with total recall of everything said.
+    You are Ami, an assistant who can recall of everything said.
     Long-term memories: 
     {memory_context}
 
-    Recent conversation (this session):
-    {convo_history}
-
     User: {latest_message}
-    Respond naturally, using memories if relevant, and keep it concise unless asked for details.
+    Base on your long-term memories, respond to user empathetically
     """
     
-    print("chatbot response:",prompt)
+    #print("chatbot response:",prompt)
     return {"prompt_str": prompt, "user_id": user_id}
     #return {"messages": [{"role": "assistant", "content": llm.stream(prompt)}], "user_id": user_id}
 #Building graph here
