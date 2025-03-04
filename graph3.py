@@ -14,6 +14,7 @@ from faissaccess import initialize_vector_store,faiss_index_path
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
+    prompt_str: str
     user_id: str
 
 # Initialize LLM and embeddings
@@ -22,7 +23,6 @@ embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
 vector_store = initialize_vector_store("tfl")
 def chatbot(state: State):
-    print("Chatbot node running with state:", state)
     latest_message = state["messages"][-1].content
     user_id = state["user_id"]
     timestamp = datetime.now().isoformat()
@@ -77,11 +77,14 @@ def chatbot(state: State):
     Respond naturally, using memories if relevant, and keep it concise unless asked for details.
     """
     
-    response_chunks = []
-    for chunk in llm.stream(prompt):
-        response_chunks.append(chunk.content)
-    response = "".join(response_chunks)
-    return {"messages": [AIMessage(content=response)], "user_id": user_id}
+    #response_chunks = []
+    #for chunk in llm.stream(prompt):
+    #    response_chunks.append(chunk.content)
+    #response = "".join(response_chunks)
+    print("chatbot response:",prompt)
+    
+
+    return {"prompt_str": prompt, "user_id": user_id}
 
     #return {"messages": [{"role": "assistant", "content": llm.stream(prompt)}], "user_id": user_id}
 #Building graph here

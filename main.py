@@ -25,7 +25,7 @@ def spell_response():
     )
 
 
-@app.route('/ami-convo', methods=['POST'])
+@app.route('/ami-learn', methods=['POST'])
 def ami_convo_response():
     data = request.get_json()
     user_input = data.get("user_input")
@@ -33,9 +33,6 @@ def ami_convo_response():
     user_id = data.get("user_id", "tfl")  # Allow client to specify, default to "tfl"
     thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
     return Response(event_stream(user_input, user_id, thread_id), mimetype='text/event-stream', headers={'X-Accel-Buffering': 'no'})  # Disable buffering for Nginx (if used))
-
-    #resp = Response(event_stream(prompt,user_id), mimetype='text/event-stream')
-    #return resp
 
 
 
