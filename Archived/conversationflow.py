@@ -2,7 +2,7 @@ import json
 from langchain_core.messages import AIMessage,HumanMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 #from graphv2 import g_app  # Assuming this is your compiled LangGraph chatbot
-from graph3 import convo_graph
+from Archived.graph3 import convo_graph
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 
 def event_stream(user_input, user_id, thread_id="global_thread"):

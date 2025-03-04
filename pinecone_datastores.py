@@ -3,7 +3,7 @@ import os
 from pinecone import Pinecone, ServerlessSpec
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-index_name = "ami-memory"
+index_name = "ami"
 
 # Kiểm tra và tạo index nếu chưa có
 if index_name not in pc.list_indexes().names():
@@ -13,3 +13,6 @@ if index_name not in pc.list_indexes().names():
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
+
+pinecone_index = pc.Index(index_name)
+

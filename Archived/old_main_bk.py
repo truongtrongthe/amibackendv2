@@ -8,7 +8,7 @@ from summarizer import summarize_text
 from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries
 #from ami import ami_selling
-from conversationflow import event_stream
+from Archived.conversationflow import event_stream
 from Archived.experts import expert_chat_function
 app = Flask(__name__)
 

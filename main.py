@@ -1,12 +1,7 @@
-from dotenv import load_dotenv
-from flask import Flask, Response, stream_with_context, request, jsonify, make_response
+from flask import Flask, Response, request
 from flask_cors import CORS  # Import CORS
-from conversationflow import event_stream
-#from langchain_core.messages import AIMessage, HumanMessage  # Explicit import
-
-from brain import ami_telling
-from graph3 import convo_graph
-
+from amilearn import event_stream
+from copilot import pilot_stream
 app = Flask(__name__)
 
 # Enable CORS for all routes and allow all origins
@@ -14,30 +9,32 @@ app = Flask(__name__)
 CORS(app)
 
 
-@app.route('/ami-spell', methods=['POST'])
-def spell_response():
+@app.route('/copilot', methods=['POST'])
+def copilot():
     data = request.get_json()
-    prompt = data.get("prompt")
+    user_input = data.get("user_input")
+    user_id ="tfl"
+    user_id = data.get("user_id", "tfl")  # Allow client to specify, default to "tfl"
+    thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
     return Response(
-        stream_with_context((chunk.content for chunk in ami_telling(prompt))),  # Access content directly
-        content_type='text/plain',
-        headers={'X-Accel-Buffering': 'no'}  # Disable buffering for Nginx (if used)
-    )
-
+        pilot_stream(user_input, user_id, thread_id), 
+        mimetype='text/event-stream', 
+        headers={'X-Accel-Buffering': 'no'}
+        )  # Disable buffering for Nginx (if used))
 
 @app.route('/ami-learn', methods=['POST'])
-def ami_convo_response():
+def ami_learn():
     data = request.get_json()
     user_input = data.get("user_input")
     user_id ="tfl"
     #user_id = data.get("user_id", "tfl")  # Allow client to specify, default to "tfl"
     thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
-    return Response(event_stream(user_input, user_id, thread_id), mimetype='text/event-stream', headers={'X-Accel-Buffering': 'no'})  # Disable buffering for Nginx (if used))
-
-
-
+    return Response(
+        event_stream(user_input, user_id, thread_id), 
+        mimetype='text/event-stream', 
+        headers={'X-Accel-Buffering': 'no'}
+        )  # Disable buffering for Nginx (if used))
 # Middleware to log headers for debugging
-
 @app.after_request
 def add_cors_headers(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
