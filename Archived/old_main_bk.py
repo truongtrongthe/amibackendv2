@@ -9,7 +9,7 @@ from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries
 #from ami import ami_selling
 from conversationflow import event_stream
-from experts import expert_chat_function
+from Archived.experts import expert_chat_function
 app = Flask(__name__)
 
 # Enable CORS for all routes and allow all origins

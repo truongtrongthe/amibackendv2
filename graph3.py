@@ -2,60 +2,93 @@ from typing import Annotated
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from typing_extensions import TypedDict
-from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import AIMessage, HumanMessage  # Explicit import
 import os
 from datetime import datetime
-import numpy as np
+from langgraph.checkpoint.memory import MemorySaver
+from faissaccess import initialize_vector_store,faiss_index_path
+
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
+    user_id: str
 
 # Initialize LLM and embeddings
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
 
-faiss_index_path = "faiss_index"
-if os.path.exists(faiss_index_path):
-    vector_store = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
-else:
-    initial_timestamp = datetime.now().isoformat()
-    vector_store = FAISS.from_documents(
-        [Document(page_content="", metadata={"timestamp": initial_timestamp, "source": "init"})],
-        embeddings
-    )
-    vector_store.save_local(faiss_index_path)
-
+vector_store = initialize_vector_store("tfl")
 def chatbot(state: State):
     print("Chatbot node running with state:", state)
     latest_message = state["messages"][-1].content
-  
+    user_id = state["user_id"]
     timestamp = datetime.now().isoformat()
-    doc = Document(page_content=latest_message, metadata={"timestamp": timestamp, "source": "user"})
-    vector_store.add_documents([doc])
-    vector_store.save_local(faiss_index_path)
+    doc = Document(
+        page_content=latest_message, 
+        metadata={"timestamp": timestamp, "source": "user","user_id":user_id}
+        )
+    if not hasattr(chatbot, 'pending_docs'):
+        chatbot.pending_docs = []
+    chatbot.pending_docs.append(doc)
+    
+    try:
+        vector_store.add_documents(chatbot.pending_docs)
+        vector_store.save_local(faiss_index_path)
+        chatbot.pending_docs.clear()
+        print(f"FAISS updated for {user_id}.")
+    except Exception as e:
+        print(f"Error saving FAISS: {e}")
+    
+    try:
+        relevant_docs = vector_store.similarity_search(
+            latest_message,
+            k=5,
+            filter={"user_id": user_id}
+        )
+        seen = set() #recent message is supposed to be seen
+        memory_context_lines = []
+        for doc in relevant_docs:
+            content = doc.page_content.strip()
+            if content and content not in seen and len(content)>3:
+                memory_context_lines.append(f"[{doc.metadata.get('timestamp','unknown')}]{content}")
+                seen.add(content)
+        memory_context = "\n".join(memory_context_lines) or "No significant memories yet."
 
-    relevant_docs = vector_store.similarity_search(latest_message, k=10)
-    context = "\n".join([f"[{doc.metadata.get('timestamp', 'unknown')}] {doc.page_content}" 
-                        for doc in relevant_docs if doc.page_content])
-    print("Context:",context)
-    prompt = f"Conversation history:\n{context}\n\nUser: {latest_message}"
-    #response = llm.invoke(prompt).content
+    except Exception as e:
+        print(f"Error retrieving memories: {e}")
+        memory_context = "Memory retrieval failed."
+    print("Long-term Context:", memory_context) 
+
+    convo_history = "\n".join([f"{m.type}: {m.content}" for m in state["messages"]])
+
+    #prompt = f"Conversation history:\n{memory_context}\n\nUser: {latest_message}"
+    prompt = f"""
+    You are Ami, an assistant with total recall of everything said.
+    Long-term memories (from your interactions with {user_id}):
+    {memory_context}
+
+    Recent conversation (this session):
+    {convo_history}
+
+    User: {latest_message}
+    Respond naturally, using memories if relevant, and keep it concise unless asked for details.
+    """
+    
     response_chunks = []
     for chunk in llm.stream(prompt):
         response_chunks.append(chunk.content)
     response = "".join(response_chunks)
-    return {
-        "messages": [AIMessage(content=response)]
-                }
+    return {"messages": [AIMessage(content=response)], "user_id": user_id}
+
+    #return {"messages": [{"role": "assistant", "content": llm.stream(prompt)}], "user_id": user_id}
 #Building graph here
 graph_builder = StateGraph(State)
 graph_builder.add_node("chatbot", chatbot)
 graph_builder.add_edge(START, "chatbot")
-# Compile
-convo_graph = graph_builder.compile()
+checkpointer = MemorySaver()
+convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
 

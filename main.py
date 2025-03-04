@@ -2,8 +2,10 @@ from dotenv import load_dotenv
 from flask import Flask, Response, stream_with_context, request, jsonify, make_response
 from flask_cors import CORS  # Import CORS
 from conversationflow import event_stream
+#from langchain_core.messages import AIMessage, HumanMessage  # Explicit import
+
 from brain import ami_telling
-from graph import g_app
+from graph3 import convo_graph
 
 app = Flask(__name__)
 
@@ -27,8 +29,13 @@ def spell_response():
 def ami_convo_response():
     data = request.get_json()
     prompt = data.get("prompt")
-    resp = Response(event_stream(prompt), mimetype='text/event-stream')
-    return resp
+    #user_id ="tfl"
+    user_id = data.get("user_id", "tfl")  # Allow client to specify, default to "tfl"
+    thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
+    return Response(event_stream(prompt, user_id, thread_id), mimetype='text/event-stream')
+
+    #resp = Response(event_stream(prompt,user_id), mimetype='text/event-stream')
+    #return resp
 
 
 
