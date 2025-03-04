@@ -19,7 +19,7 @@ class State(TypedDict):
 
 # Initialize LLM and embeddings
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
-embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
+embeddings = OpenAIEmbeddings(model="text-embedding-3-large",dimensions=1536)
 
 vector_store = initialize_vector_store("tfl")
 def chatbot(state: State):
@@ -45,7 +45,7 @@ def chatbot(state: State):
     try:
         relevant_docs = vector_store.similarity_search(
             latest_message,
-            k=5,
+            k=10,
             filter={"user_id": user_id}
         )
         seen = set() #recent message is supposed to be seen
@@ -67,7 +67,7 @@ def chatbot(state: State):
     #prompt = f"Conversation history:\n{memory_context}\n\nUser: {latest_message}"
     prompt = f"""
     You are Ami, an assistant with total recall of everything said.
-    Long-term memories (from your interactions with {user_id}):
+    Long-term memories: 
     {memory_context}
 
     Recent conversation (this session):
@@ -77,15 +77,8 @@ def chatbot(state: State):
     Respond naturally, using memories if relevant, and keep it concise unless asked for details.
     """
     
-    #response_chunks = []
-    #for chunk in llm.stream(prompt):
-    #    response_chunks.append(chunk.content)
-    #response = "".join(response_chunks)
     print("chatbot response:",prompt)
-    
-
     return {"prompt_str": prompt, "user_id": user_id}
-
     #return {"messages": [{"role": "assistant", "content": llm.stream(prompt)}], "user_id": user_id}
 #Building graph here
 graph_builder = StateGraph(State)
