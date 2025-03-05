@@ -10,12 +10,13 @@ CORS(app)
 
 
 @app.route('/copilot', methods=['POST'])
-def copilot():
+def ami_copilot():
     data = request.get_json()
     user_input = data.get("user_input")
-    user_id ="tfl"
+    #user_id ="tfl"
+    print("Trigger copilot!")
     user_id = data.get("user_id", "tfl")  # Allow client to specify, default to "tfl"
-    thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
+    thread_id = data.get("thread_id", "copilot_thread")  # Optional thread_id from client
     return Response(
         pilot_stream(user_input, user_id, thread_id), 
         mimetype='text/event-stream', 

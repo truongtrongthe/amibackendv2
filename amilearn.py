@@ -30,6 +30,7 @@ def summarize_message(content: str) -> str:
     response = llm.invoke(summary_prompt)
     return response.content.strip()
 
+
 # Chatbot node relying only on conversation history
 def chatbot(state: State):
     latest_message = state["messages"][-1]
@@ -46,7 +47,9 @@ def chatbot(state: State):
         "timestamp": timestamp,
         "source": "user" if isinstance(latest_message, HumanMessage) else "ai",
         "raw_message": latest_message.content,      # Full raw message
-        "summarized_message": summarized_content    # Summarized version
+        "summarized_message": summarized_content,    # Summarized version
+        "approval_status":"pending",
+        "confidence_score":"0.7"
     }
 
     pinecone_index.upsert([(vector_id, summary_embedding, metadata)])
