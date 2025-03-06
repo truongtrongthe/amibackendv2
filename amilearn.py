@@ -65,7 +65,7 @@ def chatbot(state: State):
     {convo_history}
     User: {latest_message.content}
     You're listening to user and save everything user said.
-    Respond based on the conversation history.
+    Respond based on the conversation history, keep the response short, example: "I got it! I'm excited to learn more!"
     """
     
     return {"prompt_str": prompt, "user_id": user_id}

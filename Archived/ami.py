@@ -1,5 +1,5 @@
 from langchain_openai import ChatOpenAI
-from knowledge import  retrieve_relevant_infov2 
+from Archived.knowledge import  retrieve_relevant_infov2 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain.memory import ConversationBufferMemory

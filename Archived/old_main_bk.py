@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, stream_with_context, request, jsonify, make_response
 from flask_cors import CORS  # Import CORS
 from ami2 import ami_response
-from knowledge import tobrain
+from Archived.knowledge import tobrain
 from summarizer import summarize_text
 from brain import ami_telling
 from database import insert_knowledge_entry, get_knowledge_entries

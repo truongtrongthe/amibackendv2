@@ -1,126 +1,148 @@
-from langchain_text_splitters import CharacterTextSplitter
-import os
-from pinecone import Pinecone, ServerlessSpec
-#from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain_openai import OpenAIEmbeddings
-from langchain.schema import Document
+import json
+import uuid
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-PINECONE_ENV = "us-east-1"  # Check Pinecone console for your region
-INDEX_NAME = "hitoindex"
+llm = ChatOpenAI(model="o3-mini")  # No streaming
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
 
-index_name = INDEX_NAME
-pc = Pinecone(api_key=PINECONE_API_KEY)
+from pinecone_datastores import pinecone_index
+# LLM prompt for parsing
 
-# Check if index exists
-existing_indexes = [i['name'] for i in pc.list_indexes()]
-if index_name not in existing_indexes:
-    pc.create_index(
-        name=index_name,
-        dimension=1536,  # Ensure this matches your model's output dimension
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
 
-# Initialize embeddings
-embeddings = OpenAIEmbeddings()
+PARSE_PROMPT_OK = """
+Extract knowledge from this sentence as a list of JSON objects, one for each distinct action or fact. For each:
+- "text": The core action or knowledge, concise (e.g., "talk gently to query their information").
+- "type": One of [Skill, Product Info, Combo, Promotion] (default: Skill).
+- "context": Specific situation or condition it applies to. Based on sentence clues (e.g., "initial contact", "price objection"), default "none" if unclear.
+- "state": One of [Info Gathering, Intent Probing, Product Pitching, Trust Building, Handling Objections, Closing] or null if unspecified. Match intent: "query info" to Info Gathering, "find intent" to Intent Probing, "believe/trust" to Trust Building, "push/close" to Closing.
 
-index = pc.Index(index_name)
+Split multi-step sentences into separate items based on actions or conditions (e.g., "first X, then Y" → two items). Don't summarize, keep text exact.
 
-def tobrain(summary, raw_content):
-    if not summary and not raw_content:
-        print("⚠️ Error: No content to store in Pinecone.")
-        return
+Sentence: {sentence}
+Return: List of JSON objects, e.g., [
+    {{"text": "talk gently to query their information", "type": "Skill", "context": "communication", "state": "Info Gathering"}},
+    {{"text": "find their hidden intent", "type": "Skill", "context": "communication", "state": "Intent Probing"}}
+]
+"""
+PARSE_PROMPT_Good = """
+Extract knowledge from this sentence as a list of JSON objects, one for each distinct action or fact. For each:
+- "text": The core action or knowledge, concise (e.g., "gently ask for their information").
+- "type": One of [Skill, Product Info, Combo, Promotion] (default: Skill).
+- "context": Specific situation or condition it applies to. Use precise terms:  
+  - "initial contact" for first interactions  
+  - "need exploration" for understanding intent or deeper needs  
+  - "clear buying signal" for final closing stage  
+  Default to "none" if unclear.
+- "state": One of [Info Gathering, Intent Probing, Product Pitching, Trust Building, Handling Objections, Closing] or null if unspecified. Match intent:  
+  - "ask for information" → Info Gathering  
+  - "find intent" → Intent Probing  
+  - "build trust" → Trust Building  
+  - "push/close" → Closing  
 
-    # Split text into chunks
-    text_splitter = CharacterTextSplitter(chunk_size=100, chunk_overlap=10, separator="\n\n")
-    summary_chunks = text_splitter.split_text(summary or "")
-    raw_chunks = text_splitter.split_text(raw_content or "")
+Split multi-step sentences into separate items based on actions or conditions (e.g., "first X, then Y" → two items). Don't summarize, keep text exact.
 
-    # Convert to Document objects with metadata
-    summary_docs = [Document(page_content=chunk, metadata={"type": "summary", "content": chunk}) for chunk in summary_chunks]
-    raw_docs = [Document(page_content=chunk, metadata={"type": "raw", "content": chunk}) for chunk in raw_chunks]
-    all_docs = summary_docs + raw_docs
+Sentence: {sentence}  
+Return: List of JSON objects, e.g., [
+    {{"text": "gently ask for their information", "type": "Skill", "context": "initial contact", "state": "Info Gathering"}},
+    {{"text": "find their hidden intent", "type": "Skill", "context": "need exploration", "state": "Intent Probing"}}
+]
+"""
 
-    print(f"📌 Number of summary docs: {len(summary_docs)}")
-    print(f"📌 Number of raw docs: {len(raw_docs)}")
+PARSE_PROMPT = """
+Extract knowledge from this sentence as a list of JSON objects, one for each distinct action or fact. For each:
+- "text": The core action or knowledge, concise (e.g., "talk gently to query their information").
+- "type": One of [Skill, Product Info, Combo, Promotion] (default: Skill).
+- "context": Specific situation or condition it applies to, based on sentence clues or explicit "with context [specific]" (e.g., "initial contact", "price objection"), required—use "general" if unclear, not "none".
+- "state": One of [Info Gathering, Intent Probing, Product Pitching, Trust Building, Handling Objections, Closing] or null if unspecified. Match intent precisely: "query info" → Info Gathering, "find intent" → Intent Probing, "believe/trust" → Trust Building, "push/close" → Closing.
 
-    if not all_docs:
-        print("⚠️ Error: No valid content to store in Pinecone.")
-        return
+Split multi-step sentences into separate items based on actions or conditions (e.g., "first X, then Y" → two items). Don’t summarize, keep text exact. If "with context [specific]" is present, use [specific] as the context.
 
-    # Generate embeddings
-    vectors = [
-        {
-            "id": f"doc_{i}",
-            "values": embeddings.embed_query(doc.page_content),
-            "metadata": doc.metadata  # ✅ Store content inside metadata
-        }
-        for i, doc in enumerate(all_docs)
-    ]
+Sentence: {sentence}
+Return: List of JSON objects, e.g., [
+    {{"text": "talk gently to query their information", "type": "Skill", "context": "initial contact", "state": "Info Gathering"}},
+    {{"text": "find their hidden intent", "type": "Skill", "context": "needs exploration", "state": "Intent Probing"}}
+]
+"""
 
-    # Upsert into Pinecone
-    index.upsert(vectors)
+# Function to parse with LLM
+def parse_knowledge_sentence(sentence):
+    full_prompt = PARSE_PROMPT.format(sentence=sentence)
+    try:
+        response = llm.invoke(full_prompt)
+        parsed_items = json.loads(response.content)
+        if not isinstance(parsed_items, list):
+            parsed_items = [parsed_items]  # Ensure it’s a list
+        return parsed_items
+    except Exception as e:
+        print(f"LLM parsing failed: {e}")
+        return [{
+            "text": sentence,  # Fallback: use full sentence
+            "type": "Skill",
+            "context": "none",
+            "state": None
+        }]
 
-def save_to_pinecone(user_id, embedding):
-    index = pc.Index(index_name)
-    index.upsert(vectors)
-
-def retrieve_relevant_info(query, k=1):
-    index = pc.Index(index_name)
-    query_embedding = embeddings.embed_query(query)
-
-    # Debugging: Ensure embedding is valid
-    if not all(isinstance(x, float) for x in query_embedding):
-        raise ValueError("Embedding contains invalid (non-float) values!")
-
-    results = index.query(
-        vector=query_embedding,  # ✅ Use "vector" instead of "queries"
-        top_k=k,
-        include_metadata=True
-    )
-
-    print("Raw results:", results)
-
-    matches = results.get("matches", [])
-
-    retrieved_docs = [
-        {
-            "id": match["id"],
-            "score": match["score"],
-            "content": match["metadata"].get("content", "")
-        }
-        for match in matches
-    ]
-
-    return retrieved_docs
-
-def retrieve_relevant_infov2(query, top_k=5):
-    """
-    Retrieves relevant information from Pinecone based on a query.
+# Function to collect knowledge from user
+def collect_knowledge_from_user():
+    knowledge_base = []
+    print("Enter training or HITO info as a sentence (type 'done' to finish):")
+    print("Example: 'When they say it's pricey, show ROI as a skill in Handling Objections'")
     
-    Args:
-        query (str): The search query.
-        top_k (int): Number of results to retrieve.
+    while True:
+        sentence = input("Your sentence: ").strip()
+        if sentence.lower() == "done":
+            break
+        
+        # Parse with LLM
+        parsed_items = parse_knowledge_sentence(sentence)
+        
+        # Fallback prompt if text is empty
+        for item in parsed_items:
+            if not item["text"]:
+                item["text"] = input(f"Couldn't parse text for one item in '{sentence}', please clarify: ").strip()
+            knowledge_base.append(item)
+            print("Added:", item)
+    
+    return knowledge_base
 
-    Returns:
-        List of relevant documents with scores.
-    """
-    # Generate embedding for the query
-    query_embedding = embeddings.embed_query(query)
+# Function to ingest knowledge into Pinecone
 
-    # Perform query search in Pinecone
-    index = pc.Index(index_name)
-    results = index.query(vector=query_embedding, top_k=top_k, include_metadata=True)
-
-    # Extract relevant data
-    retrieved_docs = [
-        {
-            "id": match["id"],
-            "score": match["score"],
-            "content": match["metadata"].get("content", "No content found")  # ✅ Fix missing content issue
+def ingest_knowledge(knowledge_base):
+    for item in knowledge_base:
+        # Generate embedding with OpenAI        
+        kb_embeding = embeddings.embed_query(item["text"])
+        # Create Pinecone entry
+        pinecone_id = str(uuid.uuid4())  # Unique ID
+        metadata = {
+            "text": item["text"],  
+            "type": item["type"],
+            "context": item["context"],
+            "state": item["state"] if item["state"] is not None else ""
         }
-        for match in results["matches"]
-    ]
+        
+        # Upsert to Pinecone
+        pinecone_index.upsert([(pinecone_id, kb_embeding, metadata)])
+        print(f"Ingested: {item['text']}")
 
-    return retrieved_docs
+# Main ingestion process
+def setup_knowledge_base():
+    knowledge_base = collect_knowledge_from_user()
+    if knowledge_base:
+        ingest_knowledge(knowledge_base)
+        print("Knowledge base ingested successfully!")
+    else:
+        print("No knowledge added.")
+
+def behappy():
+    arrayx =[
+        "first:",
+        "I love you!"
+    ]
+    print(arrayx[0])
+
+# Run setup
+if __name__ == "__main__":
+    setup_knowledge_base()
+    #behappy()
+
+

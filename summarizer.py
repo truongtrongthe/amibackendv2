@@ -1,7 +1,7 @@
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
-from knowledge import retrieve_relevant_info, tobrain
+from Archived.knowledge import retrieve_relevant_info, tobrain
 # Initialize LLM for summarization
 summarization_llm = ChatOpenAI(model="gpt-4o")
 
