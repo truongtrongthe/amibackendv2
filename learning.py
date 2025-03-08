@@ -10,6 +10,7 @@ from datetime import datetime
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pinecone_datastores import pinecone_index
 from langchain_core.messages import AIMessage, HumanMessage
+import textwrap
 
 # Initialize OpenAI
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
@@ -167,8 +168,10 @@ def learning_stream(user_input, user_id, thread_id="learning_thread"):
         )
         response = state["prompt_str"]
         
-        for word in response.split():
-            yield f"data: {json.dumps({'message': word})}\n\n"
+        for chunk in textwrap.wrap(response, width=20):
+            yield f"data: {json.dumps({'message': chunk})}\n\n"
+        #for word in response.split():
+        #    yield f"data: {json.dumps({'message': word})}\n\n"
         
         ai_message = AIMessage(content=response)
         state["messages"] = updated_messages + [ai_message]
