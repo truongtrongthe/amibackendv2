@@ -15,3 +15,6 @@ letta
 spacy
 maturin
 underthesea
+langdetect
+sentence_transformers
+fasttext
