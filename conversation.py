@@ -7,20 +7,20 @@ import uuid
 from numpy import dot
 from numpy.linalg import norm
 from pinecone_datastores import pinecone_index
-def cosine_similarity(vec1, vec2):
-    return dot(vec1, vec2) / (norm(vec1) * norm(vec2))
 
 SIMILARITY_THRESHOLD = 0.69
 client = OpenAI()
 def generate_embedding(skill_text):
-    response = client.embeddings.create(
-    input=skill_text,
-    model="text-embedding-3-small",
-    dimensions=1536  # Match the dimensions of ada-002
-    )
-    embedding_vector = response.data[0].embedding
-    return embedding_vector
-
+    try:
+        response = client.embeddings.create(
+        input=skill_text,
+        model="text-embedding-3-small",
+        dimensions=1536  # Match the dimensions of ada-002
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        print(f"Embedding generation failed: {e}")
+        return None  # Avoid breaking downstream logic
 convo_history = []
 
 SEEDED_STATES = ["Info Gathering", "Intent Probing", "Product Pitching", "Trust Building", "Handling Objections", "Closing"]
@@ -59,23 +59,51 @@ def reason_next_state(current_state, message, history):
             messages=[{"role": "user", "content": full_prompt}],
         )
         result = json.loads(response.choices[0].message.content)
+        if (current_state == "Info Gathering" or not current_state) and not profile_complete():
+            return "Info Gathering", "Profile incomplete, need more info"
         return result["next_state"], result["reason"]
+    
     except Exception as e:
         print(f"Reasoning failed: {e}")
         return "Info Gathering", "Fallback due to error"
 
 def update_profile(customer_message):
-    message_lower = customer_message.lower()
-    if not profile["name"] and any(word.isalpha() and len(word) > 2 for word in message_lower.split()):
-        profile["name"] = customer_message.split()[0].capitalize()
-    if not profile["age"] and any(word.isdigit() for word in message_lower.split()):
-        profile["age"] = next(word for word in message_lower.split() if word.isdigit())
-    if not profile["gender"] and any(g in message_lower for g in ["male", "female", "man", "woman"]):
-        profile["gender"] = next(g for g in ["male", "female", "man", "woman"] if g in message_lower)
-    if not profile["wishes"] and any(w in message_lower for w in ["grow", "height", "taller"]):
-        profile["wishes"] = "grow height"
-    if not profile["shipping_address"] and ("address" in message_lower or len(message_lower.split()) > 5):  # Rough heuristic
-        profile["shipping_address"] = customer_message
+    message_lower = customer_message.lower().strip()
+    parts = [p.strip() for p in message_lower.split(",")]
+    greetings = ["hi", "hello", "hey", "chào"]
+    
+    # Name: Set only if not set, avoid overwriting with non-names
+    if profile["name"] is None:
+        for part in parts:
+            if part.isalpha() and len(part) > 2 and part not in greetings:
+                profile["name"] = part.capitalize()
+                break
+    
+    # Age: Look for digits or "years old"
+    for part in parts:
+        if any(char.isdigit() for char in part) and ("year" in part or "tuổi" in part or part.isdigit()):
+            profile["age"] = ''.join(filter(str.isdigit, part))
+            break
+    
+    # Gender: Check keywords
+    gender_keywords = {"male": "male", "female": "female", "man": "male", "woman": "female", "nam": "male", "nữ": "female"}
+    for part in parts:
+        if part in gender_keywords:
+            profile["gender"] = gender_keywords[part]
+            break
+    
+    # Wishes: Check growth-related keywords
+    wish_keywords = ["grow", "height", "taller", "cm", "cao"]
+    if any(w in message_lower for w in wish_keywords):
+        profile["wishes"] = "grow height" if "cm" not in message_lower else f"grow {message_lower.split()[1]}"
+    
+    # Shipping address: Set only in Closing or if explicit
+    if "address" in message_lower or (len(message_lower) > 10 and profile["name"] is not None and "cm" not in message_lower):
+        profile["shipping_address"] = customer_message.strip()
+
+def profile_complete():
+    required = ["name", "age", "gender", "wishes"]
+    return all(profile[key] is not None for key in required)
 
 def cosine_similarity(vec1, vec2):
     return dot(vec1, vec2) / (norm(vec1) * norm(vec2))
@@ -121,8 +149,9 @@ def process_message(customer_message):
 
 RESPONSE_PROMPT = """
 You are Ami, a sales assistant. Your goal is to close the sale. 
-Given the current state, customer message, conversation history, profile, and relevant knowledge, craft a natural, conversational response (50-70 words max). 
-Use the knowledge as a base, adapt it to the context, and guide toward 'Closing'. Return the response as a string. Answer in Vietnamese
+Given the current state, customer message, conversation history, profile, and relevant knowledge, craft a natural, conversational response (50-70 words max) in Vietnamese. 
+In 'Info Gathering', ask for missing profile info (name, age, gender, wishes). In 'Closing', ask for shipping address if missing. Return the response as a string.
+Use the knowledge as a base, adapt it to the context, and guide toward 'Closing'. Return the response as a string. 
 
 Current State: {state}
 Customer Message: {message}
