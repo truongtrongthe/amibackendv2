@@ -234,9 +234,9 @@ if __name__ == "__main__":
         #"When you chat with customer, keep it gentle",
         #"I once lost a deal by rushing",
         #"Tell me about sales",
-        "Cho tôi biết về sales",
+        #"Cho tôi biết về sales",
         #"How to chat with customers",
-        "Làm thế nào để trò chuyện với khách hàng",
+        #"Làm thế nào để trò chuyện với khách hàng",
         #"What is upselling?",
         #"Upselling là gì?"
     ]
