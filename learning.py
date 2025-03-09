@@ -66,7 +66,8 @@ def detect_vibe(state: State):
         vibe = prior_vibe
     print(f"Detected vibe: {vibe}")
     return vibe
-# Recall from Pinecone (tweaked with English query fix)
+
+# Recall from Pinecone (tweaked with debug)
 def recall_from_pinecone(query, user_id, user_lang):
     original_query = query
     triggers_en = ["tell me about", "how to", "what is"]
@@ -76,22 +77,28 @@ def recall_from_pinecone(query, user_id, user_lang):
         "làm thế nào để": "how to",
         "là gì": "what is"
     }
+    translation_map = {
+        "sales": "sales",
+        "trò chuyện với khách hàng": "chat with customers"
+    }
     input_lower = query.lower()
     print(f"Input: '{input_lower}'")
-    english_query = input_lower  # Default to input
+    query = input_lower
     for trigger in triggers_en + triggers_vi:
         print(f"Checking trigger: '{trigger}'")
         if trigger in input_lower:
             print(f"Trigger matched: '{trigger}'")
+            query = input_lower.replace(trigger, "").strip()  # Strip trigger
             english_trigger = trigger if trigger in triggers_en else trigger_map[trigger]
-            english_query = input_lower.replace(trigger, english_trigger).strip()
-            query = input_lower.replace(trigger, "").strip()  # Strip for response
+            english_query = english_trigger + " " + translation_map.get(query, query)
             break
     else:
         print("No trigger matched")
+        english_query = translation_map.get(query, query)
     print(f"Pre-padded query: '{query}'")
     print(f"English query: '{english_query}'")
     query_embedding = embeddings.embed_query(english_query)  # Embed English
+    print(f"Embedding snippet: {query_embedding[:5]}")
     results = PINECONE_INDEX.query(
         vector=query_embedding,
         top_k=3,
@@ -99,7 +106,6 @@ def recall_from_pinecone(query, user_id, user_lang):
         filter={"user_id": user_id}
     )
     print(f"Raw Pinecone results: {results}")
-    # Deduplicate matches by text, keep highest score
     match_dict = {}
     for m in results.get("matches", []):
         text = m["metadata"]["text"]
