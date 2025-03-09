@@ -31,11 +31,12 @@ class State(TypedDict):
 def normalize_to_ascii(text):
     text = unicodedata.normalize('NFKD', text)
     replacements = {
-        '\u2019': "'", '\u2018': "'", '\u201c': '"', '\u201d': '"', '\u2014': '-', '\u2013': '-'
+        '\u2019': "'", '\u2018': "'", '\u201c': '"', '\u201d': '"', '\u2014': '-', '\u2013': '-',
+        '\u00A0': ' '  # Non-breaking space
     }
     for unicode_char, ascii_char in replacements.items():
         text = text.replace(unicode_char, ascii_char)
-    return text
+    return text.strip()
 
 # Language detection
 def detect_language(text):
@@ -44,7 +45,7 @@ def detect_language(text):
         detected_language = "vi"
     return detected_language
 
-# Vibe detection with clearer guidance
+# Refined vibe detection
 def detect_vibe(state: State):
     if not state["messages"]:
         return "casual"
@@ -52,34 +53,37 @@ def detect_vibe(state: State):
     recent_messages = state["messages"][-window_size:]
     history = "\n".join(f"{m.type}: {m.content}" for m in recent_messages)
     latest_message = state["messages"][-1].content if state["messages"] else ""
+    prior_vibe = state.get("vibe", "casual")
+    
+    confirmation_words = ["yes", "yeah", "yep", "it is", "yes it is", "it is a confirm", "it was a confirm"]
+    if any(word in latest_message.lower() for word in confirmation_words):
+        return prior_vibe
+    
     response = llm.invoke(
         f"Given this chat history:\n{history}\nFocus especially on the latest message: '{latest_message}'.\n"
-        f"Return only one vibe based on these definitions:\n"
-        f"- casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?')\n"
-        f"- knowledge: seeking or sharing info (e.g., 'Tell me about your CRM')\n"
-        f"- skills: practical tips or advice (e.g., 'Try this sales trick')\n"
-        f"- lessons: personal experiences or stories (e.g., 'I once lost a deal')\n"
+        f"Return only one vibe based on these definitions and examples:\n"
+        f"- casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?', 'Cool, bro')\n"
+        f"- knowledge: seeking or sharing info (e.g., 'Tell me about your CRM', 'Chat about sales')\n"
+        f"- skills: practical tips or advice (e.g., 'Try this sales trick', 'Handle rejection', 'Be patient in convo')\n"
+        f"- lessons: personal experiences or stories (e.g., 'I once lost a deal', 'Ask about past experience')\n"
+        f"If vague (e.g., 'Cool', 'OK'), use prior vibe: '{prior_vibe}'.\n"
         f"Options: casual, knowledge, skills, lessons"
     )
     vibe = response.content.strip().lower()
     vibe_options = ["casual", "knowledge", "skills", "lessons"]
-    for option in vibe_options:
-        if option in vibe:
-            vibe = option
-            break
-    else:
-        vibe = "casual"
+    if vibe not in vibe_options:
+        vibe = prior_vibe if state.get("vibe") else "casual"
     print(f"Detected vibe: {vibe}")
     return vibe
 
-# Chat node: Guess vibe and propose it
+# Chat node: Propose vibe
 def chat_node(state: State):
     latest_message = state["messages"][-1].content if state["messages"] else "Hello!"
     user_id = state["user_id"]
     user_lang = detect_language(latest_message)
     
-    state["vibe"] = detect_vibe(state)
-    vibe = state["vibe"]
+    vibe = detect_vibe(state)
+    state["vibe"] = vibe
     
     vibe_check = f"Hey, I'm AMI! I think this is a {vibe} vibe—am I on track?"
     follow_up = {
@@ -94,66 +98,113 @@ def chat_node(state: State):
         response = llm.invoke(f"Translate to {user_lang}: '{response}'").content.strip()
     
     response = normalize_to_ascii(response)
-    return {"prompt_str": response, "user_id": user_id, "user_lang": user_lang}
+    return {"prompt_str": response, "user_id": user_id, "user_lang": user_lang, "vibe": vibe}
 
 # Confirm node: Handle confirmation and save
 def confirm_node(state: State):
     if len(state["messages"]) < 2:
         return {"prompt_str": normalize_to_ascii("Let's chat first—what's up?")}
     
-    latest_response = state["messages"][-1].content.lower()
+    latest_response = state["messages"][-1].content
+    prior_message = state["messages"][-2].content
     vibe = state.get("vibe", "casual")
     user_lang = state["user_lang"]
-    
+
+    # In confirm_node
+    confirm_check_prompt = """
+       Return only: 'yes', 'no', or 'correction: <vibe>' where vibe is one of: casual, knowledge, skills, lessons—do not include explanations or reasoning.
+Chat history:
+- AI: '{prior_message}'
+- User: '{latest_response}'
+Prior proposed vibe was: '{vibe}'.
+Determine the user's intent based on their response:
+- 'yes' if prior message explicitly proposes a vibe (e.g., contains 'am I on track?') AND response clearly affirms it (e.g., 'yes,' 'yeah') without adding new info.
+- 'no' if prior message isn’t a proposal OR response introduces a new topic or doesn’t clearly affirm the prior vibe.
+- 'correction: <vibe>' only if user explicitly rejects the prior vibe with 'no' or 'nah' AND names a vibe (e.g., 'No, it’s <vibe>', 'Nah, that’s <vibe>').
+Use these vibe definitions:
+- casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?')
+- knowledge: seeking or sharing info (e.g., 'Tell me about your CRM', 'Chat about sales')
+- skills: practical tips or advice (e.g., 'Handle rejection', 'Be patient in convo')
+- lessons: personal experiences or stories (e.g., 'I once lost a deal', 'Ask about past experience')
+Rules:
+- If response negates (e.g., 'no', 'nah') but doesn’t explicitly name a vibe, return 'no'—treat as new topic, not correction.
+Examples:
+- AI: 'casual vibe—am I on track?' User: 'Yeah' → 'yes'
+- AI: 'casual vibe—am I on track?' User: 'Let’s chat about sales' → 'no'
+- AI: 'knowledge vibe—am I on track?' User: 'We need to be very patient...' → 'no'
+- AI: 'skills vibe—am I on track?' User: 'No, it’s lessons' → 'correction: lessons'
+- AI: 'skills vibe—am I on track?' User: 'Cool' → 'no'
+- AI: 'lessons vibe—am I on track?' User: 'It is a confirm' → 'yes'
+- AI: 'Saved as skills! What's next?' User: 'Let’s move to handling tough...' → 'no'
+- AI: 'skills vibe—am I on track?' User: 'You could ask customer...' → 'no'
+- AI: 'casual vibe—am I on track?' User: 'Nah, let’s talk pricing' → 'no'
+- AI: 'knowledge vibe—am I on track?' User: 'Nah, tell me a story' → 'no'
+- AI: 'skills vibe—am I on track?' User: 'Sure' → 'yes'
+- AI: 'skills vibe—am I on track?' User: 'Nope, tell me a story' → 'correction: lessons'
+- AI: 'skills vibe—am I on track?' User: 'Yeah, but let’s switch' → 'no'
+- AI: 'knowledge vibe—am I on track?' User: 'OK' → 'no'
+- AI: 'skills vibe—am I on track?' User: 'No way, it’s casual!' → 'correction: casual'
+    """
     try:
-        confirmation_check = llm.invoke(
-            f"User said: '{latest_response}'. Return only: 'yes', 'no', or 'correction: <vibe>' where vibe is one of: casual, knowledge, skills, lessons."
-        ).content.lower()
+        formatted_prompt = confirm_check_prompt.format(
+            prior_message=prior_message,
+            latest_response=latest_response,
+            vibe=vibe
+        )
+        confirmation_check = llm.invoke(formatted_prompt).content.lower()
         print(f"Confirmation check: {confirmation_check}")
     except Exception as e:
         print(f"Error in confirmation check: {e}")
         confirmation_check = "no"
     
-    if "yes" in confirmation_check:
-        message_to_save = state["messages"][-2].content
-        embedding = embeddings.embed_query(message_to_save)
+    # Save prior user message on "yes" if confirming a proposal
+    prior_message_clean = normalize_to_ascii(prior_message).lower()
+    is_proposal = "am i on track?" in prior_message_clean
+    print(f"Checking save: confirmation_check='{confirmation_check}', messages_len={len(state['messages'])}, is_proposal={is_proposal}")
+    if confirmation_check == "yes" and len(state["messages"]) >= 3 and is_proposal:
+        print(f"Save block triggered for vibe: {vibe}")
+        prior_user_message = state["messages"][-3].content  # Grab user input before AI proposal
+        print(f"Saving user message: '{prior_user_message}'")
+        embedding = embeddings.embed_query(prior_user_message)
         PINECONE_INDEX.upsert([(
             f"msg_{state['user_id']}_{datetime.now().isoformat()}", 
             embedding, 
-            {"vibe": vibe, "text": message_to_save, "user_id": state["user_id"]}
+            {"vibe": vibe, "text": prior_user_message, "user_id": state["user_id"]}
         )])
         response = f"Saved as {vibe}! What's next?"
-    elif "correction:" in confirmation_check:
+        return {"prompt_str": response, "vibe": vibe}
+    
+    # Handle corrections
+    if confirmation_check.startswith("correction:"):
         new_vibe = confirmation_check.split("correction:")[-1].strip()
+        detected_vibe = detect_vibe(state)
+        if new_vibe == detected_vibe:
+            print(f"Correction matches detected vibe: {detected_vibe}, keeping original response")
+            return {"prompt_str": state["prompt_str"], "vibe": vibe}
         if new_vibe in ["casual", "knowledge", "skills", "lessons"]:
             state["vibe"] = new_vibe
             response = f"Got it, switching to {new_vibe}—right now?"
+            return {"prompt_str": response, "vibe": new_vibe}
         else:
             response = "Oops, that’s not a vibe I know—try casual, knowledge, skills, or lessons!"
-    else:
-        return {"prompt_str": state["prompt_str"]}  # Keep chat_node’s response
+            return {"prompt_str": response, "vibe": vibe}
     
-    if user_lang != "en":
-        response = llm.invoke(f"Translate to {user_lang}: '{response}'").content.strip()
-    response = normalize_to_ascii(response)
-    return {"prompt_str": response}
+    # Default: keep chat_node response
+    print(f"No save or correction, using chat_node response: {state['prompt_str']}")
+    return {"prompt_str": state["prompt_str"], "vibe": vibe}
 
-# Build the graph with conditional edges
+# Build the graph
 graph_builder = StateGraph(State)
 graph_builder.add_node("chatbot", chat_node)
 graph_builder.add_node("confirm", confirm_node)
 graph_builder.add_edge(START, "chatbot")
-
-def route_to_confirm(state: State):
-    return "confirm" if len(state["messages"]) > 1 else END
-
-graph_builder.add_conditional_edges("chatbot", route_to_confirm)
+graph_builder.add_conditional_edges("chatbot", lambda state: "confirm" if len(state["messages"]) > 1 else END)
 graph_builder.add_edge("confirm", END)
 
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-# Streaming function with word-by-word chunks
+# Streaming function
 def learning_stream(user_input, user_id, thread_id="learning_thread"):
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     history = checkpoint["channel_values"].get("messages", []) if checkpoint else []
@@ -168,10 +219,8 @@ def learning_stream(user_input, user_id, thread_id="learning_thread"):
         )
         response = state["prompt_str"]
         
-        for chunk in textwrap.wrap(response, width=20):
+        for chunk in textwrap.wrap(response, width=80):
             yield f"data: {json.dumps({'message': chunk})}\n\n"
-        #for word in response.split():
-        #    yield f"data: {json.dumps({'message': word})}\n\n"
         
         ai_message = AIMessage(content=response)
         state["messages"] = updated_messages + [ai_message]
@@ -183,27 +232,26 @@ def learning_stream(user_input, user_id, thread_id="learning_thread"):
         print(error_msg)
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
 
-# Test with extended conversation
+# Test sequence
 if __name__ == "__main__":
     user_id = "test_user"
     thread_id = "test_thread"
-    
-    print("Testing 'Hi!'")
-    for chunk in learning_stream("Hi!", user_id, thread_id):
-        print(chunk)
-    
-    print("\nTesting 'Yep'")
-    for chunk in learning_stream("Yep", user_id, thread_id):
-        print(chunk)
-    
-    print("\nTesting 'Tell me about your CRM'")
-    for chunk in learning_stream("Tell me about your CRM", user_id, thread_id):
-        print(chunk)
-    
-    print("\nTesting 'Hey Ami, I have an experience...police! It works!'")
-    for chunk in learning_stream("Hey Ami, I have an experience wanna tell you: just threaten customer who deny to pay outstanding by calling police! It works!", user_id, thread_id):
-        print(chunk)
-    
+    inputs = [
+        "Hi",
+        "Let's have a chat about sales",
+        "We need to be very patient in customer conversation",
+        "Yeah",
+        "Let's move to handling tough situation like rejection, are you willing to rock?",
+        "You could ask customer about the past experience before coming back",
+        "It is a confirm",
+        "Hey, how’s it going?",
+        "Nah, let’s talk pricing",
+        "Cool"
+    ]
+    for i, user_input in enumerate(inputs):
+        print(f"\nTesting '{user_input}'")
+        for chunk in learning_stream(user_input, user_id, thread_id):
+            print(chunk)
     history = convo_graph.get_state({"configurable": {"thread_id": thread_id}}).values["messages"]
     for msg in history:
         print(f"{msg.type}: {msg.content}")
