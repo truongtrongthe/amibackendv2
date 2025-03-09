@@ -4,7 +4,7 @@ from pinecone import Pinecone, ServerlessSpec
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-index_name = "ami-dev"
+index_name = "ami"
 
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
@@ -25,7 +25,8 @@ pinecone_index = pc.Index(index_name)
 # Use your pinecone_index
 PINECONE_INDEX = pinecone_index
 
-# Recall from Pinecone (v15.2 - Query-Driven Final)
+# Recall from Pinecone (v15.2 - Markdown & Bold Final Saved)
+# Recall from Pinecone (v15.2 - Markdown & Fully Bold Tip Final Saved)
 def recall_from_pinecone(query, user_id, user_lang):
     original_query = query
     triggers_en = ["tell me about", "how to", "what is"]
@@ -76,25 +77,30 @@ def recall_from_pinecone(query, user_id, user_lang):
     
     print(f"Match scores: {[m['score'] for m in final_matches]}")
     
-    response = "Here’s what I remember:" if user_lang == "en" else "Đây là những gì tôi có từ trí nhớ:"
+    # Markdown-formatted matches
+    response = "Here’s what I remember:\n" if user_lang == "en" else "Đây là những gì tôi có từ trí nhớ:\n"
     matches_text = ""
     for i, match in enumerate(final_matches, 1):
         text = match["metadata"]["text"]
         vibe = match["metadata"]["vibe"]
-        if user_lang == "vi":
+        if user_lang == "vi" and "Translation:" in text:
+            # Strip "Translation:" prefix if present
+            text = text.replace("Translation: ", "").strip("'")
+        elif user_lang == "vi":
             text = llm.invoke(f"Translate to Vietnamese: '{text}'").content.strip()
-        response += f" {i}. '{text}' ({vibe})"
+        response += f"- {i}. '{text}' ({vibe})\n"
         matches_text += f"{i}. '{text}' ({vibe})\n"
     
     if final_matches:
-        # Tip flexes to query intent
+        # Flex answer to query intent, fully bold, in user_lang
         tip = llm.invoke(
             f"Given these matches: {matches_text}\n"
-            f"Write an answer for the user's query: '{original_query}'—keep it direct and actionable. Answer in {user_lang}"
+            f"Write an answer for the user's query: '{original_query}'—keep it direct and actionable."
+            f"Respond in {'English' if user_lang == 'en' else 'Vietnamese'}."
         ).content.strip()
-        response += f"\nTip: {tip}"
+        response += f"\n**{'Answer' if user_lang == 'en' else 'Trả lời'}: {tip}**"
     else:
         tip = "My brain is empty—teach me something about it!" if user_lang == "en" else "Ami chưa có kiến thức này. Hãy dạy tôi điều gì đó về nó!"
-        response = tip
+        response += f"\n**{'Answer' if user_lang == 'en' else 'Trả lời'}: {tip}**"
     
     return response
