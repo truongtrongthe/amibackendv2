@@ -164,7 +164,7 @@ def confirm_node(state: State):
         # Teach flow (unchanged)
         vibe = detect_vibe(state)
         state["vibe"] = vibe
-        summary = llm.invoke(f"Summarize in 5-10 words: '{latest_message}'").content.strip()
+        summary = llm.invoke(f"Summarize as a {vibe}: '{latest_message}'").content.strip()
         acknowledgements = {
             "knowledge": f"Got it—that’s some dope knowledge! Summary: '{summary}' Locked it in the vault.",
             "skills": f"Got it—that’s a slick skills tip! Summary: '{summary}' Locked it in the vault.",
