@@ -1,5 +1,4 @@
 import json
-import re
 import unicodedata
 from typing import Annotated
 from typing_extensions import TypedDict
@@ -40,175 +39,147 @@ def normalize_to_ascii(text):
 
 # Language detection
 def detect_language(text):
-    detected_language = "en"
-    if any(word in text.lower() for word in ["chào", "bạn", "anh", "chị", "em"]):
-        detected_language = "vi"
-    return detected_language
+    vietnamese_keywords = ["cho tôi", "về", "làm thế nào", "là gì", "chào", "bạn"]
+    if any(keyword in text.lower() for keyword in vietnamese_keywords):
+        return "vi"
+    return "en"
 
-# ... [Keep imports, detect_vibe unchanged unless noted] ...
-
-# ... [Keep imports unchanged] ...
-
-# Refined vibe detection (unchanged from last fix)
+# Vibe detection (for teach flow)
 def detect_vibe(state: State):
     if not state["messages"]:
         return "casual"
-    window_size = 5
-    recent_messages = state["messages"][-window_size:]
-    history = "\n".join(f"{m.type}: {m.content}" for m in recent_messages)
-    latest_message = state["messages"][-1].content if state["messages"] else ""
+    latest_message = state["messages"][-1].content
     prior_vibe = state.get("vibe", "casual")
     
-    confirmation_words = ["yes", "yeah", "yep", "it is", "yes it is", "it is a confirm", "it was a confirm", "sure"]
-    if any(word in latest_message.lower() for word in confirmation_words) and not any(word in latest_message.lower() for word in ["but", "no", "nah"]):
-        return prior_vibe
-    
     response = llm.invoke(
-        f"Given this chat history:\n{history}\nFocus especially on the latest message: '{latest_message}'.\n"
+        f"Given this message: '{latest_message}'.\n"
         f"Return only one vibe based on these definitions and examples:\n"
-        f"- casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?', 'Cool, bro')\n"
         f"- knowledge: seeking or sharing info (e.g., 'Tell me about your CRM', 'Chat about sales')\n"
         f"- skills: practical tips or advice (e.g., 'Try this sales trick', 'Handle rejection', 'Be patient in convo')\n"
         f"- lessons: personal experiences or stories (e.g., 'I once lost a deal', 'Ask about past experience')\n"
-        f"If vague (e.g., 'Cool', 'OK'), use prior vibe: '{prior_vibe}'.\n"
-        f"Options: casual, knowledge, skills, lessons"
+        f"If vague (e.g., 'Cool', 'OK'), use prior_vibe: '{prior_vibe}'.\n"
+        f"Options: knowledge, skills, lessons"
     )
     vibe = response.content.strip().lower()
-    vibe_options = ["casual", "knowledge", "skills", "lessons"]
+    vibe_options = ["knowledge", "skills", "lessons"]
     if vibe not in vibe_options:
-        vibe = prior_vibe if state.get("vibe") else "casual"
+        vibe = prior_vibe
     print(f"Detected vibe: {vibe}")
     return vibe
+# Recall from Pinecone (tweaked with English query fix)
+def recall_from_pinecone(query, user_id, user_lang):
+    original_query = query
+    triggers_en = ["tell me about", "how to", "what is"]
+    triggers_vi = ["cho tôi biết về", "làm thế nào để", "là gì"]
+    trigger_map = {
+        "cho tôi biết về": "tell me about",
+        "làm thế nào để": "how to",
+        "là gì": "what is"
+    }
+    input_lower = query.lower()
+    print(f"Input: '{input_lower}'")
+    english_query = input_lower  # Default to input
+    for trigger in triggers_en + triggers_vi:
+        print(f"Checking trigger: '{trigger}'")
+        if trigger in input_lower:
+            print(f"Trigger matched: '{trigger}'")
+            english_trigger = trigger if trigger in triggers_en else trigger_map[trigger]
+            english_query = input_lower.replace(trigger, english_trigger).strip()
+            query = input_lower.replace(trigger, "").strip()  # Strip for response
+            break
+    else:
+        print("No trigger matched")
+    print(f"Pre-padded query: '{query}'")
+    print(f"English query: '{english_query}'")
+    query_embedding = embeddings.embed_query(english_query)  # Embed English
+    results = PINECONE_INDEX.query(
+        vector=query_embedding,
+        top_k=3,
+        include_metadata=True,
+        filter={"user_id": user_id}
+    )
+    print(f"Raw Pinecone results: {results}")
+    # Deduplicate matches by text, keep highest score
+    match_dict = {}
+    for m in results.get("matches", []):
+        text = m["metadata"]["text"]
+        if text not in match_dict or m["score"] > match_dict[text]["score"]:
+            match_dict[text] = m
+    matches = [m for m in match_dict.values() if m["score"] > 0.45]
+    print(f"Match scores: {[m['score'] for m in matches]}")
+    if not matches:
+        response = f"Vault’s empty on '{original_query}'—teach me something about it!"
+        if user_lang == "vi":
+            response = llm.invoke(f"Translate to Vietnamese: '{response}'").content.strip()
+        return response
+    response = "Here’s what I’ve got from the vault:" if user_lang == "en" else "Đây là những gì tôi có từ kho:"
+    for i, match in enumerate(matches, 1):
+        text = match["metadata"]["text"]
+        vibe = match["metadata"]["vibe"]
+        if user_lang == "vi":
+            text = llm.invoke(f"Translate to Vietnamese: '{text}'").content.strip()
+            vibe = {"knowledge": "kiến thức", "skills": "kỹ năng", "lessons": "bài học"}.get(vibe, vibe)
+        response += f" {i}. '{text}' ({vibe})"
+    return response
 
-# Chat node: Propose vibe with eager learning twist
 def chat_node(state: State):
     latest_message = state["messages"][-1].content if state["messages"] else "Hello!"
     user_id = state["user_id"]
     user_lang = detect_language(latest_message)
     
-    vibe = detect_vibe(state)
-    state["vibe"] = vibe
-    
-    # First message: Greeting
     if len(state["messages"]) == 1:
         response = "Hey there! I’m AMI, pumped to chat and learn—what’s on your mind today?"
+        if user_lang == "vi":
+            response = "Chào bạn! Tôi là AMI, hào hứng trò chuyện và học—bạn đang nghĩ gì vậy?"
     else:
-        # After "no": Re-confirm
-        if len(state["messages"]) > 2 and state["messages"][-2].type == "ai" and "confirmation_check='no'" in str(state.get("messages", [])):
-            vibe_check = f"Alright, I’m locked on {vibe} now—am I nailing it?"
-        # New topic: Eager to learn
-        else:
-            vibe_check = f"Ooh, I’m picking up a {vibe} vibe here—am I on the right track?"
-        follow_up = {
-            "casual": "What’s the word on the street?",
-            "knowledge": "What’s the scoop—any hot info to share?",
-            "skills": "Got a slick trick up your sleeve?",
-            "lessons": "What’s a wild story from the trenches?"
-        }.get(vibe, "What’s the word on the street?")
-        response = f"{vibe_check} Teach me something cool about it! {follow_up}"
-    
-    if user_lang != "en":
-        response = llm.invoke(f"Translate to {user_lang}: '{response}'").content.strip()
+        response = ""  # Pass to confirm for teach or recall
     
     response = normalize_to_ascii(response)
-    return {"prompt_str": response, "user_id": user_id, "user_lang": user_lang, "vibe": vibe}
+    return {"prompt_str": response, "user_id": user_id, "user_lang": user_lang}
 
-# Confirm node: Handle confirmation with new responses
+# Confirm node: Teach or recall
 def confirm_node(state: State):
     if len(state["messages"]) < 2:
-        return {"prompt_str": normalize_to_ascii("Hey there! I’m AMI, pumped to chat and learn—what’s on your mind today?")}
+        return {"prompt_str": state["prompt_str"]}
     
-    latest_response = state["messages"][-1].content
-    prior_message = state["messages"][-2].content
-    vibe = state.get("vibe", "casual")
-    user_lang = state["user_lang"]
+    latest_message = state["messages"][-1].content
+    user_id = state["user_id"]
+    user_lang = detect_language(latest_message)
+    print(f"User ID: {user_id}")
     
-    confirm_check_prompt = """
-    Return only: 'yes', 'no', or 'correction: <vibe>' where vibe is one of: casual, knowledge, skills, lessons—do not include explanations or reasoning.
-    Chat history:
-    - AI: '{prior_message}'
-    - User: '{latest_response}'
-    Prior proposed vibe was: '{vibe}'.
-    Determine the user's intent based on their response:
-    - 'yes' if prior message explicitly proposes a vibe (e.g., contains 'am I on track?' or 'am I nailing it?') AND response clearly affirms it (e.g., 'yes,' 'yeah') without adding new info.
-    - 'no' if prior message isn’t a proposal OR response introduces a new topic or doesn’t clearly affirm the prior vibe.
-    - 'correction: <vibe>' only if user explicitly rejects the prior vibe with 'no' or 'nah' AND names a vibe (e.g., 'No, it’s <vibe>', 'Nah, that’s <vibe>').
-    Use these vibe definitions:
-    - casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?')
-    - knowledge: seeking or sharing info (e.g., 'Tell me about your CRM', 'Chat about sales')
-    - skills: practical tips or advice (e.g., 'Handle rejection', 'Be patient in convo')
-    - lessons: personal experiences or stories (e.g., 'I once lost a deal', 'Ask about past experience')
-    Rules:
-    - If response negates (e.g., 'no', 'nah') but doesn’t explicitly name a vibe, return 'no'—treat as new topic, not correction.
-    Examples:
-    - AI: 'casual vibe—am I on track?' User: 'Yeah' → 'yes'
-    - AI: 'casual vibe—am I on track?' User: 'Let’s chat about sales' → 'no'
-    - AI: 'knowledge vibe—am I on track?' User: 'We need to be very patient...' → 'no'
-    - AI: 'skills vibe—am I on track?' User: 'No, it’s lessons' → 'correction: lessons'
-    - AI: 'skills vibe—am I on track?' User: 'Cool' → 'no'
-    - AI: 'lessons vibe—am I on track?' User: 'It is a confirm' → 'yes'
-    - AI: 'Saved as skills! What's next?' User: 'Let’s move to handling tough...' → 'no'
-    - AI: 'skills vibe—am I on track?' User: 'You could ask customer...' → 'no'
-    - AI: 'casual vibe—am I on track?' User: 'Nah, let’s talk pricing' → 'no'
-    - AI: 'knowledge vibe—am I on track?' User: 'Nah, tell me a story' → 'no'
-    - AI: 'skills vibe—am I on track?' User: 'Sure' → 'yes'
-    - AI: 'skills vibe—am I on track?' User: 'Nope, tell me a story' → 'correction: lessons'
-    - AI: 'skills vibe—am I on track?' User: 'Yeah, but let’s switch' → 'no'
-    - AI: 'knowledge vibe—am I on track?' User: 'OK' → 'no'
-    - AI: 'skills vibe—am I on track?' User: 'No way, it’s casual!' → 'correction: casual'
-    """
-    try:
-        formatted_prompt = confirm_check_prompt.format(
-            prior_message=prior_message,
-            latest_response=latest_response,
-            vibe=vibe
-        )
-        confirmation_check = llm.invoke(formatted_prompt).content.lower()
-        print(f"Confirmation check: {confirmation_check}")
-    except Exception as e:
-        print(f"Error in confirmation check: {e}")
-        confirmation_check = "no"
-    
-    # Save prior user message on "yes" if confirming a proposal
-    prior_message_clean = normalize_to_ascii(prior_message).lower()
-    is_proposal = "am i on the right track?" in prior_message_clean or "am i nailing it?" in prior_message_clean
-    print(f"Checking save: confirmation_check='{confirmation_check}', messages_len={len(state['messages'])}, is_proposal={is_proposal}")
-    if confirmation_check == "yes" and len(state["messages"]) >= 3 and is_proposal:
-        print(f"Save block triggered for vibe: {vibe}")
-        prior_user_message = state["messages"][-3].content  # Grab user input before AI proposal
-        print(f"Saving user message: '{prior_user_message}'")
-        embedding = embeddings.embed_query(prior_user_message)
+    # Check for recall triggers (English or Vietnamese)
+    triggers_en = ["tell me about", "how to", "what is"]
+    triggers_vi = ["cho tôi biết về", "làm thế nào để", "là gì"]
+    input_lower = latest_message.lower()
+    if any(trigger in input_lower for trigger in triggers_en + triggers_vi):
+        print(f"Full query: '{latest_message}'")
+        response = recall_from_pinecone(latest_message, user_id, user_lang)  # Pass full query
+    else:
+        # Teach flow (unchanged)
+        vibe = detect_vibe(state)
+        state["vibe"] = vibe
+        summary = llm.invoke(f"Summarize in 5-10 words: '{latest_message}'").content.strip()
+        acknowledgements = {
+            "knowledge": f"Got it—that’s some dope knowledge! Summary: '{summary}' Locked it in the vault.",
+            "skills": f"Got it—that’s a slick skills tip! Summary: '{summary}' Locked it in the vault.",
+            "lessons": f"Got it—that’s a wild lesson! Summary: '{summary}' Locked it in the vault."
+        }
+        response = acknowledgements.get(vibe, f"Got it—that’s cool! Summary: '{summary}' Locked it in the vault.")
+        
+        if user_lang == "vi":
+            response = llm.invoke(f"Translate to Vietnamese: '{response}'").content.strip()
+        
+        embedding = embeddings.embed_query(latest_message)
         PINECONE_INDEX.upsert([(
-            f"msg_{state['user_id']}_{datetime.now().isoformat()}", 
+            f"msg_{user_id}_{datetime.now().isoformat()}", 
             embedding, 
-            {"vibe": vibe, "text": prior_user_message, "user_id": state["user_id"]}
+            {"vibe": vibe, "tags": [vibe], "text": latest_message, "summary": summary, "user_id": user_id}
         )])
-        response = f"Boom, locked in as {vibe}! What’s the next gem you’ve got for me?"
-        return {"prompt_str": response, "vibe": vibe}
+        print(f"Saved to Pinecone: vibe={vibe}, text='{latest_message}', summary='{summary}'")
     
-    # Handle corrections
-    if confirmation_check.startswith("correction:"):
-        new_vibe = confirmation_check.split("correction:")[-1].strip()
-        detected_vibe = detect_vibe(state)
-        if new_vibe == detected_vibe:
-            print(f"Correction matches detected vibe: {detected_vibe}, keeping original response")
-            return {"prompt_str": state["prompt_str"], "vibe": vibe}
-        if new_vibe in ["casual", "knowledge", "skills", "lessons"]:
-            state["vibe"] = new_vibe
-            response = f"Whoa, I see it now—this feels like {new_vibe}! Am I catching your drift?"
-            return {"prompt_str": response, "vibe": new_vibe}
-        else:
-            response = "Oops, that’s not a vibe I know—try casual, knowledge, skills, or lessons!"
-            return {"prompt_str": response, "vibe": vibe}
-    
-    # Default: keep chat_node response
-    print(f"No save or correction, using chat_node response: {state['prompt_str']}")
-    return {"prompt_str": state["prompt_str"], "vibe": vibe}
-
-# ... [Keep graph building, learning_stream unchanged] ...
-
-# ... [Keep graph building, learning_stream unchanged] ...
-
+    response = normalize_to_ascii(response)
+    return {"prompt_str": response, "vibe": state.get("vibe", "casual")}
+# Build the graph
 graph_builder = StateGraph(State)
 graph_builder.add_node("chatbot", chat_node)
 graph_builder.add_node("confirm", confirm_node)
@@ -253,15 +224,15 @@ if __name__ == "__main__":
     thread_id = "test_thread"
     inputs = [
         "Hi",
-        "Let's have a chat about sales",
-        "We need to be very patient in customer conversation",
-        "Yeah",
-        "Let's move to handling tough situation like rejection, are you willing to rock?",
-        "You could ask customer about the past experience before coming back",
-        "It is a confirm",
-        "Hey, how’s it going?",
-        "Nah, let’s talk pricing",
-        "Cool"
+        #"Let's have a chat about sales",
+        #"When you chat with customer, keep it gentle",
+        #"I once lost a deal by rushing",
+        #"Tell me about sales",
+        "Cho tôi biết về sales",
+        #"How to chat with customers",
+        "Làm thế nào để trò chuyện với khách hàng",
+        #"What is upselling?",
+        #"Upselling là gì?"
     ]
     for i, user_input in enumerate(inputs):
         print(f"\nTesting '{user_input}'")
