@@ -45,7 +45,11 @@ def detect_language(text):
         detected_language = "vi"
     return detected_language
 
-# Refined vibe detection
+# ... [Keep imports, detect_vibe unchanged unless noted] ...
+
+# ... [Keep imports unchanged] ...
+
+# Refined vibe detection (unchanged from last fix)
 def detect_vibe(state: State):
     if not state["messages"]:
         return "casual"
@@ -55,8 +59,8 @@ def detect_vibe(state: State):
     latest_message = state["messages"][-1].content if state["messages"] else ""
     prior_vibe = state.get("vibe", "casual")
     
-    confirmation_words = ["yes", "yeah", "yep", "it is", "yes it is", "it is a confirm", "it was a confirm"]
-    if any(word in latest_message.lower() for word in confirmation_words):
+    confirmation_words = ["yes", "yeah", "yep", "it is", "yes it is", "it is a confirm", "it was a confirm", "sure"]
+    if any(word in latest_message.lower() for word in confirmation_words) and not any(word in latest_message.lower() for word in ["but", "no", "nah"]):
         return prior_vibe
     
     response = llm.invoke(
@@ -76,7 +80,7 @@ def detect_vibe(state: State):
     print(f"Detected vibe: {vibe}")
     return vibe
 
-# Chat node: Propose vibe
+# Chat node: Propose vibe with eager learning twist
 def chat_node(state: State):
     latest_message = state["messages"][-1].content if state["messages"] else "Hello!"
     user_id = state["user_id"]
@@ -85,65 +89,73 @@ def chat_node(state: State):
     vibe = detect_vibe(state)
     state["vibe"] = vibe
     
-    vibe_check = f"Hey, I'm AMI! I think this is a {vibe} vibe—am I on track?"
-    follow_up = {
-        "casual": "What's up?",
-        "knowledge": "Our CRM boosts retention by 20%—need more?",
-        "skills": "Try 'What’s stopping you?' to close deals.",
-        "lessons": "I once lost a deal by overselling—learned to listen."
-    }.get(vibe, "What's up?")
+    # First message: Greeting
+    if len(state["messages"]) == 1:
+        response = "Hey there! I’m AMI, pumped to chat and learn—what’s on your mind today?"
+    else:
+        # After "no": Re-confirm
+        if len(state["messages"]) > 2 and state["messages"][-2].type == "ai" and "confirmation_check='no'" in str(state.get("messages", [])):
+            vibe_check = f"Alright, I’m locked on {vibe} now—am I nailing it?"
+        # New topic: Eager to learn
+        else:
+            vibe_check = f"Ooh, I’m picking up a {vibe} vibe here—am I on the right track?"
+        follow_up = {
+            "casual": "What’s the word on the street?",
+            "knowledge": "What’s the scoop—any hot info to share?",
+            "skills": "Got a slick trick up your sleeve?",
+            "lessons": "What’s a wild story from the trenches?"
+        }.get(vibe, "What’s the word on the street?")
+        response = f"{vibe_check} Teach me something cool about it! {follow_up}"
     
-    response = f"{vibe_check} {follow_up}"
     if user_lang != "en":
         response = llm.invoke(f"Translate to {user_lang}: '{response}'").content.strip()
     
     response = normalize_to_ascii(response)
     return {"prompt_str": response, "user_id": user_id, "user_lang": user_lang, "vibe": vibe}
 
-# Confirm node: Handle confirmation and save
+# Confirm node: Handle confirmation with new responses
 def confirm_node(state: State):
     if len(state["messages"]) < 2:
-        return {"prompt_str": normalize_to_ascii("Let's chat first—what's up?")}
+        return {"prompt_str": normalize_to_ascii("Hey there! I’m AMI, pumped to chat and learn—what’s on your mind today?")}
     
     latest_response = state["messages"][-1].content
     prior_message = state["messages"][-2].content
     vibe = state.get("vibe", "casual")
     user_lang = state["user_lang"]
-
-    # In confirm_node
+    
     confirm_check_prompt = """
-       Return only: 'yes', 'no', or 'correction: <vibe>' where vibe is one of: casual, knowledge, skills, lessons—do not include explanations or reasoning.
-Chat history:
-- AI: '{prior_message}'
-- User: '{latest_response}'
-Prior proposed vibe was: '{vibe}'.
-Determine the user's intent based on their response:
-- 'yes' if prior message explicitly proposes a vibe (e.g., contains 'am I on track?') AND response clearly affirms it (e.g., 'yes,' 'yeah') without adding new info.
-- 'no' if prior message isn’t a proposal OR response introduces a new topic or doesn’t clearly affirm the prior vibe.
-- 'correction: <vibe>' only if user explicitly rejects the prior vibe with 'no' or 'nah' AND names a vibe (e.g., 'No, it’s <vibe>', 'Nah, that’s <vibe>').
-Use these vibe definitions:
-- casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?')
-- knowledge: seeking or sharing info (e.g., 'Tell me about your CRM', 'Chat about sales')
-- skills: practical tips or advice (e.g., 'Handle rejection', 'Be patient in convo')
-- lessons: personal experiences or stories (e.g., 'I once lost a deal', 'Ask about past experience')
-Rules:
-- If response negates (e.g., 'no', 'nah') but doesn’t explicitly name a vibe, return 'no'—treat as new topic, not correction.
-Examples:
-- AI: 'casual vibe—am I on track?' User: 'Yeah' → 'yes'
-- AI: 'casual vibe—am I on track?' User: 'Let’s chat about sales' → 'no'
-- AI: 'knowledge vibe—am I on track?' User: 'We need to be very patient...' → 'no'
-- AI: 'skills vibe—am I on track?' User: 'No, it’s lessons' → 'correction: lessons'
-- AI: 'skills vibe—am I on track?' User: 'Cool' → 'no'
-- AI: 'lessons vibe—am I on track?' User: 'It is a confirm' → 'yes'
-- AI: 'Saved as skills! What's next?' User: 'Let’s move to handling tough...' → 'no'
-- AI: 'skills vibe—am I on track?' User: 'You could ask customer...' → 'no'
-- AI: 'casual vibe—am I on track?' User: 'Nah, let’s talk pricing' → 'no'
-- AI: 'knowledge vibe—am I on track?' User: 'Nah, tell me a story' → 'no'
-- AI: 'skills vibe—am I on track?' User: 'Sure' → 'yes'
-- AI: 'skills vibe—am I on track?' User: 'Nope, tell me a story' → 'correction: lessons'
-- AI: 'skills vibe—am I on track?' User: 'Yeah, but let’s switch' → 'no'
-- AI: 'knowledge vibe—am I on track?' User: 'OK' → 'no'
-- AI: 'skills vibe—am I on track?' User: 'No way, it’s casual!' → 'correction: casual'
+    Return only: 'yes', 'no', or 'correction: <vibe>' where vibe is one of: casual, knowledge, skills, lessons—do not include explanations or reasoning.
+    Chat history:
+    - AI: '{prior_message}'
+    - User: '{latest_response}'
+    Prior proposed vibe was: '{vibe}'.
+    Determine the user's intent based on their response:
+    - 'yes' if prior message explicitly proposes a vibe (e.g., contains 'am I on track?' or 'am I nailing it?') AND response clearly affirms it (e.g., 'yes,' 'yeah') without adding new info.
+    - 'no' if prior message isn’t a proposal OR response introduces a new topic or doesn’t clearly affirm the prior vibe.
+    - 'correction: <vibe>' only if user explicitly rejects the prior vibe with 'no' or 'nah' AND names a vibe (e.g., 'No, it’s <vibe>', 'Nah, that’s <vibe>').
+    Use these vibe definitions:
+    - casual: informal greetings or chit-chat (e.g., 'Hi!', 'What's up?')
+    - knowledge: seeking or sharing info (e.g., 'Tell me about your CRM', 'Chat about sales')
+    - skills: practical tips or advice (e.g., 'Handle rejection', 'Be patient in convo')
+    - lessons: personal experiences or stories (e.g., 'I once lost a deal', 'Ask about past experience')
+    Rules:
+    - If response negates (e.g., 'no', 'nah') but doesn’t explicitly name a vibe, return 'no'—treat as new topic, not correction.
+    Examples:
+    - AI: 'casual vibe—am I on track?' User: 'Yeah' → 'yes'
+    - AI: 'casual vibe—am I on track?' User: 'Let’s chat about sales' → 'no'
+    - AI: 'knowledge vibe—am I on track?' User: 'We need to be very patient...' → 'no'
+    - AI: 'skills vibe—am I on track?' User: 'No, it’s lessons' → 'correction: lessons'
+    - AI: 'skills vibe—am I on track?' User: 'Cool' → 'no'
+    - AI: 'lessons vibe—am I on track?' User: 'It is a confirm' → 'yes'
+    - AI: 'Saved as skills! What's next?' User: 'Let’s move to handling tough...' → 'no'
+    - AI: 'skills vibe—am I on track?' User: 'You could ask customer...' → 'no'
+    - AI: 'casual vibe—am I on track?' User: 'Nah, let’s talk pricing' → 'no'
+    - AI: 'knowledge vibe—am I on track?' User: 'Nah, tell me a story' → 'no'
+    - AI: 'skills vibe—am I on track?' User: 'Sure' → 'yes'
+    - AI: 'skills vibe—am I on track?' User: 'Nope, tell me a story' → 'correction: lessons'
+    - AI: 'skills vibe—am I on track?' User: 'Yeah, but let’s switch' → 'no'
+    - AI: 'knowledge vibe—am I on track?' User: 'OK' → 'no'
+    - AI: 'skills vibe—am I on track?' User: 'No way, it’s casual!' → 'correction: casual'
     """
     try:
         formatted_prompt = confirm_check_prompt.format(
@@ -159,7 +171,7 @@ Examples:
     
     # Save prior user message on "yes" if confirming a proposal
     prior_message_clean = normalize_to_ascii(prior_message).lower()
-    is_proposal = "am i on track?" in prior_message_clean
+    is_proposal = "am i on the right track?" in prior_message_clean or "am i nailing it?" in prior_message_clean
     print(f"Checking save: confirmation_check='{confirmation_check}', messages_len={len(state['messages'])}, is_proposal={is_proposal}")
     if confirmation_check == "yes" and len(state["messages"]) >= 3 and is_proposal:
         print(f"Save block triggered for vibe: {vibe}")
@@ -171,7 +183,7 @@ Examples:
             embedding, 
             {"vibe": vibe, "text": prior_user_message, "user_id": state["user_id"]}
         )])
-        response = f"Saved as {vibe}! What's next?"
+        response = f"Boom, locked in as {vibe}! What’s the next gem you’ve got for me?"
         return {"prompt_str": response, "vibe": vibe}
     
     # Handle corrections
@@ -183,7 +195,7 @@ Examples:
             return {"prompt_str": state["prompt_str"], "vibe": vibe}
         if new_vibe in ["casual", "knowledge", "skills", "lessons"]:
             state["vibe"] = new_vibe
-            response = f"Got it, switching to {new_vibe}—right now?"
+            response = f"Whoa, I see it now—this feels like {new_vibe}! Am I catching your drift?"
             return {"prompt_str": response, "vibe": new_vibe}
         else:
             response = "Oops, that’s not a vibe I know—try casual, knowledge, skills, or lessons!"
@@ -193,7 +205,10 @@ Examples:
     print(f"No save or correction, using chat_node response: {state['prompt_str']}")
     return {"prompt_str": state["prompt_str"], "vibe": vibe}
 
-# Build the graph
+# ... [Keep graph building, learning_stream unchanged] ...
+
+# ... [Keep graph building, learning_stream unchanged] ...
+
 graph_builder = StateGraph(State)
 graph_builder.add_node("chatbot", chat_node)
 graph_builder.add_node("confirm", confirm_node)
