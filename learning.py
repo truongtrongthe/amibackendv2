@@ -7,13 +7,14 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from datetime import datetime
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from pinecone_datastores import pinecone_index
+from pinecone_datastores import pinecone_index,recall_from_pinecone
 from langchain_core.messages import AIMessage, HumanMessage
 import textwrap
 
 # Initialize OpenAI
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
+
 
 # Use your pinecone_index
 PINECONE_INDEX = pinecone_index
@@ -68,7 +69,7 @@ def detect_vibe(state: State):
     return vibe
 
 # Recall from Pinecone (tweaked with debug)
-def recall_from_pinecone(query, user_id, user_lang):
+def recall_from_pinecone_OK(query, user_id, user_lang):
     original_query = query
     triggers_en = ["tell me about", "how to", "what is"]
     triggers_vi = ["cho tôi biết về", "làm thế nào để", "là gì"]
@@ -225,25 +226,21 @@ def learning_stream(user_input, user_id, thread_id="learning_thread"):
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
 
 # Test sequence
+
 if __name__ == "__main__":
-    user_id = "test_user"
-    thread_id = "test_thread"
+    #user_id = "test_user"
+    #thread_id = "test_thread"
     inputs = [
-        "Hi",
-        #"Let's have a chat about sales",
-        #"When you chat with customer, keep it gentle",
-        #"I once lost a deal by rushing",
-        #"Tell me about sales",
-        #"Cho tôi biết về sales",
-        #"How to chat with customers",
-        #"Làm thế nào để trò chuyện với khách hàng",
-        #"What is upselling?",
-        #"Upselling là gì?"
+        #"Hi",
+        #"Send a gentle email after a week of silence.",
+        #"30% of customers ghost mid-funnel—common issue.",
+        #"I re-engaged a ghost with a 10% discount offer.",
+        #"How to re-engage ghosting customer"
     ]
-    for i, user_input in enumerate(inputs):
-        print(f"\nTesting '{user_input}'")
-        for chunk in learning_stream(user_input, user_id, thread_id):
-            print(chunk)
-    history = convo_graph.get_state({"configurable": {"thread_id": thread_id}}).values["messages"]
-    for msg in history:
-        print(f"{msg.type}: {msg.content}")
+    #for i, user_input in enumerate(inputs):
+    #    print(f"\nTesting '{user_input}'")
+    #    for chunk in learning_stream(user_input, user_id, thread_id):
+    #        print(chunk)
+    #history = convo_graph.get_state({"configurable": {"thread_id": thread_id}}).values["messages"]
+    #for msg in history:
+    #    print(f"{msg.type}: {msg.content}")
