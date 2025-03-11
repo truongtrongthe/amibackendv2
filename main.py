@@ -3,8 +3,8 @@ from flask_cors import CORS  # Import CORS
 from Archived.amilearn import event_stream
 from Archived.copilot import pilot_stream
 #from learning import learning_stream
-#from ami_training_1_0 import convo_stream
-from ami import convo_stream
+from ami_training_1_2 import convo_stream
+#from ami import convo_stream
 
 
 app = Flask(__name__)

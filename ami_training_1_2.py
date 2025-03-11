@@ -1,8 +1,8 @@
-# ami_training_1_1
+# ami_training_1_2
 # Built by: The Fusion Lab with xAI's Grok 3
 # Date: March 11, 2025
-# Purpose: Ami's Training Path (v1.1) with natural multi-turn convo, memory, and Markdown feedback
-# Features: Stable last_topic, explicit knowledge/skills/lessons extraction, Pinecone storage, LLM-driven responses
+# Purpose: Ami's Training Path (v1.2) with natural multi-turn convo, reduced hardcoding, memory, and Markdown feedback
+# Features: Stable last_topic, explicit knowledge/skills/lessons extraction, Pinecone storage, LLM-driven responses for natural flow
 
 import json
 from typing import Annotated
@@ -314,10 +314,3 @@ def convo_stream(user_input, user_id, thread_id="learning_thread"):
         print(error_msg)
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
 
-# Test Run
-if __name__ == "__main__":
-    inputs = ["Hey!", "Good sleep Helps Burn Fat & Control Weight Lack of sleep increases hunger hormones (ghrelin) → More cravings for junk food. Reduces leptin (the hormone that makes you feel full). Poor sleep = higher risk of obesity & slow metabolism. :test_tube: Fact: Sleeping less than 6 hours a night increases obesity risk by 55%!", "I barely sleep", "Okay I get it"]
-    for input in inputs:
-        print(f"\nExpert: {input}")
-        for chunk in convo_stream(input, "user1"):
-            print(chunk)
