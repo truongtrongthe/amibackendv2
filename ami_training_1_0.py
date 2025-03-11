@@ -256,7 +256,7 @@ def convo_stream(user_input, user_id, thread_id="learning_thread"):
         state = convo_graph.invoke(state, {"configurable": {"thread_id": thread_id}})
         print(f"Debug: After invoke - state: {state['last_topic'] = }, {state['convo_context'] = }")
         
-        for chunk in textwrap.wrap(state["prompt_str"], width=100):
+        for chunk in textwrap.wrap(state["prompt_str"], width=50):
             yield f"data: {json.dumps({'message': chunk})}\n\n"
         
         updated_state = {

@@ -1,3 +1,9 @@
+# ami_training_1.0
+# Built by: The Fusion Lab with xAI's Grok 3
+# Date: March 10, 2025
+# Purpose: Ami's Training Path (v1.0) - learns dynamically from human lectures with stable topic tracking
+# Features: SPIN/Challenger in Preset Brain, Enterprise Brain storage, natural conversation flow
+
 import json
 from typing import Annotated
 from typing_extensions import TypedDict
@@ -7,6 +13,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage
 from pinecone_datastores import pinecone_index
+
 import textwrap
 
 # Initialize OpenAI, Embeddings, and Pinecone
@@ -46,6 +53,8 @@ class TrainingPath:
         relevance = 85
         fluency = 88
         return (accuracy + relevance + fluency) / 3
+
+# Intent Detection with Stable last_topic
 def detect_intent(state: State):
     latest_message = state["messages"][-1].content
     prior_messages = state["messages"][:-1]
@@ -61,6 +70,7 @@ def detect_intent(state: State):
     - "Switching topics": Shifting to a new sales concept.
     - "Asking a question": Querying Ami (e.g., "What do you think?").
     - "Casual chat": Off-topic or friendly banter (e.g., "Hey, how’s it going?").
+    - "Continuing chat": Responding to Ami's prior question or continuing the thread (e.g., "We use X" after "What challenges...?").
     Return the intent as a quoted phrase, e.g., "Teaching a sales skill".
     """
     intent = llm.invoke(intent_prompt).content.strip()
@@ -68,7 +78,6 @@ def detect_intent(state: State):
 
     last_topic = state.get("last_topic", "")
     if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"']:
-        # Guess new topic for sales-focused intents
         topic_prompt = f"""
         Guess the sales-related topic (e.g., "inventory management", "closing deals") based on this message:
         Latest Message: {latest_message}
@@ -77,8 +86,7 @@ def detect_intent(state: State):
         Return only the topic as a short phrase (e.g., "closing deals"), or "unknown" if unclear—no explanations.
         """
         current_topic = llm.invoke(topic_prompt).content.strip()
-    elif intent in ['"Casual chat"', '"Asking a question"']:
-        # Stick with prior topic unless message clearly shifts
+    elif intent in ['"Casual chat"', '"Asking a question"', '"Continuing chat"']:
         topic_prompt = f"""
         Does this message clearly suggest a new sales-related topic unrelated to the prior topic?
         Latest Message: {latest_message}
@@ -92,9 +100,8 @@ def detect_intent(state: State):
         """
         current_topic = llm.invoke(topic_prompt).content.strip()
     else:  # Switching topics
-        current_topic = ""  # Reset for switch
+        current_topic = ""
 
-    # Update convo context
     context_prompt = f"""
     Summarize the convo so far in one sentence, blending this message with prior context:
     Latest Message: {latest_message}
@@ -102,7 +109,6 @@ def detect_intent(state: State):
     """
     convo_context = llm.invoke(context_prompt).content.strip()
 
-    # Save old topic before switching
     if last_topic and last_topic != current_topic and intent == '"Switching topics"':
         if not is_topic_saved(last_topic):
             summary = generate_summary(prior_messages)
@@ -113,32 +119,78 @@ def detect_intent(state: State):
         "last_topic": current_topic,
         "convo_context": convo_context
     }
-# Ami Node (unchanged)
-def ami_node(state: State, trainer: TrainingPath):
+
+def ami_node_OK(state: State, trainer: TrainingPath):
     result = detect_intent(state)
     intent = result["intent"]
     latest_message = state["messages"][-1].content
     tone = state.get("tone", "friendly")
     print(f"Debug: ami_node received intent: '{intent}'")
 
-    if intent == '"Teaching a sales skill"' or intent == '"Sharing a sales lesson"':
-        print(f"Debug: Entering training block for intent: {intent}")
-        knowledge_prompt = f"""
-        Extract sales-related knowledge from this message and return it as a valid JSON object:
+    knowledge_prompt_OK = f"""
+    Extract sales-related knowledge, skills, and lessons from this message and return it as a valid JSON object:
+    Message: {latest_message}
+    Intent: {intent}
+    Prior Topic (if any): {state.get('last_topic', 'unknown')}
+    Use this exact JSON structure:
+    {{
+        "topic": "The sales-related topic (e.g., inventory management, closing deals; use Prior Topic for 'Continuing chat' unless message shifts it)",
+        "method": "One of: spin_situation, spin_problem, challenger_teach (match to skills if present, else 'none')",
+        "content": "The core idea or phrase to process (keep it short, e.g., 'their current inventory system')",
+        "knowledge": ["Factual info or data from the message (e.g., 'Clients use spreadsheets')"],
+        "skills": ["Specific techniques or abilities to apply (e.g., 'Ask open-ended questions')"],
+        "lessons": ["Learned best practices or principles (e.g., 'Questions build rapport')"]
+    }}
+    Examples:
+    - For Intent "Teaching a sales skill", Message "ask about their current inventory system": 
+    "topic": "inventory management",
+    "method": "spin_situation",
+    "content": "their current inventory system",
+    "knowledge": ["Clients have inventory systems"],
+    "skills": ["Ask about their current inventory system"],
+    "lessons": ["Opening with questions provides valuable info"]
+    - For Intent "Continuing chat", Prior Topic "inventory management", Message "We use spreadsheet":
+    "topic": "inventory management",
+    "method": "none",
+    "content": "We use spreadsheet",
+    "knowledge": ["Client uses spreadsheets for inventory"],
+    "skills": [],
+    "lessons": []
+    Return only the JSON string, nothing else.
+    """
+    knowledge_prompt = f"""
+        Extract sales-related knowledge, skills, and lessons from this message and return it as a valid JSON object:
         Message: {latest_message}
+        Intent: {intent}
+        Prior Topic (if any): {state.get('last_topic', 'unknown')}
         Use this exact JSON structure:
         {{
-            "topic": "The sales-related topic (e.g., inventory management, closing deals)",
-            "method": "One of: spin_situation, spin_problem, challenger_teach",
+            "topic": "The sales-related topic (e.g., inventory management, closing deals; use Prior Topic for 'Continuing chat' unless message shifts it)",
+            "method": "One of: spin_situation, spin_problem, challenger_teach (match to skills if present, else 'none')",
             "content": "The core idea or phrase to process (keep it short, e.g., 'their current inventory system')",
-            "insights": ["List of actionable insights"],
-            "lessons": ["List of lessons or best practices"]
+            "knowledge": ["Factual info or data from the message (e.g., 'Clients use spreadsheets')"],
+            "skills": ["Specific techniques or abilities to apply (e.g., 'Ask open-ended questions')"],
+            "lessons": ["Learned best practices or principles (e.g., 'Questions build rapport')"]
         }}
         Examples:
-        - For "ask about their current inventory system": "content": "their current inventory system"
-        - For "clients buy faster when you show how downtime costs them money": "content": "how downtime costs them money"
+        - For Intent "Teaching a sales skill", Message "ask about their current inventory system": 
+          "topic": "inventory management",
+          "method": "spin_situation",
+          "content": "their current inventory system",
+          "knowledge": ["Clients have inventory systems"],
+          "skills": ["Ask about their current inventory system"],
+          "lessons": ["Opening with questions provides valuable info"]
+        - For Intent "Continuing chat", Prior Topic "inventory management", Message "We use spreadsheet":
+          "topic": "inventory management",
+          "method": "none",
+          "content": "We use spreadsheet",
+          "knowledge": ["Client uses spreadsheets for inventory"],
+          "skills": [],
+          "lessons": []
         Return only the JSON string, nothing else.
         """
+    if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"', '"Continuing chat"']:
+        print(f"Debug: Entering extraction block for intent: {intent}")
         raw_response = llm.invoke(knowledge_prompt).content.strip()
         cleaned_response = raw_response.replace("```json", "").replace("```", "").strip()
 
@@ -147,44 +199,61 @@ def ami_node(state: State, trainer: TrainingPath):
             print(f"Debug: Extracted knowledge: {extracted_knowledge}")
         except json.JSONDecodeError as e:
             print(f"Debug: JSON error: {e} - Cleaned response was: '{cleaned_response}'")
-            extracted_knowledge = {"topic": "Unknown", "method": "none", "content": latest_message, "insights": [], "lessons": []}
+            extracted_knowledge = {"topic": state.get("last_topic", "unknown"), "method": "none", "content": latest_message, "knowledge": [], "skills": [], "lessons": []}
 
-        if "spin" in extracted_knowledge["method"]:
-            type = extracted_knowledge["method"].split("_")[1].capitalize()
-            content = extracted_knowledge["content"].replace("Ask about ", "").replace("the client's ", "").strip()
-            response = trainer.preset.spin_question(type, content)
-            intro = "Nice tip! I’ll try asking: "
-        elif "challenger" in extracted_knowledge["method"]:
-            content = extracted_knowledge["content"]
-            if "downtime" in content.lower():
-                response = "Here’s something they might not realize: downtime can hit their bottom line hard."
+        # Response logic
+        if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"']:
+            if "spin" in extracted_knowledge["method"]:
+                type = extracted_knowledge["method"].split("_")[1].capitalize()
+                content = extracted_knowledge["content"].replace("Ask about ", "").replace("the client's ", "").strip()
+                response = trainer.preset.spin_question(type, content)
+                intro = "Nice tip! I’ll try asking: " if intent == '"Teaching a sales skill"' else "Love that insight—here’s how I’d pitch it: "
+            elif "challenger" in extracted_knowledge["method"]:
+                content = extracted_knowledge["content"]
+                response = "Here’s something they might not realize: downtime can hit their bottom line hard." if "downtime" in content.lower() else trainer.preset.challenger_teach(content)
+                intro = "Love that insight—here’s how I’d pitch it: "
             else:
-                response = trainer.preset.challenger_teach(content)
-            intro = "Love that insight—here’s how I’d pitch it: "
-        else:
-            response = "I’ll need a bit more to work with there!"
-            intro = "Hmm, "
+                response = "I’ll need a bit more to work with there!"
+                intro = "Hmm, "
+            confidence = trainer.evaluate_confidence(response, latest_message)
+            trainer.confidence_scores[response] = confidence
 
-        confidence = trainer.evaluate_confidence(response, latest_message)
-        trainer.confidence_scores[response] = confidence
+            follow_up_prompt = f"""
+            Based on this response ({confidence}% confidence) and convo context ({state.get('convo_context', 'No context')}):
+            {response}
+            Ask a concise, friendly follow-up question to keep the chat flowing. Return only the question.
+            """
+            follow_up = llm.invoke(follow_up_prompt).content.strip()
+            response = f"{intro}{response} How about this: {follow_up}"
 
+        elif intent == '"Continuing chat"':
+            last_topic = state.get("last_topic", "unknown")
+            cleaned_response = latest_message.lower().replace("we use ", "").replace(".", "").strip()
+            if "spreadsheet" in cleaned_response:
+                cleaned_response = "spreadsheets"
+            follow_up_prompt = f"""
+            Given this response to Ami's prior question and the convo context:
+            Latest Message: {latest_message}
+            Convo Context: {state.get('convo_context', 'No context')}
+            Prior Topic: {last_topic}
+            Ask a concise, friendly follow-up question to deepen the thread. Return only the question.
+            """
+            follow_up = llm.invoke(follow_up_prompt).content.strip()
+            response = f"Cool, so you’re on {cleaned_response} for {last_topic.lower()}—how’s that working out? {follow_up}"
+            confidence = trainer.evaluate_confidence(response, latest_message)
+            trainer.confidence_scores[response] = confidence
+
+        # Save to Pinecone
         enterprise_entry = {
             "topic": extracted_knowledge["topic"],
             "response": response,
             "confidence": confidence,
             "source": "Rep A, 3/10/25",
-            "insights": extracted_knowledge["insights"],
+            "knowledge": extracted_knowledge["knowledge"],
+            "skills": extracted_knowledge["skills"],
             "lessons": extracted_knowledge["lessons"]
         }
         save_to_pinecone(enterprise_entry)
-
-        follow_up_prompt = f"""
-        Based on this response ({confidence}% confidence) and convo context ({state.get('convo_context', 'No context')}):
-        {response}
-        Ask a concise, friendly follow-up question to keep the chat flowing. Return only the question.
-        """
-        follow_up = llm.invoke(follow_up_prompt).content.strip()
-        response = f"{intro}{response} How about this: {follow_up}"
 
     elif intent == '"Switching topics"':
         last_topic = state.get('last_topic', '')
@@ -204,7 +273,137 @@ def ami_node(state: State, trainer: TrainingPath):
         "tone": tone
     }
 
-# Helpers
+def ami_node(state: State, trainer: TrainingPath):
+    result = detect_intent(state)
+    intent = result["intent"]
+    latest_message = state["messages"][-1].content
+    tone = state.get("tone", "friendly")
+    print(f"Debug: ami_node received intent: '{intent}'")
+
+    if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"', '"Continuing chat"']:
+        print(f"Debug: Entering extraction block for intent: {intent}")
+        knowledge_prompt = f"""
+        Extract sales-related knowledge, skills, and lessons from this message and return it as a valid JSON object:
+        Message: {latest_message}
+        Intent: {intent}
+        Prior Topic (if any): {state.get('last_topic', 'unknown')}
+        Use this exact JSON structure:
+        {{
+            "topic": "The sales-related topic (e.g., inventory management, closing deals; use Prior Topic for 'Continuing chat' unless message shifts it)",
+            "method": "One of: spin_situation, spin_problem, challenger_teach (match to skills if present, else 'none')",
+            "content": "The core idea or phrase to process (keep it short, e.g., 'their current inventory system')",
+            "knowledge": ["Factual info or data from the message (e.g., 'Clients use spreadsheets')"],
+            "skills": ["Specific techniques or abilities to apply (e.g., 'Ask open-ended questions')"],
+            "lessons": ["Learned best practices or principles (e.g., 'Questions build rapport')"]
+        }}
+        Examples:
+        - For Intent "Teaching a sales skill", Message "ask about their current inventory system": 
+          "topic": "inventory management",
+          "method": "spin_situation",
+          "content": "their current inventory system",
+          "knowledge": ["Clients have inventory systems"],
+          "skills": ["Ask about their current inventory system"],
+          "lessons": ["Opening with questions provides valuable info"]
+        - For Intent "Continuing chat", Prior Topic "inventory management", Message "We use spreadsheet":
+          "topic": "inventory management",
+          "method": "none",
+          "content": "We use spreadsheet",
+          "knowledge": ["Client uses spreadsheets for inventory"],
+          "skills": [],
+          "lessons": []
+        Return only the JSON string, nothing else.
+        """
+        raw_response = llm.invoke(knowledge_prompt).content.strip()
+        cleaned_response = raw_response.replace("```json", "").replace("```", "").strip()
+
+        try:
+            extracted_knowledge = json.loads(cleaned_response)
+            print(f"Debug: Extracted knowledge: {extracted_knowledge}")
+        except json.JSONDecodeError as e:
+            print(f"Debug: JSON error: {e} - Cleaned response was: '{cleaned_response}'")
+            extracted_knowledge = {"topic": state.get("last_topic", "unknown"), "method": "none", "content": latest_message, "knowledge": [], "skills": [], "lessons": []}
+
+        # Build Markdown summary
+        markdown_summary = f"""
+        ### Here's what I picked up:
+        - **Topic**: {extracted_knowledge['topic']}
+        - **Knowledge**: {', '.join(extracted_knowledge['knowledge']) if extracted_knowledge['knowledge'] else 'None yet'}
+        - **Skills**: {', '.join(extracted_knowledge['skills']) if extracted_knowledge['skills'] else 'None yet'}
+        - **Lessons**: {', '.join(extracted_knowledge['lessons']) if extracted_knowledge['lessons'] else 'None yet'}
+        """
+
+        # Response logic
+        if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"']:
+            if "spin" in extracted_knowledge["method"]:
+                type = extracted_knowledge["method"].split("_")[1].capitalize()
+                content = extracted_knowledge["content"].replace("Ask about ", "").replace("the client's ", "").strip()
+                response = trainer.preset.spin_question(type, content)
+                intro = "Nice tip! I’ll try asking: " if intent == '"Teaching a sales skill"' else "Love that insight—here’s how I’d pitch it: "
+            elif "challenger" in extracted_knowledge["method"]:
+                content = extracted_knowledge["content"]
+                response = "Here’s something they might not realize: downtime can hit their bottom line hard." if "downtime" in content.lower() else trainer.preset.challenger_teach(content)
+                intro = "Love that insight—here’s how I’d pitch it: "
+            else:
+                response = "I’ll need a bit more to work with there!"
+                intro = "Hmm, "
+            confidence = trainer.evaluate_confidence(response, latest_message)
+            trainer.confidence_scores[response] = confidence
+
+            follow_up_prompt = f"""
+            Based on this response ({confidence}% confidence) and convo context ({state.get('convo_context', 'No context')}):
+            {response}
+            Ask a concise, friendly follow-up question to keep the chat flowing. Return only the question.
+            """
+            follow_up = llm.invoke(follow_up_prompt).content.strip()
+            response = f"{markdown_summary}\n\n{intro}{response} How about this: {follow_up}"
+
+        elif intent == '"Continuing chat"':
+            last_topic = state.get("last_topic", "unknown")
+            cleaned_response = latest_message.lower().replace("we use ", "").replace(".", "").strip()
+            if "spreadsheet" in cleaned_response:
+                cleaned_response = "spreadsheets"
+            follow_up_prompt = f"""
+            Given this response to Ami's prior question and the convo context:
+            Latest Message: {latest_message}
+            Convo Context: {state.get('convo_context', 'No context')}
+            Prior Topic: {last_topic}
+            Ask a concise, friendly follow-up question to deepen the thread. Return only the question.
+            """
+            follow_up = llm.invoke(follow_up_prompt).content.strip()
+            response = f"{markdown_summary}\n\nCool, so you’re on {cleaned_response} for {last_topic.lower()}—how’s that working out? {follow_up}"
+            confidence = trainer.evaluate_confidence(response, latest_message)
+            trainer.confidence_scores[response] = confidence
+
+        # Save to Pinecone
+        enterprise_entry = {
+            "topic": extracted_knowledge["topic"],
+            "response": response,
+            "confidence": confidence,
+            "source": "Rep A, 3/10/25",
+            "knowledge": extracted_knowledge["knowledge"],
+            "skills": extracted_knowledge["skills"],
+            "lessons": extracted_knowledge["lessons"]
+        }
+        save_to_pinecone(enterprise_entry)
+
+    elif intent == '"Switching topics"':
+        last_topic = state.get('last_topic', '')
+        from_text = f"from {last_topic}" if last_topic else "from what we were chatting about"
+        response = f"Cool, looks like we’re shifting gears {from_text}. What’s this new angle about?"
+    elif intent == '"Asking a question"':
+        response = f"Good one! Let me think... What’s your take on it first?"
+    elif intent == '"Casual chat"':
+        response = f"Hey, I’m all for a quick breather! How’s your day going so far?"
+    else:
+        response = "Hey, I’m here to soak up your sales wisdom—whatcha got for me?"
+
+    return {
+        "prompt_str": response,
+        "last_topic": result["last_topic"],
+        "convo_context": result["convo_context"],
+        "tone": tone
+    }
+
 def generate_summary(messages):
     conversation = "\n".join([m.content for m in messages])
     summary_prompt = f"Summarize this convo in one or two sentences:\n{conversation}"
@@ -228,7 +427,7 @@ graph_builder.add_edge("ami", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-# Replace this in your code
+# Streaming
 def convo_stream(user_input, user_id, thread_id="learning_thread"):
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}}) or {}
     channel_values = checkpoint.get("channel_values", {})
@@ -237,7 +436,6 @@ def convo_stream(user_input, user_id, thread_id="learning_thread"):
     updated_messages = history + [new_message]
     
     try:
-        # Load state from channel_values
         state = {
             "messages": updated_messages,
             "prompt_str": channel_values.get("prompt_str", ""),
@@ -251,10 +449,11 @@ def convo_stream(user_input, user_id, thread_id="learning_thread"):
         state = convo_graph.invoke(state, {"configurable": {"thread_id": thread_id}})
         print(f"Debug: After invoke - state: {state['last_topic'] = }, {state['convo_context'] = }")
         
-        for chunk in textwrap.wrap(state["prompt_str"], width=100):
-            yield f"data: {json.dumps({'message': chunk})}\n\n"
-        
-        # Save full state under channel_values
+        response_lines = state["prompt_str"].split('\n')
+        for line in response_lines:
+            if line.strip():  # Skip empty lines
+                yield f"data: {json.dumps({'message': line.strip()})}\n\n"
+                print(f"data: {json.dumps({'message': line.strip()})}\n\n")
         updated_state = {
             "messages": state["messages"],
             "prompt_str": state["prompt_str"],
@@ -273,14 +472,12 @@ def convo_stream(user_input, user_id, thread_id="learning_thread"):
         error_msg = f"Error in stream: {str(e)}"
         print(error_msg)
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
-# Test
+
+
 if __name__ == "__main__":
     thread_id = "test_thread"
     expert_inputs = [
-        "Hey Ami, when talking to a client, ask about their current inventory system—it’s a good opener.",
-        "A lesson I’ve learned: clients buy faster when you show how downtime costs them money.",
-        "Hey, how’s it going today?",
-        "Switching gears—how do you handle objections?"
+       
     ]
     for user_input in expert_inputs:
         print(f"\nExpert: {user_input}")
