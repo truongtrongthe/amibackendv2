@@ -1,8 +1,9 @@
 from flask import Flask, Response, request
 from flask_cors import CORS  # Import CORS
-from amilearn import event_stream
-from copilot import pilot_stream
-from learning import learning_stream
+from Archived.amilearn import event_stream
+from Archived.copilot import pilot_stream
+#from learning import learning_stream
+from ami_training_1_0 import convo_stream
 app = Flask(__name__)
 
 # Enable CORS for all routes and allow all origins
@@ -72,7 +73,7 @@ def learn():
     user_id ="tfl"
     thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
     return Response(
-        learning_stream(user_input, user_id, thread_id), 
+        convo_stream(user_input, user_id, thread_id), 
         mimetype='text/event-stream', 
         headers={'X-Accel-Buffering': 'no','Access-Control-Allow-Origin': '*'}
         )  # Disable buffering for Nginx (if used))

@@ -9,7 +9,7 @@ from datetime import datetime
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from pinecone_datastores import pinecone_index
 import re
-from digesting import infer_hidden_intent
+from Archived.digesting import infer_hidden_intent
 # Initialize LLM
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 

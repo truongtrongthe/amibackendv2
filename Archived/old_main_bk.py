@@ -5,8 +5,8 @@ from flask_cors import CORS  # Import CORS
 from ami2 import ami_response
 from Archived.knowledge import tobrain
 from summarizer import summarize_text
-from brain import ami_telling
-from database import insert_knowledge_entry, get_knowledge_entries
+from Archived.brain import ami_telling
+from supabse_database import insert_knowledge_entry, get_knowledge_entries
 #from ami import ami_selling
 from Archived.conversationflow import event_stream
 from Archived.experts import expert_chat_function

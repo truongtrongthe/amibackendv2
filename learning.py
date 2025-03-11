@@ -7,7 +7,7 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from datetime import datetime
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from pinecone_datastores import pinecone_index,recall_from_pinecone
+from pinecone_datastores import pinecone_index
 from langchain_core.messages import AIMessage, HumanMessage
 import textwrap
 
@@ -19,6 +19,86 @@ embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
 # Use your pinecone_index
 PINECONE_INDEX = pinecone_index
 
+
+# Recall from Pinecone (v15.2 - Markdown & Bold Final Saved)
+# Recall from Pinecone (v15.2 - Markdown & Fully Bold Tip Final Saved)
+def recall_from_pinecone(query, user_id, user_lang):
+    original_query = query
+    triggers_en = ["tell me about", "how to", "what is"]
+    triggers_vi = ["cho tôi biết về", "làm thế nào để", "là gì"]
+    trigger_map = {
+        "cho tôi biết về": "tell me about",
+        "làm thế nào để": "how to",
+        "là gì": "what is"
+    }
+    translation_map = {
+        "sales": "sales",
+        "trò chuyện với khách hàng": "chat with customers",
+        "re-engage customer ghosting": "re-engage customer ghosting",
+        "re-engage ghosting customer": "re-engage customer ghosting",
+        "khách hàng mất liên lạc": "customer ghosting"
+    }
+    input_lower = query.lower()
+    print(f"Input: '{input_lower}'")
+    english_trigger = ""
+    for trigger in triggers_en + triggers_vi:
+        print(f"Checking trigger: '{trigger}'")
+        if trigger in input_lower:
+            print(f"Trigger matched: '{trigger}'")
+            english_trigger = trigger_map.get(trigger, trigger)
+            break
+    else:
+        print("No trigger matched")
+        english_trigger = ""
+    
+    # Strip trigger cleanly
+    query_clean = input_lower.replace(english_trigger, "").strip() if english_trigger else input_lower
+    english_query = f"{trigger_map.get(english_trigger, english_trigger)} {translation_map.get(query_clean, query_clean)}".strip()
+    print(f"Pre-padded query: '{query_clean}'")
+    print(f"English query: '{english_query}'")
+    query_embedding = embeddings.embed_query(english_query)
+    print(f"Embedding snippet: {query_embedding[:5]}")
+    results = pinecone_index.query(
+        vector=query_embedding,
+        top_k=10,
+        include_metadata=True,
+        filter={"user_id": user_id}
+    )
+    print(f"Raw Pinecone results: {results}")
+    
+    # Top 3 by score—query drives it
+    matches = [m for m in results.get("matches", []) if m["score"] > 0.4]
+    final_matches = sorted(matches, key=lambda x: x["score"], reverse=True)[:3]
+    
+    print(f"Match scores: {[m['score'] for m in final_matches]}")
+    
+    # Markdown-formatted matches
+    response = "Here’s what I remember:\n" if user_lang == "en" else "Đây là những gì tôi có từ trí nhớ:\n"
+    matches_text = ""
+    for i, match in enumerate(final_matches, 1):
+        text = match["metadata"]["text"]
+        vibe = match["metadata"]["vibe"]
+        if user_lang == "vi" and "Translation:" in text:
+            # Strip "Translation:" prefix if present
+            text = text.replace("Translation: ", "").strip("'")
+        elif user_lang == "vi":
+            text = llm.invoke(f"Translate to Vietnamese: '{text}'").content.strip()
+        response += f"- {i}. '{text}' ({vibe})\n"
+        matches_text += f"{i}. '{text}' ({vibe})\n"
+    
+    if final_matches:
+        # Flex answer to query intent, fully bold, in user_lang
+        tip = llm.invoke(
+            f"Given these matches: {matches_text}\n"
+            f"Write an answer for the user's query: '{original_query}'—keep it direct and actionable."
+            f"Respond in {'English' if user_lang == 'en' else 'Vietnamese'}."
+        ).content.strip()
+        response += f"\n**{'Answer' if user_lang == 'en' else 'Trả lời'}: {tip}**"
+    else:
+        tip = "My brain is empty—teach me something about it!" if user_lang == "en" else "Ami chưa có kiến thức này. Hãy dạy tôi điều gì đó về nó!"
+        response += f"\n**{'Answer' if user_lang == 'en' else 'Trả lời'}: {tip}**"
+    
+    return response
 # Define the State
 class State(TypedDict):
     messages: Annotated[list, add_messages]
@@ -67,67 +147,6 @@ def detect_vibe(state: State):
         vibe = prior_vibe
     print(f"Detected vibe: {vibe}")
     return vibe
-
-# Recall from Pinecone (tweaked with debug)
-def recall_from_pinecone_OK(query, user_id, user_lang):
-    original_query = query
-    triggers_en = ["tell me about", "how to", "what is"]
-    triggers_vi = ["cho tôi biết về", "làm thế nào để", "là gì"]
-    trigger_map = {
-        "cho tôi biết về": "tell me about",
-        "làm thế nào để": "how to",
-        "là gì": "what is"
-    }
-    translation_map = {
-        "sales": "sales",
-        "trò chuyện với khách hàng": "chat with customers"
-    }
-    input_lower = query.lower()
-    print(f"Input: '{input_lower}'")
-    query = input_lower
-    for trigger in triggers_en + triggers_vi:
-        print(f"Checking trigger: '{trigger}'")
-        if trigger in input_lower:
-            print(f"Trigger matched: '{trigger}'")
-            query = input_lower.replace(trigger, "").strip()  # Strip trigger
-            english_trigger = trigger if trigger in triggers_en else trigger_map[trigger]
-            english_query = english_trigger + " " + translation_map.get(query, query)
-            break
-    else:
-        print("No trigger matched")
-        english_query = translation_map.get(query, query)
-    print(f"Pre-padded query: '{query}'")
-    print(f"English query: '{english_query}'")
-    query_embedding = embeddings.embed_query(english_query)  # Embed English
-    print(f"Embedding snippet: {query_embedding[:5]}")
-    results = PINECONE_INDEX.query(
-        vector=query_embedding,
-        top_k=3,
-        include_metadata=True,
-        filter={"user_id": user_id}
-    )
-    print(f"Raw Pinecone results: {results}")
-    match_dict = {}
-    for m in results.get("matches", []):
-        text = m["metadata"]["text"]
-        if text not in match_dict or m["score"] > match_dict[text]["score"]:
-            match_dict[text] = m
-    matches = [m for m in match_dict.values() if m["score"] > 0.45]
-    print(f"Match scores: {[m['score'] for m in matches]}")
-    if not matches:
-        response = f"Vault’s empty on '{original_query}'—teach me something about it!"
-        if user_lang == "vi":
-            response = llm.invoke(f"Translate to Vietnamese: '{response}'").content.strip()
-        return response
-    response = "Here’s what I’ve got from the vault:" if user_lang == "en" else "Đây là những gì tôi có từ kho:"
-    for i, match in enumerate(matches, 1):
-        text = match["metadata"]["text"]
-        vibe = match["metadata"]["vibe"]
-        if user_lang == "vi":
-            text = llm.invoke(f"Translate to Vietnamese: '{text}'").content.strip()
-            vibe = {"knowledge": "kiến thức", "skills": "kỹ năng", "lessons": "bài học"}.get(vibe, vibe)
-        response += f" {i}. '{text}' ({vibe})"
-    return response
 
 def chat_node(state: State):
     latest_message = state["messages"][-1].content if state["messages"] else "Hello!"
@@ -186,6 +205,88 @@ def confirm_node(state: State):
     
     response = normalize_to_ascii(response)
     return {"prompt_str": response, "vibe": state.get("vibe", "casual")}
+
+
+# Recall from Pinecone (v15.2 - Markdown & Bold Final Saved)
+# Recall from Pinecone (v15.2 - Markdown & Fully Bold Tip Final Saved)
+def recall_from_pinecone(query, user_id, user_lang):
+    original_query = query
+    triggers_en = ["tell me about", "how to", "what is"]
+    triggers_vi = ["cho tôi biết về", "làm thế nào để", "là gì"]
+    trigger_map = {
+        "cho tôi biết về": "tell me about",
+        "làm thế nào để": "how to",
+        "là gì": "what is"
+    }
+    translation_map = {
+        "sales": "sales",
+        "trò chuyện với khách hàng": "chat with customers",
+        "re-engage customer ghosting": "re-engage customer ghosting",
+        "re-engage ghosting customer": "re-engage customer ghosting",
+        "khách hàng mất liên lạc": "customer ghosting"
+    }
+    input_lower = query.lower()
+    print(f"Input: '{input_lower}'")
+    english_trigger = ""
+    for trigger in triggers_en + triggers_vi:
+        print(f"Checking trigger: '{trigger}'")
+        if trigger in input_lower:
+            print(f"Trigger matched: '{trigger}'")
+            english_trigger = trigger_map.get(trigger, trigger)
+            break
+    else:
+        print("No trigger matched")
+        english_trigger = ""
+    
+    # Strip trigger cleanly
+    query_clean = input_lower.replace(english_trigger, "").strip() if english_trigger else input_lower
+    english_query = f"{trigger_map.get(english_trigger, english_trigger)} {translation_map.get(query_clean, query_clean)}".strip()
+    print(f"Pre-padded query: '{query_clean}'")
+    print(f"English query: '{english_query}'")
+    query_embedding = embeddings.embed_query(english_query)
+    print(f"Embedding snippet: {query_embedding[:5]}")
+    results = pinecone_index.query(
+        vector=query_embedding,
+        top_k=10,
+        include_metadata=True,
+        filter={"user_id": user_id}
+    )
+    print(f"Raw Pinecone results: {results}")
+    
+    # Top 3 by score—query drives it
+    matches = [m for m in results.get("matches", []) if m["score"] > 0.4]
+    final_matches = sorted(matches, key=lambda x: x["score"], reverse=True)[:3]
+    
+    print(f"Match scores: {[m['score'] for m in final_matches]}")
+    
+    # Markdown-formatted matches
+    response = "Here’s what I remember:\n" if user_lang == "en" else "Đây là những gì tôi có từ trí nhớ:\n"
+    matches_text = ""
+    for i, match in enumerate(final_matches, 1):
+        text = match["metadata"]["text"]
+        vibe = match["metadata"]["vibe"]
+        if user_lang == "vi" and "Translation:" in text:
+            # Strip "Translation:" prefix if present
+            text = text.replace("Translation: ", "").strip("'")
+        elif user_lang == "vi":
+            text = llm.invoke(f"Translate to Vietnamese: '{text}'").content.strip()
+        response += f"- {i}. '{text}' ({vibe})\n"
+        matches_text += f"{i}. '{text}' ({vibe})\n"
+    
+    if final_matches:
+        # Flex answer to query intent, fully bold, in user_lang
+        tip = llm.invoke(
+            f"Given these matches: {matches_text}\n"
+            f"Write an answer for the user's query: '{original_query}'—keep it direct and actionable."
+            f"Respond in {'English' if user_lang == 'en' else 'Vietnamese'}."
+        ).content.strip()
+        response += f"\n**{'Answer' if user_lang == 'en' else 'Trả lời'}: {tip}**"
+    else:
+        tip = "My brain is empty—teach me something about it!" if user_lang == "en" else "Ami chưa có kiến thức này. Hãy dạy tôi điều gì đó về nó!"
+        response += f"\n**{'Answer' if user_lang == 'en' else 'Trả lời'}: {tip}**"
+    
+    return response
+
 # Build the graph
 graph_builder = StateGraph(State)
 graph_builder.add_node("chatbot", chat_node)
