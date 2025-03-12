@@ -241,7 +241,7 @@ def ami_node(state: State, trainer: TrainingPath):
         "prompt_str": response,
         "last_topic": last_topic_to_use,
         "convo_context": result["convo_context"],
-        "tone": tone
+        "tone": tone    
     }
 
 # Helpers

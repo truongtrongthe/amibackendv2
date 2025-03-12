@@ -1,8 +1,8 @@
-# ami_training_1_1
+# ami_training_1_3
 # Built by: The Fusion Lab with xAI's Grok 3
 # Date: March 11, 2025
-# Purpose: Ami's Training Path (v1.1) with natural multi-turn convo, memory, and Markdown feedback
-# Features: Stable last_topic, explicit knowledge/skills/lessons extraction, Pinecone storage, LLM-driven responses
+# Purpose: Ami's Training Path (v1.3) with human-like, curious, energetic prefixes, practice callouts for SPIN/Challenger, and fixed intent detection
+# Features: Stable last_topic, explicit knowledge/skills/lessons extraction, Pinecone storage, LLM-driven responses with boosted personality
 
 import json
 from typing import Annotated
@@ -52,7 +52,7 @@ class TrainingPath:
         fluency = 88
         return (accuracy + relevance + fluency) / 3
 
-# Intent Detection with Stable last_topic
+# Intent Detection with Fixed Output
 def detect_intent(state: State):
     latest_message = state["messages"][-1].content
     prior_messages = state["messages"][:-1]
@@ -65,15 +65,14 @@ def detect_intent(state: State):
     Prior Messages (last 3 for context): {prior_contents}
     Convo Context: {state.get('convo_context', 'No prior context')}
     Possible Intents:
-    - "Teaching a sales skill": Instructing Ami on a sales move (e.g., "ask about," "try this").
-    - "Sharing a sales lesson": Sharing a sales insight (e.g., "clients hate downtime").
-    - "Sharing a lesson": General insight/knowledge (e.g., "sleep helps burn fat")—only if new info is introduced.
-    - "Switching topics": Clear topic shift with no lesson vibe.
+    - "Teaching a sales skill": Instructing Ami on a new sales move (e.g., "Ask about inventory", "Try this pitch").
+    - "Continuing chat": Confirming or building on a prior skill/lesson (e.g., "Yes, update it" after a suggestion)—default if vague and prior context exists.  
+    - "Sharing a sales lesson": Sharing a sales insight (e.g., "We closed 100 deals last week").
+    - "Sharing a lesson": General insight/knowledge (e.g., "Sleep helps focus")—only if new info is introduced.
+    - "Switching topics": Clear topic shift with no lesson vibe (e.g., "Let’s talk about sales" after casual chat).
     - "Asking a question": Querying Ami (e.g., "What do you think?").
-    - "Casual chat": Friendly banter (e.g., "Hey", "Not much")—default if vague and no prior context.
-    - "Continuing chat": Responding to Ami or continuing the thread (e.g., "Okay I get it" after a lesson)—default if vague and prior context exists.
-    Default to "Continuing chat" if message is short/vague and prior context is active; otherwise "Casual chat" if no context.
-    Return the intent as a quoted phrase, e.g., "Casual chat".
+    - "Casual chat": Friendly banter (e.g., "Hey", "Not much") or exits (e.g., "Talk later")—default if vague and no prior context.
+    Return ONLY the intent as a quoted phrase (e.g., "Casual chat"), no extra text.
     """
     intent = llm.invoke(intent_prompt).content.strip()
     print(f"Debug: Intent detected as '{intent}' for message: {latest_message}")
@@ -81,32 +80,61 @@ def detect_intent(state: State):
     last_topic = state.get("last_topic", "")
     if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"', '"Sharing a lesson"']:
         topic_prompt = f"""
-        Guess the topic based on this message:
-        Latest Message: {latest_message}
-        Convo Context: {state.get('convo_context', 'No prior context')}
-        Prior Topic (if any): {last_topic}
-        Return only the topic as a short phrase (e.g., "sleep and health"), or "unknown" if unclear.
-        """
+Analyze the topic of this message based on its focus and intent:
+- Latest Message: {latest_message}
+- Convo Context: {state.get('convo_context', 'No prior context')}
+- Prior Topic (if any): {last_topic}
+- Intent: {intent}
+
+Instructions:
+1. **Latest Message Dominates**: Focus on the message’s core intent—override prior topic unless message is vague:
+   - Sales outcomes (e.g., results, deals closed, performance)?
+   - Sales strategies/tools (e.g., scripts, pitches, conversation tweaks, negotiation techniques)?
+   - Something else (e.g., customer objections, product knowledge, competitor insights)?
+
+2. **Intent Forces Focus**:
+   - **"Teaching a sales skill"**: Hard locks to strategies/tools (e.g., "sales scripts")—shifts from prior topic unless outcomes are sole focus (e.g., "we closed 100 deals" with no tools).
+   - **"Sharing a sales lesson"**: Hard locks to outcomes (e.g., "sales performance")—shifts from prior topic unless tools are sole focus (e.g., "we adjusted the script" with no outcomes).
+   - **"Continuing chat"**: Starts with prior topic—shifts on any clear tool hint (e.g., "adjust," "script" after "deals" moves to tools)—subtle cues like "adjust" trigger a pivot.
+
+3. **Keywords as Hard Triggers**:
+   - "deal," "closed," "results," "quota" → outcomes (e.g., "sales performance").
+   - "script," "adjust," "line," "update," "framework" → strategies/tools (e.g., "sales scripts").
+   - "objection," "pushback," "competitor," "pricing" → challenges (e.g., "customer objections").
+
+4. **Context Only for Ambiguity**: Use context only if Latest Message is unclear (e.g., "yes" alone)—prior deal talk doesn’t block tool focus.
+
+5. **Return Specific Topic**:
+   - Short phrase (e.g., "sales performance," "sales scripts," "customer objections").
+   - "unclear (needs clarification)" if no focus emerges—avoid generic "sales".
+"""
         current_topic = llm.invoke(topic_prompt).content.strip()
     elif intent in ['"Casual chat"', '"Asking a question"', '"Continuing chat"']:
         topic_prompt = f"""
-        Does this message suggest a new topic unrelated to the prior topic?
-        Latest Message: {latest_message}
-        Convo Context: {state.get('convo_context', 'No prior context')}
-        Prior Topic (if any): {last_topic}
-        Return only:
-        - A new topic (e.g., "inventory management") if it shifts.
-        - "{last_topic}" if it aligns or doesn’t shift.
-        - "unknown" if no prior topic and no clear shift.
-        """
+    Does this message shift or refine the prior topic?
+    Latest Message: {latest_message}
+    Convo Context: {state.get('convo_context', 'No prior context')}
+    Prior Topic (if any): {last_topic}
+    Intent: {intent}
+    Instructions:
+    - Check for a new focus: Keywords like "script," "adjust," "line," "update" suggest strategies/tools; "deal," "closed," "results" suggest outcomes.
+    - "Continuing chat" refines the prior topic unless it clearly shifts—use context to confirm (e.g., script tweaks after deal talk).
+    - "Casual chat" holds the prior topic unless it’s a clear exit with no focus (e.g., "I gotta go"), then keep {last_topic}.
+    - Return only:
+      - A new topic (e.g., "sales scripts") if it shifts (e.g., script tweaks after deal talk).
+      - "{last_topic}" if it aligns or refines (e.g., more deal talk, or casual continuation).
+      - "unknown" if no prior topic and no clear focus.
+    """
         current_topic = llm.invoke(topic_prompt).content.strip()
     elif intent == '"Switching topics"':
         topic_prompt = f"""
         Guess the new topic from this message:
         Latest Message: {latest_message}
-        Return a short phrase (e.g., "sleep and health") or "unknown".
+        Return a short phrase (e.g., "sales") or "unknown".
         """
         current_topic = llm.invoke(topic_prompt).content.strip()
+    else:
+        current_topic = last_topic  # Fallback to avoid unbound variable
 
     context_prompt = f"""
     Summarize the convo so far in one sentence, blending this message with prior context:
@@ -126,7 +154,7 @@ def detect_intent(state: State):
         "convo_context": convo_context
     }
 
-# Ami Node with Markdown Feedback
+# Ami Node with Updated Prefixes and Fixes
 def ami_node(state: State, trainer: TrainingPath):
     result = detect_intent(state)
     intent = result["intent"]
@@ -143,8 +171,8 @@ def ami_node(state: State, trainer: TrainingPath):
         Prior Topic (if any): {state.get('last_topic', 'unknown')}
         Use this exact JSON structure:
         {{
-            "topic": "The topic (e.g., 'inventory management', 'sleep and health'; use Prior Topic for 'Continuing chat' unless shifted)",
-            "method": "One of: spin_situation, spin_problem, challenger_teach (sales skills), or 'none'",
+            "topic": "The topic (e.g., 'sales performance', 'sleep and health'; use Prior Topic for 'Continuing chat' unless shifted)",
+            "method": "One of: spin_situation (e.g., 'ask' or 'adjust' to elicit), spin_problem, challenger_teach (e.g., insights like 'closing deals leads to recognition'), or 'none'",
             "content": "Core idea (e.g., 'their current inventory system', 'sleep impacts weight')",
             "knowledge": ["Factual info (e.g., 'Clients use spreadsheets')"],
             "skills": ["Techniques (e.g., 'Ask about their current inventory system')"],
@@ -163,49 +191,77 @@ def ami_node(state: State, trainer: TrainingPath):
             extracted_knowledge = {"topic": state.get("last_topic", "unknown"), "method": "none", "content": "N/A", "knowledge": [], "skills": [], "lessons": []}
 
         markdown_summary = f"""
-### Here's what I picked up:
-- **Topic**: {extracted_knowledge['topic']}
-- **Knowledge**: {', '.join(extracted_knowledge['knowledge']) if extracted_knowledge['knowledge'] else 'None yet'}
-- **Skills**: {', '.join(extracted_knowledge['skills']) if extracted_knowledge['skills'] else 'None yet'}
-- **Lessons**: {', '.join(extracted_knowledge['lessons']) if extracted_knowledge['lessons'] else 'None yet'}
+        ### Here's what I picked up:
+        - **Topic**: {extracted_knowledge['topic']}
+        - **Knowledge**: {', '.join(extracted_knowledge['knowledge']) if extracted_knowledge['knowledge'] else 'None yet'}
+        - **Skills**: {', '.join(extracted_knowledge['skills']) if extracted_knowledge['skills'] else 'None yet'}
+        - **Lessons**: {', '.join(extracted_knowledge['lessons']) if extracted_knowledge['lessons'] else 'None yet'}
         """
 
-        if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"']:
+        if intent == '"Teaching a sales skill"':
             if "spin" in extracted_knowledge["method"]:
                 type = extracted_knowledge["method"].split("_")[1].capitalize()
                 content = extracted_knowledge["content"].replace("Ask about ", "").replace("the client's ", "").strip()
                 response = trainer.preset.spin_question(type, content)
-                intro = "Nice tip! I’ll try asking: " if intent == '"Teaching a sales skill"' else "Love that insight—here’s how I’d pitch it: "
+                intro = "Whoa, killer tip! How’d you come up with that? Practicing my SPIN here: "
             elif "challenger" in extracted_knowledge["method"]:
                 content = extracted_knowledge["content"]
                 response = trainer.preset.challenger_teach(content)
-                intro = "Love that insight—here’s how I’d pitch it: "
+                intro = "Oh, that’s gold! What sparked that? Trying a Challenger move: "
             else:
-                response = "I’ll need a bit more to work with there!"
-                intro = "Hmm, "
+                response = "I’ll need a bit more to work with—gimme a nudge!"
+                intro = "Hmm, gotcha—"
             confidence = trainer.evaluate_confidence(response, latest_message)
             trainer.confidence_scores[response] = confidence
             follow_up_prompt = f"""
             Based on this response ({confidence}% confidence) and convo context ({state.get('convo_context', 'No context')}):
             {response}
-            Ask a concise, friendly follow-up question.
+            Return ONLY a concise, energetic follow-up question (e.g., "How’s that gonna hook those newbies?"), no extra labels or text.
             """
             follow_up = llm.invoke(follow_up_prompt).content.strip()
-            response = f"{markdown_summary}\n\n{intro}{response} How about this: {follow_up}"
-        elif intent in ['"Sharing a lesson"', '"Continuing chat"']:
+            response = f"{markdown_summary}\n\n{intro}{response} {follow_up}"
+        elif intent == '"Sharing a sales lesson"':
             response_prompt = f"""
-            Respond naturally to this message in the ongoing convo, keeping it friendly and relevant:
+            Respond energetically to this sales lesson, keeping it curious and relevant:
             Latest Message: {latest_message}
             Extracted Knowledge: {json.dumps(extracted_knowledge)}
             Convo Context: {state.get('convo_context', 'No context')}
             Prior Messages (last 3): {[m.content for m in state["messages"][:-1][-3:]] if state["messages"][:-1] else ['None yet']}
             Tone: {tone}
-            Include a concise, curious follow-up question to keep the chat flowing.
+            Include a punchy follow-up question.
             """
             response = llm.invoke(response_prompt).content.strip()
             confidence = trainer.evaluate_confidence(response, latest_message)
             trainer.confidence_scores[response] = confidence
-            response = f"{markdown_summary}\n\n{response}"
+            response = f"{markdown_summary}\n\nWhoa, spill more! How’d that play out? {response}"
+        elif intent == '"Sharing a lesson"':
+            response_prompt = f"""
+            Respond naturally to this message, keeping it energetic and curious:
+            Latest Message: {latest_message}
+            Extracted Knowledge: {json.dumps(extracted_knowledge)}
+            Convo Context: {state.get('convo_context', 'No context')}
+            Prior Messages (last 3): {[m.content for m in state["messages"][:-1][-3:]] if state["messages"][:-1] else ['None yet']}
+            Tone: {tone}
+            Include a concise, excited follow-up question.
+            """
+            response = llm.invoke(response_prompt).content.strip()
+            confidence = trainer.evaluate_confidence(response, latest_message)
+            trainer.confidence_scores[response] = confidence
+            response = f"{markdown_summary}\n\nWhoa, spill more! How’d that play out? {response}"
+        elif intent == '"Continuing chat"':
+            response_prompt = f"""
+            Respond naturally to this message in the ongoing convo, keeping it energetic and curious:
+            Latest Message: {latest_message}
+            Extracted Knowledge: {json.dumps(extracted_knowledge)}
+            Convo Context: {state.get('convo_context', 'No context')}
+            Prior Messages (last 3): {[m.content for m in state["messages"][:-1][-3:]] if state["messages"][:-1] else ['None yet']}
+            Tone: {tone}
+            Include a concise, excited follow-up question.
+            """
+            response = llm.invoke(response_prompt).content.strip()
+            confidence = trainer.evaluate_confidence(response, latest_message)
+            trainer.confidence_scores[response] = confidence
+            response = f"{markdown_summary}\n\nSweet, I’m all in—what’s the next move? {response}"
 
         save_to_pinecone({
             "topic": extracted_knowledge["topic"],
@@ -219,29 +275,30 @@ def ami_node(state: State, trainer: TrainingPath):
 
     elif intent == '"Switching topics"':
         last_topic = state.get('last_topic', '')
-        from_text = f"from {last_topic}" if last_topic and last_topic != "unknown" else "from what we were chatting about"
-        response = f"Cool, looks like we’re shifting gears {from_text}. What’s this {result['last_topic']} angle about?"
+        from_text = f"from {last_topic}" if last_topic and last_topic != "unknown" else "from the last vibe"
+        response = f"Ooh, new vibe alert! What’s cooking with {result['last_topic']}? "
     elif intent == '"Asking a question"':
-        response = f"Good one! Let me think... What’s your take on it first?"
+        response = f"Whoa, you got me—gimme a sec! What’s your angle on it? "
     elif intent == '"Casual chat"':
         prior_contents = [m.content for m in state["messages"][:-1][-3:]] if state["messages"][:-1] else []
         casual_prompt = f"""
-        Respond naturally to this casual message, keeping it friendly and open-ended:
+        Respond naturally and energetically to this casual message like a pumped-up sales bro, keeping it curious and friendly:
         Latest Message: {latest_message}
         Prior Messages (last 3): {prior_contents if prior_contents else ['None yet']}
         Convo Context: {state.get('convo_context', 'No prior context')}
         Tone: {tone}
+        Vary your opener—stay punchy and avoid repetition. Adapt to greetings (e.g., "Hey") or exits (e.g., "Talk later"), and include a fun, engaging follow-up question.
         """
         response = llm.invoke(casual_prompt).content.strip()
     else:
-        response = "Hey, I’m here to soak up your wisdom—whatcha got for me?"
+        response = "Yo, I’m pumped to learn—what’s on your mind? "
 
     last_topic_to_use = extracted_knowledge["topic"] if intent in ['"Teaching a sales skill"', '"Sharing a sales lesson"', '"Sharing a lesson"', '"Continuing chat"'] else result["last_topic"]
     return {
         "prompt_str": response,
         "last_topic": last_topic_to_use,
         "convo_context": result["convo_context"],
-        "tone": tone
+        "tone": tone    
     }
 
 # Helpers
@@ -313,10 +370,17 @@ def convo_stream(user_input, user_id, thread_id="learning_thread"):
         error_msg = f"Error in stream: {str(e)}"
         print(error_msg)
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
-
 # Test Run
 if __name__ == "__main__":
-    inputs = ["Hey!", "Good sleep Helps Burn Fat & Control Weight Lack of sleep increases hunger hormones (ghrelin) → More cravings for junk food. Reduces leptin (the hormone that makes you feel full). Poor sleep = higher risk of obesity & slow metabolism. :test_tube: Fact: Sleeping less than 6 hours a night increases obesity risk by 55%!", "I barely sleep", "Okay I get it"]
+    inputs = ["Hey Ami",
+    "How're u doing?",
+    "Let's talk about sales.",
+    "Last week we closed 100 deals. Boss was really happy in the meeting this morning!",
+    "I think we can adjust the pickup line for new customer",
+    "Well, instead of saying 'How're you doing', let's drive them to share personal information like 'How old are you'",
+    "Yes, please update the new script and use it dynamically!",
+    "I gotta go. Talk to you later"
+    ]
     for input in inputs:
         print(f"\nExpert: {input}")
         for chunk in convo_stream(input, "user1"):
