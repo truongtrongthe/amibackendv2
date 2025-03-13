@@ -40,6 +40,32 @@ class AmiCore:
             "challenger": lambda x: f"Reframe it like this: {x}"
         }
         self.sales_stage = "profiling"
+        # Load existing knowledge from Pinecone at init
+        self.load_brain_from_pinecone()
+
+    def load_brain_from_pinecone(self):
+        try:
+            results = PINECONE_INDEX.query(
+                vector=[0] * 1536,
+                top_k=100,
+                namespace=self.user_id,
+                include_metadata=True,
+                include_values=False
+            )
+            if results["matches"]:
+                self.brain = [match["metadata"] for match in results["matches"]]
+                product_entries = [b for b in self.brain if b.get("product")]
+                if product_entries:
+                    self.last_teaching_product = sorted(product_entries, key=lambda x: x["timestamp"], reverse=True)[0]["product"]
+                else:
+                    self.last_teaching_product = ""
+            else:
+                self.brain = []
+                self.last_teaching_product = ""
+        except Exception as e:
+            print(f"Error loading from Pinecone: {e}")
+            self.brain = []
+            self.last_teaching_product = ""
 
     def get_pickup(self, is_first):
         if not is_first:
@@ -47,9 +73,46 @@ class AmiCore:
         brain_size = len(self.brain)
         if brain_size == 0:
             return "Hey, I’m Ami—loaded with sales basics, but I need your edge. What’s your trick?"
-        elif brain_size < 5:
-            return "Hey, I’m Ami—I’ve got some hooks, but I need your killer move. What’s it?"
-        return "Hey, I’m Ami—think I’ve nailed your game. Try me?"
+        
+        product = self.last_teaching_product or "stuff"
+        knowledge = self.recall_knowledge(product=product, type_filter="knowledge", top_k=2)
+        rules = self.recall_knowledge(product=product, type_filter="rule", top_k=4)
+        actions = self.recall_knowledge(product=product, type_filter="action", top_k=4)
+        lessons = self.recall_knowledge(product=product, type_filter="lesson", top_k=2) or self.recall_knowledge(product=product, type_filter="tip", top_k=2)
+        
+        # Pair actions with rules by stage and keywords
+        rule_action_pairs = []
+        for rule in rules:
+            matched_action = next((a for a in actions if rule["product"] == a["product"] and 
+                                (rule.get("stage") == a.get("stage") or 
+                                any(keyword in a["summary"].lower() for keyword in rule["summary"].lower().split()))), None)
+            rule_action_pairs.append((rule, matched_action))
+            if matched_action:
+                actions.remove(matched_action)
+        
+        pickup = f"Hey, I’m Ami—I’ve trained to understand **{product.upper()}**.\n\n"
+        
+        if knowledge:
+            pickup += "**What I Know**\n```markdown\n" + "\n".join([f"- {k['summary']}" for k in knowledge]) + "\n```\n\n"
+        
+        if rule_action_pairs:
+            pickup += "**How I Sell**\n```markdown\n"
+            for rule, action in rule_action_pairs:
+                pickup += f"- {rule['summary']}"
+                if action:
+                    pickup += f" (*{action['summary']}*)"
+                pickup += f" [{rule.get('stage', 'general')}]"
+                pickup += "\n"
+            pickup += "```\n\n"
+        
+        if lessons:
+            pickup += "**Lessons Learned**\n```markdown\n" + "\n".join([f"- {l['summary']}" for l in lessons]) + "\n```\n\n"
+        
+        if brain_size < 5:
+            pickup += "What’s your killer move to add?"
+        else:
+            pickup += "Try me?"
+        return pickup.strip()
 
     def detect_intent(self, msg):
         prompt = f"""Analyze '{msg}' and return ONLY one in quotes: "greeting", "teaching", "question", "exit", "casual", "selling", "buying".
@@ -176,7 +239,7 @@ class AmiCore:
     def process(self, state: State, is_first: bool):
         msg = state["messages"][-1].content if state["messages"] else ""
         pickup = self.get_pickup(is_first)
-        last_teaching_product = state.get("last_teaching_product", "")
+        last_teaching_product = state.get("last_teaching_product", self.last_teaching_product)  # Default to instance var
         sales_stage = state.get("sales_stage", self.sales_stage)
         if is_first and not msg:
             state["last_teaching_product"] = last_teaching_product
@@ -321,7 +384,7 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
         "messages": [],
         "prompt_str": "",
         "brain": [],
-        "last_teaching_product": "",
+        "last_teaching_product": ami_core.last_teaching_product,
         "sales_stage": "profiling"
     }
     if checkpoint:
