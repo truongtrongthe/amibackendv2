@@ -5,7 +5,7 @@ from Archived.copilot import pilot_stream
 #from learning import learning_stream
 #from AmiCore.ami_core_1_4_selling_concept import convo_stream
 #from AmiCore.amicore_1_5_ner_brain import convo_stream
-from ami_core_1_9 import convo_stream
+from ami import convo_stream
 
 
 app = Flask(__name__)

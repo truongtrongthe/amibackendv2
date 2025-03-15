@@ -143,7 +143,7 @@ class AmiCore:
             return []
         entities = self.extract_entities(msg)
         product = entities["entities_products"][0].lower() if entities["entities_products"] else None
-        
+
         response = llm_non_streaming.invoke(f"""Analyze '{msg}' and return a JSON list of entries. Each entry has:
         - 'type': one of 'knowledge', 'rule', 'action', 'lesson', 'tip'
         - 'summary': concise summary (short, factual, no fluff)
@@ -458,12 +458,14 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
 
 # Test
 if __name__ == "__main__":
+    PINECONE_INDEX.delete(delete_all=True, namespace="tfl")
+    print("Debug: Cleared Pinecone namespace 'tfl'")
     thread_id = "test_hito_sale"
     print("\nAmi starts:")
     for chunk in convo_stream(thread_id=thread_id):
         print(chunk)
     test_inputs = [
-        "What you have, Ami?"
+    #    "What you have, Ami?"
     ]
     for input in test_inputs:
         print(f"\nYou: {input}")
