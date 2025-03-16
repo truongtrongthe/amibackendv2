@@ -97,7 +97,7 @@ class AmiCore:
                 Return an energetic, excited, beautiful response in Vietnamese—blend the input and extracted terms (if any) 
                 into a polished, vibey flex that shows off your new understanding. Make it flow naturally, even if the input’s short, 
                 and nudge for more with a hyped tone. 
-                Example: Input 'HITO Cốm tốt lắm' → 'Woa, anh ơi, HITO Cốm mà tốt thế này thì đỉnh khỏi bàn! Ami thấy nó như bảo bối cho sức khỏe, anh còn chiêu gì hay nữa không để em học với nào!'
+                Example: Input 'HITO Cốm tốt lắm' → '<tóm tắt các kiến thức vừa học>. Anh thấy em học khét chưa!'
                 Output MUST be a raw string, no quotes or markdown."""
                 response = LLM.invoke(prompt).content + " - Đã lưu, Ami biết thêm rồi nha!"
             elif state["last_response"] == "no":
