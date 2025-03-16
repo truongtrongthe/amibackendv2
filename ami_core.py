@@ -1,10 +1,11 @@
 # ami_core.py
 # Built by: The Fusion Lab with xAI's Grok 3
-# Date: March 15, 2025
-# Purpose: Core Ami logic with stable stage handling, powered by Ami Blue Print 3.3 Mark 3, synced with langgraph
+# Date: March 15, 2025 (Updated for live on March 16, 2025)
+# Purpose: Core Ami logic with stable stage handling, powered by Ami Blue Print 3.4 Mark 3, synced with langgraph
 
-from utilities import detect_intent, extract_knowledge, confirm_knowledge, recall_knowledge, LLM
+from utilities import detect_intent, extract_knowledge, recall_knowledge, LLM  # Updated import
 import json
+# Note: confirm_knowledge added below for live sync
 
 class AmiCore:
     def __init__(self):
@@ -42,10 +43,27 @@ class AmiCore:
             return "Chill vậy—kế tiếp là gì nào?"
         return "Cá là bạn có gì đó xịn—kể nghe coi!"
 
+    def confirm_knowledge(self, state, user_id, confirm_callback=None):
+        # Added for live sync—minimal impl
+        pending_node = state.get("pending_node", {"pieces": [], "primary_topic": "Miscellaneous"})
+        if confirm_callback:
+            confirmed = confirm_callback(pending_node)
+            if confirmed == "yes":
+                return pending_node
+            elif confirmed == "no":
+                state["prompt_str"] = "Ami chưa rõ lắm—nói lại đi bro!"
+                return None
+        return pending_node  # Default—assumes confirmed
+
     def do(self, state=None, is_first=False, confirm_callback=None):
         state = state if state is not None else self.state
         latest_msg = state["messages"][-1].content if state["messages"] else ""
-        intent = detect_intent(state) if latest_msg else "greeting"
+        # Safely handle detect_intent output—string or tuple
+        intent_result = detect_intent(state) if latest_msg else "greeting"
+        if isinstance(intent_result, tuple):
+            intent, _ = intent_result  # Unpack if tuple (e.g., "request", 0.9)
+        else:
+            intent = intent_result  # Use as-is if string (e.g., "question")
         response = ""
 
         default_state = {
@@ -63,12 +81,11 @@ class AmiCore:
 
         if intent == "teaching":
             knowledge = extract_knowledge(state, self.user_id)
-            confirmed_node = confirm_knowledge(state, self.user_id, confirm_callback=confirm_callback)
+            confirmed_node = self.confirm_knowledge(state, self.user_id, confirm_callback=confirm_callback)
             if confirmed_node and state["last_response"] == "yes":
-                # Lean, casual confirmation—show she got it
                 pieces = confirmed_node["pieces"]
                 if pieces:
-                    text = pieces[0]["raw_input"]  # First piece’s raw input
+                    text = pieces[0]["raw_input"]
                     response = f"{text} -Ami nắm được rồi! Còn gì hay nữa không?"
                 else:
                     response = "Ami nắm rồi, bro! Còn gì hay nữa không?"
@@ -77,9 +94,18 @@ class AmiCore:
 
         elif intent in ["question", "request"]:
             recall = recall_knowledge(latest_msg, self.user_id)
-            response = recall["response"]
-            if recall["mode"] == "Autopilot":
-                state["sales_stage"] = self.sales_stages[1]
+            if not recall["knowledge"]:
+                response = "Ami đây! Chưa đủ info, bro thêm tí nha!"
+            else:
+                prompt = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
+                - Input: '{latest_msg}'
+                - Intent: '{recall["intent"]}'
+                - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+                Return a chill, sales-y response in Vietnamese—blend all knowledge, use exact key phrases (e.g., "ổn định hấp thụ xương"), make sales hooks explicit (e.g., "mua cho con"). If it’s a component (e.g., "Aquamin F"), tie it to "HITO Cốm". Predict objections (e.g., age, cost) and hit ‘em with a "cực chất" vibe. Keep it short, actionable—drop a "nè" if it fits!"""
+                response = LLM.invoke(prompt).content.strip('"')
+                if recall["mode"] == "Autopilot":
+                    state["sales_stage"] = self.sales_stages[1]
 
         elif intent in ["greeting", "casual"]:
             pickup = self.get_pickup_line(is_first, intent)

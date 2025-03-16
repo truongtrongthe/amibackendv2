@@ -359,7 +359,7 @@ def store_convo_node(node, user_id):
         logger.error(f"Convo upsert failed: {e}")
         return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
 
-def recall_knowledge_runOK(message, user_id=None):
+def recall_knowledge(message, user_id=None):
     state = {"messages": [HumanMessage(message)], "prompt_str": ""}
     intent = detect_intent(state)
     
@@ -408,19 +408,34 @@ def recall_knowledge_runOK(message, user_id=None):
             index.upsert([(term_id, embedding, meta)], namespace="term_memory")
             time.sleep(1)
     
-    prompt = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
+
+    prompt_OK = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
     - Input: '{message}'
     - Intent: '{intent}'
     - Convo Nodes: {json.dumps([n['meta'] for n in top_nodes], ensure_ascii=False)}
     - Term Nodes: {json.dumps({tid: tn['metadata'] for tid, tn in term_nodes.items()}, ensure_ascii=False)}
     Return raw JSON: {{"response": "<response>", "mode": "<mode>", "source": "Enterprise"}}
     Rules:
-    - "response": Vietnamese, casual, sales-y—use all three top_nodes for fullest context, check aliases. For 'request', prioritize sales steps with specifics (e.g., "#combo 1"). For 'question', blend all top_nodes; include all key details from highest-scoring node (e.g., all benefits), use exact key phrases where possible (e.g., "ổn định hấp thụ xương"), and make sales hooks explicit (e.g., "mua cho con"). If asking about a component (e.g., "Aquamin F"), link it to "HITO Cốm" explicitly. Predict objections (e.g., age, cost) and address them.
+    - "response": Vietnamese, casual, sales-y—use all top_nodes convo + term data, check aliases. For 'request', prioritize sales steps with specifics (e.g., "#combo 1"). For 'question', blend all three top_nodes for fullest context; include all key details from highest-scoring node (e.g., all benefits), and if asking about a component (e.g., "Aquamin F"), link it to "HITO Cốm" explicitly (e.g., from ingredients or benefits). Predict objections (e.g., age, cost) and address them.
     - "mode": "Autopilot" if "request", else "Co-Pilot".
     - "source": "Enterprise".
     - Short, actionable, charming—use highest vibe_score terms first.
-    - Example: "Tôi 35 tuổi, HITO Cốm có tác dụng không?" → {{"response": "Bro 35 tuổi thì HITO Cốm giúp ổn định hấp thụ xương, không tăng chiều cao nhiều—mua cho con nhỏ thì đỉnh hơn!", "mode": "Co-Pilot", "source": "Enterprise"}}
+    - Example: "Tôi 35 tuổi, HITO Cốm có tác dụng không?" → {{"response": "Bro 35 tuổi thì HITO Cốm giúp ổn định xương, không tăng chiều cao nhiều—mua cho con nhỏ thì đỉnh hơn!", "mode": "Co-Pilot", "source": "Enterprise"}}
     - Output MUST be valid JSON, no markdown."""
+    
+    prompt = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
+- Input: '{message}'
+- Intent: '{intent}'
+- Convo Nodes: {json.dumps([n['meta'] for n in top_nodes], ensure_ascii=False)}
+- Term Nodes: {json.dumps({tid: tn['metadata'] for tid, tn in term_nodes.items()}, ensure_ascii=False)}
+Return raw JSON: {{"response": "<response>", "mode": "<mode>", "source": "Enterprise"}}
+Rules:
+- "response": Vietnamese, casual, sales-y—use all three top_nodes for fullest context, check aliases. For 'request', prioritize sales steps with specifics (e.g., "#combo 1"). For 'question', blend all top_nodes; include all key details from highest-scoring node (e.g., all benefits), use exact key phrases where possible (e.g., "ổn định hấp thụ xương"), and make sales hooks explicit (e.g., "mua cho con"). If asking about a component (e.g., "Aquamin F"), link it to "HITO Cốm" explicitly. Predict objections (e.g., age, cost) and address them.
+- "mode": "Autopilot" if "request", else "Co-Pilot".
+- "source": "Enterprise".
+- Short, actionable, charming—use highest vibe_score terms first.
+- Example: "Tôi 35 tuổi, HITO Cốm có tác dụng không?" → {{"response": "Bro 35 tuổi thì HITO Cốm giúp ổn định hấp thụ xương, không tăng chiều cao nhiều—mua cho con nhỏ thì đỉnh hơn!", "mode": "Co-Pilot", "source": "Enterprise"}}
+- Output MUST be valid JSON, no markdown."""
 
     response = clean_llm_response(LLM.invoke(prompt).content)
     try:
@@ -430,69 +445,50 @@ def recall_knowledge_runOK(message, user_id=None):
     except json.JSONDecodeError as e:
         logger.error(f"Recall parse error: {e}. Raw: '{response}'. Falling back")
         return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
-# utilities.py (snippet)
-# utilities.py (snippet)
-def recall_knowledge(message, user_id=None):
-    state = {"messages": [HumanMessage(message)], "prompt_str": ""}
-    # Safely handle detect_intent output—string or tuple
-    intent_result = detect_intent(state)
-    if isinstance(intent_result, tuple):
-        intent, _ = intent_result  # Unpack if tuple (e.g., "request", 0.9)
-    else:
-        intent = intent_result  # Use as-is if string (e.g., "question")
-    
-    message_lower = message.lower()
-    preset_results = index.query(vector=EMBEDDINGS.embed_query(message), top_k=2, include_metadata=True, namespace="Preset")
-    for r in preset_results["matches"]:
-        if r.score > 0.8:
-            return {
-                "knowledge": [{"text": r.metadata['text'], "source": "Preset", "score": r.score}],
-                "mode": "Co-Pilot",
-                "intent": intent
-            }
 
-    query_embedding = EMBEDDINGS.embed_query(message)
-    convo_results = index.query(vector=query_embedding, top_k=10, include_metadata=True, namespace="convo_nodes")
-    logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")
+def test_ami():
+    logger.info("Testing Ami—AI Brain Mark 3.4 locked and loaded!")
+    state = {"messages": [], "prompt_str": "", "convo_id": str(uuid.uuid4()), "active_terms": {}, "pending_knowledge": {}}
+    confirm_callback = lambda x: "yes"  # Auto-confirm for stress test
     
-    now = datetime.now()
-    nodes = []
-    for r in convo_results["matches"]:
-        meta = r.metadata
-        meta["pieces"] = json.loads(meta["pieces"])
-        meta["last_accessed"] = meta.get("last_accessed", now.isoformat())
-        meta["access_count"] = meta.get("access_count", 0)
-        days_since = (now - datetime.fromisoformat(meta["last_accessed"])).days
-        relevance = r.score
-        recency = max(0, 1 - 0.05 * days_since)
-        usage = min(1, meta["access_count"] / 10)
-        vibe_score = (0.5 * relevance) + (0.3 * recency) + (0.2 * usage)
-        nodes.append({"meta": meta, "vibe_score": vibe_score})
+    # Training Path - Stack Knowledge with 9 Inputs
+    inputs = [
+        #"HITO Cốm có khả năng tăng cường hấp thụ Calcium giúp người lớn tăng trưởng đột phá chiều cao, phù hợp cho người từ 10 tới 30 tuổi.",
+        #"Thành phần của HITO cốm là: Bột xương cá tuyết (25% canxi) và Aquamin F( 32% canxi , canxi từ tảo biển đỏ)",
+        #"Công dụng của Aquamin F( 32% canxi , canxi từ tảo biển đỏ) là Bổ sung canxin hữu cơ dễ hấp thu mà còn không lắng cặn, không bị nóng trong hay táo bón như canxin vô cơ .Củng cố hệ xương, bổ sung canxi giúp xương chắc khỏe, dẻo dai. bảo vệ và tham gia vào quá trình hình thành dịch nhầy ở khớp, giúp khớp chuyển động linh hoạt, thoải mái hơn.giúp ngăn ngừa việc hình thành khối u ở gan, polyp trực tràng. Đồng thời bảo vệ sức khỏe đường tiêu hóa",
+        #"Công dụng của Bột xương cá tuyết (25% canxi) là Bổ sung canxi ,Hỗ trợ sự phát triển hệ xương và cơ bắp, giúp trẻ tăng trưởng chiều cao,đóng vai trò thiết yếu cho việc phát triển xương, làm chắc xương, răng, chống loãng xương, còi xương, nhuyễn xương,… mà còn có vai trò quan trọng trong việc duy trì hoạt động cơ bắp, thông máu, phát tín hiệu cho các tế bào thần kinh và giúp tiết chế một số kích thích tố",
+        #"Với người trên 25 tuổi có thể phát triển tiếp 3cm chiều cao. Với người trên 30 tuổi thì giúp ổn định hấp thụ xương",
+        #"Khi tư vấn cho khách hàng về HITO cốm, cần khai thác tên tuổi giới tính chiều cao hiện tại và chiều cao mong muốn.",
+        #"Với khách hàng trên 30 tuổi, có thể gợi ý mua cho con hoặc người thân nhỏ tuổi",
+        #"Khi khách hàng chưa tin tưởng thì cần gửi ảnh <link ảnh>",
+        #"Khi khách hàng muốn mua thì hỏi địa chỉ giao hàng sau đó gửi các combo: #combo 1, #combo2, #combo 3. Sau đó yêu cầu khách hàng chuyển tiền theo thông tin chuyển tiền @VCB Germany."
+    ]
     
-    filtered_nodes = [n for n in nodes if n["meta"]["pieces"]] or nodes[:2]
-    if not filtered_nodes:
-        return {"knowledge": [], "mode": "Co-Pilot", "intent": intent}
+    logger.info("Training Path: Stacking 9 inputs...")
+    for i, input_text in enumerate(inputs, 1):
+        logger.info(f"Input {i}: {input_text}")
+        state["messages"].append(HumanMessage(input_text))
+        extract_knowledge(state)
+        confirm_knowledge(state, "user123", confirm_callback)
+        logger.info(f"Active Terms: {json.dumps(state['active_terms'], ensure_ascii=False)}")
+        logger.info(f"Pending Node Cleared: {json.dumps(state['pending_node'], ensure_ascii=False)}")
     
-    filtered_nodes.sort(key=lambda x: (x["vibe_score"], datetime.fromisoformat(x["meta"]["last_accessed"])), reverse=True)
-    top_nodes = filtered_nodes[:3]
-    term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
+    # Selling Path - Stress Test Recall with 5 Queries
+    queries = [
+        #"HITO Cốm có gì hay?",
+        #"Thành phần HITO Com là gì?",
+        "Aquamin F có công dụng gì?",
+        "Tôi 35 tuổi, HITO Cốm có tác dụng không?",
+        #"Tôi muốn mua HITO Cốm, làm sao đây?"
+    ]
     
-    fetch_response = index.fetch(list(term_ids), namespace="term_memory")
-    term_nodes = getattr(fetch_response, "vectors", {})
-    for term_id in term_ids:
-        if term_id in term_nodes:
-            meta = term_nodes[term_id]["metadata"]
-            meta["vibe_score"] += 0.1
-            meta["access_count"] += 1
-            meta["last_updated"] = now.isoformat()
-            embedding_text = f"{meta['term_name']} {' '.join(k['text'] for k in json.loads(meta['knowledge']))}"
-            embedding = EMBEDDINGS.embed_query(embedding_text)
-            index.upsert([(term_id, embedding, meta)], namespace="term_memory")
-            time.sleep(1)
+    logger.info("Selling Path: Testing 5 recall queries...")
+    for i, query in enumerate(queries, 1):
+        logger.info(f"Query {i}: {query}")
+        result = recall_knowledge(query, "user123")
+        logger.info(f"Recall result: {json.dumps(result, ensure_ascii=False)}")
     
-    return {
-        "knowledge": [{"meta": n["meta"], "vibe_score": n["vibe_score"]} for n in top_nodes],
-        "terms": {tid: tn["metadata"] for tid, tn in term_nodes.items()},
-        "mode": "Autopilot" if intent == "request" else "Co-Pilot",
-        "intent": intent
-    }
+    logger.info("Stress Test Complete—Ami Mark 3.4 flexed hard, bro!")
+
+if __name__ == "__main__":
+    test_ami()

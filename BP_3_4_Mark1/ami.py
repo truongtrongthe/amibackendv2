@@ -1,6 +1,6 @@
 # ami.py
-# Purpose: State, graph, and test harness for intent stress testing with Ami Blue Print 3.4 Mark 3
-# Date: March 15, 2025 (Updated for live on March 16, 2025)
+# Purpose: State, graph, and test harness for intent stress testing with Ami Blue Print 3.3 Mark 3
+# Date: March 15, 2025
 
 import json
 import time
@@ -86,7 +86,11 @@ if __name__ == "__main__":
         print(chunk)
     
     test_inputs = [
-        "Hãy bán HITO cho anh Brian 41 tuổi"              # Request (Autopilot)
+        "Hello",                         # Greeting
+        "Hey, vừa chill vừa code",       # Casual
+        "Bột xương cá tuyết là thành phần của HITO, có tác dụng tăng cường khả năng hấp thụ xương",   # Teaching
+        "HITO có gì hay?",              # Question
+        "Gửi tôi HITO nhé"              # Request (Autopilot)
     ]
     
     for input in test_inputs:
