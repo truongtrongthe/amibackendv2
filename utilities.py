@@ -20,10 +20,19 @@ def sanitize_vector_id(text):
 def clean_llm_response(response):
     response = response.strip()
     if response.startswith("```json") and response.endswith("```"):
-        return response[7:-3].strip()
+        response = response[7:-3].strip()
     elif response.startswith("```") and response.endswith("```"):
-        return response[3:-3].strip()
+        response = response[3:-3].strip()
+    # Strip trailing } if it’s malformed
+    while response.endswith("}"):
+        response = response.rstrip("}").rstrip() + "}"
+        try:
+            json.loads(response)
+            break
+        except json.JSONDecodeError:
+            continue
     return response
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -179,13 +188,13 @@ def extract_knowledge(state, user_id=None):
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
     Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
     Rules:
-    - "terms": Extract ALL full noun phrases or product names (e.g., "HITO Cốm", "iPhone") via NER or context. Prioritize product names over generics unless explicitly standalone.
+    - "terms": Extract ALL full noun phrases or product names (e.g., "HITO Cốm", "iPhone") via NER or context. Prioritize product names (e.g., "HITO Cốm") over generics unless explicitly standalone—check convo history for recent product mentions.
     - "knowledge": Chunk input into meaningful phrases tied to each term—split naturally. "Nó"/"it" refers to highest vibe_score term.
     - "aliases": List variants (e.g., "HITO Com" for "HITO Cốm") if detected via context or fuzzy match (>80% similarity).
     - "piece": Single object with intent, primary topic, raw_input.
     - NO translation—keep input language EXACTLY as provided.
     - Example: "HITO Cốm tăng chiều cao, HITO Com ngon" → {{"terms": {{"HITO Cốm": {{"knowledge": ["tăng chiều cao", "ngon"], "aliases": ["HITO Com"]}}}}, "piece": ...}}
-    - Output MUST be valid JSON, no markdown."""
+    - Output MUST be valid JSON, no extra brackets or trailing chars."""
     
     response = clean_llm_response(LLM.invoke(prompt).content)
     logger.info(f"Raw LLM response from extract_knowledge: '{response}'")
@@ -210,11 +219,11 @@ def extract_knowledge(state, user_id=None):
             if fuzz.ratio(term_name.lower(), existing_name.lower()) > 80:
                 canonical_name = existing_name
                 break
-        # Get or set term_id as string
         term_id = active_terms.get(canonical_name, {}).get("term_id", f"term_{sanitize_vector_id(canonical_name)}_{convo_id}")
         active_terms[canonical_name] = {"term_id": term_id, "vibe_score": active_terms.get(canonical_name, {}).get("vibe_score", 1.0)}
-        piece["term_refs"].append(term_id)
-        # Use term_id string directly in pending_knowledge
+        # Add to term_refs if not already present
+        if term_id not in piece["term_refs"]:
+            piece["term_refs"].append(term_id)
         state.setdefault("pending_knowledge", {}).setdefault(term_id, []).extend(
             [{"text": chunk, "confidence": 0.9, "source_piece_id": piece["piece_id"], "created_at": datetime.now().isoformat(), "aliases": data["aliases"]} 
              for chunk in data["knowledge"]]
@@ -222,7 +231,8 @@ def extract_knowledge(state, user_id=None):
     
     if not piece["term_refs"] and "nó" in latest_msg.lower() and active_terms:
         top_term = max(active_terms.items(), key=lambda x: x[1]["vibe_score"])[1]["term_id"]
-        piece["term_refs"].append(top_term)
+        if top_term not in piece["term_refs"]:
+            piece["term_refs"].append(top_term)
     
     pending_node = state.get("pending_node", {"pieces": [], "primary_topic": topics[0]["name"]})
     pending_node["pieces"].append(piece)
@@ -351,12 +361,12 @@ def recall_knowledge(message, user_id=None):
     message_lower = message.lower()
     preset_results = index.query(vector=EMBEDDINGS.embed_query(message), top_k=2, include_metadata=True, namespace="Preset")
     for r in preset_results["matches"]:
-        if r.score > 0.8:  # High relevance threshold
+        if r.score > 0.8:
             return {"response": f"Ami đây! {r.metadata['text']}—thử không bro?", "mode": "Co-Pilot", "source": "Preset"}
 
     # Enterprise Brain recall
     query_embedding = EMBEDDINGS.embed_query(message)
-    convo_results = index.query(vector=query_embedding, top_k=5, include_metadata=True, namespace="convo_nodes")
+    convo_results = index.query(vector=query_embedding, top_k=10, include_metadata=True, namespace="convo_nodes")  # Upped to 10
     logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")
     
     now = datetime.now()
@@ -370,7 +380,7 @@ def recall_knowledge(message, user_id=None):
         relevance = r.score
         recency = max(0, 1 - 0.05 * days_since)
         usage = min(1, meta["access_count"] / 10)
-        vibe_score = (0.3 * relevance) + (0.5 * recency) + (0.2 * usage)
+        vibe_score = (0.5 * relevance) + (0.3 * recency) + (0.2 * usage)  # Upped relevance weight
         nodes.append({"meta": meta, "vibe_score": vibe_score})
     
     filtered_nodes = [n for n in nodes if n["meta"]["pieces"]] or nodes[:2]
@@ -378,23 +388,23 @@ def recall_knowledge(message, user_id=None):
         return {"response": f"Ami đây! Chưa đủ info, bro thêm tí nha!", "mode": "Co-Pilot", "source": "Enterprise"}
     
     filtered_nodes.sort(key=lambda x: (x["vibe_score"], datetime.fromisoformat(x["meta"]["last_accessed"])), reverse=True)
-    top_nodes = filtered_nodes[:2]
+    top_nodes = filtered_nodes[:3]  # Upped to 3 for broader context
     term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
     
-    # Update term vibe_scores
+    # Update Term Vibe Scores
     term_nodes = index.fetch(list(term_ids), namespace="term_memory").get("vectors", {})
     for term_id in term_ids:
         if term_id in term_nodes:
             meta = term_nodes[term_id]["metadata"]
-            meta["vibe_score"] += 0.1  # 3.4: +0.1 per recall
+            meta["vibe_score"] += 0.1
             meta["access_count"] += 1
             meta["last_updated"] = now.isoformat()
             embedding_text = f"{meta['term_name']} {' '.join(k['text'] for k in json.loads(meta['knowledge']))}"
             embedding = EMBEDDINGS.embed_query(embedding_text)
             index.upsert([(term_id, embedding, meta)], namespace="term_memory")
-            time.sleep(1)  # Reduced delay
+            time.sleep(1)
     
-    # Pitch with vibe_score and aliases
+    # Pitch Response
     prompt = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
     - Input: '{message}'
     - Intent: '{intent}'
@@ -402,12 +412,11 @@ def recall_knowledge(message, user_id=None):
     - Term Nodes: {json.dumps({tid: tn['metadata'] for tid, tn in term_nodes.items()}, ensure_ascii=False)}
     Return raw JSON: {{"response": "<response>", "mode": "<mode>", "source": "Enterprise"}}
     Rules:
-    - "response": Vietnamese, casual, sales-y—use convo + term data, check aliases for variants. For 'request' and 'question', prioritize sales process steps (e.g., address, combos, payment) over general info.
+    - "response": Vietnamese, casual, sales-y—use convo + term data (all relevant nodes), check aliases for variants. For 'request', prioritize sales process steps (e.g., address, combos, payment) over general info. For 'question', predict objections (e.g., age, cost).
     - "mode": "Autopilot" if "request", else "Co-Pilot".
     - "source": "Enterprise".
     - Short, actionable, charming—use highest vibe_score terms first.
-    - Predict objections if intent fits (e.g., "question" → cost concerns).
-    - Example: "HITO Cốm ngon không?" → {{"response": "HITO Cốm ngon xịn, tăng chiều cao—đắt tí nhưng đáng bro!", "mode": "Co-Pilot", "source": "Enterprise"}}
+    - Example: "Tôi muốn mua HITO Cốm" → {{"response": "Bro cho địa chỉ giao hàng đi, Ami gửi combo #1, #2, #3, chuyển tiền @VCB Germany nhé!", "mode": "Autopilot", "source": "Enterprise"}}
     - Output MUST be valid JSON, no markdown."""
     
     response = clean_llm_response(LLM.invoke(prompt).content)
