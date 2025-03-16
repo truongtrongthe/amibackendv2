@@ -3,7 +3,7 @@
 # Date: March 15, 2025 (Updated for live on March 16, 2025)
 # Purpose: Core Ami logic with stable stage handling, powered by Ami Blue Print 3.4 Mark 3, synced with langgraph
 
-from utilities import detect_intent, extract_knowledge, recall_knowledge,upsert_term_node,store_convo_node, LLM,time  # Updated import
+from utilities import detect_intent, extract_knowledge, recall_knowledge,upsert_term_node,store_convo_node, LLM,index,logger,EMBEDDINGS  # Updated import
 import json
 from datetime import datetime
 import uuid
@@ -38,7 +38,7 @@ class AmiCore:
     def get_pickup_line(self, is_first, intent):
         intent = intent.strip('"')
         if is_first:
-            return "Yo, tôi là Ami—vibe mạnh lắm nha! Thử đi, nghi ngờ kiểu gì cũng lật ngược—bạn tính sao?"
+            return "Ami—mạnh lắm nha! Thử đi, nghi ngờ kiểu gì cũng lật ngược—bạn tính sao?"
         if intent == "teaching":
             return "Kiến thức đỉnh—cho tôi thêm đi bro!"
         if intent == "casual":
@@ -50,7 +50,7 @@ class AmiCore:
         if not node["pieces"]:
             return None
         
-        confirm_callback = confirm_callback or (lambda x: "yes")  # Default to "yes"
+        confirm_callback = confirm_callback or (lambda x: "yes")
         for piece in node["pieces"]:
             if piece["needs_clarification"]:
                 state["prompt_str"] = f"Ami hiểu là {piece['raw_input']}—đúng không?"
@@ -64,9 +64,9 @@ class AmiCore:
         
         state["prompt_str"] = "Ami lưu cả mớ này nhé?"
         response = confirm_callback(state["prompt_str"])
-        state["last_response"] = response  # Already here, should work
-        if not response:  # Extra safety
-            print(f"Callback failed, forcing 'yes' for {state['prompt_str']}")
+        state["last_response"] = response
+        if not response:
+            logger.error(f"Callback failed, forcing 'yes' for {state['prompt_str']}")
             state["last_response"] = "yes"
             response = "yes"
         if response == "yes":
@@ -80,11 +80,42 @@ class AmiCore:
             node["primary_topic"] = node["pieces"][0]["topic"]["name"]
             
             pending_knowledge = state.get("pending_knowledge", {})
+            # Batch upsert all terms at once
+            term_upserts = []
             for term_id, knowledge in pending_knowledge.items():
-                upsert_term_node(term_id, state["convo_id"], knowledge)
-                time.sleep(3)
-            store_convo_node(node, user_id)
-            time.sleep(3)
+                term_name = term_id.split("term_")[1].split(f"_{state['convo_id']}")[0]
+                fetch_response = index.fetch([term_id], namespace="term_memory")
+                existing_node = fetch_response.vectors.get(term_id) if fetch_response.vectors else None
+                
+                aliases = list(set(sum([k["aliases"] for k in knowledge if "aliases" in k], [])))
+                if existing_node:
+                    metadata = existing_node["metadata"]
+                    combined_knowledge = json.loads(metadata["knowledge"]) + knowledge
+                    vibe_score = metadata["vibe_score"]
+                    aliases = list(set(json.loads(metadata.get("aliases", "[]")) + aliases))
+                else:
+                    combined_knowledge = knowledge
+                    vibe_score = 1.0
+                    aliases = aliases or []
+                
+                metadata = {
+                    "term_id": term_id,
+                    "term_name": term_name,
+                    "knowledge": json.dumps([k for k in combined_knowledge if "aliases" not in k], ensure_ascii=False),
+                    "aliases": json.dumps(aliases, ensure_ascii=False),
+                    "vibe_score": vibe_score,
+                    "last_updated": datetime.now().isoformat(),
+                    "access_count": existing_node["metadata"]["access_count"] if existing_node else 0,
+                    "created_at": existing_node["metadata"]["created_at"] if existing_node else datetime.now().isoformat()
+                }
+                embedding = EMBEDDINGS.embed_query(f"{term_name} {' '.join(k['text'] for k in combined_knowledge)}")
+                term_upserts.append((term_id, embedding, metadata))
+            
+            if term_upserts:
+                index.upsert(term_upserts, namespace="term_memory")  # Single batch call
+                logger.info(f"Batch upserted {len(term_upserts)} term nodes: {', '.join(t[0] for t in term_upserts)}")
+            
+            store_convo_node(node, user_id)  # No sleep here either
             state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
             state.pop("pending_knowledge", None)
         elif response == "no":
@@ -168,7 +199,7 @@ class AmiCore:
         else:
             response = self.get_pickup_line(is_first, intent)
 
-        state["prompt_str"] = f"Ami detected intent: '{intent}'.Em bảo: **_{response}_**"
+        state["prompt_str"] = f"Ami detected intent: '{intent}': **_{response}_**"
         state["brain"] = self.brain
         self.state = state
         return state
