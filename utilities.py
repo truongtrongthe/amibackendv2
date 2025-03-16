@@ -173,8 +173,8 @@ def identify_topic(state, max_context=1000):
     logger.info(f"Parsed topics: {json.dumps(topics, ensure_ascii=False)}")
     return topics
 
-def extract_knowledge(state, user_id=None):
-    intent = detect_intent(state)
+def extract_knowledge(state, user_id=None, intent =None):
+    intent = intent or detect_intent(state) 
     topics = identify_topic(state)
     messages = state["messages"][-5:] if state["messages"] else []
     latest_msg = messages[-1].content if messages else ""
@@ -253,50 +253,6 @@ def extract_knowledge(state, user_id=None):
     return pending_node
 
 
-def confirm_knowledge(state, user_id, confirm_callback=None):
-    node = state.get("pending_node", {"pieces": [], "primary_topic": "Miscellaneous"})
-    if not node["pieces"]:
-        return None
-    
-    confirm_callback = confirm_callback or (lambda x: input(x + " (yes/no): ").lower())
-    for piece in node["pieces"]:
-        if piece["needs_clarification"]:
-            state["prompt_str"] = f"Ami hiểu là {piece['raw_input']}—đúng không?"
-            response = confirm_callback(state["prompt_str"])
-            state["last_response"] = response
-            if response == "yes":
-                piece["needs_clarification"] = False
-                piece["meaningfulness_score"] = max(piece["meaningfulness_score"], 0.8)
-            elif response == "no":
-                piece["meaningfulness_score"] = 0.5
-    
-    state["prompt_str"] = "Ami lưu cả mớ này nhé?"
-    response = confirm_callback(state["prompt_str"])
-    state["last_response"] = response
-    if response == "yes":
-        node["node_id"] = f"node_{uuid.uuid4()}"
-        node["convo_id"] = state.get("convo_id", str(uuid.uuid4()))
-        node["confidence"] = sum(p["meaningfulness_score"] for p in node["pieces"]) / len(node["pieces"])
-        node["created_at"] = datetime.now().isoformat()
-        node["last_accessed"] = node["created_at"]
-        node["access_count"] = 0
-        node["confirmed_by"] = user_id or "user123"
-        node["primary_topic"] = node["pieces"][0]["topic"]["name"]
-        
-        pending_knowledge = state.get("pending_knowledge", {})
-        for term_id, knowledge in pending_knowledge.items():
-            # Pass aliases along to upsert
-            upsert_term_node(term_id, state["convo_id"], knowledge)
-            time.sleep(2)  # Reduced delay—batch later if needed
-        
-        store_convo_node(node, user_id)
-        time.sleep(2)  # Reduced delay
-        state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
-        state.pop("pending_knowledge", None)
-    elif response == "no":
-        state["prompt_str"] = f"OK, Ami bỏ qua. Còn gì thêm cho {node['primary_topic']} không?"
-        state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
-    return node
 
 def upsert_term_node(term_id, convo_id, new_knowledge):
     term_name = term_id.split("term_")[1].split(f"_{convo_id}")[0]

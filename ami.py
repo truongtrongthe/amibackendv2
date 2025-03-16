@@ -31,7 +31,8 @@ graph_builder = StateGraph(State)
 # Node: AmiCore.do with confirmation callback
 def ami_node(state):
     # Pass a callback for confirmation—defaults to "yes" for testing
-    confirm_callback = lambda x: "yes" if "test" in state.get("convo_id", "") else None
+    #confirm_callback = lambda x: "yes" if "test" in state.get("convo_id", "") else None
+    confirm_callback = lambda x: "yes"  # Always confirm for testing
     return ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback)
 
 graph_builder.add_node("ami", ami_node)
