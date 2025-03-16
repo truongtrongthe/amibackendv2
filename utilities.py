@@ -253,11 +253,11 @@ def extract_knowledge(state, user_id=None, intent =None):
     return pending_node
 
 
-
 def upsert_term_node(term_id, convo_id, new_knowledge):
     term_name = term_id.split("term_")[1].split(f"_{convo_id}")[0]
     vector_id = term_id  # Already term_<name>_<convo_id>
-    existing_node = index.fetch([vector_id], namespace="term_memory").get("vectors", {}).get(vector_id, None)
+    fetch_response = index.fetch([vector_id], namespace="term_memory")  # FetchResponse object
+    existing_node = fetch_response.vectors.get(vector_id) if fetch_response.vectors else None  # Access .vectors
     
     aliases = []
     if new_knowledge and "aliases" in new_knowledge[0]:
@@ -278,7 +278,7 @@ def upsert_term_node(term_id, convo_id, new_knowledge):
     metadata = {
         "term_id": term_id,
         "term_name": term_name,
-        "knowledge": json.dumps([k for k in knowledge if "aliases" not in k], ensure_ascii=False),  # Strip aliases from knowledge
+        "knowledge": json.dumps([k for k in knowledge if "aliases" not in k], ensure_ascii=False),
         "aliases": json.dumps(aliases, ensure_ascii=False),
         "vibe_score": vibe_score,
         "last_updated": datetime.now().isoformat(),
