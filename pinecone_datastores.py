@@ -4,7 +4,7 @@ from pinecone import Pinecone, ServerlessSpec
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-index_name = "amibrain"
+index_name = "ami"
 
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
@@ -19,8 +19,6 @@ if index_name not in pc.list_indexes().names():
         spec=ServerlessSpec(cloud="aws", region="us-east-1")
     )
 
-pinecone_index = pc.Index(index_name)
+index = pc.Index(index_name)
 
 
-# Use your pinecone_index
-PINECONE_INDEX = pinecone_index

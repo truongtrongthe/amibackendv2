@@ -1,19 +1,23 @@
-# utilities.py (scaled, full prompts, no hardcodes)
+# utilities.py (Ami_Blue_Print_3_3 Mark 3 - AI Brain, locked March 15, 2025)
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage
 import json
 import pinecone
 from datetime import datetime
-from pinecone_datastores import pinecone_index
+from pinecone_datastores import index  # Assumed Pinecone index import
 import uuid
 import os
+import logging
+import time
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Config - Dynamic, no hardcodes
 LLM = ChatOpenAI(model="gpt-4o", streaming=True)
 EMBEDDINGS = OpenAIEmbeddings(model="text-embedding-3-small")
-index = pinecone_index  # Pre-configured Pinecone index
 
-# 18 Categories from Ami_Blue_Print_3_0 (could be config-loaded later)
 CATEGORIES = [
     "Skills", "Guidelines", "Lessons", "Products and Services", "Customer Personas and Behavior",
     "Objections and Responses", "Sales Scenarios and Context", "Feedback and Outcomes",
@@ -24,234 +28,379 @@ CATEGORIES = [
 
 INTENTS = ["greeting", "question", "casual", "teaching", "request", "exit", "humor", "challenge", "confusion"]
 
-# Core Intent Detection (Full Prompt Restored)
+CATEGORY_KEYWORDS = {
+    "Skills": ["kỹ năng", "mẹo", "cách", "chia sẻ"],
+    "Guidelines": ["hướng dẫn", "quy tắc", "luật"],
+    "Lessons": ["bài học", "kinh nghiệm", "học được"],
+    "Products and Services": ["sản phẩm", "có", "chứa", "glucosamine", "iphone", "galaxy", "tesla", "coffee"],
+    "Customer Personas and Behavior": ["khách hàng", "hành vi", "nhu cầu"],
+    "Objections and Responses": ["phản đối", "trả lời", "giải thích"],
+    "Sales Scenarios and Context": ["tình huống", "bán hàng", "kịch bản"],
+    "Feedback and Outcomes": ["phản hồi", "kết quả", "đánh giá"],
+    "Ethical and Compliance Guidelines": ["đạo đức", "tuân thủ", "quy định"],
+    "Industry and Market Trends": ["ngành", "xu hướng", "thị trường"],
+    "Emotional and Psychological Insights": ["tâm trạng", "cảm xúc", "tăng chiều cao"],
+    "Personalization and Customer History": ["cá nhân hóa", "lịch sử", "khách cũ"],
+    "Metrics and Performance Tracking": ["số liệu", "hiệu suất", "theo dõi"],
+    "Team and Collaboration Dynamics": ["đội nhóm", "hợp tác", "không khí"],
+    "Creative Workarounds": ["sáng tạo", "giải pháp", "linh hoạt"],
+    "Tools and Tech": ["crm", "công cụ", "đồng bộ"],
+    "External Influences": ["thời tiết", "môi trường", "bên ngoài"],
+    "Miscellaneous": ["khác", "tùy", "chưa rõ"]
+}
+
+PRESET_KNOWLEDGE = {
+    "Skills": {"text": "Đặt câu hỏi mở để hiểu khách hàng", "confidence": 0.9},
+    "External Influences": {"text": "Thời tiết ảnh hưởng tâm trạng", "confidence": 0.85},
+}
+
+# Helper to strip markdown
+def clean_llm_response(response):
+    response = response.strip()
+    if response.startswith("```json") and response.endswith("```"):
+        return response[7:-3].strip()
+    elif response.startswith("```") and response.endswith("```"):
+        return response[3:-3].strip()
+    return response
+
+# Detect Intent
 def detect_intent(state):
     messages = state["messages"][-3:] if state["messages"] else []
     convo_history = " | ".join([m.content for m in messages]) if messages else ""
     last_ami_msg = state.get("prompt_str", "")
     latest_msg = messages[-1].content if messages else ""
     
-    prompt = f"""You’re Ami, a razor-sharp AI nailing human intent from text alone. Given:
-    - Latest message: '{latest_msg}'
-    - Last 3 user messages (or less): '{convo_history}'
-    - Last Ami message: '{last_ami_msg}'
-    Pick ONE intent from: {', '.join(f'"{i}"' for i in INTENTS)}. Return it in quotes (e.g., '"teaching"').
-
-    Read the room:
-    - "greeting": Opens the chat—warm, welcoming, fresh-start energy (e.g., "Hi!", "Yo, what’s up?").
-    - "question": Seeks info—explicit ask, question mark, or clear curiosity (e.g., "How’s it work?", "What’s this?").
-    - "casual": Hangs loose—short, neutral, no strong push or pull (e.g., "Cool", "Yeah, vibing").
-    - "teaching": Drops knowledge—states facts, guides, explains, no imperative verb (e.g., "Trials flip skeptics", "Habits affect health").
-    - "request": Demands action—direct, imperative verb, do-something-now vibe (e.g., "Call them", "Run the ad").
-    - "exit": Shuts it down—farewell, end-of-line tone (e.g., "See ya", "Out").
-    - "humor": Plays around—joking, silly, light-hearted flex (e.g., "Lol, nice one").
-    - "challenge": Throws a gauntlet—tests or dares, competitive edge (e.g., "Bet you can’t", "Prove it").
-    - "confusion": Signals lost vibes—unclear, garbled, "huh?" energy (e.g., "What?", "Huh??").
-
-    Rules of the game:
-    - Latest message is boss—judge its raw vibe first (e.g., imperative verb = "request", no verb + fact = "teaching").
-    - Use prior 1-2 messages and Ami’s last reply for flow—boosts context but doesn’t override latest standalone intent unless tied (e.g., question-answer).
-    - No assumptions—stick to text, no hidden vibes.
-    - Any language, typos, emojis—decode the intent, not the words.
-    - Stuck? Default "casual", log it, but fight to pick right.
-
-    Think fast, think human."""
+    prompt = f"""You’re Ami, detecting human intent. Given:
+    - Latest message (70% weight): '{latest_msg}'
+    - Last 3 messages (20% weight): '{convo_history}'
+    - Last Ami message (10% weight): '{last_ami_msg}'
+    Pick ONE intent from: {', '.join(f'"{i}"' for i in INTENTS)}. 
+    Return ONLY a raw JSON object like: {{"intent": "teaching", "confidence": 0.9}}.
+    Rules:
+    - Latest message drives it—judge its raw vibe first.
+    - Context adjusts only if tied.
+    - Confidence <0.7? Pick 'confusion' and flag for clarification.
+    - Output MUST be valid JSON, no markdown."""
     
-    
-    intent = LLM.invoke(prompt).content.strip()
-    print(f"Intent for convo '{convo_history}' with Ami context '{last_ami_msg}': {intent}")
-    return intent
-
-# Chunking Helper
-
-def chunk_input(text, product_id, max_phrases=5):
-    """Splits big inputs into chunks of max_phrases phrases."""
-    # Strip existing product_id prefix if present
-    if text.startswith(f"{product_id}:"):
-        text = text[len(f"{product_id}:"):].strip()
-    phrases = [p.strip() for p in text.split(',') if p.strip()]
-    chunks = [phrases[i:i + max_phrases] for i in range(0, len(phrases), max_phrases)]
-    return [f"{product_id}: {', '.join(chunk)}" for chunk in chunks]
-
-
-def extract_knowledge(state, product_id=None):
-    messages = state["messages"][-3:] if state["messages"] else []
-    convo_history = " | ".join([m.content for m in messages]) if messages else ""
+    response = clean_llm_response(LLM.invoke(prompt).content)
+    try:
+        result = json.loads(response)
+        intent, confidence = result["intent"], result["confidence"]
+        if confidence < 0.7:
+            state["prompt_str"] = f"Này, bạn đang muốn {INTENTS[3]} hay {INTENTS[2]} vậy?"
+            return "confusion"
+        logger.info(f"Intent for '{latest_msg}': {intent} ({confidence})")
+        return intent
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Intent parse error: {e}. Raw response: '{response}'. Falling back to 'casual'")
+        return "casual"
+def identify_topic(state, max_context=1000):
+    messages = state["messages"] if state["messages"] else []
+    context_size = min(max_context, len(messages))
+    convo_history = " | ".join([m.content for m in messages[-context_size:]]) if messages else ""
     latest_msg = messages[-1].content if messages else ""
-    intent = detect_intent(state)
-    effective_product_id = product_id or "unknown"
     
-    if len(latest_msg.split(',')) > 5:
-        chunks = chunk_input(latest_msg, effective_product_id)
-    else:
-        chunks = [f"{effective_product_id}: {latest_msg}" if not latest_msg.startswith(f"{effective_product_id}:") else latest_msg]
-    
-    all_entities = []
-    for chunk in chunks:
-        prompt = f"""You’re Ami, extracting sales knowledge from text for product '{effective_product_id}' per Ami_Blue_Print_3_0. Given:
-        - Latest message: '{chunk}'
-        - Intent: '{intent}'
-        - Last 3 messages: '{convo_history}'
-        Return JSON: {{"entities": [{{"text": "{effective_product_id} - khai thác thông tin", "categories": [{{"name": "Skills", "confidence": 0.9}}], "linked_entities": ["tên, tuổi"]}}]}}
-        - "entities": List—each with:
-          - "text": Key phrase—'{effective_product_id} - ' prefix; split ingredients (e.g., "Bột xương cá tuyết") from benefits (e.g., "tăng trưởng chiều cao")
-          - "categories": List—{{"name": category, "confidence": 0-1}} from 18: {', '.join(CATEGORIES)}
-          - "linked_entities": Related phrases—empty [] if none
-        Rules:
-        - Valid JSON—{{"entities": []}} if no sales content.
-        - Extract 2-5 phrases—always split ingredients (Products and Services) from benefits (Emotional and Psychological Insights) when tied (e.g., "Glucosamine giảm đau khớp" → "Glucosamine" and "giảm đau khớp").
-        - NO translation—keep Vietnamese.
-        - Skip fluff—e.g., "với", "giúp".
-        - Intent guides:
-          - "teaching": Ingredients (Products and Services), benefits (Emotional Psych), actions (Skills).
-          - "question": Needs—terms (Emotional Psych), context (Products and Services).
-          - "request": Actions (Skills).
-          - "casual": Broad—sales terms.
-        - Link entities: Tie ingredients to benefits and vice versa (e.g., "Bột xương cá tuyết" ↔ "tăng trưởng chiều cao") when tied in text.
-        - Confidence: 0.9+ exact, 0.7-0.8 likely, <0.7 stretch.
-        - Flexible—extract naturally, ensure product-specific clarity.
-        """
-        
-        try:
-            response = LLM.invoke(prompt).content.strip()
-            print(f"Raw LLM response: '{response}'")
-            cleaned_response = response.replace("```json", "").replace("```", "").strip()
-            knowledge = json.loads(cleaned_response)
-            if not isinstance(knowledge, dict) or "entities" not in knowledge:
-                raise ValueError("Invalid JSON structure—missing 'entities'")
-            all_entities.extend(knowledge["entities"])
-            print(f"Extracted from '{chunk}': {json.dumps(knowledge, ensure_ascii=False)}")
-        except Exception as e:
-            default = {"entities": []}
-            print(f"Extraction failed—error: {e}. Defaulting: {default}")
-            all_entities.extend(default["entities"])
-    
-    return {"entities": all_entities}
-
-def store_in_pinecone(intent, entities, convo_history, product_id):
-    vectors = []
-    timestamp = datetime.now().isoformat()
-    convo_id = str(uuid.uuid4())
-    
-    for entity in entities["entities"]:
-        text = entity["text"]
-        categories = [cat["name"] for cat in entity["categories"]]
-        confidence = max(cat["confidence"] for cat in entity["categories"])
-        vector_id = f"{intent}_{uuid.uuid4()}_{'_'.join(categories)}_{timestamp}"
-        
-        embedding = EMBEDDINGS.embed_query(text)
-        metadata = {
-            "text": text,
-            "intent": intent,
-            "categories": categories,
-            "confidence": confidence,
-            "product_id": product_id,
-            "source": "Enterprise",
-            "linked_entities": entity["linked_entities"],
-            "convo_id": convo_id,
-            "ingredient_flag": any(keyword in text.lower() for keyword in ["bột", "canxi", "collagen", "vitamin", "aquamin", "glucosamine", "msm"])
-        }
-        vectors.append((vector_id, embedding, metadata))
-    
-    if vectors:
-        index.upsert(vectors=vectors)
-        print(f"Stored {len(vectors)} vectors for '{product_id}': {[v[0] for v in vectors]}")
-
-def recall_knowledge(message, product_id=None):
-    state = {"messages": [HumanMessage(message)], "prompt_str": ""}
-    intent = detect_intent(state)
-    input_knowledge = extract_knowledge(state, product_id or "unknown")
-    
-    full_embedding = EMBEDDINGS.embed_query(message)
-    filter_query = {"product_id": product_id} if product_id else None
-    results = index.query(vector=full_embedding, top_k=20, include_metadata=True, filter=filter_query)
-    print(f"Raw Pinecone hits: {json.dumps([r.metadata for r in results['matches']], ensure_ascii=False)}")
-    
-    matches = []
-    input_cats = set(cat["name"] for item in input_knowledge["entities"] for cat in item["categories"])
-    input_entities = set(item["text"] for item in input_knowledge["entities"]) | set(
-        ent for item in input_knowledge["entities"] for ent in item["linked_entities"]
+    prompt = (
+        f"You’re Ami, identifying topics per Ami_Blue_Print_3_3 Mark 3. Given:\n"
+        f"- Latest message: '{latest_msg}'\n"
+        f"- Context (last {context_size} messages): '{convo_history}'\n"
+        f"Pick 1-3 topics from: {', '.join(CATEGORIES)}. Return raw JSON as a LIST like:\n"
+        f'[{{"name": "Products and Services", "confidence": 0.9}}]\n'
+        f"Rules:\n"
+        f"- Latest message is priority—judge its vibe first.\n"
+        f"- Context adds flow—check continuity.\n"
+        f"- Use NER, keywords from {json.dumps(CATEGORY_KEYWORDS, ensure_ascii=False)}, and vibe.\n"
+        f"- Confidence: 0.9+ exact match, 0.7-0.8 likely, <0.7 stretch.\n"
+        f"- Max 3 topics, primary first (highest confidence).\n"
+        f"- Ambiguous (<70%)? Flag for clarification, best guess now.\n"
+        f"- Output MUST be a valid JSON LIST, e.g., '[{{}}]', no extra brackets or malformed syntax.\n"
+        f"- Example: 'HITO là thuốc bổ sung canxi' → '[{{'name': 'Products and Services', 'confidence': 0.9}}]'.\n"
+        f"- NO markdown, just raw JSON."
     )
     
-    for result in results["matches"]:
-        match_cats = set(result.metadata["categories"])
-        match_entities = set(result.metadata["linked_entities"])
-        cat_overlap = len(match_cats.intersection(input_cats))
-        ent_overlap = len(match_entities.intersection(input_entities))
-        source_boost = 0.1 if result.metadata.get("source") == "Enterprise" else 0
-        ingred_boost = 0.1 if result.metadata.get("ingredient_flag", False) and "có gì" in message.lower() else 0
-        score = result.score + (cat_overlap * 0.1) + (ent_overlap * 0.05) + source_boost + ingred_boost
-        matches.append({
-            "text": result.metadata["text"],
-            "confidence": result.metadata["confidence"],
-            "categories": result.metadata["categories"],
-            "linked_entities": result.metadata["linked_entities"],
-            "intent": result.metadata["intent"],
-            "score": score,
-            "source": result.metadata.get("source", "Enterprise")
-        })
+    response = clean_llm_response(LLM.invoke(prompt).content)
+    logger.info(f"Raw LLM topic response: '{response}'")  # Debug raw output
+    try:
+        topics = json.loads(response)
+        if not isinstance(topics, list) or not all(isinstance(t, dict) and "name" in t and "confidence" in t for t in topics):
+            raise ValueError("Invalid topic format—must be a list of dicts")
+        topics = [t for t in topics if t["name"] in CATEGORIES][:3]
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Topic parse error: {e}. Raw response: '{response}'. Falling back to Miscellaneous")
+        return [{"name": "Miscellaneous", "confidence": 0.5}]
+
+    if not topics or max(t["confidence"] for t in topics) < 0.7:
+        state["prompt_str"] = f"Này, bạn đang nói về {CATEGORIES[3]} hay {CATEGORIES[10]} vậy?"
+        return [{"name": "Miscellaneous", "confidence": 0.5}]
+
+    topics = sorted(topics, key=lambda x: x["confidence"], reverse=True)
+    logger.info(f"Parsed topics: {json.dumps(topics, ensure_ascii=False)}")
+    return topics
+
+# Extract Knowledge (Training Path)
+def extract_knowledge(state, user_id=None):
+    intent = detect_intent(state)
+    topics = identify_topic(state)
+    messages = state["messages"][-5:] if state["messages"] else []
+    latest_msg = messages[-1].content if messages else ""
+    active_terms = state.get("active_terms", {})
+    convo_history = " ".join(m.content for m in messages)
+    convo_id = state.get("convo_id", str(uuid.uuid4()))
     
-    matches = sorted(matches, key=lambda x: x["score"] * x["confidence"], reverse=True)[:5]
-    if not matches:
-        return {"response": "Ami đây! Chưa đủ info, bro thêm tí nha!", "mode": "Co-Pilot", "source": "Preset"}
+    prompt = f"""You’re Ami, extracting for AI Brain Mark 3. Given:
+    - Latest: '{latest_msg}'
+    - Convo History (last 5): '{convo_history}'
+    - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
+    Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
+    Rules:
+    - "terms": Extract ALL full noun phrases or product names (e.g., "Bột xương cá tuyết", "HITO") via NER or context—grab every distinct entity you spot.
+    - "knowledge": Chunk the input into full, meaningful phrases tied to each term based on context—don’t force a pattern, just split naturally. "Nó"/"it" refers to the last active term.
+    - "piece": Single object with intent, primary topic, raw_input.
+    - NO translation—keep input language EXACTLY as provided (e.g., Vietnamese stays Vietnamese).
+    - Example: "HITO giúp xương chắc khỏe" → {{"terms": {{"HITO": {{"knowledge": ["giúp xương chắc khỏe"]}}}}, "piece": ...}}
+    - Output MUST be valid JSON, no markdown."""
     
-    matches_str = json.dumps(matches, ensure_ascii=False, indent=2)
-    prompt = f"""You’re Ami, reasoning the best response per Ami_Blue_Print_3_0 Selling Path. Given:
+    response = clean_llm_response(LLM.invoke(prompt).content)
+    logger.info(f"Raw LLM response from extract_knowledge: '{response}'")
+    try:
+        result = json.loads(response)
+        terms = result["terms"]
+        piece = result["piece"]
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Extract parse error: {e}. Raw: '{response}'. Falling back")
+        terms = {latest_msg.split()[0]: {"knowledge": [latest_msg]}}  # Fallback: first word as term
+        piece = {"intent": intent, "topic": topics[0], "raw_input": latest_msg}
+    
+    piece["piece_id"] = f"piece_{uuid.uuid4()}"
+    piece["meaningfulness_score"] = 0.9
+    piece["needs_clarification"] = False
+    piece["term_refs"] = []
+    
+    for term_name, data in terms.items():
+        term_id = active_terms.get(term_name, f"term_{uuid.uuid4()}")
+        active_terms[term_name] = term_id
+        piece["term_refs"].append(term_id)  # Link all terms in piece
+        state.setdefault("pending_knowledge", {}).setdefault(term_id, []).extend(
+            [{"text": chunk, "confidence": 0.9, "source_piece_id": piece["piece_id"], "created_at": datetime.now().isoformat()} 
+             for chunk in data["knowledge"]]
+        )
+    
+    if not piece["term_refs"] and "nó" in latest_msg.lower() and active_terms:
+        last_term_id = list(active_terms.values())[-1]
+        piece["term_refs"].append(last_term_id)
+    
+    pending_node = state.get("pending_node", {"pieces": [], "primary_topic": topics[0]["name"]})
+    pending_node["pieces"].append(piece)
+    state["pending_node"] = pending_node
+    state["active_terms"] = active_terms
+    
+    unclear_pieces = [p["raw_input"] for p in pending_node["pieces"] if p["meaningfulness_score"] < 0.8]
+    if unclear_pieces:
+        state["prompt_str"] = f"Ami thấy mấy ý—{', '.join(f'‘{t}’' for t in unclear_pieces)}—nói rõ cái nào đi bro!"
+        for p in pending_node["pieces"]:
+            if p["meaningfulness_score"] < 0.8:
+                p["needs_clarification"] = True
+    
+    logger.info(f"Extracted pieces: {json.dumps(pending_node['pieces'], ensure_ascii=False)}")
+    return pending_node
+
+
+def confirm_knowledge(state, user_id, confirm_callback=None):
+    node = state.get("pending_node", {"pieces": [], "primary_topic": "Miscellaneous"})
+    if not node["pieces"]:
+        return None
+    
+    confirm_callback = confirm_callback or (lambda x: input(x + " (yes/no): ").lower())
+    for piece in node["pieces"]:
+        if piece["needs_clarification"]:
+            state["prompt_str"] = f"Ami hiểu là {piece['raw_input']}—đúng không?"
+            response = confirm_callback(state["prompt_str"])
+            state["last_response"] = response
+            if response == "yes":
+                piece["needs_clarification"] = False
+                piece["meaningfulness_score"] = max(piece["meaningfulness_score"], 0.8)
+            elif response == "no":
+                piece["meaningfulness_score"] = 0.5
+    
+    state["prompt_str"] = "Ami lưu cả mớ này nhé?"
+    response = confirm_callback(state["prompt_str"])
+    state["last_response"] = response
+    if response == "yes":
+        node["node_id"] = f"node_{uuid.uuid4()}"
+        node["convo_id"] = state.get("convo_id", str(uuid.uuid4()))
+        node["confidence"] = sum(p["meaningfulness_score"] for p in node["pieces"]) / len(node["pieces"])
+        node["created_at"] = datetime.now().isoformat()
+        node["last_accessed"] = node["created_at"]
+        node["access_count"] = 0
+        node["confirmed_by"] = user_id or "user123"
+        node["primary_topic"] = node["pieces"][0]["topic"]["name"]  # Set from first piece’s topic
+        
+        pending_knowledge = state.get("pending_knowledge", {})
+        for term_id, knowledge in pending_knowledge.items():
+            upsert_term_node(term_id, state["convo_id"], knowledge)
+            time.sleep(5)
+        
+        store_convo_node(node, user_id)
+        time.sleep(5)
+        state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
+        state.pop("pending_knowledge", None)
+    elif response == "no":
+        state["prompt_str"] = f"OK, Ami bỏ qua. Còn gì thêm cho {node['primary_topic']} không?"
+        state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
+    return node
+
+# Upsert Term Node (Enterprise Brain)
+def upsert_term_node(term_id, convo_id, new_knowledge):
+    term_name = term_id.split("term_")[1].split(f"_{convo_id}")[0]
+    vector_id = term_id
+    existing_node = index.fetch([vector_id], namespace="term_memory").get("vectors", {}).get(vector_id, None)
+    
+    if existing_node:
+        metadata = existing_node["metadata"]
+        knowledge = json.loads(metadata["knowledge"]) + new_knowledge
+        embedding_text = f"{term_name} {' '.join(k['text'] for k in knowledge)}"
+        vibe_score = metadata["vibe_score"]
+    else:
+        knowledge = new_knowledge
+        embedding_text = f"{term_name} {' '.join(k['text'] for k in knowledge)}"
+        vibe_score = 1.0  # Blueprint: Start at 1.0
+    
+    metadata = {
+        "term_id": term_id,
+        "term_name": term_name,
+        "knowledge": json.dumps(knowledge, ensure_ascii=False),
+        "vibe_score": vibe_score,
+        "last_updated": datetime.now().isoformat(),
+        "access_count": existing_node["metadata"]["access_count"] if existing_node else 0,
+        "created_at": existing_node["metadata"]["created_at"] if existing_node else datetime.now().isoformat()
+    }
+    embedding = EMBEDDINGS.embed_query(embedding_text)
+    try:
+        index.upsert([(vector_id, embedding, metadata)], namespace="term_memory")
+        logger.info(f"Upserted term node: {vector_id}")
+    except Exception as e:
+        logger.error(f"Term upsert failed: {e}")
+
+# Store Convo Node (Enterprise Brain)
+def store_convo_node(node, user_id):
+    vector_id = f"{node['node_id']}_{node['primary_topic']}_{node['created_at']}"
+    embedding_text = " ".join(p["raw_input"] for p in node["pieces"])
+    embedding = EMBEDDINGS.embed_query(embedding_text)
+    metadata = {
+        "node_id": node["node_id"],
+        "convo_id": node["convo_id"],
+        "pieces": json.dumps(node["pieces"], ensure_ascii=False),
+        "primary_topic": node["primary_topic"],
+        "confidence": node["confidence"],
+        "confirmed_by": node["confirmed_by"],
+        "last_accessed": node["last_accessed"],
+        "access_count": node["access_count"],
+        "created_at": node["created_at"]
+    }
+    try:
+        index.upsert([(vector_id, embedding, metadata)], namespace="convo_nodes")
+        logger.info(f"Stored convo node: {vector_id}")
+    except Exception as e:
+        logger.error(f"Convo upsert failed: {e}")
+
+# Recall Knowledge (Selling Path)
+def recall_knowledge(message, user_id=None):
+    state = {"messages": [HumanMessage(message)], "prompt_str": ""}
+    intent = detect_intent(state)
+    
+    message_lower = message.lower()
+    for category, preset in PRESET_KNOWLEDGE.items():
+        if category in message or any(kw in message_lower for kw in CATEGORY_KEYWORDS.get(category, [])):
+            return {"response": f"Ami đây! {preset['text']}—thử không bro?", "mode": "Co-Pilot", "source": "Preset"}
+
+    query_embedding = EMBEDDINGS.embed_query(message)
+    convo_results = index.query(vector=query_embedding, top_k=5, include_metadata=True, namespace="convo_nodes")
+    logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")  # Debug Pinecone hits
+    
+    now = datetime.now()
+    nodes = []
+    for r in convo_results["matches"]:
+        meta = r.metadata
+        meta["pieces"] = json.loads(meta["pieces"])
+        meta["last_accessed"] = meta.get("last_accessed", now.isoformat())
+        meta["access_count"] = meta.get("access_count", 0)
+        days_since = (now - datetime.fromisoformat(meta["last_accessed"])).days
+        relevance = r.score
+        recency = max(0, 1 - 0.05 * days_since)
+        usage = min(1, meta["access_count"] / 10)
+        vibe_score = (0.3 * relevance) + (0.5 * recency) + (0.2 * usage)
+        nodes.append({"meta": meta, "vibe_score": vibe_score})
+    
+    # Loosen filter—any nodes with pieces, not just term_refs
+    filtered_nodes = [n for n in nodes if n["meta"]["pieces"]]
+    if not filtered_nodes and nodes:
+        filtered_nodes = nodes[:2]  # Fallback to top vibe_score
+    
+    if not filtered_nodes:
+        return {"response": f"Ami đây! Chưa đủ info, bro thêm tí nha!", "mode": "Co-Pilot", "source": "Enterprise"}
+    
+    filtered_nodes.sort(key=lambda x: (datetime.fromisoformat(x["meta"]["last_accessed"]), x["vibe_score"]), reverse=True)
+    top_nodes = filtered_nodes[:2]
+    term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
+    
+    # Update Term Vibe Scores
+    term_nodes = index.fetch(list(term_ids), namespace="term_memory").get("vectors", {})
+    for term_id in term_ids:
+        if term_id in term_nodes:
+            meta = term_nodes[term_id]["metadata"]
+            meta["vibe_score"] += 0.1  # Blueprint: +0.1 per recall
+            meta["access_count"] += 1
+            meta["last_updated"] = now.isoformat()
+            embedding_text = f"{meta['term_name']} {' '.join(k['text'] for k in json.loads(meta['knowledge']))}"
+            embedding = EMBEDDINGS.embed_query(embedding_text)
+            index.upsert([(term_id, embedding, meta)], namespace="term_memory")
+            time.sleep(2)  # Delay for Pinecone indexing
+    
+    # Pitch Response
+    prompt = f"""You’re Ami, pitching for AI Brain Mark 3. Given:
     - Input: '{message}'
     - Intent: '{intent}'
-    - Relevant knowledge: {matches_str}
-    Return JSON: {{"response": "Ami gợi ý...", "mode": "Co-Pilot", "source": "Enterprise"}}
-    - "response": String—charming (e.g., "nha bro"); name product from matches (e.g., 'HITO_1'), suggest if 'unknown'; short, actionable.
-    - "mode": "Autopilot" ("request"), "Co-Pilot" (others).
-    - "source": "Enterprise" or "Preset" from top match.
+    - Convo Nodes: {json.dumps([n['meta'] for n in top_nodes], ensure_ascii=False)}
+    - Term Nodes: {json.dumps({tid: tn['metadata'] for tid, tn in term_nodes.items()}, ensure_ascii=False)}
+    Return raw JSON: {{"response": "<response>", "mode": "<mode>", "source": "Enterprise"}}
     Rules:
-    - Use matches—text, categories, linked_entities, intent.
-    - Stick to matches—no extras.
-    - Tone—casual, sales-y.
-    - Link entities if fit—e.g., "với Glucosamine".
-    - Intent—"question" → suggest, "request" → direct.
-    - No fluff—punchy, predictive.
-    """
+    - "response": Vietnamese, casual, sales-y—use convo + term data.
+    - "mode": "Autopilot" if "request", else "Co-Pilot".
+    - "source": "Enterprise".
+    - Short, actionable, charming.
+    - Predict objections if intent fits.
+    - Output MUST be valid JSON, no markdown."""
     
+    response = clean_llm_response(LLM.invoke(prompt).content)
+    try:
+        result = json.loads(response)
+        logger.info(f"Recalled: {json.dumps(result, ensure_ascii=False)}")
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Recall parse error: {e}. Raw: '{response}'. Falling back")
+        return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
 
-    response = LLM.invoke(prompt).content.strip()
-    cleaned_response = response.replace("```json", "").replace("```", "").strip()
-    result = json.loads(cleaned_response)
-    print(f"LLM reasoned: {json.dumps(result, ensure_ascii=False)}")
-    return result
-
-def update_product_memory(product_id, new_input):
-    index.delete(filter={"product_id": product_id})
-    print(f"Deleted old vectors for '{product_id}'")
-    
-    state = {"messages": [HumanMessage(new_input)], "prompt_str": ""}
-    intent = detect_intent(state)
-    knowledge = extract_knowledge(state, product_id)
-    store_in_pinecone(intent, knowledge, new_input, product_id)
-
+# Test Suite
 def test_ami():
-    print("Testing Ami—scaled up!")
+    logger.info("Testing Ami—AI Brain Mark 3 locked and loaded!")
+    state = {"messages": [], "prompt_str": "", "convo_id": str(uuid.uuid4()), "active_terms": {}, "pending_knowledge": {}}
     
-    hito1_input = "HITO_1: Bột xương cá tuyết giúp tăng trưởng chiều cao, Aquamin F làm xương chắc khỏe, Collagen Type II hỗ trợ khớp"
-    hito2_input = "HITO_2: Glucosamine giảm đau khớp, MSM tăng linh hoạt, Vitamin D hỗ trợ xương"
-    state1 = {"messages": [HumanMessage(hito1_input)], "prompt_str": ""}
-    state2 = {"messages": [HumanMessage(hito2_input)], "prompt_str": ""}
-    intent1 = detect_intent(state1)
-    #intent2 = detect_intent(state2)
-    #knowledge1 = extract_knowledge(state1, "HITO_1")
-    #knowledge2 = extract_knowledge(state2, "HITO_2")
-    #store_in_pinecone(intent1, knowledge1, hito1_input, "HITO_1")
-    #store_in_pinecone(intent2, knowledge2, hito2_input, "HITO_2")
+    # Test Training Path
+    state["messages"].append(HumanMessage("Apple iPhone helps with tech vibes"))
+    extract_knowledge(state)
+    confirm_knowledge(state, "user123", lambda x: "yes")  # Simulate confirmation
     
-    result1 = recall_knowledge("Con gái tôi 13 tuổi muốn cao lên")
-    #result2 = recall_knowledge("Sản phẩm tốt cho khớp không?", "HITO_2")
-    print(f"Test 1 result: {json.dumps(result1, ensure_ascii=False)}")
-    #print(f"HITO_2 result: {json.dumps(result2, ensure_ascii=False)}")
+    state["messages"].append(HumanMessage("Nó có chip A17 và camera xịn"))
+    extract_knowledge(state)
+    confirm_knowledge(state, "user123", lambda x: "yes")
     
-    #update_input = "HITO_1 giờ có thêm Vitamin K2 tăng mật độ xương"
-    #update_product_memory("HITO_1", update_input)
-    #result3 = recall_knowledge("HITO_1 có gì mới?", "HITO_1")
-    #print(f"HITO_1 updated result: {json.dumps(result3, ensure_ascii=False)}")
+    # Test Selling Path
+    result = recall_knowledge("Apple iPhone có gì hay?", "user123")
+    logger.info(f"Recall result: {json.dumps(result, ensure_ascii=False)}")
+    
+    # Test Preset Fallback
+    result = recall_knowledge("Thời tiết hôm nay thế nào?", "user123")
+    logger.info(f"Preset recall: {json.dumps(result, ensure_ascii=False)}")
 
 if __name__ == "__main__":
     test_ami()

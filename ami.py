@@ -1,5 +1,6 @@
 # ami.py
-# Purpose: State, graph, and test harness for intent stress testing
+# Purpose: State, graph, and test harness for intent stress testing with Ami Blue Print 3.3 Mark 3
+# Date: March 15, 2025
 
 import json
 import time
@@ -10,19 +11,30 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 from ami_core import AmiCore
-from utilities import LLM
 
-# State
+# State - Aligned with AmiCore and utilities.py
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     prompt_str: str
+    convo_id: str
+    active_terms: dict
+    pending_node: dict
+    pending_knowledge: dict
     brain: list
     sales_stage: str
+    last_response: str  # For confirmation feedback
 
 # Graph
 ami_core = AmiCore()
 graph_builder = StateGraph(State)
-graph_builder.add_node("ami", lambda state: ami_core.do(state, not state.get("messages", [])))
+
+# Node: AmiCore.do with confirmation callback
+def ami_node(state):
+    # Pass a callback for confirmation—defaults to "yes" for testing
+    confirm_callback = lambda x: "yes" if "test" in state.get("convo_id", "") else None
+    return ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback)
+
+graph_builder.add_node("ami", ami_node)
 graph_builder.add_edge(START, "ami")
 graph_builder.add_edge("ami", END)
 checkpointer = MemorySaver()
@@ -34,8 +46,13 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
     default_state = {
         "messages": [],
         "prompt_str": "",
+        "convo_id": thread_id,  # Tie thread_id to convo_id for persistence
+        "active_terms": {},
+        "pending_node": {"pieces": [], "primary_topic": "Miscellaneous"},
+        "pending_knowledge": {},
         "brain": ami_core.brain,
-        "sales_stage": ami_core.sales_stages[0]
+        "sales_stage": ami_core.sales_stages[0],
+        "last_response": ""
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
     
@@ -44,14 +61,15 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
     
     # Debug state before processing
-    print(f"Debug: Starting convo_stream - Input: '{user_input}', Stage: {state['sales_stage']}")
+    print(f"Debug: Starting convo_stream - Input: '{user_input}', Stage: {state['sales_stage']}, Convo ID: {state['convo_id']}")
     
-    # Pass to AmiCore.do for processing
+    # Pass to AmiCore.do for processing via graph
     state = convo_graph.invoke(state, {"configurable": {"thread_id": thread_id}})
     
     # Debug state after processing
-    print(f"Debug: State after invoke - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}")
+    print(f"Debug: State after invoke - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
 
+    # Stream response
     response_lines = state["prompt_str"].split('\n')
     for line in response_lines:
         if line.strip():
@@ -60,20 +78,25 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
     # Persist updated state
     convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
 
-# Test
+# Test Harness
 if __name__ == "__main__":
     thread_id = "stress_test_intent_1"
     print("\nAmi starts:")
     for chunk in convo_stream(thread_id=thread_id):
         print(chunk)
+    
     test_inputs = [
-        "Hello",
-        "Hey, just chilling today",  # Casual
-        "HITO is a calcium supplement",  # Teaching
+        "Hello",                         # Greeting
+        "Hey, vừa chill vừa code",       # Casual
+        "Bột xương cá tuyết là thành phần của HITO, có tác dụng tăng cường khả năng hấp thụ xương",   # Teaching
+        "HITO có gì hay?",              # Question
+        "Gửi tôi HITO nhé"              # Request (Autopilot)
     ]
+    
     for input in test_inputs:
         print(f"\nYou: {input}")
         for chunk in convo_stream(input, thread_id=thread_id):
             print(chunk)
+    
     current_state = convo_graph.get_state({"configurable": {"thread_id": thread_id}})
     print(f"\nFinal state: {json.dumps(current_state, default=str)}")
