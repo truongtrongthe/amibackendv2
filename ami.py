@@ -79,21 +79,34 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
     # Persist updated state
     convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
 
-# Test Harness
-if __name__ == "__main__":
-    thread_id = "stress_test_intent_1"
-    print("\nAmi starts:")
-    for chunk in convo_stream(thread_id=thread_id):
-        print(chunk)
+def pilot_stream(user_input=None, thread_id=f"pilot_thread_{int(time.time())}"):
+    checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
+    default_state = {
+        "messages": [],
+        "prompt_str": "",
+        "convo_id": thread_id,
+        "active_terms": {},
+        "pending_node": {"pieces": [], "primary_topic": "Miscellaneous"},
+        "pending_knowledge": {},
+        "brain": ami_core.brain,
+        "sales_stage": ami_core.sales_stages[0],
+        "last_response": ""
+    }
+    state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
     
-    test_inputs = [
-        "Hãy bán HITO cho anh Brian 41 tuổi"              # Request (Autopilot)
-    ]
+    if user_input:
+        state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
     
-    for input in test_inputs:
-        print(f"\nYou: {input}")
-        for chunk in convo_stream(input, thread_id=thread_id):
-            print(chunk)
+    print(f"Debug: Starting pilot_stream - Input: '{user_input}', Stage: {state['sales_stage']}, Convo ID: {state['convo_id']}")
     
-    current_state = convo_graph.get_state({"configurable": {"thread_id": thread_id}})
-    print(f"\nFinal state: {json.dumps(current_state, default=str)}")
+    # No teaching logic—just pass to do() without confirm_callback
+    state = ami_core.do(state, not state.get("messages", []), confirm_callback=None)
+    
+    print(f"Debug: State after do - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
+    
+    response_lines = state["prompt_str"].split('\n')
+    for line in response_lines:
+        if line.strip():
+            yield f"data: {json.dumps({'message': line.strip()})}\n\n"
+    
+    convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
