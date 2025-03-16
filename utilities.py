@@ -352,6 +352,7 @@ def store_convo_node(node, user_id):
         logger.info(f"Stored convo node: {vector_id}")
     except Exception as e:
         logger.error(f"Convo upsert failed: {e}")
+        return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
 
 def recall_knowledge(message, user_id=None):
     state = {"messages": [HumanMessage(message)], "prompt_str": ""}
@@ -366,7 +367,7 @@ def recall_knowledge(message, user_id=None):
 
     # Enterprise Brain recall
     query_embedding = EMBEDDINGS.embed_query(message)
-    convo_results = index.query(vector=query_embedding, top_k=10, include_metadata=True, namespace="convo_nodes")  # Upped to 10
+    convo_results = index.query(vector=query_embedding, top_k=10, include_metadata=True, namespace="convo_nodes")
     logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")
     
     now = datetime.now()
@@ -380,7 +381,7 @@ def recall_knowledge(message, user_id=None):
         relevance = r.score
         recency = max(0, 1 - 0.05 * days_since)
         usage = min(1, meta["access_count"] / 10)
-        vibe_score = (0.5 * relevance) + (0.3 * recency) + (0.2 * usage)  # Upped relevance weight
+        vibe_score = (0.5 * relevance) + (0.3 * recency) + (0.2 * usage)
         nodes.append({"meta": meta, "vibe_score": vibe_score})
     
     filtered_nodes = [n for n in nodes if n["meta"]["pieces"]] or nodes[:2]
@@ -388,11 +389,12 @@ def recall_knowledge(message, user_id=None):
         return {"response": f"Ami đây! Chưa đủ info, bro thêm tí nha!", "mode": "Co-Pilot", "source": "Enterprise"}
     
     filtered_nodes.sort(key=lambda x: (x["vibe_score"], datetime.fromisoformat(x["meta"]["last_accessed"])), reverse=True)
-    top_nodes = filtered_nodes[:3]  # Upped to 3 for broader context
+    top_nodes = filtered_nodes[:3]
     term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
     
     # Update Term Vibe Scores
-    term_nodes = index.fetch(list(term_ids), namespace="term_memory").get("vectors", {})
+    fetch_response = index.fetch(list(term_ids), namespace="term_memory")
+    term_nodes = getattr(fetch_response, "vectors", {})  # Modern Pinecone API: FetchResponse.vectors
     for term_id in term_ids:
         if term_id in term_nodes:
             meta = term_nodes[term_id]["metadata"]
