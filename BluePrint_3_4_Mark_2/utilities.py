@@ -182,18 +182,19 @@ def extract_knowledge(state, user_id=None):
     convo_history = " ".join(m.content for m in messages)
     convo_id = state.get("convo_id", str(uuid.uuid4()))
     
-    
     prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
     - Latest: '{latest_msg}'
     - Convo History (last 5): '{convo_history}'
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
     Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
     Rules:
-    - "terms": Extract ALL full noun phrases, roles, or titles (e.g., "HITO Cốm", "bác sĩ dinh dưỡng") via NER or context. Prioritize specific entities over generics.
-    - "knowledge": Tie chunks to terms—e.g., "giới thiệu mình là bác sĩ dinh dưỡng" for "bác sĩ dinh dưỡng".
-    - "aliases": Leave empty unless variants detected.
-    - NO translation—keep it exact.
-    - Output MUST be valid JSON."""
+    - "terms": Extract ALL full noun phrases or product names (e.g., "HITO Cốm", "iPhone") via NER or context. Prioritize product names (e.g., "HITO Cốm") over generics—check convo history for recent product mentions and link if relevant (e.g., "nó" or implied context). Only use generics if explicitly standalone.
+    - "knowledge": Chunk input into meaningful phrases tied to each term—split naturally. "Nó"/"it" refers to highest vibe_score term.
+    - "aliases": List variants (e.g., "HITO Com" for "HITO Cốm") if detected via context or fuzzy match (>80% similarity).
+    - "piece": Single object with intent, primary topic, raw_input.
+    - NO translation—keep input language EXACTLY as provided.
+    - Output MUST be valid JSON, no extra brackets, trailing chars, or malformed syntax—double-check closing braces."""
+    
     # Debug: Disable streaming, add timeout
     LLM_NO_STREAM = ChatOpenAI(model="gpt-4o", streaming=False)
     try:

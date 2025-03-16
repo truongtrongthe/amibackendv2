@@ -80,30 +80,17 @@ class AmiCore:
         state = {**default_state, **state}
 
         if intent == "teaching":
-            # Step 1: Extract knowledge from input
             knowledge = extract_knowledge(state, self.user_id)
-            
-            # Step 2: Confirm it
             confirmed_node = self.confirm_knowledge(state, self.user_id, confirm_callback=confirm_callback)
-            
             if confirmed_node and state["last_response"] == "yes":
-                # Step 3: Flex with LLM flair
                 pieces = confirmed_node["pieces"]
-                terms = state.get("pending_knowledge", {})
-                prompt = f"""You’re Ami, flexing for AI Brain Mark 3.4. Given:
-                - Input: '{latest_msg}'
-                - Extracted Terms: {json.dumps(terms, ensure_ascii=False)}
-                - Extracted Piece: {json.dumps(pieces[0], ensure_ascii=False)}
-                Return an energetic, excited, beautiful response in Vietnamese—blend the input and extracted terms (if any) 
-                into a polished, vibey flex that shows off your new understanding. Make it flow naturally, even if the input’s short, 
-                and nudge for more with a hyped tone. 
-                Example: Input 'HITO Cốm tốt lắm' → 'Woa, anh ơi, HITO Cốm mà tốt thế này thì đỉnh khỏi bàn! Ami thấy nó như bảo bối cho sức khỏe, anh còn chiêu gì hay nữa không để em học với nào!'
-                Output MUST be a raw string, no quotes or markdown."""
-                response = LLM.invoke(prompt).content + " - Đã lưu, Ami biết thêm rồi nha!"
+                if pieces:
+                    text = pieces[0]["raw_input"]
+                    response = f"{text} -Ami nắm được rồi! Còn gì hay nữa không?"
+                else:
+                    response = "Ami nắm rồi, bro! Còn gì hay nữa không?"
             elif state["last_response"] == "no":
-                response = state["prompt_str"]  # e.g., "Ami chưa rõ lắm—nói lại đi bro!"
-            else:
-                response = "Ami đang xử lý, đợi tí nha anh!"  # Fallback for no confirmation
+                response = state["prompt_str"]
 
         elif intent in ["question", "request"]:
             recall = recall_knowledge(latest_msg, self.user_id)
