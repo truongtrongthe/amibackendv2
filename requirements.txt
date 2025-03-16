@@ -18,3 +18,5 @@ underthesea
 langdetect
 sentence_transformers
 fasttext
+fuzzywuzzy
+unidecode

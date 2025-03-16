@@ -1,4 +1,4 @@
-# utilities.py (Ami_Blue_Print_3_3 Mark 3 - AI Brain, locked March 15, 2025)
+# utilities.py (Ami_Blue_Print_3_4 Mark 3.4 - AI Brain, locked March 16, 2025)
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage
 import json
@@ -9,7 +9,21 @@ import uuid
 import os
 import logging
 import time
+from fuzzywuzzy import fuzz  # Added for variant merging
 
+import unidecode
+
+def sanitize_vector_id(text):
+    """Convert non-ASCII text to ASCII-safe string for Pinecone vector IDs."""
+    return unidecode.unidecode(text).replace(" ", "_").lower()
+
+def clean_llm_response(response):
+    response = response.strip()
+    if response.startswith("```json") and response.endswith("```"):
+        return response[7:-3].strip()
+    elif response.startswith("```") and response.endswith("```"):
+        return response[3:-3].strip()
+    return response
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,41 +43,53 @@ CATEGORIES = [
 INTENTS = ["greeting", "question", "casual", "teaching", "request", "exit", "humor", "challenge", "confusion"]
 
 CATEGORY_KEYWORDS = {
-    "Skills": ["kỹ năng", "mẹo", "cách", "chia sẻ"],
-    "Guidelines": ["hướng dẫn", "quy tắc", "luật"],
-    "Lessons": ["bài học", "kinh nghiệm", "học được"],
-    "Products and Services": ["sản phẩm", "có", "chứa", "glucosamine", "iphone", "galaxy", "tesla", "coffee"],
-    "Customer Personas and Behavior": ["khách hàng", "hành vi", "nhu cầu"],
-    "Objections and Responses": ["phản đối", "trả lời", "giải thích"],
-    "Sales Scenarios and Context": ["tình huống", "bán hàng", "kịch bản"],
-    "Feedback and Outcomes": ["phản hồi", "kết quả", "đánh giá"],
-    "Ethical and Compliance Guidelines": ["đạo đức", "tuân thủ", "quy định"],
-    "Industry and Market Trends": ["ngành", "xu hướng", "thị trường"],
-    "Emotional and Psychological Insights": ["tâm trạng", "cảm xúc", "tăng chiều cao"],
-    "Personalization and Customer History": ["cá nhân hóa", "lịch sử", "khách cũ"],
-    "Metrics and Performance Tracking": ["số liệu", "hiệu suất", "theo dõi"],
-    "Team and Collaboration Dynamics": ["đội nhóm", "hợp tác", "không khí"],
-    "Creative Workarounds": ["sáng tạo", "giải pháp", "linh hoạt"],
-    "Tools and Tech": ["crm", "công cụ", "đồng bộ"],
-    "External Influences": ["thời tiết", "môi trường", "bên ngoài"],
-    "Miscellaneous": ["khác", "tùy", "chưa rõ"]
+    "Skills": {"keywords": ["kỹ năng", "mẹo", "cách", "chia sẻ"], "aliases": []},
+    "Guidelines": {"keywords": ["hướng dẫn", "quy tắc", "luật"], "aliases": []},
+    "Lessons": {"keywords": ["bài học", "kinh nghiệm", "học được"], "aliases": []},
+    "Products and Services": {"keywords": ["sản phẩm", "có", "chứa", "glucosamine", "iphone", "galaxy", "tesla", "coffee"], "aliases": ["HITO Cốm", "HITO Com", "HITO"]},
+    "Customer Personas and Behavior": {"keywords": ["khách hàng", "hành vi", "nhu cầu"], "aliases": []},
+    "Objections and Responses": {"keywords": ["phản đối", "trả lời", "giải thích"], "aliases": []},
+    "Sales Scenarios and Context": {"keywords": ["tình huống", "bán hàng", "kịch bản"], "aliases": []},
+    "Feedback and Outcomes": {"keywords": ["phản hồi", "kết quả", "đánh giá"], "aliases": []},
+    "Ethical and Compliance Guidelines": {"keywords": ["đạo đức", "tuân thủ", "quy định"], "aliases": []},
+    "Industry and Market Trends": {"keywords": ["ngành", "xu hướng", "thị trường"], "aliases": []},
+    "Emotional and Psychological Insights": {"keywords": ["tâm trạng", "cảm xúc", "tăng chiều cao"], "aliases": []},
+    "Personalization and Customer History": {"keywords": ["cá nhân hóa", "lịch sử", "khách cũ"], "aliases": []},
+    "Metrics and Performance Tracking": {"keywords": ["số liệu", "hiệu suất", "theo dõi"], "aliases": []},
+    "Team and Collaboration Dynamics": {"keywords": ["đội nhóm", "hợp tác", "không khí"], "aliases": []},
+    "Creative Workarounds": {"keywords": ["sáng tạo", "giải pháp", "linh hoạt"], "aliases": []},
+    "Tools and Tech": {"keywords": ["crm", "công cụ", "đồng bộ"], "aliases": []},
+    "External Influences": {"keywords": ["thời tiết", "môi trường", "bên ngoài"], "aliases": []},
+    "Miscellaneous": {"keywords": ["khác", "tùy", "chưa rõ"], "aliases": []}
 }
 
+# Preset Knowledge - Moved to Pinecone setup function
 PRESET_KNOWLEDGE = {
     "Skills": {"text": "Đặt câu hỏi mở để hiểu khách hàng", "confidence": 0.9},
     "External Influences": {"text": "Thời tiết ảnh hưởng tâm trạng", "confidence": 0.85},
 }
 
-# Helper to strip markdown
-def clean_llm_response(response):
-    response = response.strip()
-    if response.startswith("```json") and response.endswith("```"):
-        return response[7:-3].strip()
-    elif response.startswith("```") and response.endswith("```"):
-        return response[3:-3].strip()
-    return response
+def initialize_preset_brain():
+    """Load PRESET_KNOWLEDGE into Pinecone 'Preset' namespace on startup."""
+    for category, data in PRESET_KNOWLEDGE.items():
+        vector_id = f"preset_{category.lower().replace(' ', '_')}"
+        embedding_text = data["text"]
+        embedding = EMBEDDINGS.embed_query(embedding_text)
+        metadata = {
+            "category": category,
+            "text": data["text"],
+            "confidence": data["confidence"],
+            "created_at": datetime.now().isoformat()
+        }
+        try:
+            index.upsert([(vector_id, embedding, metadata)], namespace="Preset")
+            logger.info(f"Upserted preset: {vector_id}")
+        except Exception as e:
+            logger.error(f"Preset upsert failed: {e}")
 
-# Detect Intent
+# Run on import
+initialize_preset_brain()
+
 def detect_intent(state):
     messages = state["messages"][-3:] if state["messages"] else []
     convo_history = " | ".join([m.content for m in messages]) if messages else ""
@@ -94,6 +120,7 @@ def detect_intent(state):
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Intent parse error: {e}. Raw response: '{response}'. Falling back to 'casual'")
         return "casual"
+
 def identify_topic(state, max_context=1000):
     messages = state["messages"] if state["messages"] else []
     context_size = min(max_context, len(messages))
@@ -101,7 +128,7 @@ def identify_topic(state, max_context=1000):
     latest_msg = messages[-1].content if messages else ""
     
     prompt = (
-        f"You’re Ami, identifying topics per Ami_Blue_Print_3_3 Mark 3. Given:\n"
+        f"You’re Ami, identifying topics per Ami_Blue_Print_3_4 Mark 3.4. Given:\n"
         f"- Latest message: '{latest_msg}'\n"
         f"- Context (last {context_size} messages): '{convo_history}'\n"
         f"Pick 1-3 topics from: {', '.join(CATEGORIES)}. Return raw JSON as a LIST like:\n"
@@ -109,17 +136,17 @@ def identify_topic(state, max_context=1000):
         f"Rules:\n"
         f"- Latest message is priority—judge its vibe first.\n"
         f"- Context adds flow—check continuity.\n"
-        f"- Use NER, keywords from {json.dumps(CATEGORY_KEYWORDS, ensure_ascii=False)}, and vibe.\n"
+        f"- Use NER, keywords, and aliases from {json.dumps({k: v['keywords'] + v['aliases'] for k, v in CATEGORY_KEYWORDS.items()}, ensure_ascii=False)}, and vibe.\n"
         f"- Confidence: 0.9+ exact match, 0.7-0.8 likely, <0.7 stretch.\n"
         f"- Max 3 topics, primary first (highest confidence).\n"
         f"- Ambiguous (<70%)? Flag for clarification, best guess now.\n"
         f"- Output MUST be a valid JSON LIST, e.g., '[{{}}]', no extra brackets or malformed syntax.\n"
-        f"- Example: 'HITO là thuốc bổ sung canxi' → '[{{'name': 'Products and Services', 'confidence': 0.9}}]'.\n"
+        f"- Example: 'HITO Cốm là thuốc bổ sung canxi' → '[{{'name': 'Products and Services', 'confidence': 0.9}}]'.\n"
         f"- NO markdown, just raw JSON."
     )
     
     response = clean_llm_response(LLM.invoke(prompt).content)
-    logger.info(f"Raw LLM topic response: '{response}'")  # Debug raw output
+    logger.info(f"Raw LLM topic response: '{response}'")
     try:
         topics = json.loads(response)
         if not isinstance(topics, list) or not all(isinstance(t, dict) and "name" in t and "confidence" in t for t in topics):
@@ -137,27 +164,27 @@ def identify_topic(state, max_context=1000):
     logger.info(f"Parsed topics: {json.dumps(topics, ensure_ascii=False)}")
     return topics
 
-# Extract Knowledge (Training Path)
 def extract_knowledge(state, user_id=None):
     intent = detect_intent(state)
     topics = identify_topic(state)
     messages = state["messages"][-5:] if state["messages"] else []
     latest_msg = messages[-1].content if messages else ""
-    active_terms = state.get("active_terms", {})
+    active_terms = state.get("active_terms", {})  # {term_name: {"term_id": str, "vibe_score": float}}
     convo_history = " ".join(m.content for m in messages)
     convo_id = state.get("convo_id", str(uuid.uuid4()))
     
-    prompt = f"""You’re Ami, extracting for AI Brain Mark 3. Given:
+    prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
     - Latest: '{latest_msg}'
     - Convo History (last 5): '{convo_history}'
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
-    Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
+    Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
     Rules:
-    - "terms": Extract ALL full noun phrases or product names (e.g., "Bột xương cá tuyết", "HITO") via NER or context—grab every distinct entity you spot.
-    - "knowledge": Chunk the input into full, meaningful phrases tied to each term based on context—don’t force a pattern, just split naturally. "Nó"/"it" refers to the last active term.
+    - "terms": Extract ALL full noun phrases or product names (e.g., "HITO Cốm", "iPhone") via NER or context. Prioritize product names over generics unless explicitly standalone.
+    - "knowledge": Chunk input into meaningful phrases tied to each term—split naturally. "Nó"/"it" refers to highest vibe_score term.
+    - "aliases": List variants (e.g., "HITO Com" for "HITO Cốm") if detected via context or fuzzy match (>80% similarity).
     - "piece": Single object with intent, primary topic, raw_input.
-    - NO translation—keep input language EXACTLY as provided (e.g., Vietnamese stays Vietnamese).
-    - Example: "HITO giúp xương chắc khỏe" → {{"terms": {{"HITO": {{"knowledge": ["giúp xương chắc khỏe"]}}}}, "piece": ...}}
+    - NO translation—keep input language EXACTLY as provided.
+    - Example: "HITO Cốm tăng chiều cao, HITO Com ngon" → {{"terms": {{"HITO Cốm": {{"knowledge": ["tăng chiều cao", "ngon"], "aliases": ["HITO Com"]}}}}, "piece": ...}}
     - Output MUST be valid JSON, no markdown."""
     
     response = clean_llm_response(LLM.invoke(prompt).content)
@@ -168,7 +195,7 @@ def extract_knowledge(state, user_id=None):
         piece = result["piece"]
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Extract parse error: {e}. Raw: '{response}'. Falling back")
-        terms = {latest_msg.split()[0]: {"knowledge": [latest_msg]}}  # Fallback: first word as term
+        terms = {latest_msg.split()[0]: {"knowledge": [latest_msg], "aliases": []}}
         piece = {"intent": intent, "topic": topics[0], "raw_input": latest_msg}
     
     piece["piece_id"] = f"piece_{uuid.uuid4()}"
@@ -177,17 +204,25 @@ def extract_knowledge(state, user_id=None):
     piece["term_refs"] = []
     
     for term_name, data in terms.items():
-        term_id = active_terms.get(term_name, f"term_{uuid.uuid4()}")
-        active_terms[term_name] = term_id
-        piece["term_refs"].append(term_id)  # Link all terms in piece
+        # Fuzzy match against existing terms
+        canonical_name = term_name
+        for existing_name in active_terms:
+            if fuzz.ratio(term_name.lower(), existing_name.lower()) > 80:
+                canonical_name = existing_name
+                break
+        # Get or set term_id as string
+        term_id = active_terms.get(canonical_name, {}).get("term_id", f"term_{sanitize_vector_id(canonical_name)}_{convo_id}")
+        active_terms[canonical_name] = {"term_id": term_id, "vibe_score": active_terms.get(canonical_name, {}).get("vibe_score", 1.0)}
+        piece["term_refs"].append(term_id)
+        # Use term_id string directly in pending_knowledge
         state.setdefault("pending_knowledge", {}).setdefault(term_id, []).extend(
-            [{"text": chunk, "confidence": 0.9, "source_piece_id": piece["piece_id"], "created_at": datetime.now().isoformat()} 
+            [{"text": chunk, "confidence": 0.9, "source_piece_id": piece["piece_id"], "created_at": datetime.now().isoformat(), "aliases": data["aliases"]} 
              for chunk in data["knowledge"]]
         )
     
     if not piece["term_refs"] and "nó" in latest_msg.lower() and active_terms:
-        last_term_id = list(active_terms.values())[-1]
-        piece["term_refs"].append(last_term_id)
+        top_term = max(active_terms.items(), key=lambda x: x[1]["vibe_score"])[1]["term_id"]
+        piece["term_refs"].append(top_term)
     
     pending_node = state.get("pending_node", {"pieces": [], "primary_topic": topics[0]["name"]})
     pending_node["pieces"].append(piece)
@@ -203,7 +238,6 @@ def extract_knowledge(state, user_id=None):
     
     logger.info(f"Extracted pieces: {json.dumps(pending_node['pieces'], ensure_ascii=False)}")
     return pending_node
-
 
 def confirm_knowledge(state, user_id, confirm_callback=None):
     node = state.get("pending_node", {"pieces": [], "primary_topic": "Miscellaneous"})
@@ -233,15 +267,16 @@ def confirm_knowledge(state, user_id, confirm_callback=None):
         node["last_accessed"] = node["created_at"]
         node["access_count"] = 0
         node["confirmed_by"] = user_id or "user123"
-        node["primary_topic"] = node["pieces"][0]["topic"]["name"]  # Set from first piece’s topic
+        node["primary_topic"] = node["pieces"][0]["topic"]["name"]
         
         pending_knowledge = state.get("pending_knowledge", {})
         for term_id, knowledge in pending_knowledge.items():
+            # Pass aliases along to upsert
             upsert_term_node(term_id, state["convo_id"], knowledge)
-            time.sleep(5)
+            time.sleep(2)  # Reduced delay—batch later if needed
         
         store_convo_node(node, user_id)
-        time.sleep(5)
+        time.sleep(2)  # Reduced delay
         state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
         state.pop("pending_knowledge", None)
     elif response == "no":
@@ -249,26 +284,32 @@ def confirm_knowledge(state, user_id, confirm_callback=None):
         state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
     return node
 
-# Upsert Term Node (Enterprise Brain)
 def upsert_term_node(term_id, convo_id, new_knowledge):
     term_name = term_id.split("term_")[1].split(f"_{convo_id}")[0]
-    vector_id = term_id
+    vector_id = term_id  # Already term_<name>_<convo_id>
     existing_node = index.fetch([vector_id], namespace="term_memory").get("vectors", {}).get(vector_id, None)
+    
+    aliases = []
+    if new_knowledge and "aliases" in new_knowledge[0]:
+        aliases = list(set(sum([k["aliases"] for k in new_knowledge], [])))  # Flatten and dedupe aliases
     
     if existing_node:
         metadata = existing_node["metadata"]
         knowledge = json.loads(metadata["knowledge"]) + new_knowledge
         embedding_text = f"{term_name} {' '.join(k['text'] for k in knowledge)}"
         vibe_score = metadata["vibe_score"]
+        aliases = list(set(json.loads(metadata.get("aliases", "[]")) + aliases))  # Merge with existing
     else:
         knowledge = new_knowledge
         embedding_text = f"{term_name} {' '.join(k['text'] for k in knowledge)}"
-        vibe_score = 1.0  # Blueprint: Start at 1.0
+        vibe_score = 1.0  # 3.4: Start at 1.0
+        aliases = aliases or []
     
     metadata = {
         "term_id": term_id,
         "term_name": term_name,
-        "knowledge": json.dumps(knowledge, ensure_ascii=False),
+        "knowledge": json.dumps([k for k in knowledge if "aliases" not in k], ensure_ascii=False),  # Strip aliases from knowledge
+        "aliases": json.dumps(aliases, ensure_ascii=False),
         "vibe_score": vibe_score,
         "last_updated": datetime.now().isoformat(),
         "access_count": existing_node["metadata"]["access_count"] if existing_node else 0,
@@ -281,7 +322,6 @@ def upsert_term_node(term_id, convo_id, new_knowledge):
     except Exception as e:
         logger.error(f"Term upsert failed: {e}")
 
-# Store Convo Node (Enterprise Brain)
 def store_convo_node(node, user_id):
     vector_id = f"{node['node_id']}_{node['primary_topic']}_{node['created_at']}"
     embedding_text = " ".join(p["raw_input"] for p in node["pieces"])
@@ -303,19 +343,21 @@ def store_convo_node(node, user_id):
     except Exception as e:
         logger.error(f"Convo upsert failed: {e}")
 
-# Recall Knowledge (Selling Path)
 def recall_knowledge(message, user_id=None):
     state = {"messages": [HumanMessage(message)], "prompt_str": ""}
     intent = detect_intent(state)
     
+    # Check Preset Brain first
     message_lower = message.lower()
-    for category, preset in PRESET_KNOWLEDGE.items():
-        if category in message or any(kw in message_lower for kw in CATEGORY_KEYWORDS.get(category, [])):
-            return {"response": f"Ami đây! {preset['text']}—thử không bro?", "mode": "Co-Pilot", "source": "Preset"}
+    preset_results = index.query(vector=EMBEDDINGS.embed_query(message), top_k=2, include_metadata=True, namespace="Preset")
+    for r in preset_results["matches"]:
+        if r.score > 0.8:  # High relevance threshold
+            return {"response": f"Ami đây! {r.metadata['text']}—thử không bro?", "mode": "Co-Pilot", "source": "Preset"}
 
+    # Enterprise Brain recall
     query_embedding = EMBEDDINGS.embed_query(message)
     convo_results = index.query(vector=query_embedding, top_k=5, include_metadata=True, namespace="convo_nodes")
-    logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")  # Debug Pinecone hits
+    logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")
     
     now = datetime.now()
     nodes = []
@@ -331,44 +373,41 @@ def recall_knowledge(message, user_id=None):
         vibe_score = (0.3 * relevance) + (0.5 * recency) + (0.2 * usage)
         nodes.append({"meta": meta, "vibe_score": vibe_score})
     
-    # Loosen filter—any nodes with pieces, not just term_refs
-    filtered_nodes = [n for n in nodes if n["meta"]["pieces"]]
-    if not filtered_nodes and nodes:
-        filtered_nodes = nodes[:2]  # Fallback to top vibe_score
-    
+    filtered_nodes = [n for n in nodes if n["meta"]["pieces"]] or nodes[:2]
     if not filtered_nodes:
         return {"response": f"Ami đây! Chưa đủ info, bro thêm tí nha!", "mode": "Co-Pilot", "source": "Enterprise"}
     
-    filtered_nodes.sort(key=lambda x: (datetime.fromisoformat(x["meta"]["last_accessed"]), x["vibe_score"]), reverse=True)
+    filtered_nodes.sort(key=lambda x: (x["vibe_score"], datetime.fromisoformat(x["meta"]["last_accessed"])), reverse=True)
     top_nodes = filtered_nodes[:2]
     term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
     
-    # Update Term Vibe Scores
+    # Update term vibe_scores
     term_nodes = index.fetch(list(term_ids), namespace="term_memory").get("vectors", {})
     for term_id in term_ids:
         if term_id in term_nodes:
             meta = term_nodes[term_id]["metadata"]
-            meta["vibe_score"] += 0.1  # Blueprint: +0.1 per recall
+            meta["vibe_score"] += 0.1  # 3.4: +0.1 per recall
             meta["access_count"] += 1
             meta["last_updated"] = now.isoformat()
             embedding_text = f"{meta['term_name']} {' '.join(k['text'] for k in json.loads(meta['knowledge']))}"
             embedding = EMBEDDINGS.embed_query(embedding_text)
             index.upsert([(term_id, embedding, meta)], namespace="term_memory")
-            time.sleep(2)  # Delay for Pinecone indexing
+            time.sleep(1)  # Reduced delay
     
-    # Pitch Response
-    prompt = f"""You’re Ami, pitching for AI Brain Mark 3. Given:
+    # Pitch with vibe_score and aliases
+    prompt = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
     - Input: '{message}'
     - Intent: '{intent}'
     - Convo Nodes: {json.dumps([n['meta'] for n in top_nodes], ensure_ascii=False)}
     - Term Nodes: {json.dumps({tid: tn['metadata'] for tid, tn in term_nodes.items()}, ensure_ascii=False)}
     Return raw JSON: {{"response": "<response>", "mode": "<mode>", "source": "Enterprise"}}
     Rules:
-    - "response": Vietnamese, casual, sales-y—use convo + term data.
+    - "response": Vietnamese, casual, sales-y—use convo + term data, check aliases for variants. For 'request' and 'question', prioritize sales process steps (e.g., address, combos, payment) over general info.
     - "mode": "Autopilot" if "request", else "Co-Pilot".
     - "source": "Enterprise".
-    - Short, actionable, charming.
-    - Predict objections if intent fits.
+    - Short, actionable, charming—use highest vibe_score terms first.
+    - Predict objections if intent fits (e.g., "question" → cost concerns).
+    - Example: "HITO Cốm ngon không?" → {{"response": "HITO Cốm ngon xịn, tăng chiều cao—đắt tí nhưng đáng bro!", "mode": "Co-Pilot", "source": "Enterprise"}}
     - Output MUST be valid JSON, no markdown."""
     
     response = clean_llm_response(LLM.invoke(prompt).content)
@@ -380,27 +419,49 @@ def recall_knowledge(message, user_id=None):
         logger.error(f"Recall parse error: {e}. Raw: '{response}'. Falling back")
         return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
 
-# Test Suite
 def test_ami():
-    logger.info("Testing Ami—AI Brain Mark 3 locked and loaded!")
+    logger.info("Testing Ami—AI Brain Mark 3.4 locked and loaded!")
     state = {"messages": [], "prompt_str": "", "convo_id": str(uuid.uuid4()), "active_terms": {}, "pending_knowledge": {}}
+    confirm_callback = lambda x: "yes"  # Auto-confirm for stress test
     
-    # Test Training Path
-    state["messages"].append(HumanMessage("Apple iPhone helps with tech vibes"))
-    extract_knowledge(state)
-    confirm_knowledge(state, "user123", lambda x: "yes")  # Simulate confirmation
+    # Training Path - Stack Knowledge with 9 Inputs
+    inputs = [
+        "HITO Cốm có khả năng tăng cường hấp thụ Calcium giúp người lớn tăng trưởng đột phá chiều cao, phù hợp cho người từ 10 tới 30 tuổi.",
+        "Thành phần của HITO cốm là: Bột xương cá tuyết (25% canxi) và Aquamin F( 32% canxi , canxi từ tảo biển đỏ)",
+        "Công dụng của Aquamin F( 32% canxi , canxi từ tảo biển đỏ) là Bổ sung canxin hữu cơ dễ hấp thu mà còn không lắng cặn, không bị nóng trong hay táo bón như canxin vô cơ .Củng cố hệ xương, bổ sung canxi giúp xương chắc khỏe, dẻo dai. bảo vệ và tham gia vào quá trình hình thành dịch nhầy ở khớp, giúp khớp chuyển động linh hoạt, thoải mái hơn.giúp ngăn ngừa việc hình thành khối u ở gan, polyp trực tràng. Đồng thời bảo vệ sức khỏe đường tiêu hóa",
+        "Công dụng của Bột xương cá tuyết (25% canxi) là Bổ sung canxi ,Hỗ trợ sự phát triển hệ xương và cơ bắp, giúp trẻ tăng trưởng chiều cao,đóng vai trò thiết yếu cho việc phát triển xương, làm chắc xương, răng, chống loãng xương, còi xương, nhuyễn xương,… mà còn có vai trò quan trọng trong việc duy trì hoạt động cơ bắp, thông máu, phát tín hiệu cho các tế bào thần kinh và giúp tiết chế một số kích thích tố",
+        "Với người trên 25 tuổi có thể phát triển tiếp 3cm chiều cao. Với người trên 30 tuổi thì giúp ổn định hấp thụ xương",
+        "Khi tư vấn cho khách hàng về HITO cốm, cần khai thác tên tuổi giới tính chiều cao hiện tại và chiều cao mong muốn.",
+        "Với khách hàng trên 30 tuổi, có thể gợi ý mua cho con hoặc người thân nhỏ tuổi",
+        "Khi khách hàng chưa tin tưởng thì cần gửi ảnh <link ảnh>",
+        "Khi khách hàng muốn mua thì hỏi địa chỉ giao hàng sau đó gửi các combo: #combo 1, #combo2, #combo 3. Sau đó yêu cầu khách hàng chuyển tiền theo thông tin chuyển tiền @VCB Germany."
+    ]
     
-    state["messages"].append(HumanMessage("Nó có chip A17 và camera xịn"))
-    extract_knowledge(state)
-    confirm_knowledge(state, "user123", lambda x: "yes")
+    logger.info("Training Path: Stacking 9 inputs...")
+    for i, input_text in enumerate(inputs, 1):
+        logger.info(f"Input {i}: {input_text}")
+        state["messages"].append(HumanMessage(input_text))
+        extract_knowledge(state)
+        confirm_knowledge(state, "user123", confirm_callback)
+        logger.info(f"Active Terms: {json.dumps(state['active_terms'], ensure_ascii=False)}")
+        logger.info(f"Pending Node Cleared: {json.dumps(state['pending_node'], ensure_ascii=False)}")
     
-    # Test Selling Path
-    result = recall_knowledge("Apple iPhone có gì hay?", "user123")
-    logger.info(f"Recall result: {json.dumps(result, ensure_ascii=False)}")
+    # Selling Path - Stress Test Recall with 5 Queries
+    queries = [
+        "HITO Cốm có gì hay?",
+        "Thành phần HITO Com là gì?",
+        "Aquamin F có công dụng gì?",
+        "Tôi 35 tuổi, HITO Cốm có tác dụng không?",
+        "Tôi muốn mua HITO Cốm, làm sao đây?"
+    ]
     
-    # Test Preset Fallback
-    result = recall_knowledge("Thời tiết hôm nay thế nào?", "user123")
-    logger.info(f"Preset recall: {json.dumps(result, ensure_ascii=False)}")
+    logger.info("Selling Path: Testing 5 recall queries...")
+    for i, query in enumerate(queries, 1):
+        logger.info(f"Query {i}: {query}")
+        result = recall_knowledge(query, "user123")
+        logger.info(f"Recall result: {json.dumps(result, ensure_ascii=False)}")
+    
+    logger.info("Stress Test Complete—Ami Mark 3.4 flexed hard, bro!")
 
 if __name__ == "__main__":
     test_ami()
