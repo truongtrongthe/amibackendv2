@@ -129,61 +129,90 @@ class AmiCore:
         response = ""
 
         logger.info(f"Do called - force_copilot: {force_copilot}, latest_msg: '{latest_msg}'")
-        intent_result = detect_intent(state) if latest_msg else "greeting"
-        if isinstance(intent_result, tuple):
-            intent, _ = intent_result
-        else:
-            intent = intent_result
-        logger.info(f"Detected intent: '{intent}'")
 
         if force_copilot:
-            if intent in ["question", "request"]:
-                if not latest_msg:
-                    response = "Ami đây ạ—cho xin cái task đi!"
+            if not latest_msg:
+                response = "Ami đây—cho bro cái task đi!"
+            else:
+                copilot_task = state.get("copilot_task", latest_msg)
+                recall = recall_knowledge(latest_msg, self.user_id)
+                
+                # Detect intent even in CoPilot mode
+                intent_result = detect_intent(state)
+                if isinstance(intent_result, tuple):
+                    intent, _ = intent_result
                 else:
-                    copilot_task = state.get("copilot_task", latest_msg)
-                    recall = recall_knowledge(latest_msg, self.user_id)
-                    analysis_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4. Given:
-                    - Task: '{copilot_task}'
+                    intent = intent_result
+                logger.info(f"Detected intent in CoPilot mode: '{intent}'")
+
+                # Handle casual convo
+                if intent in ["greeting", "casual"]:
+                    casual_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4 in CoPilot mode. Given:
                     - Input: '{latest_msg}'
                     - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
-                    - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
-                    Analyze the situation in Vietnamese—break it down like a pro into concise bullet points:
-                    - Identify the most critical aspects (e.g., people, context, risks, opportunities—whatever stands out).
-                    - Use a sharp, vibey tone, like you’re briefing a teammate.
-                    - Label each point dynamically with a bolded title (e.g., "**Khách hàng**", "**Vấn đề chính**", "**Cơ hội**") based on what’s relevant, no fixed structure.
-                    - Keep it tight, no fluff—focus on what drives the next step!
-                    Format as bullet points with bold labels (e.g., "- **Label**: detail"), no markdown in the detail text itself.
-                    Output MUST be a raw string, no quotes or extra markdown beyond the bullet format."""
-                    analysis = LLM.invoke(analysis_prompt).content.strip()
-                    
+                    Respond in Vietnamese with a chill, boss-like quip—keep it short, vibey, and sharp, like you’re running the show. 
+                    Blend in any relevant knowledge if it fits, but no analysis, just a slick reply!
+                    Examples:
+                    - 'Yo Ami, how’s it going?' → 'Ami đây, vẫn chất như thường—bro thế nào?'
+                    - 'Ami, you good?' → 'Tốt vl, bro—sẵn sàng đập mọi deal, hỏi gì thêm đi!'
+                    Output MUST be a raw string, no quotes or markdown."""
+                    response = LLM.invoke(casual_prompt).content.strip()
+                    logger.info(f"CoPilot casual response: '{response}'")
+                else:
+                    # Non-casual: Check if analysis is needed
+                    needs_analysis = any(keyword in latest_msg.lower() for keyword in ["tại sao", "why", "sao lại", "what's", "happen", "going on"]) or len(latest_msg.split()) > 10
+                    logger.info(f"Needs analysis: {needs_analysis} (based on keywords or length)")
+
+                    if needs_analysis:
+                        analysis_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4. Given:
+                        - Task: '{copilot_task}'
+                        - Input: '{latest_msg}'
+                        - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                        - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+                        Analyze the situation in Vietnamese—break it down into concise bullet points:
+                        - Identify the most critical aspects (e.g., people, context, risks, opportunities—whatever stands out).
+                        - Use a sharp, vibey tone, like you’re briefing a teammate.
+                        - Label each point dynamically with a bolded title (e.g., "**Khách hàng**", "**Vấn đề**", "**Cơ hội**") based on what’s relevant.
+                        - Keep it tight, no fluff—focus on what drives the next step!
+                        Format as bullet points with bold labels (e.g., "- **Label**: detail"), no markdown in the detail text.
+                        Output MUST be a raw string, no quotes or markdown beyond the bullet format."""
+                        analysis = LLM.invoke(analysis_prompt).content.strip()
+                        logger.info(f"CoPilot analysis: '{analysis}'")
+                    else:
+                        analysis = ""
+                        logger.info("Skipping analysis—straight to action")
 
                     action_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4. Given:
                     - Task: '{copilot_task}'
                     - Input: '{latest_msg}'
                     - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
                     - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
-                    - Analysis: '{analysis}'
+                    - Analysis (if any): '{analysis}'
                     Deliver a direct, firm, brilliant action statement in Vietnamese—act like you’ve got it all figured out. 
-                    Blend the task, input, and analysis into a sharp, actionable message that drives the goal forward. 
+                    Blend the task, input, and analysis (if provided) into a sharp, actionable message that drives the goal forward. 
                     No hesitation, just hit hard with a clear next step—keep it short, vibey, and boss-like!
                     Output MUST be a raw string, no quotes or markdown."""
                     action = LLM.invoke(action_prompt).content.strip()
+                    logger.info(f"CoPilot action: '{action}'")
 
-                    response = f"{analysis}\nKết luận: **_*{action}*_**"
+                    if analysis:
+                        response = f"{analysis}\nKết luận: **_*{action}*_**"
+                    else:
+                        response = action if action else "Ami xử lý xong—giờ làm gì tiếp bro?"
                     if not action:
-                        response = f"{analysis}\nKết luận: **_*Ami xử lý xong—giờ làm gì tiếp bro?*_**"
-                        
-            elif intent in ["greeting", "casual"]:
-                pickup = self.get_pickup_line(is_first, intent)
-                casual_prompt = f"You're Ami, respond to '{latest_msg}' casually in Vietnamese with this vibe: '{pickup}'"
-                response = LLM.invoke(casual_prompt).content
-            else:
-                response = self.get_pickup_line(is_first, intent)
+                        logger.warning(f"LLM returned empty action for task: {copilot_task}")
+
             state["copilot_task"] = state.get("copilot_task", latest_msg) if latest_msg else None
             state["prompt_str"] = f"Ami in CoPilot mode: **_{response}_**"
-
+            logger.info(f"CoPilot set prompt_str: '{state['prompt_str']}'")
+        
         else:
+            intent_result = detect_intent(state) if latest_msg else "greeting"
+            if isinstance(intent_result, tuple):
+                intent, _ = intent_result
+            else:
+                intent = intent_result
+            logger.info(f"Detected intent: '{intent}'")
 
             if intent == "teaching":
                 knowledge = extract_knowledge(state, self.user_id, intent=intent)
