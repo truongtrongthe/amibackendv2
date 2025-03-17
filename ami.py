@@ -11,9 +11,12 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 from ami_core import AmiCore
-from utilities import logger
+from utilities import logger,EMBEDDINGS
 import textwrap
+from pinecone_datastores import index
+from utilities import detect_intent
 # State - Aligned with AmiCore and utilities.py
+from datetime import datetime
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     prompt_str: str
@@ -32,10 +35,11 @@ graph_builder = StateGraph(State)
 # Node: AmiCore.do with confirmation callback
 def ami_node(state,config=None):
     force_copilot = config.get("configurable", {}).get("force_copilot", False) if config else False
-    logger.info(f"ami_node received config: {config}, extracted force_copilot: {force_copilot}")
+    user_id = config.get("configurable", {}).get("user_id", "unknown")  # Grab from config
+    logger.info(f"ami_node received config: {config}, extracted force_copilot: {force_copilot}, user_id: {user_id}")
     confirm_callback = lambda x: "yes"
-    updated_state = ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback, force_copilot=force_copilot)
-    logger.info(f"ami_node returning state with prompt_str: '{updated_state['prompt_str']}'")
+    updated_state = ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback, force_copilot=force_copilot, user_id=user_id)
+    logger.info(f"ami_node returning state with prompt_str for {user_id}: '{updated_state['prompt_str']}'")
     return updated_state
     
 graph_builder.add_node("ami", ami_node)
@@ -120,12 +124,17 @@ def pilot_stream_ok(user_input=None, thread_id=f"copilot_thread_{int(time.time()
     
     convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
 
-def pilot_stream(user_input=None, thread_id=f"copilot_thread_{int(time.time())}"):
+def pilot_stream(user_input=None, user_id=None, thread_id=None):
+    if not user_id:
+        raise ValueError("user_id is required for personalized CoPilot chats")
+    thread_id = thread_id or f"{user_id}_copilot_{int(time.time())}"
+    
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     default_state = {
         "messages": [],
         "prompt_str": "",
         "convo_id": thread_id,
+        "user_id": user_id,
         "active_terms": {},
         "pending_node": {"pieces": [], "primary_topic": "Miscellaneous"},
         "pending_knowledge": {},
@@ -139,26 +148,54 @@ def pilot_stream(user_input=None, thread_id=f"copilot_thread_{int(time.time())}"
     if user_input:
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
     
-    print(f"Debug: Starting pilot_stream - Input: '{user_input}', Stage: {state['sales_stage']}, CoPilot Task: {state['copilot_task']}")
+    print(f"Debug: Starting pilot_stream - User: '{user_id}', Input: '{user_input}', Stage: {state['sales_stage']}, CoPilot Task: {state['copilot_task']}")
     
     config = {
-        "configurable": {"thread_id": thread_id},
+        "configurable": {
+            "thread_id": thread_id,
+            "user_id": user_id
+        },
         "force_copilot": True
     }
-    print(f"Invoking graph with config: {config}")
+    logger.info(f"Invoking graph with config for {user_id}: {config}")
     state = convo_graph.invoke(state, config=config)
     
-    print(f"Debug: State after invoke - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
+    print(f"Debug: State after invoke - User: '{user_id}', Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
     
     response = state["prompt_str"].strip()
     if not response:
-        response = "Ami đây—cho bro cái task đi!"
-        print("prompt_str empty after invoke, using fallback")
+        response = f"{user_id.split('_')[0]}, Ami đây—cho bro cái task đi!"
+        logger.warning(f"prompt_str empty after invoke for {user_id}, using fallback")
     
     for chunk in textwrap.wrap(response, width=80):
-        print(f"Debug: Streaming chunk: '{chunk}'")
-        yield f"data: {json.dumps({'message': chunk})}\n\n"
+        print(f"Debug: Streaming chunk for {user_id}: '{chunk}'")
+        yield f"data: {json.dumps({'message': chunk, 'user_id': user_id})}\n\n"
         time.sleep(0.2)
     
-    print(f"Updating state with prompt_str: '{state['prompt_str']}'")
+    intent = state.get("intent", "unknown")
+    if intent == "unknown":
+        intent_result = detect_intent(state)
+        intent = intent_result[0] if isinstance(intent_result, tuple) else intent_result
+    
+    # Use latest_msg from state, not user_input
+    latest_msg = state["messages"][-1].content if state["messages"] else ""
+    input_to_save = latest_msg if latest_msg else "[no input]"  # Handle empty input
+    
+    chat_content = f"Input: {input_to_save}\nResponse: {response}"
+    embedding = EMBEDDINGS.embed_query(chat_content)
+    vector_id = f"node_{thread_id}_{int(time.time())}"
+    metadata = {
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "input": input_to_save,  # Use processed input
+        "response": response,
+        "intent": intent,
+        "timestamp": datetime.now().isoformat(),
+        "primary_topic": "CoPilot Chat"
+    }
+
+    logger.info(f"Attempting upsert to {user_id}_pilot_nodes with node: {vector_id}")
+    index.upsert([(vector_id, embedding, metadata)], namespace=f"{user_id}_pilot_nodes")  # Scope to user_id
+    logger.info(f"Successfully stored convo node in {user_id}_pilot_nodes: {vector_id}")
+    
     convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")

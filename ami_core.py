@@ -123,7 +123,7 @@ class AmiCore:
             state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
         return node
 
-    def do(self, state=None, is_first=False, confirm_callback=None, force_copilot=False):
+    def done(self, state=None, is_first=False, confirm_callback=None, force_copilot=False):
         state = state if state is not None else self.state
         latest_msg = state["messages"][-1].content if state["messages"] else ""
         response = ""
@@ -274,4 +274,163 @@ class AmiCore:
         state["brain"] = self.brain
         self.state = state
         logger.info(f"Returning state with prompt_str: '{state['prompt_str']}'")
+        return state
+   
+    def do(self, state=None, is_first=False, confirm_callback=None, force_copilot=False, user_id=None):
+        state = state if state is not None else self.state
+        latest_msg = state["messages"][-1].content if state["messages"] else ""
+        response = ""
+        user_id = user_id or state.get("user_id", "unknown")  # Fallback to state if not passed
+
+        logger.info(f"Do called - force_copilot: {force_copilot}, user_id: '{user_id}', latest_msg: '{latest_msg}'")
+
+        if force_copilot:
+            if not latest_msg:
+                response = f"{user_id.split('_')[0]}, Ami đây—cho bro cái task đi!"
+            else:
+                copilot_task = state.get("copilot_task", latest_msg)
+                recall = recall_knowledge(latest_msg, user_id=None)  # Base convo_nodes
+                
+                intent_result = detect_intent(state)
+                if isinstance(intent_result, tuple):
+                    intent, _ = intent_result
+                else:
+                    intent = intent_result
+                logger.info(f"Detected intent in CoPilot mode for {user_id}: '{intent}'")
+                state["intent"] = intent  # Store intent in state for logging
+
+                if intent in ["greeting", "casual"]:
+                    casual_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4 in CoPilot mode. Given:
+                    - User: '{user_id.split('_')[0]}'
+                    - Input: '{latest_msg}'
+                    - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                    Respond in Vietnamese with a chill, boss-like quip—keep it short, vibey, and sharp, like you’re running the show. 
+                    Personalize it with the user’s name and weave in knowledge if relevant, no analysis, just a slick reply!
+                    Examples:
+                    - 'Yo Ami, how’s it going?' → 'Yo John, Ami vẫn chất—bro thế nào sau deal Shawn?'
+                    - 'Ami, you good?' → 'Pete, tốt vl—sẵn sàng đập deal tiếp, hỏi gì thêm đi!'
+                    Output MUST be a raw string, no quotes or markdown."""
+                    response = LLM.invoke(casual_prompt).content.strip()
+                    logger.info(f"CoPilot casual response for {user_id}: '{response}'")
+                else:
+                    needs_analysis = any(keyword in latest_msg.lower() for keyword in ["tại sao", "why", "sao lại", "what's", "happen", "going on"]) or len(latest_msg.split()) > 10
+                    logger.info(f"Needs analysis for {user_id}: {needs_analysis} (based on keywords or length)")
+
+                    if needs_analysis:
+                        analysis_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4. Given:
+                        - User: '{user_id.split('_')[0]}'
+                        - Task: '{copilot_task}'
+                        - Input: '{latest_msg}'
+                        - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                        - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+                        Analyze the situation in Vietnamese—break it down into concise bullet points:
+                        - Identify the most critical aspects (e.g., people, context, risks, opportunities—whatever stands out).
+                        - Use a sharp, vibey tone, like you’re briefing {user_id.split('_')[0]}.
+                        - Label each point dynamically with a bolded title (e.g., "**Khách hàng**", "**Vấn đề**", "**Cơ hội**") based on what’s relevant.
+                        - Keep it tight, no fluff—focus on what drives the next step, weave in knowledge if it fits!
+                        Format as bullet points with bold labels (e.g., "- **Label**: detail"), no markdown in the detail text.
+                        Output MUST be a raw string, no quotes or markdown beyond the bullet format."""
+                        analysis = LLM.invoke(analysis_prompt).content.strip()
+                        logger.info(f"CoPilot analysis for {user_id}: '{analysis}'")
+                    else:
+                        analysis = ""
+                        logger.info(f"Skipping analysis for {user_id}—straight to action")
+
+                    action_prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4. Given:
+                    - User: '{user_id.split('_')[0]}'
+                    - Task: '{copilot_task}'
+                    - Input: '{latest_msg}'
+                    - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                    - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+                    - Analysis (if any): '{analysis}'
+                    Deliver a direct, firm, brilliant action statement in Vietnamese—act like you’ve got it all figured out for {user_id.split('_')[0]}. 
+                    Blend the task, input, analysis (if provided), and knowledge into a sharp, actionable message that drives the goal forward. 
+                    No hesitation, just hit hard with a clear next step—keep it short, vibey, and boss-like!
+                    Output MUST be a raw string, no quotes or markdown."""
+                    action = LLM.invoke(action_prompt).content.strip()
+                    logger.info(f"CoPilot action for {user_id}: '{action}'")
+
+                    if analysis:
+                        response = f"{analysis}\nKết luận: **_*{action}*_**"
+                    else:
+                        response = action if action else f"{user_id.split('_')[0]}, Ami xử lý xong—giờ làm gì tiếp bro?"
+                    if not action:
+                        logger.warning(f"LLM returned empty action for {user_id}, task: {copilot_task}")
+
+            state["copilot_task"] = state.get("copilot_task", latest_msg) if latest_msg else None
+            state["prompt_str"] = f"Ami in CoPilot mode: **_{response}_**"
+            state["user_id"] = user_id
+            logger.info(f"CoPilot set prompt_str for {user_id}: '{state['prompt_str']}'")
+        
+        else:
+            intent_result = detect_intent(state) if latest_msg else "greeting"
+            if isinstance(intent_result, tuple):
+                intent, _ = intent_result
+            else:
+                intent = intent_result
+            logger.info(f"Detected intent for {user_id}: '{intent}'")
+
+            if intent == "teaching":
+                knowledge = extract_knowledge(state, user_id, intent=intent)
+                confirmed_node = self.confirm_knowledge(state, user_id, confirm_callback=confirm_callback)
+                if confirmed_node and state["last_response"] == "yes":
+                    pieces = confirmed_node["pieces"]
+                    terms = state.get("pending_knowledge", {})
+                    prompt = f"""You’re Ami, flexing for AI Brain Mark 3.4. Given:
+                    - User: '{user_id.split('_')[0]}'
+                    - Input: '{latest_msg}'
+                    - Extracted Terms: {json.dumps(terms, ensure_ascii=False)}
+                    - Extracted Piece: {json.dumps(pieces[0], ensure_ascii=False)}
+                    Return an energetic, excited, beautiful response in Vietnamese—blend the input and extracted terms (if any) 
+                    into a polished, vibey flex that shows off your new understanding. Make it flow naturally, even if the input’s short, 
+                    and nudge for more with a hyped tone. 
+                    Example: Input 'HITO Cốm tốt lắm' → 'Woa, John, HITO Cốm mà tốt thế này thì đỉnh khỏi bàn! Ami thấy nó như bảo bối cho sức khỏe, anh còn chiêu gì hay nữa không để em học với nào!'
+                    Output MUST be a raw string, no quotes or markdown."""
+                    response = LLM.invoke(prompt).content + " - Đã lưu, Ami biết thêm rồi nha!"
+                elif state["last_response"] == "no":
+                    response = state["prompt_str"]
+                else:
+                    response = f"{user_id.split('_')[0]}, Ami đang xử lý, đợi tí nha bro!"
+
+            elif intent in ["question", "request"]:
+                recall = recall_knowledge(latest_msg, user_id)
+                if not recall["knowledge"]:
+                    response = f"{user_id.split('_')[0]}, Ami đây! Chưa đủ info, bro thêm tí nha!"
+                else:
+                    prompt = f"""You’re Ami, pitching like a pro for AI Brain Mark 3.4. Given:
+                    - User: '{user_id.split('_')[0]}'
+                    - Input: '{latest_msg}'
+                    - Intent: '{recall["intent"]}'
+                    - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                    - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+                    Return a chill, sales-y response in Vietnamese that screams GAIN—blend all knowledge into a tight pitch 
+                    using exact key phrases (e.g., "ổn định hấp thụ xương"). For QUESTIONS, drop clear answers with a gain hook 
+                    (e.g., "xương chắc hơn") and nudge for more. For REQUESTS, push a confident close with next steps 
+                    (e.g., "làm luôn nè") and max gain (e.g., "con bạn cao vượt trội"). 
+                    Predict objections (e.g., "quá tuổi?", "đắt không?") and flip ‘em—keep it short, vibey, and actionable with a "cực chất" edge!
+                    Examples:
+                    - Question 'HITO Cốm có gì hay?' → 'John, HITO Cốm chất lắm—tăng hấp thụ canxi, xương chắc hơn, con bạn cao vượt trội! Còn thắc mắc gì nữa không nè?'
+                    - Request 'Mua HITO Cốm đi' → 'Pete, HITO Cốm đây—bổ sung canxi đỉnh cao, rẻ mà chất! Gửi địa chỉ, chọn combo 1-3, chuyển tiền @VCB Germany—làm luôn nè!'
+                    Output MUST be a raw string, no quotes or markdown."""
+                    response = LLM.invoke(prompt).content.strip('"')
+                    if recall["mode"] == "Autopilot" and intent == "request":
+                        state["sales_stage"] = self.sales_stages[1]  # 'pitched'
+
+            elif intent in ["greeting", "casual"]:
+                pickup = self.get_pickup_line(is_first, intent)
+                casual_prompt = f"You're Ami, respond to '{latest_msg}' casually in Vietnamese with this vibe: '{pickup}' for {user_id.split('_')[0]}"
+                response = LLM.invoke(casual_prompt).content
+                print(f"DEBUG: Casual response for {user_id}: '{response}'")
+            
+            else:
+                response = self.get_pickup_line(is_first, intent)
+                print(f"DEBUG: Casual response for {user_id}: '{response}'")
+
+            state["prompt_str"] = f"Ami detected intent: '{intent}': **_{response}_**"
+            logger.info(f"Intent set prompt_str for {user_id}: '{state['prompt_str']}'")
+
+        state["brain"] = self.brain
+        state["user_id"] = user_id
+        self.state = state
+        logger.info(f"Returning state with prompt_str for {user_id}: '{state['prompt_str']}'")
         return state
