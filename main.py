@@ -43,27 +43,6 @@ def ami_copilot():
     )
 
 
-
-@app.route('/ami-learn', methods=['POST','OPTIONS'])
-def ami_learn():
-    if request.method == 'OPTIONS':
-        response = Response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Max-Age'] = '86400'  # Cache preflight for 1 day
-        return response, 200  # Fast response for preflight
-    data = request.get_json()
-    user_input = data.get("user_input")
-    user_id ="tfl"
-    thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
-    return Response(
-        event_stream(user_input, user_id, thread_id), 
-        mimetype='text/event-stream', 
-        headers={'X-Accel-Buffering': 'no','Access-Control-Allow-Origin': '*'}
-        )  # Disable buffering for Nginx (if used))
-
-
 @app.route('/learning-ok', methods=['POST','OPTIONS'])
 def learnok():
     if request.method == 'OPTIONS':

@@ -29,11 +29,12 @@ ami_core = AmiCore()
 graph_builder = StateGraph(State)
 
 # Node: AmiCore.do with confirmation callback
-def ami_node(state):
+def ami_node(state,config=None):
     # Pass a callback for confirmation—defaults to "yes" for testing
     #confirm_callback = lambda x: "yes" if "test" in state.get("convo_id", "") else None
     confirm_callback = lambda x: "yes"  # Always confirm for testing
-    return ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback)
+    force_copilot = config.get("force_copilot", False) if config else False
+    return ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback,force_copilot=force_copilot)
 
 graph_builder.add_node("ami", ami_node)
 graph_builder.add_edge(START, "ami")
@@ -79,7 +80,8 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
     # Persist updated state
     convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
 
-def pilot_stream(user_input=None, thread_id=f"pilot_thread_{int(time.time())}"):
+def pilot_stream(user_input=None, thread_id=f"copilot_thread_{int(time.time())}"):
+    # Load or init state
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     default_state = {
         "messages": [],
@@ -90,19 +92,24 @@ def pilot_stream(user_input=None, thread_id=f"pilot_thread_{int(time.time())}"):
         "pending_knowledge": {},
         "brain": ami_core.brain,
         "sales_stage": ami_core.sales_stages[0],
-        "last_response": ""
+        "last_response": "",
+        "copilot_task": user_input if user_input else None
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
     
     if user_input:
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
     
-    print(f"Debug: Starting pilot_stream - Input: '{user_input}', Stage: {state['sales_stage']}, Convo ID: {state['convo_id']}")
+    print(f"Debug: Starting pilot_stream - Input: '{user_input}', Stage: {state['sales_stage']}, CoPilot Task: {state['copilot_task']}")
     
-    # No teaching logic—just pass to do() without confirm_callback
-    state = ami_core.do(state, not state.get("messages", []), confirm_callback=None)
+    # Combine checkpoint config and force_copilot into one config dict
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "force_copilot": True
+    }
+    state = convo_graph.invoke(state, config=config)
     
-    print(f"Debug: State after do - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
+    print(f"Debug: State after invoke - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
     
     response_lines = state["prompt_str"].split('\n')
     for line in response_lines:

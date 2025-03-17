@@ -123,10 +123,10 @@ class AmiCore:
             state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
         return node
 
-    def do(self, state=None, is_first=False, confirm_callback=None):
+    def do(self, state=None, is_first=False, confirm_callback=None, force_copilot=False):
         state = state if state is not None else self.state
         latest_msg = state["messages"][-1].content if state["messages"] else ""
-        intent_result = detect_intent(state) if latest_msg else "greeting"
+        intent_result = detect_intent(state) if latest_msg and not force_copilot else "greeting"
         if isinstance(intent_result, tuple):
             intent, _ = intent_result
         else:
@@ -146,7 +146,27 @@ class AmiCore:
         }
         state = {**default_state, **state}
 
-        if intent == "teaching":
+        if force_copilot and latest_msg:
+        # CoPilot mode: Confident, know-it-all coworker
+            copilot_task = state.get("copilot_task", latest_msg)  # Default to input if no task set
+            recall = recall_knowledge(latest_msg, self.user_id)
+            prompt = f"""You’re Ami, a confident, know-it-all coworker for AI Brain Mark 3.4. Given:
+            - Task: '{copilot_task}'
+            - Input: '{latest_msg}'
+            - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+            - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+            Return a direct, firm, brilliant response in Vietnamese—act like you’ve got it all figured out. 
+            Blend the task, input, and knowledge into a sharp, actionable message that drives the goal forward. 
+            No hesitation, just hit hard with a clear next step—keep it short, vibey, and boss-like!
+            Examples:
+            - Task 'pitch HITO Cốm cho khách VIP', Input 'Pitch HITO Cốm đi' → 'HITO Cốm cho VIP thì phải chất—‘Canxi max, xương cứng như thép, giá đỉnh!’ Gửi khách ngay, xong deal!'
+            - Task 'plan shipping', Input 'Ship HITO Cốm sao đây?' → 'Ship HITO Cốm? Combo 3, free ship, giao 24h—bro xác nhận địa chỉ, Ami đẩy liền!'
+            Output MUST be a raw string, no quotes or markdown."""
+            response = LLM.invoke(prompt).content.strip()
+            state["copilot_task"] = copilot_task  # Persist task
+            state["prompt_str"] = f"Ami in CoPilot mode: **_{response}_**"
+
+        elif intent == "teaching":
             knowledge = extract_knowledge(state, self.user_id, intent=intent)  # Pass intent
             confirmed_node = self.confirm_knowledge(state, self.user_id, confirm_callback=confirm_callback)
             if confirmed_node and state["last_response"] == "yes":
@@ -198,8 +218,8 @@ class AmiCore:
 
         else:
             response = self.get_pickup_line(is_first, intent)
-
-        state["prompt_str"] = f"Ami detected intent: '{intent}': **_{response}_**"
+        if not force_copilot:
+            state["prompt_str"] = f"Ami detected intent: '{intent}': **_{response}_**"
         state["brain"] = self.brain
         self.state = state
         return state
