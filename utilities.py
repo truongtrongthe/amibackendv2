@@ -11,7 +11,7 @@ from fuzzywuzzy import fuzz
 import unidecode
 
 # Setup logging (minimal)
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Config
