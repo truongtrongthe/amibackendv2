@@ -48,7 +48,7 @@ graph_builder.add_edge("ami", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
+def convo_stream(user_input=None,user_id=None, thread_id=f"test_thread_{int(time.time())}"):
     # Load or init state
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     default_state = {
@@ -60,7 +60,8 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
         "pending_knowledge": {},
         "brain": ami_core.brain,
         "sales_stage": ami_core.sales_stages[0],
-        "last_response": ""
+        "last_response": "",
+        "user_id":user_id
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
     
@@ -86,43 +87,7 @@ def convo_stream(user_input=None, thread_id=f"test_thread_{int(time.time())}"):
     # Persist updated state
     convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
 
-def pilot_stream_ok(user_input=None, thread_id=f"copilot_thread_{int(time.time())}"):
-    # Load or init state
-    checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
-    default_state = {
-        "messages": [],
-        "prompt_str": "",
-        "convo_id": thread_id,
-        "active_terms": {},
-        "pending_node": {"pieces": [], "primary_topic": "Miscellaneous"},
-        "pending_knowledge": {},
-        "brain": ami_core.brain,
-        "sales_stage": ami_core.sales_stages[0],
-        "last_response": "",
-        "copilot_task": user_input if user_input else None
-    }
-    state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
-    
-    if user_input:
-        state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
-    
-    print(f"Debug: Starting pilot_stream - Input: '{user_input}', Stage: {state['sales_stage']}, CoPilot Task: {state['copilot_task']}")
-    
-    # Combine checkpoint config and force_copilot into one config dict
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "force_copilot": True
-    }
-    state = convo_graph.invoke(state, config=config)
-    
-    print(f"Debug: State after invoke - Prompt: '{state['prompt_str']}', Stage: {state['sales_stage']}, Last Response: {state.get('last_response', '')}")
-    
-    response_lines = state["prompt_str"].split('\n')
-    for line in response_lines:
-        if line.strip():
-            yield f"data: {json.dumps({'message': line.strip()})}\n\n"
-    
-    convo_graph.update_state({"configurable": {"thread_id": thread_id}}, state, as_node="ami")
+
 
 def pilot_stream(user_input=None, user_id=None, thread_id=None):
     if not user_id:
