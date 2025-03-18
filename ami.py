@@ -154,10 +154,15 @@ def pilot_stream(user_input=None, user_id=None, thread_id=None):
         response = f"{user_id.split('_')[0]}, Ami đây—cho bro cái task đi!"
         logger.warning(f"prompt_str empty after invoke for {user_id}, using fallback")
     
-    for chunk in textwrap.wrap(response, width=80):
-        print(f"Debug: Streaming chunk for {user_id}: '{chunk}'")
-        yield f"data: {json.dumps({'message': chunk, 'user_id': user_id})}\n\n"
-        time.sleep(0.2)
+    # Stream using natural \n splits
+    response_lines = response.split('\n')
+    for line in response_lines:
+        if line.strip():
+            print(f"Debug: Streaming chunk for {user_id}: '{line.strip()}'")
+            yield f"data: {json.dumps({'message': line.strip(), 'user_id': user_id})}\n\n"
+            time.sleep(0.2)
+    # Signal stream end
+    yield "data: [DONE]\n\n"
     
     intent = state.get("intent", "unknown")
     if intent == "unknown":
@@ -185,4 +190,3 @@ def pilot_stream(user_input=None, user_id=None, thread_id=None):
         logger.debug(f"Pinecone upsert took {time.time() - start_upsert:.2f}s")
     except Exception as e:
         logger.error(f"Upsert failed for {user_id}_pilot_nodes: {e}")
-

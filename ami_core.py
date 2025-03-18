@@ -9,6 +9,7 @@ from datetime import datetime
 import uuid
 import asyncio
 from threading import Thread
+import time
 
 class AmiCore:
     def __init__(self):
@@ -106,9 +107,13 @@ class AmiCore:
                 response = f"{user_id.split('_')[0]}, Ami đây—cho bro cái task đi!"
             else:
                 copilot_task = state.get("copilot_task", latest_msg)
+                recall_start = time.time()
                 recall = await asyncio.to_thread(recall_knowledge, latest_msg, user_id=None)
+                logger.debug(f"recall_knowledge took {time.time() - recall_start:.2f}s")
                 
+                intent_start = time.time()
                 intent_result = await asyncio.to_thread(detect_intent, state)
+                logger.debug(f"detect_intent took {time.time() - intent_start:.2f}s")
                 intent = intent_result[0] if isinstance(intent_result, tuple) else intent_result
                 state["intent"] = intent
 
@@ -119,8 +124,13 @@ class AmiCore:
                     - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
                     Respond in Vietnamese with a chill, boss-like quip—keep it short, vibey, and sharp, like you’re running the show. 
                     Personalize it with the user’s name and weave in knowledge if relevant, no analysis, just a slick reply!
+                    Examples:
+                    - 'Yo Ami, how’s it going?' → 'Yo John, Ami vẫn chất—bro thế nào sau deal Shawn?'
+                    - 'Ami, you good?' → 'Pete, tốt vl—sẵn sàng đập deal tiếp, hỏi gì thêm đi!'
                     Output MUST be a raw string, no quotes or markdown."""
+                    casual_start = time.time()
                     response = (await asyncio.to_thread(LLM.invoke, casual_prompt)).content.strip()
+                    logger.debug(f"Casual LLM invoke took {time.time() - casual_start:.2f}s")
                 else:
                     needs_analysis = any(keyword in latest_msg.lower() for keyword in ["tại sao", "why", "sao lại", "what's", "happen", "going on"]) or len(latest_msg.split()) > 10
                     combined_prompt = f"""You’re Ami, a confident coworker for AI Brain Mark 3.4. Given:
@@ -130,17 +140,36 @@ class AmiCore:
                     - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
                     - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
                     Return a JSON object with:
-                    - "analysis": Bullet-point breakdown (e.g., "- **Vấn đề**: detail") or empty string if {'no analysis needed' if not needs_analysis else 'analysis required'}.
-                    - "action": Direct, actionable statement.
-                    Rules: Keep it vibey, sharp, Vietnamese. Output MUST be valid JSON."""
-                    result = json.loads((await asyncio.to_thread(LLM.invoke, combined_prompt)).content.strip())
-                    analysis, action = result["analysis"], result["action"] or f"{user_id.split('_')[0]}, Ami xử lý xong—giờ làm gì tiếp bro?"
+                    - "analysis": Detailed bullet-point breakdown in Vietnamese with 2-3 points if possible (e.g., "- **Vấn đề**: chi tiết", "- **Nguyên nhân**: lý do"), or empty string if {'no analysis needed' if not needs_analysis else 'analysis required'}.
+                    - "action": Detailed, actionable statement in Vietnamese with a clear next step and a vibe boost.
+                    Rules: ALL IN VIETNAMESE—no English. Output MUST be a COMPLETE, VALID JSON object (e.g., {{"analysis": "", "action": "text"}}), nothing else—no extra text, no markdown outside JSON.
+                    Examples:
+                    - Input: 'Khách hàng từ chối thì phải làm sao' → {{"analysis": "- **Vấn đề**: Khách từ chối, chưa rõ lý do\n- **Nguyên nhân**: Có thể sản phẩm chưa phù hợp\n- **Cơ hội**: Tìm hiểu thêm để thuyết phục", "action": "Tfl, chill—hỏi khách lý do từ chối, gợi ý lợi ích khác, rồi đẩy deal lên level mới nha!"}}
+                    - Input: 'Bán thử sản phẩm đi' → {{"analysis": "- **Vấn đề**: Cần thuyết phục khách thử\n- **Lợi ích**: Sản phẩm có thể giải quyết nhu cầu khách", "action": "Tfl, gợi ý khách thử sản phẩm ngay—nhấn mạnh lợi ích đỉnh cao để họ gật đầu liền!"}}"""
+                    combined_start = time.time()
+                    response = ""
+                    for chunk in await asyncio.to_thread(LLM.invoke, combined_prompt):
+                        if isinstance(chunk, tuple) and len(chunk) >= 2 and chunk[0] == 'content':
+                            response += chunk[1]
+                    logger.debug(f"CoPilot raw response: '{response}'")
+                    logger.debug(f"CoPilot LLM invoke took {time.time() - combined_start:.2f}s")
+                    response = response.strip()
+                    if response.startswith("```json") and response.endswith("```"):
+                        response = response[7:-3].strip()
+                    elif response.startswith("```") and response.endswith("```"):
+                        response = response[3:-3].strip()
+                    try:
+                        result = json.loads(response)
+                        analysis, action = result["analysis"], result["action"] or f"{user_id.split('_')[0]}, Ami xử lý xong—giờ làm gì tiếp bro?"
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.error(f"CoPilot JSON parse error: {e}. Raw: '{response}'")
+                        analysis = "- **Vấn đề**: Chưa rõ bro muốn gì"
+                        action = f"{user_id.split('_')[0]}, chill—nói rõ hơn nha, Ami xử lý ngay!"
                     response = f"{analysis}\nKết luận: **_*{action}*_**" if analysis else action
 
-            state["copilot_task"] = state.get("copilot_task", latest_msg) if latest_msg else None
-            state["prompt_str"] = f"Ami in CoPilot mode: **_{response}_**"
-            state["user_id"] = user_id
-        
+                state["copilot_task"] = state.get("copilot_task", latest_msg) if latest_msg else None
+                state["prompt_str"] = f"Ami in CoPilot mode: **_{response}_**"
+                state["user_id"] = user_id
         else:
             intent_result = await asyncio.to_thread(detect_intent, state) if latest_msg else "greeting"
             intent = intent_result[0] if isinstance(intent_result, tuple) else intent_result
