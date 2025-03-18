@@ -183,7 +183,7 @@ def extract_knowledge(state, user_id=None, intent=None):
     convo_history = " ".join(m.content for m in messages)
     convo_id = state.get("convo_id", str(uuid.uuid4()))
     
-    prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
+    prompt_old = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
     - Latest: '{latest_msg}'
     - Convo History (last 5): '{convo_history}'
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
@@ -194,6 +194,18 @@ def extract_knowledge(state, user_id=None, intent=None):
     - "aliases": Leave empty unless variants detected.
     - NO translation—keep exact text from input.
     - Example: Input 'Aquamin F( 32% canxi , canxi từ tảo biển đỏ) bổ sung canxi hữu cơ' → {{"terms": {{"Aquamin F": {{"knowledge": ["32% canxi", "canxi từ tảo biển đỏ", "bổ sung canxi hữu cơ"], "aliases": []}}, "canxi hữu cơ": {{"knowledge": ["bổ sung canxi hữu cơ"], "aliases": []}}}}, "piece": ...}}
+    Output MUST be valid JSON."""
+    prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
+    - Latest: '{latest_msg}'
+    - Convo History (last 5): '{convo_history}'
+    - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
+    Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
+    Rules:
+    - "terms": Extract ALL distinct noun phrases, entities, or concepts (e.g., "khách hàng", "giá", "ROI") via NER or context.
+    - "knowledge": Split the input into concise, standalone chunks tied to each term. Each chunk MUST be a specific fact, attribute, or action (e.g., "hỏi về giá", "phải nhấn mạnh"). For instructions, break into actionable pieces.
+    - "aliases": Leave empty unless variants detected.
+    - NO translation—keep exact text from input.
+    - Example: Input 'Khi khách hàng hỏi về giá, hãy nhấn mạnh vào ROI' → {{"terms": {{"khách hàng": {{"knowledge": ["hỏi về giá"], "aliases": []}}, "giá": {{"knowledge": ["được hỏi bởi khách hàng"], "aliases": []}}, "ROI": {{"knowledge": ["phải nhấn mạnh"], "aliases": []}}}}, "piece": ...}}
     Output MUST be valid JSON."""
     
     LLM_NO_STREAM = ChatOpenAI(model="gpt-4o", streaming=False)
