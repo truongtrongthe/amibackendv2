@@ -1,3 +1,3 @@
-import fasttext
-model = fasttext.load_model("lid.176.bin")
-print(model.predict("Chào em", k=1))  # Check the output
+from pinecone_datastores import index
+response = index.fetch(["term_canxi_huu_co_global_thread"], namespace="term_memory")
+print(response.vectors["term_canxi_huu_co_global_thread"]["metadata"])

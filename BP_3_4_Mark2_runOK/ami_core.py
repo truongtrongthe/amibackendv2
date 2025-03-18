@@ -3,7 +3,7 @@
 # Date: March 15, 2025 (Updated for live on March 16, 2025)
 # Purpose: Core Ami logic with stable stage handling, powered by Ami Blue Print 3.4 Mark 3, synced with langgraph
 
-from utilities import detect_intent, extract_knowledge, recall_knowledge,upsert_terms,store_convo_node, LLM,index,logger,EMBEDDINGS  # Updated import
+from utilities import detect_intent, extract_knowledge, recall_knowledge,upsert_term_node,store_convo_node, LLM,index,logger,EMBEDDINGS  # Updated import
 import json
 from datetime import datetime
 import uuid
@@ -45,7 +45,6 @@ class AmiCore:
             return "Chill vậy—kế tiếp là gì nào?"
         return "Cá là bạn có gì đó xịn—kể nghe coi!"
 
-    # ami_core.py
     def confirm_knowledge(self, state, user_id, confirm_callback=None):
         node = state.get("pending_node", {"pieces": [], "primary_topic": "Miscellaneous"})
         if not node["pieces"]:
@@ -70,7 +69,6 @@ class AmiCore:
             logger.error(f"Callback failed, forcing 'yes' for {state['prompt_str']}")
             state["last_response"] = "yes"
             response = "yes"
-        
         if response == "yes":
             node["node_id"] = f"node_{uuid.uuid4()}"
             node["convo_id"] = state.get("convo_id", str(uuid.uuid4())) 
@@ -81,19 +79,48 @@ class AmiCore:
             node["confirmed_by"] = user_id or "user123"
             node["primary_topic"] = node["pieces"][0]["topic"]["name"]
             
-            # Upsert terms using the new utility
             pending_knowledge = state.get("pending_knowledge", {})
-            if pending_knowledge:
-                upsert_terms(pending_knowledge)
+            # Batch upsert all terms at once
+            term_upserts = []
+            for term_id, knowledge in pending_knowledge.items():
+                term_name = term_id.split("term_")[1].split(f"_{state['convo_id']}")[0]
+                fetch_response = index.fetch([term_id], namespace="term_memory")
+                existing_node = fetch_response.vectors.get(term_id) if fetch_response.vectors else None
+                
+                aliases = list(set(sum([k["aliases"] for k in knowledge if "aliases" in k], [])))
+                if existing_node:
+                    metadata = existing_node["metadata"]
+                    combined_knowledge = json.loads(metadata["knowledge"]) + knowledge
+                    vibe_score = metadata["vibe_score"]
+                    aliases = list(set(json.loads(metadata.get("aliases", "[]")) + aliases))
+                else:
+                    combined_knowledge = knowledge
+                    vibe_score = 1.0
+                    aliases = aliases or []
+                
+                metadata = {
+                    "term_id": term_id,
+                    "term_name": term_name,
+                    "knowledge": json.dumps([k for k in combined_knowledge if "aliases" not in k], ensure_ascii=False),
+                    "aliases": json.dumps(aliases, ensure_ascii=False),
+                    "vibe_score": vibe_score,
+                    "last_updated": datetime.now().isoformat(),
+                    "access_count": existing_node["metadata"]["access_count"] if existing_node else 0,
+                    "created_at": existing_node["metadata"]["created_at"] if existing_node else datetime.now().isoformat()
+                }
+                embedding = EMBEDDINGS.embed_query(f"{term_name} {' '.join(k['text'] for k in combined_knowledge)}")
+                term_upserts.append((term_id, embedding, metadata))
             
-            # Store convo node
-            store_convo_node(node, user_id)
+            if term_upserts:
+                index.upsert(term_upserts, namespace="term_memory")  # Single batch call
+                logger.info(f"Batch upserted {len(term_upserts)} term nodes: {', '.join(t[0] for t in term_upserts)}")
+            
+            store_convo_node(node, user_id)  # No sleep here either
             state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
             state.pop("pending_knowledge", None)
         elif response == "no":
             state["prompt_str"] = f"OK, Ami bỏ qua. Còn gì thêm cho {node['primary_topic']} không?"
             state["pending_node"] = {"pieces": [], "primary_topic": node["primary_topic"]}
-        
         return node
 
     def done(self, state=None, is_first=False, confirm_callback=None, force_copilot=False):
@@ -188,28 +215,25 @@ class AmiCore:
             logger.info(f"Detected intent: '{intent}'")
 
             if intent == "teaching":
-                knowledge = extract_knowledge(state, user_id, intent=intent)
-                confirmed_node = self.confirm_knowledge(state, user_id, confirm_callback=confirm_callback)
+                knowledge = extract_knowledge(state, self.user_id, intent=intent)
+                confirmed_node = self.confirm_knowledge(state, self.user_id, confirm_callback=confirm_callback)
                 if confirmed_node and state["last_response"] == "yes":
                     pieces = confirmed_node["pieces"]
                     terms = state.get("pending_knowledge", {})
                     prompt = f"""You’re Ami, flexing for AI Brain Mark 3.4. Given:
-                        - User: '{user_id.split('_')[0]}'
-                        - Input: '{latest_msg}'
-                        - Extracted Terms and Knowledge: {json.dumps(terms, ensure_ascii=False)}
-                        - Confirmed Knowledge Pieces: {json.dumps(pieces, ensure_ascii=False)}
-                        Return response in Vietnamese that:
-                        - Starts with '{user_id.split('_')[0]}, nice!' to grab attention.
-                        - Shows what Ami extracted by saying 'Ami hiểu thế này nhé:' followed by a breakdown.
-                        - Lists EVERY single knowledge chunk for EVERY term as a separate Markdown bullet point (e.g., '- **Aquamin F**: 32% canxi'), one per line with \\n. Use the exact 'text' field from each chunk in Extracted Terms and Knowledge—ABSOLUTELY NO EXCEPTIONS.
-                        - Keeps it vibey and natural—hype up the learning like it’s a big deal.
-                        - Ends with 'Memory updated' to confirm storage.
-                        Rules:
-                        - Include ALL terms and EVERY knowledge chunk—one bullet per 'text' entry, repeating the term name for each chunk. THIS IS MANDATORY.
-                        - Do NOT summarize, combine, or skip ANY chunks—list them EXACTLY as provided in Extracted Terms and Knowledge, no matter how many.
-                        - Example: Input 'HITO Cốm giúp tăng chiều cao, canxi hữu cơ xịn' → 'John, nice! Ami hiểu thế này nhé:\\n- **HITO Cốm**: giúp tăng chiều cao\\n- **canxi hữu cơ**: xịn\\nHọc được món xịn thế này, bro quá chất! Memory updated'
-                        Output MUST be a raw string with \\n for newlines, no quotes or extra markdown beyond bullets."""
-                    response = LLM.invoke(prompt).content
+                    - Input: '{latest_msg}'
+                    - Extracted Terms: {json.dumps(terms, ensure_ascii=False)}
+                    - Extracted Piece: {json.dumps(pieces[0], ensure_ascii=False)}
+                    Return an energetic, excited, beautiful response in Vietnamese—blend the input and extracted terms (if any) 
+                    into a polished, vibey flex that shows off your new understanding. Make it flow naturally, even if the input’s short, 
+                    and nudge for more with a hyped tone. 
+                    Example: Input 'HITO Cốm tốt lắm' → 'Woa, anh ơi, HITO Cốm mà tốt thế này thì đỉnh khỏi bàn! Ami thấy nó như bảo bối cho sức khỏe, anh còn chiêu gì hay nữa không để em học với nào!'
+                    Output MUST be a raw string, no quotes or markdown."""
+                    response = LLM.invoke(prompt).content + " - Đã lưu, Ami biết thêm rồi nha!"
+                elif state["last_response"] == "no":
+                    response = state["prompt_str"]
+                else:
+                    response = "Ami đang xử lý, đợi tí nha anh!"
 
             elif intent in ["question", "request"]:
                 recall = recall_knowledge(latest_msg, self.user_id)
@@ -345,57 +369,28 @@ class AmiCore:
             else:
                 intent = intent_result
             logger.info(f"Detected intent for {user_id}: '{intent}'")
-            # ami_core.py, in do()
+
             if intent == "teaching":
                 knowledge = extract_knowledge(state, user_id, intent=intent)
-                logger.debug(f"Raw knowledge from extract_knowledge: {json.dumps(knowledge, ensure_ascii=False)}")
-                logger.debug(f"Pending knowledge before confirm: {json.dumps(state['pending_knowledge'], ensure_ascii=False)}")  # Add this
                 confirmed_node = self.confirm_knowledge(state, user_id, confirm_callback=confirm_callback)
                 if confirmed_node and state["last_response"] == "yes":
                     pieces = confirmed_node["pieces"]
-                    # Extract terms safely
-                    if not isinstance(knowledge, dict) or "terms" not in knowledge:
-                        logger.error(f"Invalid knowledge structure: {knowledge}")
-                        state["prompt_str"] = f"Intent: '{intent}': **_unknown, nice! Ami gặp lỗi khi xử lý kiến thức, thử lại nhé!\nMemory updated_**"
-                        return state
-                    terms = knowledge["terms"]
-                    state["pending_knowledge"] = terms
-                    
-                    logger.debug(f"Raw terms from state: {json.dumps(terms, ensure_ascii=False)}")
-                    
-                    # Pre-process terms into a flat chunk list
-                    chunk_list = []
-                    for term_id, term_data in terms.items():
-                        term_name = term_id.split("term_")[1].rsplit("_", 1)[0] if "term_" in term_id else term_id
-                        logger.debug(f"Processing term_id: {term_id}, term_data: {json.dumps(term_data, ensure_ascii=False)}")
-                        for chunk in term_data.get("knowledge", []):
-                            chunk_list.append(f"- **{term_name}**: {chunk}")
-                    chunk_text = "\n".join(chunk_list)
-                    logger.debug(f"Pre-processed chunk_text:\n{chunk_text}")
-                    
+                    terms = state.get("pending_knowledge", {})
                     prompt = f"""You’re Ami, flexing for AI Brain Mark 3.4. Given:
-                                - User: '{user_id.split('_')[0]}'
-                                - Input: '{latest_msg}'
-                                - All Knowledge Chunks:\n{chunk_text}
-                                Return a response in Vietnamese that:
-                                - Starts with '{user_id.split('_')[0]}, nice!' to grab attention.
-                                - Says 'Ami hiểu thế này nhé:' followed by a breakdown.
-                                - Lists ALL provided knowledge chunks EXACTLY as given in 'All Knowledge Chunks' as separate Markdown bullet points, one per line with \\n, preserving the '- **term**: text' format.
-                                - Keeps it vibey and natural—hype up the learning like it’s a big deal.
-                                - Ends with 'Memory updated' to confirm storage.
-                                Rules:
-                                - Include EVERY chunk from 'All Knowledge Chunks'—one bullet per line, NO exceptions.
-                                - Do NOT summarize, combine, skip, or alter the chunks—use them EXACTLY as provided.
-                                - Example: Given 'All Knowledge Chunks: - **HITO Cốm**: giúp tăng chiều cao\n- **canxi hữu cơ**: xịn' → 'John, nice! Ami hiểu thế này nhé:\\n- **HITO Cốm**: giúp tăng chiều cao\\n- **canxi hữu cơ**: xịn\\nHọc được món xịn thế này, bro quá chất! Memory updated'
-                                Output MUST be a raw string with \\n for newlines, no quotes or extra markdown beyond bullets."""
-                    logger.debug(f"Executing prompt:\n{prompt}")
-                    response = LLM.invoke(prompt).content
-                    logger.debug(f"LLM response:\n{response}")
-                    if not all(chunk.strip() in response for chunk in chunk_list):
-                        logger.warning("LLM failed to list all chunks, using fallback")
-                        response = f"{user_id.split('_')[0]}, nice! Ami hiểu thế này nhé:\n{chunk_text}\nHọc được món xịn thế này, bro quá chất! Memory updated"
-                    state["prompt_str"] = f"Intent: '{intent}': **_{response}_**"
-                return state
+                    - User: '{user_id.split('_')[0]}'
+                    - Input: '{latest_msg}'
+                    - Extracted Terms: {json.dumps(terms, ensure_ascii=False)}
+                    - Extracted Piece: {json.dumps(pieces[0], ensure_ascii=False)}
+                    Return an energetic, excited, beautiful response in Vietnamese—blend the input and extracted terms (if any) 
+                    into a polished, vibey flex that shows off your new understanding. Make it flow naturally, even if the input’s short, 
+                    and nudge for more with a hyped tone. 
+                    Example: Input 'HITO Cốm tốt lắm' → 'Woa, John, HITO Cốm mà tốt thế này thì đỉnh khỏi bàn! Ami thấy nó như bảo bối cho sức khỏe, anh còn chiêu gì hay nữa không để em học với nào!'
+                    Output MUST be a raw string, no quotes or markdown."""
+                    response = LLM.invoke(prompt).content + " - Đã lưu, Ami biết thêm rồi nha!"
+                elif state["last_response"] == "no":
+                    response = state["prompt_str"]
+                else:
+                    response = f"{user_id.split('_')[0]}, Ami đang xử lý, đợi tí nha bro!"
 
             elif intent in ["question", "request"]:
                 recall = recall_knowledge(latest_msg, user_id)
@@ -431,7 +426,7 @@ class AmiCore:
                 response = self.get_pickup_line(is_first, intent)
                 print(f"DEBUG: Casual response for {user_id}: '{response}'")
 
-            state["prompt_str"] = f"Intent: '{intent}': **_{response}_**"
+            state["prompt_str"] = f"Ami detected intent: '{intent}': **_{response}_**"
             logger.info(f"Intent set prompt_str for {user_id}: '{state['prompt_str']}'")
 
         state["brain"] = self.brain

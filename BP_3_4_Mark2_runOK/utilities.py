@@ -34,7 +34,7 @@ def clean_llm_response(response):
     return response
 
 # Setup logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Config - Dynamic, no hardcodes
@@ -173,9 +173,8 @@ def identify_topic(state, max_context=1000):
     logger.info(f"Parsed topics: {json.dumps(topics, ensure_ascii=False)}")
     return topics
 
-# utilities.py
-def extract_knowledge(state, user_id=None, intent=None):
-    intent = intent or detect_intent(state)
+def extract_knowledge(state, user_id=None, intent =None):
+    intent = intent or detect_intent(state) 
     topics = identify_topic(state)
     messages = state["messages"][-5:] if state["messages"] else []
     latest_msg = messages[-1].content if messages else ""
@@ -183,19 +182,19 @@ def extract_knowledge(state, user_id=None, intent=None):
     convo_history = " ".join(m.content for m in messages)
     convo_id = state.get("convo_id", str(uuid.uuid4()))
     
+    
     prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
     - Latest: '{latest_msg}'
     - Convo History (last 5): '{convo_history}'
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
     Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
     Rules:
-    - "terms": Extract ALL distinct noun phrases, entities, or concepts (e.g., "Aquamin F", "canxi hữu cơ", "hệ xương") via NER or context. Include both specific entities and key concepts.
-    - "knowledge": Split the input into concise, standalone chunks tied to each term. Each chunk MUST be a specific fact or attribute (e.g., "32% canxi" or "dễ hấp thu"), max 1-2 short phrases. Break sentences into separate facts where possible.
+    - "terms": Extract ALL full noun phrases, roles, or titles (e.g., "HITO Cốm", "bác sĩ dinh dưỡng") via NER or context. Prioritize specific entities over generics.
+    - "knowledge": Tie chunks to terms—e.g., "giới thiệu mình là bác sĩ dinh dưỡng" for "bác sĩ dinh dưỡng".
     - "aliases": Leave empty unless variants detected.
-    - NO translation—keep exact text from input.
-    - Example: Input 'Aquamin F( 32% canxi , canxi từ tảo biển đỏ) bổ sung canxi hữu cơ' → {{"terms": {{"Aquamin F": {{"knowledge": ["32% canxi", "canxi từ tảo biển đỏ", "bổ sung canxi hữu cơ"], "aliases": []}}, "canxi hữu cơ": {{"knowledge": ["bổ sung canxi hữu cơ"], "aliases": []}}}}, "piece": ...}}
-    Output MUST be valid JSON."""
-    
+    - NO translation—keep it exact.
+    - Output MUST be valid JSON."""
+    # Debug: Disable streaming, add timeout
     LLM_NO_STREAM = ChatOpenAI(model="gpt-4o", streaming=False)
     try:
         response = clean_llm_response(LLM_NO_STREAM.invoke(prompt, timeout=30).content)
@@ -213,13 +212,11 @@ def extract_knowledge(state, user_id=None, intent=None):
         terms = {latest_msg.split()[0]: {"knowledge": [latest_msg], "aliases": []}}
         piece = {"intent": intent, "topic": topics[0], "raw_input": latest_msg}
     
-    # Add metadata to piece
     piece["piece_id"] = f"piece_{uuid.uuid4()}"
     piece["meaningfulness_score"] = 0.9
     piece["needs_clarification"] = False
     piece["term_refs"] = []
     
-    # Process terms and update state
     for term_name, data in terms.items():
         canonical_name = term_name
         for existing_name in active_terms:
@@ -235,19 +232,16 @@ def extract_knowledge(state, user_id=None, intent=None):
              for chunk in data["knowledge"]]
         )
     
-    # Handle "nó" reference
     if not piece["term_refs"] and "nó" in latest_msg.lower() and active_terms:
         top_term = max(active_terms.items(), key=lambda x: x[1]["vibe_score"])[1]["term_id"]
         if top_term not in piece["term_refs"]:
             piece["term_refs"].append(top_term)
     
-    # Build pending_node
     pending_node = state.get("pending_node", {"pieces": [], "primary_topic": topics[0]["name"]})
     pending_node["pieces"].append(piece)
     state["pending_node"] = pending_node
     state["active_terms"] = active_terms
     
-    # Check for unclear pieces
     unclear_pieces = [p["raw_input"] for p in pending_node["pieces"] if p["meaningfulness_score"] < 0.8]
     if unclear_pieces:
         state["prompt_str"] = f"Ami thấy mấy ý—{', '.join(f'‘{t}’' for t in unclear_pieces)}—nói rõ cái nào đi bro!"
@@ -256,114 +250,47 @@ def extract_knowledge(state, user_id=None, intent=None):
                 p["needs_clarification"] = True
     
     logger.info(f"Extracted pieces: {json.dumps(pending_node['pieces'], ensure_ascii=False)}")
-    
-    # Return raw LLM structure with terms
-    return {"terms": terms, "piece": piece}
+    return pending_node
 
-def upsert_terms(terms):
-    vectors = []
-    now = datetime.now().isoformat()
-    for term_id, knowledge in terms.items():
-        try:
-            if "term_" not in term_id:
-                term_name = term_id
-                term_id = f"term_{sanitize_vector_id(term_name)}_{uuid.uuid4()}"
-            else:
-                term_name = term_id.split("term_")[1].rsplit("_", 1)[0]
-        except IndexError:
-            logger.error(f"Malformed term_id: {term_id}. Rebuilding.")
-            term_name = term_id
-            term_id = f"term_{sanitize_vector_id(term_name)}_{uuid.uuid4()}"
 
-        term_chunks = []
-        for chunk in knowledge:
-            if isinstance(chunk, str):
-                # Handle raw string chunks (backward compatibility or error case)
-                term_chunks.append({
-                    "text": chunk,
-                    "confidence": 0.9,
-                    "source_piece_id": "",
-                    "created_at": now,
-                    "aliases": []
-                })
-            elif isinstance(chunk, dict) and "text" in chunk:
-                # Handle expected dict format
-                term_chunks.append({
-                    "text": chunk["text"],
-                    "confidence": chunk.get("confidence", 0.9),
-                    "source_piece_id": chunk.get("source_piece_id", ""),
-                    "created_at": chunk.get("created_at", now),
-                    "aliases": chunk.get("aliases", [])
-                })
-            else:
-                logger.warning(f"Unexpected chunk format: {chunk}. Skipping.")
-                continue
-
-        vector = {
-            "id": term_id,
-            "values": EMBEDDINGS.embed_query(term_name + " " + " ".join(c["text"] for c in term_chunks)),
-            "metadata": {
-                "term_name": term_name,
-                "knowledge": json.dumps(term_chunks, ensure_ascii=False),
-                "vibe_score": 1.0,
-                "access_count": 0,
-                "last_updated": now,
-                "convo_id": term_id.rsplit("_", 1)[-1] if "_" in term_id else str(uuid.uuid4())
-            }
-        }
-        vectors.append(vector)
+def upsert_term_node(term_id, convo_id, new_knowledge):
+    term_name = term_id.split("term_")[1].split(f"_{convo_id}")[0]
+    vector_id = term_id  # Already term_<name>_<convo_id>
+    fetch_response = index.fetch([vector_id], namespace="term_memory")  # FetchResponse object
+    existing_node = fetch_response.vectors.get(vector_id) if fetch_response.vectors else None  # Access .vectors
     
-    if vectors:
-        index.upsert(vectors=vectors, namespace="term_memory")
-        logger.info(f"Batch upserted {len(vectors)} terms: {', '.join(v['id'] for v in vectors)}")
-def upsert_terms_old(terms_data, namespace="term_memory"):
-    term_upserts = []
-    now = datetime.now().isoformat()
+    aliases = []
+    if new_knowledge and "aliases" in new_knowledge[0]:
+        aliases = list(set(sum([k["aliases"] for k in new_knowledge], [])))  # Flatten and dedupe aliases
     
-    for term_id, new_knowledge in terms_data.items():
-        #term_name_parts = term_id.split("term_")[1].split("_")
-        #term_name = "_".join(term_name_parts[:-1])  # Fix: Take all parts except convo_id, e.g., "canxi_huu_co"
-        term_name = term_id.split("term_")[1].rsplit("_", 1)[0]
-        
-        fetch_response = index.fetch([term_id], namespace=namespace)
-        existing_node = fetch_response.vectors.get(term_id) if fetch_response.vectors else None
-        
-        aliases = list(set(sum([k["aliases"] for k in new_knowledge if "aliases" in k], [])))
-        if existing_node:
-            metadata = existing_node["metadata"]
-            combined_knowledge = json.loads(metadata["knowledge"]) + new_knowledge
-            vibe_score = metadata["vibe_score"]
-            aliases = list(set(json.loads(metadata.get("aliases", "[]")) + aliases))
-            access_count = metadata["access_count"]
-            created_at = metadata["created_at"]
-        else:
-            combined_knowledge = new_knowledge
-            vibe_score = 1.0
-            aliases = aliases or []
-            access_count = 0
-            created_at = now
-        
-        metadata = {
-            "term_id": term_id,
-            "term_name": term_name,
-            "knowledge": json.dumps(combined_knowledge, ensure_ascii=False),  # Fix: Keep all chunks
-            "aliases": json.dumps(aliases, ensure_ascii=False),
-            "vibe_score": vibe_score,
-            "last_updated": now,
-            "access_count": access_count,
-            "created_at": created_at
-        }
-        
-        embedding_text = f"{term_name} {' '.join(k['text'] for k in combined_knowledge)}"
-        embedding = EMBEDDINGS.embed_query(embedding_text)
-        term_upserts.append((term_id, embedding, metadata))
+    if existing_node:
+        metadata = existing_node["metadata"]
+        knowledge = json.loads(metadata["knowledge"]) + new_knowledge
+        embedding_text = f"{term_name} {' '.join(k['text'] for k in knowledge)}"
+        vibe_score = metadata["vibe_score"]
+        aliases = list(set(json.loads(metadata.get("aliases", "[]")) + aliases))  # Merge with existing
+    else:
+        knowledge = new_knowledge
+        embedding_text = f"{term_name} {' '.join(k['text'] for k in knowledge)}"
+        vibe_score = 1.0  # 3.4: Start at 1.0
+        aliases = aliases or []
     
-    if term_upserts:
-        try:
-            index.upsert(term_upserts, namespace=namespace)
-            logger.info(f"Batch upserted {len(term_upserts)} terms: {', '.join(t[0] for t in term_upserts)}")
-        except Exception as e:
-            logger.error(f"Batch upsert failed: {e}. Terms: {len(term_upserts)}")
+    metadata = {
+        "term_id": term_id,
+        "term_name": term_name,
+        "knowledge": json.dumps([k for k in knowledge if "aliases" not in k], ensure_ascii=False),
+        "aliases": json.dumps(aliases, ensure_ascii=False),
+        "vibe_score": vibe_score,
+        "last_updated": datetime.now().isoformat(),
+        "access_count": existing_node["metadata"]["access_count"] if existing_node else 0,
+        "created_at": existing_node["metadata"]["created_at"] if existing_node else datetime.now().isoformat()
+    }
+    embedding = EMBEDDINGS.embed_query(embedding_text)
+    try:
+        index.upsert([(vector_id, embedding, metadata)], namespace="term_memory")
+        logger.info(f"Upserted term node: {vector_id}")
+    except Exception as e:
+        logger.error(f"Term upsert failed: {e}")
 
 def store_convo_node(node, user_id):
     vector_id = f"{node['node_id']}_{node['primary_topic']}_{node['created_at']}"
@@ -387,8 +314,80 @@ def store_convo_node(node, user_id):
         logger.error(f"Convo upsert failed: {e}")
         return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
 
+def recall_knowledge_runOK(message, user_id=None):
+    state = {"messages": [HumanMessage(message)], "prompt_str": ""}
+    intent = detect_intent(state)
+    
+    message_lower = message.lower()
+    preset_results = index.query(vector=EMBEDDINGS.embed_query(message), top_k=2, include_metadata=True, namespace="Preset")
+    for r in preset_results["matches"]:
+        if r.score > 0.8:
+            return {"response": f"Ami đây! {r.metadata['text']}—thử không bro?", "mode": "Co-Pilot", "source": "Preset"}
 
-def recall_knowledge_3_4_2(message, user_id=None):
+    query_embedding = EMBEDDINGS.embed_query(message)
+    convo_results = index.query(vector=query_embedding, top_k=10, include_metadata=True, namespace="convo_nodes")
+    logger.info(f"Recall convo_results: {json.dumps(convo_results, default=str)}")
+    
+    now = datetime.now()
+    nodes = []
+    for r in convo_results["matches"]:
+        meta = r.metadata
+        meta["pieces"] = json.loads(meta["pieces"])
+        meta["last_accessed"] = meta.get("last_accessed", now.isoformat())
+        meta["access_count"] = meta.get("access_count", 0)
+        days_since = (now - datetime.fromisoformat(meta["last_accessed"])).days
+        relevance = r.score
+        recency = max(0, 1 - 0.05 * days_since)
+        usage = min(1, meta["access_count"] / 10)
+        vibe_score = (0.5 * relevance) + (0.3 * recency) + (0.2 * usage)
+        nodes.append({"meta": meta, "vibe_score": vibe_score})
+    
+    filtered_nodes = [n for n in nodes if n["meta"]["pieces"]] or nodes[:2]
+    if not filtered_nodes:
+        return {"response": f"Ami đây! Chưa đủ info, bro thêm tí nha!", "mode": "Co-Pilot", "source": "Enterprise"}
+    
+    filtered_nodes.sort(key=lambda x: (x["vibe_score"], datetime.fromisoformat(x["meta"]["last_accessed"])), reverse=True)
+    top_nodes = filtered_nodes[:3]
+    term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
+    
+    fetch_response = index.fetch(list(term_ids), namespace="term_memory")
+    term_nodes = getattr(fetch_response, "vectors", {})
+    for term_id in term_ids:
+        if term_id in term_nodes:
+            meta = term_nodes[term_id]["metadata"]
+            meta["vibe_score"] += 0.1
+            meta["access_count"] += 1
+            meta["last_updated"] = now.isoformat()
+            embedding_text = f"{meta['term_name']} {' '.join(k['text'] for k in json.loads(meta['knowledge']))}"
+            embedding = EMBEDDINGS.embed_query(embedding_text)
+            index.upsert([(term_id, embedding, meta)], namespace="term_memory")
+            time.sleep(1)
+    
+    prompt = f"""You’re Ami, pitching for AI Brain Mark 3.4. Given:
+    - Input: '{message}'
+    - Intent: '{intent}'
+    - Convo Nodes: {json.dumps([n['meta'] for n in top_nodes], ensure_ascii=False)}
+    - Term Nodes: {json.dumps({tid: tn['metadata'] for tid, tn in term_nodes.items()}, ensure_ascii=False)}
+    Return raw JSON: {{"response": "<response>", "mode": "<mode>", "source": "Enterprise"}}
+    Rules:
+    - "response": Vietnamese, casual, sales-y—use all three top_nodes for fullest context, check aliases. For 'request', prioritize sales steps with specifics (e.g., "#combo 1"). For 'question', blend all top_nodes; include all key details from highest-scoring node (e.g., all benefits), use exact key phrases where possible (e.g., "ổn định hấp thụ xương"), and make sales hooks explicit (e.g., "mua cho con"). If asking about a component (e.g., "Aquamin F"), link it to "HITO Cốm" explicitly. Predict objections (e.g., age, cost) and address them.
+    - "mode": "Autopilot" if "request", else "Co-Pilot".
+    - "source": "Enterprise".
+    - Short, actionable, charming—use highest vibe_score terms first.
+    - Example: "Tôi 35 tuổi, HITO Cốm có tác dụng không?" → {{"response": "Bro 35 tuổi thì HITO Cốm giúp ổn định hấp thụ xương, không tăng chiều cao nhiều—mua cho con nhỏ thì đỉnh hơn!", "mode": "Co-Pilot", "source": "Enterprise"}}
+    - Output MUST be valid JSON, no markdown."""
+
+    response = clean_llm_response(LLM.invoke(prompt).content)
+    try:
+        result = json.loads(response)
+        logger.info(f"Recalled: {json.dumps(result, ensure_ascii=False)}")
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Recall parse error: {e}. Raw: '{response}'. Falling back")
+        return {"response": f"Ami đây! Chưa rõ lắm, bro nói thêm đi!", "mode": "Co-Pilot", "source": "Enterprise"}
+# utilities.py (snippet)
+# utilities.py (snippet)
+def recall_knowledge(message, user_id=None):
     state = {"messages": [HumanMessage(message)], "prompt_str": ""}
     # Safely handle detect_intent output—string or tuple
     intent_result = detect_intent(state)
@@ -445,63 +444,6 @@ def recall_knowledge_3_4_2(message, user_id=None):
             embedding = EMBEDDINGS.embed_query(embedding_text)
             index.upsert([(term_id, embedding, meta)], namespace="term_memory")
             time.sleep(1)
-    
-    return {
-        "knowledge": [{"meta": n["meta"], "vibe_score": n["vibe_score"]} for n in top_nodes],
-        "terms": {tid: tn["metadata"] for tid, tn in term_nodes.items()},
-        "mode": "Autopilot" if intent == "request" else "Co-Pilot",
-        "intent": intent
-    }
-
-# utilities.py
-def recall_knowledge(message, user_id=None):
-    state = {"messages": [HumanMessage(message)], "prompt_str": ""}
-    intent_result = detect_intent(state)
-    intent = intent_result[0] if isinstance(intent_result, tuple) else intent_result
-    
-    preset_results = index.query(vector=EMBEDDINGS.embed_query(message), top_k=2, include_metadata=True, namespace="Preset")
-    for r in preset_results["matches"]:
-        if r.score > 0.8:
-            return {"knowledge": [{"text": r.metadata['text'], "source": "Preset", "score": r.score}], "mode": "Co-Pilot", "intent": intent}
-
-    query_embedding = EMBEDDINGS.embed_query(message)
-    convo_results = index.query(vector=query_embedding, top_k=10, include_metadata=True, namespace="convo_nodes")
-    
-    now = datetime.now()
-    nodes = []
-    for r in convo_results["matches"]:
-        meta = r.metadata
-        meta["pieces"] = json.loads(meta["pieces"])
-        meta["last_accessed"] = meta.get("last_accessed", now.isoformat())
-        meta["access_count"] = meta.get("access_count", 0)
-        days_since = (now - datetime.fromisoformat(meta["last_accessed"])).days
-        vibe_score = (0.5 * r.score) + (0.3 * max(0, 1 - 0.05 * days_since)) + (0.2 * min(1, meta["access_count"] / 10))
-        nodes.append({"meta": meta, "vibe_score": vibe_score})
-    
-    filtered_nodes = [n for n in nodes if n["meta"]["pieces"]] or nodes[:2]
-    if not filtered_nodes:
-        return {"knowledge": [], "mode": "Co-Pilot", "intent": intent}
-    
-    filtered_nodes.sort(key=lambda x: (x["vibe_score"], datetime.fromisoformat(x["meta"]["last_accessed"])), reverse=True)
-    top_nodes = filtered_nodes[:3]
-    term_ids = set(t for n in top_nodes for p in n["meta"]["pieces"] for t in p["term_refs"])
-    
-    fetch_response = index.fetch(list(term_ids), namespace="term_memory")
-    term_nodes = getattr(fetch_response, "vectors", {})
-    
-    # Batch update terms
-    terms_to_update = {}
-    for term_id in term_ids:
-        if term_id in term_nodes:
-            meta = term_nodes[term_id]["metadata"]
-            meta["vibe_score"] += 0.1
-            meta["access_count"] += 1
-            meta["last_updated"] = now.isoformat()
-            knowledge = json.loads(meta["knowledge"])
-            terms_to_update[term_id] = [{"text": k["text"], "confidence": k.get("confidence", 0.9), "source_piece_id": k.get("source_piece_id", ""), "created_at": k.get("created_at", now), "aliases": k.get("aliases", [])} for k in knowledge]
-    
-    if terms_to_update:
-        upsert_terms(terms_to_update)
     
     return {
         "knowledge": [{"meta": n["meta"], "vibe_score": n["vibe_score"]} for n in top_nodes],
