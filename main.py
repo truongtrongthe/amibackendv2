@@ -54,7 +54,7 @@ def learnok():
         return response, 200  # Fast response for preflight
     data = request.get_json()
     user_input = data.get("user_input")
-    user_id ="tfl"
+    user_id ="sales"
     thread_id = data.get("thread_id", "global_thread")  # Optional thread_id from client
     return Response(
         convo_stream(user_input, user_id, thread_id), 
@@ -76,11 +76,12 @@ def learn():
     # Parse input
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
+    user_id ="Teacher"
     thread_id = data.get("thread_id", "global_thread")  # Client-provided or default
 
     # Stream response
     return Response(
-        convo_stream(user_input, thread_id),  # Pass only essentials
+        convo_stream(user_input, user_id,thread_id),  # Pass only essentials
         mimetype='text/event-stream',
         headers={
             'X-Accel-Buffering': 'no',

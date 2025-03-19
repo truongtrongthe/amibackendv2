@@ -148,7 +148,7 @@ def extract_knowledge(state, user_id=None, intent=None):
     Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
     Rules: Extract ALL distinct noun phrases/entities/concepts. "knowledge" must be concise facts. Output MUST be valid JSON."""
     
-    prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
+    prompt = f"""You’re Ami, extracting nature language like a pro. Given:
     - Latest: '{latest_msg}' (in its original language, Vietnamese - KEEP THE ORIGINAL LANGUAGE, DO NOT TRANSLATE)
     - Convo History (last 5): '{convo_history}' (in its original language, Vietnamese - KEEP THE ORIGINAL LANGUAGE, DO NOT TRANSLATE)
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}

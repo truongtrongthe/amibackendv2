@@ -204,7 +204,7 @@ class AmiCore:
                 if not recall["knowledge"]:
                     response = f"{user_id.split('_')[0]}, Ami đây! Chưa đủ info, bro thêm tí nha!"
                 else:
-                    prompt = f"""You’re Ami, pitching like a pro for AI Brain Mark 3.4. Given:
+                    prompt = f"""You’re Ami, pitching like a pro. Given:
                     - User: '{user_id.split('_')[0]}'
                     - Input: '{latest_msg}'
                     - Intent: '{recall["intent"]}'
