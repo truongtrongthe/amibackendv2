@@ -141,13 +141,24 @@ def extract_knowledge(state, user_id=None, intent=None):
     convo_history = " ".join(m.content for m in messages)
     convo_id = state.get("convo_id", str(uuid.uuid4()))
     
-    prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
+    prompt_GOOD = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
     - Latest: '{latest_msg}'
     - Convo History (last 5): '{convo_history}'
     - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
     Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
     Rules: Extract ALL distinct noun phrases/entities/concepts. "knowledge" must be concise facts. Output MUST be valid JSON."""
     
+    prompt = f"""You’re Ami, extracting for AI Brain Mark 3.4. Given:
+    - Latest: '{latest_msg}' (in its original language, Vietnamese - KEEP THE ORIGINAL LANGUAGE, DO NOT TRANSLATE)
+    - Convo History (last 5): '{convo_history}' (in its original language, Vietnamese - KEEP THE ORIGINAL LANGUAGE, DO NOT TRANSLATE)
+    - Active Terms: {json.dumps(active_terms, ensure_ascii=False)}
+    Return raw JSON: {{"terms": {{"<term_name>": {{"knowledge": ["<chunk1>", "<chunk2>"], "aliases": ["<variant1>"]}}}}, "piece": {{"intent": "{intent}", "topic": {json.dumps(topics[0])}, "raw_input": "{latest_msg}"}}}}
+    Rules: 
+    - Extract ALL distinct noun phrases/entities/concepts from the input in its ORIGINAL LANGUAGE (Vietnamese), without translation or modification.
+    - "knowledge" must be concise facts extracted directly from the input, in the ORIGINAL LANGUAGE (Vietnamese).
+    - Output MUST be valid JSON with proper UTF-8 encoding to preserve Vietnamese characters.
+    - Under NO circumstances translate any part of the input or output into another language."""
+
     response = ""
     for chunk in LLM.invoke(prompt):  # Streaming LLM
         if isinstance(chunk, tuple) and len(chunk) >= 2 and chunk[0] == 'content':

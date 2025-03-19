@@ -137,15 +137,8 @@ class AmiCore:
                     if not recall["knowledge"]:
                         response = f"{user_id.split('_')[0]}, Ami đây! Chưa đủ info, bro thêm tí nha!"
                     else:
-                        prompt1 = f"""You’re Ami a Sales Expert, answer user input. Given:
-                        - User: '{user_id.split('_')[0]}'
-                        - Input: '{latest_msg}'
-                        - Intent: '{recall["intent"]}'
-                        - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
-                        - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
-                        Return a confident, sales-y response in Vietnamese that screams GAIN—blend all knowledge into a tight pitch 
-                        using exact key phrases. Output MUST be a raw string, no quotes or markdown."""
-                        prompt = f"""You’re Ami, a Sales Expert in CoPilot mode. Given:
+                        
+                        prompt_OK = f"""You’re Ami, a Sales Expert in CoPilot mode. Given:
                         - User: '{user_id.split('_')[0]}'
                         - Input: '{latest_msg}'
                         - Intent: '{recall["intent"]}'
@@ -153,6 +146,16 @@ class AmiCore:
                         - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
                         Return a single-part response:
                         Example Instruction: A confident, actionable instruction in Vietnamese for the salesperson running this Copilot, showing them how to handle customer objections effectively based on the input, intent, knowledge, and terms. Use exact key phrases from the terms and knowledge, focus on GAIN for the salesperson’s approach, and include a 1-2 sentence example of what they could say to the customer in double quotes with bold italic markdown (e.g., **_"example"_**).
+                        Output MUST be a raw string. Do NOT include any markdown symbols (e.g., no **, *, _, or >) or extra formatting except for the example message within the Example Instruction."""
+                        
+                        prompt = f"""You’re Ami, a Sales Expert in CoPilot mode. Given:
+                        - User: '{user_id.split('_')[0]}'
+                        - Input: '{latest_msg}'
+                        - Intent: '{recall["intent"]}'
+                        - Knowledge: {json.dumps(recall["knowledge"], ensure_ascii=False)}
+                        - Terms: {json.dumps(recall["terms"], ensure_ascii=False)}
+                        Return a single-part response:
+                        Example Instruction: A confident, actionable instruction in Vietnamese for the salesperson running this Copilot, showing them how to handle customer objections effectively. Use the Knowledge as the core structure (skeleton), then enhance it with vivid, persuasive, and colorful language to maximize engagement and GAIN for the salesperson’s approach. Incorporate exact key phrases from the terms and knowledge, and include a 1-2 sentence example of what they could say to the customer in double quotes with bold italic markdown (e.g., **_"example"_**).
                         Output MUST be a raw string. Do NOT include any markdown symbols (e.g., no **, *, _, or >) or extra formatting except for the example message within the Example Instruction."""
                         response = (await asyncio.to_thread(LLM.invoke, prompt)).content.strip('"')
                 state["copilot_task"] = state.get("copilot_task", latest_msg) if latest_msg else None
