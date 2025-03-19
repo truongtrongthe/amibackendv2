@@ -63,38 +63,71 @@ def initialize_preset_brain():
 
 initialize_preset_brain()
 
-def detect_intent(state):
-    messages = state["messages"][-3:] if state["messages"] else []
+def detect_intent(state, user_id=None):
+    """
+    Detects intent using 100% LLM (GPT-4o) for Vietnamese inputs.
+    Args:
+        state (dict): Contains 'messages' (list of HumanMessage) and 'prompt_str' (Ami's last response).
+        user_id (str, optional): For future user-specific tweaks (unused here).
+    Returns:
+        str: Detected intent from INTENTS list.
+    """
+    messages = state["messages"][-3:] if state["messages"] else []  # Last 3 messages for context
     convo_history = " | ".join([m.content for m in messages]) if messages else ""
-    last_ami_msg = state.get("prompt_str", "")
+    last_ami_msg = state.get("prompt_str", "")  # Ami's last response
     latest_msg = messages[-1].content if messages else ""
     
-    prompt = f"""You’re Ami, detecting human intent. Given:
+    if not latest_msg.strip():  # Empty input fallback
+        logger.info("Empty input, defaulting to greeting")
+        return "greeting"
+
+    # LLM prompt for intent detection
+    prompt = f"""You’re Ami, detecting intent for a Vietnamese-speaking user. Given:
     - Latest message (70% weight): '{latest_msg}'
     - Last 3 messages (20% weight): '{convo_history}'
     - Last Ami message (10% weight): '{last_ami_msg}'
-    Pick ONE intent from: {', '.join(f'"{i}"' for i in INTENTS)}. 
-    Return ONLY a raw JSON object like: {{"intent": "teaching", "confidence": 0.9}}.
-    Rules: Latest message drives it. Confidence <0.7? Pick 'confusion'. Output MUST be valid JSON."""
+    Pick ONE intent from: {', '.join(f'"{i}"' for i in INTENTS)}.
+    Return JSON: {{"intent": "teaching", "confidence": 0.9}}.
+    Rules:
+    - Prioritize latest message as the primary intent driver.
+    - Confidence < 0.7? Pick 'confusion' and suggest clarification.
+    - Output MUST be valid JSON.
+    - Process Vietnamese natively, no translation needed."""
     
     response = ""
-    for chunk in LLM.invoke(prompt):  # Streaming LLM
-        if isinstance(chunk, tuple) and len(chunk) >= 2 and chunk[0] == 'content':
-            response += chunk[1]  # Only append the 'content' value
-        # Ignore other tuples (e.g., 'additional_kwargs', 'response_metadata')
-        else:
-            logger.debug(f"Ignoring non-content chunk in detect_intent: {chunk}")
+    try:
+        for chunk in LLM.invoke(prompt):  # Streaming LLM response
+            if isinstance(chunk, tuple) and len(chunk) >= 2 and chunk[0] == 'content':
+                response += chunk[1]
+            else:
+                logger.debug(f"Ignoring non-content chunk: {chunk}")
+    except Exception as e:
+        logger.error(f"LLM invocation failed: {e}")
+        return "casual"
+
+    if not response:  # No response fallback
+        logger.warning("No content from LLM, defaulting to confusion")
+        return "confusion"
     
-    response = clean_llm_response(response)
+    response = clean_llm_response(response)  # Strip markdown, fix JSON
     try:
         result = json.loads(response)
-        intent, confidence = result["intent"], result["confidence"]
-        if confidence < 0.7:
+        intent = result["intent"]
+        confidence = result["confidence"]
+        
+        if intent not in INTENTS:  # Validate intent
+            logger.error(f"Invalid intent '{intent}' detected, defaulting to casual")
+            return "casual"
+        
+        if confidence < 0.7:  # Low confidence triggers clarification
             state["prompt_str"] = f"Này, bạn đang muốn {INTENTS[3]} hay {INTENTS[2]} vậy?"
+            logger.info(f"Low confidence ({confidence}) for '{intent}', returning confusion")
             return "confusion"
+        
+        logger.info(f"Detected intent: '{intent}' (confidence: {confidence})")
         return intent
     except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Intent parse error: {e}. Raw: '{response}'")
+        logger.error(f"LLM response parse error: {e}. Raw: '{response}'")
         return "casual"
 
 def identify_topic(state, max_context=1000):
