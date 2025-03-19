@@ -4,7 +4,7 @@ from pinecone import Pinecone, ServerlessSpec
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-index_name = "dev"
+index_name = "ami"
 
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
