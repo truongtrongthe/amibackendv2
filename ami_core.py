@@ -288,23 +288,22 @@ class Ami:
             # Startup brain flex for first message
             if len(state["messages"]) == 1:
                 logger.info("First message detected - Checking knowledge tree")
-                namespace = f"enterprise_knowledge_tree_{user_id.upper()}"  # Tail with user_id
-                # Get total node count
+                namespace = f"enterprise_knowledge_tree_{user_id}"  # Match case from stats
                 stats = index.describe_index_stats()
                 node_count = stats["namespaces"].get(namespace, {}).get("vector_count", 0)
-                # Get node names (up to 5)
-                response = index.query(
-                    vector=[0] * 1536,  # Dummy vector
-                    top_k=5,  # Grab up to 5 nodes
-                    include_metadata=True,
-                    namespace=namespace
-                )
-                if node_count > 0 and response["matches"]:
-                    node_names = [match["metadata"]["name"] for match in response["matches"]]
-                    names_str = ", ".join(f"‘{name}’" for name in node_names[:5])  # Limit to 5, quote each
+                if node_count > 0:
+                    # Fetch all nodes if possible, or use a broad query
+                    response = index.query(
+                        vector=[0] * 1536,
+                        top_k=min(node_count, 5),  # Get up to 5 or node_count
+                        include_metadata=True,
+                        namespace=namespace
+                    )
+                    node_names = [match["metadata"]["name"] for match in response["matches"]] if response["matches"] else ["stuff"]
+                    names_str = ", ".join(f"‘{name}’" for name in node_names[:5])
                     state["prompt_str"] = f"Yo, I’ve got {node_count} nodes in my brain—like {names_str}, bro! What’s next?"
                 else:
-                    state["prompt_str"] = "My brain’s a blank slate, bro—start teaching me some dope stuff!"
+                    state["prompt_str"] = f"Yo, {user_id}, my brain’s fresh for you—teach me some dope stuff, bro!"
                 state["pickup_line"] = "Ami’s ready to roll—hit me with something!"
                 logger.info(f"Startup response: {state['prompt_str']}")
                 self.state = state
