@@ -6,7 +6,7 @@ from flask_cors import CORS  # Import CORS
 #from AmiCore.ami_core_1_4_selling_concept import convo_stream
 #from AmiCore.amicore_1_5_ner_brain import convo_stream
 from ami import convo_stream
-from ami import pilot_stream
+#from ami import pilot_stream
 
 
 app = Flask(__name__)
