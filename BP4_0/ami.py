@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
-from ami_core import Ami
+from ami_core import AmiCore
 from utilities import logger
 import asyncio
 
@@ -26,7 +26,7 @@ class State(TypedDict):
     needs_confirmation: bool  # Added to match ami_core_4_0.py
 
 # Graph
-ami_core = Ami()
+ami_core = AmiCore()
 graph_builder = StateGraph(State)
 
 # Node: Async AmiCore.do with fixed confirmation
@@ -92,18 +92,17 @@ def convo_stream(user_input=None, user_id=None, thread_id=None):
 # Test the 6-turn flow
 if __name__ == "__main__":
     turns = [
-        "Human hello Ami!"
-        #"HITO là sản phẩm bổ sung canxi hỗ trợ phát triển chiều cao (từ 2 tuổi trở lên, đăc biệt dành cho người trưởng thành),Đối tượng KH: Việt kiều 20-30 tuổi (cốm viên) Và mẹ có con từ 12-18 tuổi ở VN (sữa, thạch). Sản phẩm cao cấp, công thức toàn diện. Được đội ngũ chuyên viên đồng hành, cung cấp thông tin chuyên khoa, cá nhân hóa. Bộ tứ canxi hữu cơ kết hợp giúp hệ xương phát tri. ển toàn diện: Canxi cá tuyết, canxi tảo đỏ, canxi Gluconate, bột nhung hươu, ở trên bảng thành phần sp A+. Sản phẩm được CLB hàng đầu VN tín nhiệm và đưa vào chế độ dinh dưỡng cho các lứa cầu thủ chuyên nghiệp. Sản phẩm canxi duy nhất được CLB Bóng đá Hoàng Anh Gia Lai tin dùng. Website: https://hitovietnam.com/. Canxi cá tuyết: cá tuyết sống ở mực nước sâu hàng nghìn mét dưới mực nước biển nên có hệ xương vững chắc, mật độ xương cao. Theo chuyên gia Hito thì xương cá tuyết có cầu tạo gần giống hệ xương người, dồi dào canxi hữu cơ (gấp 9-10 lần canxi so với các nguồn khác), tương thích sinh học cao, tăng hấp thụ tối đa canxi vào xương",
-        #"It's made in Japan"
-        #"Yes",
-        #"Tell me about HITO",
-        #"No, HITO’s from Vietnam",
-        #"What’s HITO’s price?"
-        #"Giá của HITO là combo1 $500, combo2 $800 và combo3 $1200",
-        #"Giá HITO là bao nhiêu?"
+        "HITO is a height booster",
+        "It’s made in Japan maybe?",
+        "Yes",
+        "Tell me about HITO",
+        "No, HITO’s from Vietnam",
+        "What’s HITO’s price?",
+        "Giá của HITO là combo1 $500, combo2 $800 và combo3 $1200",
+        "Giá HITO là bao nhiêu?"
     ]
-    user_id = "TFL"
-    thread_id = "teaching"
+    user_id = "tfl_test"
+    thread_id = "test_123"
     print("\n=== 6-Turn Flow Test ===")
     for i, msg in enumerate(turns, 1):
         print(f"\nTurn {i}: {msg}")

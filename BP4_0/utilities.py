@@ -12,7 +12,7 @@ import logging
 
 # Setup logging
 
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger(__name__)
 
 # Config
@@ -60,11 +60,9 @@ initialize_preset_brain()
 
 
 def detect_intent(state, user_id=None):
-    logger.info("Detecting intent")
     messages = state["messages"][-3:] if state["messages"] else []
-    # Handle both dicts and HumanMessage objects
-    convo_history = " | ".join([m["content"] if isinstance(m, dict) else m.content for m in messages[:-1]]) if len(messages) > 1 else ""
-    latest_msg = messages[-1]["content"] if isinstance(messages[-1], dict) else messages[-1].content if messages else ""
+    convo_history = " | ".join([m.content for m in messages[:-1]]) if len(messages) > 1 else ""
+    latest_msg = messages[-1].content if messages else ""
     last_ai_msg = state.get("prompt_str", "")
     active_terms = state.get("active_terms", {})
     intent_history = state.get("intent_history", [])
@@ -165,7 +163,6 @@ def detect_intent(state, user_id=None):
     state["intent_history"] = intent_history + [intent]
     return intent
 
-
 def detect_topic(state):
     messages = state["messages"][-3:] if state["messages"] else []
     latest_msg = messages[-1].content if messages else ""
@@ -197,7 +194,6 @@ def detect_topic(state):
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Topic parse error: {e}. Raw: '{response}'")
         return "unclear"
-
 def extract_knowledge(state, user_id=None, intent=None):
     messages = state["messages"][-5:] if state["messages"] else []
     latest_msg = messages[-1].content if messages else ""
@@ -220,19 +216,19 @@ def extract_knowledge(state, user_id=None, intent=None):
             convo_history = " | ".join(m.content for m in messages[:-1]) if len(messages) > 1 else "None"
             focus_str = ", ".join([f"{t['term']} (score: {t['score']:.1f})" for t in focus_history]) if focus_history else "None"
             term_prompt = f"""Given:
-                - Latest message: '{latest_msg}'
-                - Prior messages: '{convo_history}'
-                - Intent: '{intent}'
-                - Focus history (term, relevance score): '{focus_str}'
-                What’s the main term or phrase this is about? Return just the term, nothing else. Examples:
-                - 'yo, got some dope info!' → 'None'
-                - 'hito granules—height growth booster!' → 'HITO Granules'
-                - 'HITO boosts height maybe?' → 'HITO'
-                - 'Good—made by novahealth!' → 'HITO Granules' (if HITO Granules is high in focus)
-                Rules:
-                - Pick the subject or focus—usually a product, company, or key concept at the start of the statement.
-                - Strongly favor the highest-scored term in focus history if the message is vague or lacks an explicit subject (e.g., 'của nó', 'Ngoài ra'), unless clearly contradicted.
-                - Return 'None' only if no term fits after context analysis."""
+- Latest message: '{latest_msg}'
+- Prior messages: '{convo_history}'
+- Intent: '{intent}'
+- Focus history (term, relevance score): '{focus_str}'
+What’s the main term or phrase this is about? Return just the term, nothing else. Examples:
+- 'yo, got some dope info!' → 'None'
+- 'hito granules—height growth booster!' → 'HITO Granules'
+- 'HITO boosts height maybe?' → 'HITO'
+- 'Good—made by novahealth!' → 'HITO Granules' (if HITO Granules is high in focus)
+Rules:
+- Pick the subject or focus—usually a product, company, or key concept at the start of the statement.
+- Strongly favor the highest-scored term in focus history if the message is vague or lacks an explicit subject (e.g., 'của nó', 'Ngoài ra'), unless clearly contradicted.
+- Return 'None' only if no term fits after context analysis."""
 
             logger.info("Before term extraction")
             term_response = LLM.invoke(term_prompt).content.strip()
@@ -277,8 +273,6 @@ def extract_knowledge(state, user_id=None, intent=None):
         logger.info(f"Identified term: '{term}' (confidence: {confidence:.1f})")
 
         # Step 3: Attributes and relationships extraction
-        attributes = []
-        relationships = []
         if term and latest_msg.strip():
             focus_score = max([f["score"] for f in focus_history if f["term"] == term], default=0)
             convo_history = " | ".join([m.content for m in messages[-3:-1]])  # Last 2 messages for context
@@ -314,25 +308,22 @@ def extract_knowledge(state, user_id=None, intent=None):
                 logger.warning(f"Invalid attributes format: {attr_response}")
                 attributes = []
 
-            rel_prompt = f"""
-                        Given:
-                            - Latest message: '{latest_msg}'
-                            - Main term: '{term}' (focus score: {focus_score:.1f})
-                            - Intent: '{intent}'
-                            - Focus history (term, relevance score): '{json.dumps(focus_history)}'
-                            List relationships as a JSON-compatible Python list of dicts with node IDs.
-                            Strongly assume the message describes '{term}' if it’s in focus history or explicitly mentioned—treat pronouns (e.g., 'của nó') or vague references (e.g., 'Ngoài ra', 'Phụ Liệu') as adding details to '{term}' unless clearly contradicted by context.
-                            Example: [{{"subject": "Canxi cá tuyết", "relation": "Ingredient Of", "object": "{term}", "subject_id": "node_canxi_ca_tuyet_ingredients_user_tfl_test_{uuid.uuid4()}"}}]
-                            Rules:
-                                - Identify external entities (e.g., companies, customer segments, countries) connected via verbs/prepositions (e.g., 'dành cho', 'được...tin dùng', 'made by', 'for', 'made in').
-                                - Generate unique node IDs: `node_<object>_<category>_user_tfl_test_<uuid>`.
-                                - For components (e.g., ingredients), use 'Ingredient Of' with subject as the component and object as '{term}'.
-                                - For locations (e.g., countries like 'Japan'), use 'Made In' if 'made in' is present, with subject as '{term}' and object as the location.
-                                - Use category from context (e.g., 'Companies', 'Customer Segments', 'Countries', 'Ingredients').
-                                - Examples: 'dành cho Việt kiều' → Customer Segment, 'được CLB tin dùng' → Endorsement, 'made in Japan' → Countries.
-                                - Return `[]` if no clear relationships.
-                            Output ONLY the list, no 'python' or 'json' prefix.
-                        """
+            rel_prompt = f"""Given:
+                - Latest message: '{latest_msg}'
+                - Main term: '{term}' (focus score: {focus_score:.1f})
+                - Intent: '{intent}'
+                - Focus history (term, relevance score): '{focus_str}'
+                List relationships as a JSON-compatible Python list of dicts with node IDs.
+                Strongly assume the message describes '{term}' if it’s in focus history or explicitly mentioned—treat pronouns (e.g., 'của nó') or vague references (e.g., 'Ngoài ra', 'Phụ Liệu') as adding details to '{term}' unless clearly contradicted by context.
+                Example: [{{"subject": "Canxi cá tuyết", "relation": "Ingredient Of", "object": "{term}"}}]
+                Rules:
+                - Identify external entities (e.g., companies, customer segments) connected via verbs/prepositions (e.g., 'dành cho', 'được...tin dùng', 'made by', 'for').
+                - Generate unique node IDs: `node_<object>_<category>_user_{user_id}_<uuid>`.
+                - For components (e.g., ingredients), use 'Ingredient Of' with subject as the component and object as '{term}'.
+                - Use category from context (e.g., 'Companies', 'Customer Segments', 'Partners', 'Ingredients').
+                - Examples: 'dành cho Việt kiều' → Customer Segment, 'được CLB tin dùng' → Endorsement, 'Website: https://...' → Website.
+                - Return `[]` if no clear relationships.
+                Output ONLY the list, no 'python' or 'json' prefix."""
             logger.info("Before relationships extraction")
             rel_response = clean_llm_response(LLM.invoke(rel_prompt).content)
             logger.info(f"Raw relationships response: '{rel_response}'")
@@ -345,16 +336,12 @@ def extract_knowledge(state, user_id=None, intent=None):
                 logger.warning(f"Invalid relationships format: {rel_response}")
                 relationships = []
 
-            # Add subject_id if missing in relationships
-            for rel in relationships:
-                if "subject_id" not in rel or "<uuid>" in rel["subject_id"]:
-                    category = "Countries" if rel["relation"] == "Made In" else "Unknown"
-                    rel["subject_id"] = f"node_{rel['subject'].lower().replace(' ', '_')}_{category.lower()}_user_{user_id}_{uuid.uuid4()}"
         logger.info(f"Extracted - Attributes: {attributes}, Relationships: {relationships}")
 
         # Step 4: Update state
         state["focus_history"] = focus_history
-        if term and (attributes or relationships):  # Changed to include relationships
+        # Step 4: Update state (adjust confidence handling)
+        if term and attributes:  # Only update if attributes extracted
             category = detect_topic(state)
             if category == "unclear" or category not in CATEGORIES:
                 logger.info(f"Category unclear or invalid: '{category}', defaulting to 'Products'")
@@ -362,35 +349,32 @@ def extract_knowledge(state, user_id=None, intent=None):
             
             term_id = f"node_{sanitize_vector_id(term)}_{sanitize_vector_id(category)}_user_{user_id}_{uuid.uuid4()}"
             parent_id = f"node_{sanitize_vector_id(category)}_user_{user_id}_{uuid.uuid4()}"
-            existing = active_terms.get(term, {})
-            existing_attrs = existing.get("attributes", [])
-            vibe_score = existing.get("vibe_score", 1.0)
-            
-            # Merge only new attributes from this turn, don’t pull Pinecone history
-            merged_attrs = list({(a["key"], a["value"]): a for a in existing_attrs + attributes}.values())
-            if len(merged_attrs) > len(existing_attrs) or relationships:
-                vibe_score += 0.3
-            
+            vibe_score = active_terms.get(term, {}).get("vibe_score", 1.0)
+            if term in active_terms and attributes:
+                existing_attrs = active_terms[term].get("attributes", [])
+                if any(attr["key"] not in [a["key"] for a in existing_attrs] for attr in attributes):
+                    vibe_score += 0.3
             active_terms[term] = {
-                "term_id": existing.get("term_id", term_id),
+                "term_id": active_terms.get(term, {}).get("term_id", term_id),
                 "vibe_score": vibe_score,
-                "attributes": merged_attrs  # Only current convo’s attrs
+                "attributes": attributes
             }
             state["pending_knowledge"] = {
                 "term_id": active_terms[term]["term_id"],
                 "name": term,
                 "category": category,
-                "attributes": merged_attrs,
+                "attributes": attributes,
                 "relationships": relationships,
                 "vibe_score": vibe_score,
                 "parent_id": parent_id,
-                "needs_confirmation": confidence < 0.8
+                "needs_confirmation": confidence < 0.8  # Keep confirmation tight
             }
         else:
             state["pending_knowledge"] = {}
 
         state["active_terms"] = active_terms
         logger.info(f"Active terms set to state: {state['active_terms']}")
+
         # Step 5: Return
         logger.info("Exiting extract_knowledge successfully")
         return {"term": term, "attributes": attributes, "relationships": relationships, "confidence": confidence}
@@ -402,6 +386,7 @@ def extract_knowledge(state, user_id=None, intent=None):
         state["pending_knowledge"] = {}
         logger.info(f"Active terms after failure: {state['active_terms']}")
         return {"term": None, "attributes": [], "relationships": [], "confidence": 0.0}
+
 
 def save_knowledge(state, user_id, confirmed=True):
     logger.info(f"Entering save_knowledge for user_id: {user_id}, confirmed: {confirmed}")
@@ -462,7 +447,7 @@ def save_knowledge(state, user_id, confirmed=True):
         logger.error(f"Root node upsert failed: {e}")
         return
 
-    # Merge existing node data for Pinecone storage
+    # Merge existing node data if it exists
     existing_node = index.fetch([term_id], namespace=namespace).vectors.get(term_id, None)
     if existing_node:
         old_meta = existing_node.metadata
@@ -478,7 +463,7 @@ def save_knowledge(state, user_id, confirmed=True):
         created_at = datetime.now().isoformat()
         logger.info("Creating new node - No existing data to merge")
 
-    # Prepare embedding and metadata for Pinecone
+    # Prepare embedding and metadata
     embedding_text = f"{pending['name']} " + " ".join([f"{a['key']}:{a['value']}" for a in attributes])
     embedding = EMBEDDINGS.embed_query(embedding_text)
     metadata = {
@@ -487,7 +472,7 @@ def save_knowledge(state, user_id, confirmed=True):
         "parent_id": parent_id,
         "attributes": json.dumps(attributes, ensure_ascii=False),
         "relationships": json.dumps(relationships, ensure_ascii=False),
-        "vibe_score": vibe_score,
+        "vibe_score": vibe_score,  # Use preserved or merged vibe_score
         "created_at": created_at
     }
     logger.info(f"Saving metadata: {metadata}")
@@ -496,12 +481,8 @@ def save_knowledge(state, user_id, confirmed=True):
     try:
         upsert_result = index.upsert([(term_id, embedding, metadata)], namespace=namespace)
         logger.info(f"Saved/Updated child node: {term_id} to {namespace} - Result: {upsert_result}")
-        # Update active_terms with only this turn’s pending attributes
-        state["active_terms"][pending["name"]] = {
-            "term_id": term_id,
-            "vibe_score": vibe_score,
-            "attributes": pending["attributes"]  # Only current turn’s attrs
-        }
+        # Update active_terms with the preserved vibe_score
+        state["active_terms"][pending["name"]] = {"term_id": term_id, "vibe_score": vibe_score}
     except Exception as e:
         logger.error(f"Child node upsert failed: {e}")
         return
@@ -525,7 +506,7 @@ def save_knowledge(state, user_id, confirmed=True):
     logger.info(f"Exiting save_knowledge - Active Terms: {state['active_terms']}")
 
 def recall_knowledge(message, state, user_id=None):
-    #intent = detect_intent(state)
+    intent = detect_intent(state)
     namespace = f"enterprise_knowledge_tree_{user_id}"
     
     active_terms = state.get("active_terms", {})
