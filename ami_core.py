@@ -118,7 +118,7 @@ class Ami:
         if dominant_intent == "teaching":
             knowledge = await asyncio.to_thread(extract_knowledge, state, user_id, "teaching")
             brain_data["extracted_knowledge"] = knowledge
-            summary = ""
+            summary = ""  # Keeping this for compatibility, though we’ll override it in the prompt
             if knowledge["term"] and knowledge["confidence"] >= 0.8:
                 key_attrs = [attr["value"] for attr in knowledge["attributes"] if attr["key"] in ["Use", "Ingredients", "Calcium Composition"]]
                 if len(key_attrs) >= 2:
@@ -144,9 +144,14 @@ class Ami:
                 f"Chat: {context}\n"
                 f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
                 f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                "Nhiệm vụ: Nếu có kiến thức mới (xem 'pending_knowledge'), bắt đầu bằng cách tóm tắt ngắn gọn những gì đã hiểu (ví dụ: '{summary}'), rồi hỏi 'Lưu không bro?' để xác nhận—đảm bảo câu này luôn xuất hiện khi có kiến thức mới. "
+                "Nhiệm vụ: "
+                "Nhận diện các chủ đề đang nói (xem 'active_terms') và nhắc đến chúng nếu phù hợp. "
+                "Với mỗi chủ đề trong 'active_terms', nếu có 'pending_knowledge', liệt kê chi tiết: "
+                "- Dùng dấu đầu dòng ('- ') để trình bày từng 'attribute' (ví dụ: '- Công dụng: giúp xương chắc khỏe') và 'relationship' (ví dụ: '- Liên quan: xương') một cách rõ ràng. "
+                "Sau đó hỏi 'Lưu không bro?' để xác nhận—đảm bảo câu này luôn xuất hiện khi có kiến thức mới. "
+                "Kết thúc bằng 'Ý cuối của em': một câu ngắn thể hiện hiểu biết tốt nhất về các chủ đề. "
                 "Tiếp tục trò chuyện tự nhiên, thoải mái theo chủ đề nếu người dùng đang xoay quanh nó. "
-                "Chọn cách xưng hô phù hợp (mình, tớ, tôi, em, bạn) theo giọng điệu người dùng. Giữ ngắn gọn, tự nhiên."
+                "Chọn cách xưng hô phù hợp (mình, tớ, tôi, em, bạn) theo giọng điệu người dùng. Giữ tự nhiên, gần gũi."
             )
             response = await asyncio.to_thread(LLM, prompt)
             state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
