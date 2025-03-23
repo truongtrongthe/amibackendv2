@@ -104,20 +104,24 @@ def save_knowledge(state, user_id, pending=None):
         logger.debug("No pending knowledge to save")
         return False
     
-    logger.info(f"Entering save_knowledge for user_id: {user_id}, pending: {pending}")
+    logger.info(f"Entering save_knowledge for user_id: {user_id}, confirmed: True")
     
     term_id = sanitize_vector_id(pending["term_id"])
     category = pending["category"]
-    namespace = f"enterprise_knowledge_tree_{user_id}"
+    namespace = f"enterprise_knowledge_{user_id}"
     parent_id = sanitize_vector_id(pending["parent_id"])
-    
+    logger.info(f"Pending knowledge: {pending}")
+
     vibe_score = pending["vibe_score"]
     if pending["name"] in state["active_terms"]:
-        vibe_score = max(vibe_score, state["active_terms"][pending["name"]]["vibe_score"])
-    logger.debug(f"Vibe score for '{pending['name']}': {vibe_score}")
+        existing_vibe = state["active_terms"][pending["name"]]["vibe_score"]
+        vibe_score = max(vibe_score, existing_vibe)
+        logger.info(f"Preserving vibe_score from active_terms: {vibe_score} (was {pending['vibe_score']})")
+    else:
+        logger.info(f"Using pending vibe_score: {vibe_score}")
 
-    # Check existing node
     query_embedding = EMBEDDINGS.embed_query(pending["name"])
+    logger.info(f"Querying Pinecone for existing node: {pending['name']}")
     existing = index.query(
         vector=query_embedding,
         top_k=1,
@@ -125,34 +129,46 @@ def save_knowledge(state, user_id, pending=None):
         namespace=namespace,
         filter={"name": pending["name"], "category": category}
     )
-    logger.debug(f"Query for existing node '{pending['name']}': {existing}")
+    logger.info(f"Query result: {existing}")
+
     if existing["matches"]:
         term_id = existing["matches"][0]["id"]
         logger.info(f"Found existing node: {term_id}, updating...")
     else:
-        logger.info(f"Creating new node: {term_id}")
+        term_id = sanitize_vector_id(pending["term_id"])
+        logger.info(f"No existing node found for '{pending['name']}', creating new: {term_id}")
 
-    # Root node
     root_metadata = {
         "name": category,
         "category": category,
         "vibe_score": 1.0,
-        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        "created_at": datetime.datetime.now().isoformat()  # Corrected
     }
     root_embedding = EMBEDDINGS.embed_query(category)
     try:
         if not index.fetch([parent_id], namespace=namespace).vectors.get(parent_id):
+            logger.info(f"Upserting root node: {parent_id}")
             index.upsert([(parent_id, root_embedding, root_metadata)], namespace=namespace)
-            logger.info(f"Saved root node: {parent_id}")
+            logger.info(f"Created root node: {parent_id} in {namespace}")
     except Exception as e:
         logger.error(f"Root node upsert failed: {e}")
         return False
 
-    # Child node
-    attributes = pending["attributes"]
-    relationships = pending["relationships"]
-    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    
+    existing_node = index.fetch([term_id], namespace=namespace).vectors.get(term_id, None)
+    if existing_node:
+        old_meta = existing_node.metadata
+        old_attributes = json.loads(old_meta.get("attributes", "[]"))
+        old_relationships = json.loads(old_meta.get("relationships", "[]"))
+        attributes = list({(a["key"], a["value"]): a for a in old_attributes + pending["attributes"]}.values())
+        relationships = list({(r["subject"], r["relation"], r["object"]): r for r in old_relationships + pending["relationships"]}.values())
+        created_at = old_meta["created_at"]
+        logger.info(f"Merging with existing node - Attributes: {len(attributes)}, Relationships: {len(relationships)}")
+    else:
+        attributes = pending["attributes"]
+        relationships = pending["relationships"]
+        created_at = datetime.datetime.now().isoformat()  # Corrected
+        logger.info("Creating new node - No existing data to merge")
+
     embedding_text = f"{pending['name']} " + " ".join([f"{a['key']}:{a['value']}" for a in attributes])
     embedding = EMBEDDINGS.embed_query(embedding_text)
     metadata = {
@@ -164,104 +180,119 @@ def save_knowledge(state, user_id, pending=None):
         "vibe_score": vibe_score,
         "created_at": created_at
     }
-    
+    logger.info(f"Saving metadata: {metadata}")
+
     try:
         upsert_result = index.upsert([(term_id, embedding, metadata)], namespace=namespace)
-        logger.info(f"Saved child node: {term_id} - Result: {upsert_result}")
+        logger.info(f"Saved/Updated child node: {term_id} to {namespace} - Result: {upsert_result}")
         state["active_terms"][pending["name"]] = {
             "term_id": term_id,
             "vibe_score": vibe_score,
-            "attributes": attributes,
-            "last_mentioned": created_at,
-            "category": category
+            "attributes": pending["attributes"]
         }
     except Exception as e:
         logger.error(f"Child node upsert failed: {e}")
         return False
-    
+
+    convo_id = state.get("convo_id", "default_convo")
+    convo_meta_id = f"convo_{convo_id}_{uuid.uuid4()}"
+    convo_embedding = EMBEDDINGS.embed_query(" ".join([m.content for m in state["messages"][-3:]]))
+    convo_metadata = {
+        "state": json.dumps(state, default=str, ensure_ascii=False),
+        "last_updated": datetime.datetime.now().isoformat()  # Corrected
+    }
+    try:
+        index.upsert([(convo_meta_id, convo_embedding, convo_metadata)], namespace="convo_metadata")
+        logger.info(f"Saved convo metadata: {convo_meta_id} to convo_metadata")
+    except Exception as e:
+        logger.error(f"Convo metadata upsert failed: {e}")
+
     logger.info(f"Exiting save_knowledge - Active Terms: {state['active_terms']}")
     return True
 
 def recall_knowledge(message, state, user_id=None):
-    namespace = f"enterprise_knowledge_tree_{user_id}"
-    active_terms = state.get("active_terms", {})
+    #intent = detect_intent(state)
+    namespace = f"enterprise_knowledge_{user_id}"
     
-    # Use active terms or "HITO" if teaching context
-    query_text = message if message != f"user_profile_{user_id}" else "HITO" if "HITO" in message else " ".join(active_terms.keys())
-    if not query_text.strip():
-        query_text = "default_query"
+    active_terms = state.get("active_terms", {})
+    query_text = f"{message} {' '.join(active_terms.keys())}"  # e.g., "Tell me about HITO? HITO"
+    query_embedding = EMBEDDINGS.embed_query(query_text)
+    
     results = index.query(
-        vector=EMBEDDINGS.embed_query(query_text),
-        top_k=10,
+        vector=query_embedding,
+        top_k=5,
         include_metadata=True,
-        namespace=namespace,
-        filter={"parent_id": {"$exists": True}}
+        namespace=namespace
     )
-    logger.info(f"Query found {len(results['matches'])} matches for '{query_text}'")
+    #logger.info(f"Query results: {results}")
+    logger.info(f"Query found {len(results['matches'])} matches")
     
     nodes = []
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.now()
     
+    # If query fails, try direct fetch by term_id
     if not results["matches"] and active_terms:
         logger.info("Query returned no matches, attempting direct fetch by term_id")
         term_ids = [v["term_id"] for v in active_terms.values()]
         fetched = index.fetch(term_ids, namespace=namespace).vectors
+        logger.info(f"Direct fetch results: {fetched}")
         for term_id, data in fetched.items():
             meta = data.metadata
-            days_since = (now - datetime.datetime.fromisoformat(meta["created_at"])).days
+            days_since = (now - datetime.fromisoformat(meta["created_at"])).days
             vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
-            vibe_score = min(2.2, max(0.1, vibe_score))
-            nodes.append({"id": term_id, "meta": meta, "score": 1.0})
+            vibe_score = min(2.2, max(0.1, vibe_score + 0.1))
+            if meta["name"] in active_terms:
+                vibe_score = min(2.2, max(vibe_score, active_terms[meta["name"]]["vibe_score"]))
+            meta["vibe_score"] = vibe_score
+            nodes.append({"id": term_id, "meta": meta, "score": 1.0})  # High score for direct match
     else:
         for r in results["matches"]:
             meta = r.metadata
-            attributes = meta.get("attributes", "[]")
-            relationships = meta.get("relationships", "[]")
-            if isinstance(attributes, str):
-                attributes = json.loads(attributes)
-            if isinstance(relationships, str):
-                relationships = json.loads(relationships)
-            meta["attributes"] = attributes
-            meta["relationships"] = relationships
-            days_since = (now - datetime.datetime.fromisoformat(meta["created_at"])).days
+            logger.info(f"Node metadata: {meta}")
+            days_since = (now - datetime.fromisoformat(meta["created_at"])).days
             vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
-            vibe_score = min(2.2, max(0.1, vibe_score))
+            vibe_score = min(2.2, max(0.1, vibe_score + 0.1))
+            if meta["name"] in active_terms:
+                vibe_score = min(2.2, max(vibe_score, active_terms[meta["name"]]["vibe_score"]))
+            meta["vibe_score"] = vibe_score
             nodes.append({"id": r.id, "meta": meta, "score": r.score})
     
+    nodes = [n for n in nodes if "parent_id" in n["meta"] and n["meta"]["name"] != n["meta"]["category"]]
     if not nodes:
-        preset_results = index.query(
-            vector=EMBEDDINGS.embed_query("preset_profile"),
-            top_k=5,
-            include_metadata=True,
-            namespace="preset_knowledge_tree"
-        )
-        nodes = [{"id": r.id, "meta": r.metadata, "score": r.score} for r in preset_results["matches"]]
-        logger.info(f"Fallback to preset_knowledge_tree: {len(nodes)} nodes")
+        logger.warning(f"No child nodes found in {namespace} for query: '{query_text}'")
+        return {"knowledge": [], "terms": {}}
     
     nodes = sorted(nodes, key=lambda x: (x["score"], x["meta"]["created_at"]), reverse=True)
     
     merged = {}
-    for n in nodes[:5]:
+    for n in nodes[:3]:
         name = n["meta"]["name"]
         if name not in merged:
             merged[name] = {
                 "name": name,
                 "vibe_score": n["meta"]["vibe_score"],
-                "attributes": n["meta"]["attributes"],
-                "relationships": n["meta"]["relationships"],
-                "term_id": n["id"],
-                "last_mentioned": n["meta"]["created_at"],
-                "category": n["meta"]["category"]
+                "attributes": json.loads(n["meta"].get("attributes", "[]")),
+                "relationships": json.loads(n["meta"].get("relationships", "[]"))
             }
+        else:
+            new_attrs = json.loads(n["meta"].get("attributes", "[]"))
+            attr_dict = {a["key"]: a["value"] for a in merged[name]["attributes"]}
+            for a in new_attrs:
+                if a["key"] not in attr_dict or len(a["value"]) > len(attr_dict[a["key"]]):
+                    attr_dict[a["key"]] = a["value"]
+            merged[name]["attributes"] = [{"key": k, "value": v} for k, v in attr_dict.items()]
+            merged[name]["relationships"] = list({(r["subject"], r["relation"], r["object"]): r for r in merged[name]["relationships"] + json.loads(n["meta"].get("relationships", "[]"))}.values())
+            merged[name]["vibe_score"] = max(merged[name]["vibe_score"], n["meta"]["vibe_score"])
     
-    state["active_terms"] = {
-        n["meta"]["name"]: {
-            "term_id": n["id"],
-            "vibe_score": n["meta"]["vibe_score"],
-            "attributes": merged[n["meta"]["name"]]["attributes"],
-            "last_mentioned": n["meta"]["created_at"],
-            "category": n["meta"]["category"]
-        } for n in nodes[:5]
-    }
+    state["active_terms"] = {n["meta"]["name"]: {"term_id": n["id"], "vibe_score": n["meta"]["vibe_score"]} for n in nodes[:3]}
     knowledge = list(merged.values())
-    return {"knowledge": knowledge, "terms": {k["name"]: k for k in knowledge}}
+    terms = {k["name"]: {
+        "attributes": json.dumps(k["attributes"], ensure_ascii=False),
+        "relationships": json.dumps(k["relationships"], ensure_ascii=False),
+        "vibe_score": k["vibe_score"],
+        "category": n["meta"]["category"],
+        "created_at": n["meta"]["created_at"],
+        "name": k["name"],
+        "parent_id": n["meta"].get("parent_id", None)
+    } for k, n in zip(knowledge, nodes)}
+    return {"knowledge": knowledge, "terms": terms}

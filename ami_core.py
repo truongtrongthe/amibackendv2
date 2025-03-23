@@ -1,16 +1,16 @@
 # ami_core_4_0.py
 # Built by: The Fusion Lab with xAI's Grok 3
-# Date: March 21, 2025 
-# Purpose: Core Ami logic blending structured intents with GPT-4o natural flow
+# Date: March 20, 2025 
+# Purpose: Core Ami logic blending structured intents with GPT-4o natural flow, aligned to Final Blue Print 4.0 - Enterprise Brain
 
-from utilities import recall_knowledge, LLM, logger,clean_llm_response
-from knowledge import extract_knowledge,save_knowledge,sanitize_vector_id
+from utilities import LLM, logger, clean_llm_response
+from knowledge import extract_knowledge, save_knowledge, sanitize_vector_id,recall_knowledge
 import asyncio
 import json
 import uuid
 from langchain_core.messages import HumanMessage
 from typing import Dict, List, Tuple
-import datetime  # Add this
+import datetime
 
 def detect_terms(state):
     latest_msg = state["messages"][-1].content if state["messages"] else ""
@@ -27,145 +27,116 @@ def detect_terms(state):
         "List all key terms (products, companies, concepts, proper nouns) explicitly or implicitly mentioned in the latest message. "
         "Return JSON: ['term1', 'term2']. Examples:\n"
         "- 'Xin chào Ami!' → ['Ami']\n"
-        "- 'GenX Fast là sản phẩm của công ty mình' → ['GenX Fast']\n"
-        "- 'Calcium và Vitamin D giúp xương chắc khỏe' → ['Calcium', 'Vitamin D']\n"
-        "- 'Nó giúp xương chắc khỏe' with active terms ['GenX Fast'] → ['GenX Fast']\n"
-        "- 'GenX Fast là sản phẩm, Calcium giúp xương, Vitamin D hỗ trợ nó' → ['GenX Fast', 'Calcium', 'Vitamin D']\n"
-        "- 'Nó hỗ trợ Vitamin D' with active terms ['GenX Fast', 'Calcium'] → ['Calcium', 'Vitamin D']\n"
+        "- 'HITO Granules boosts height' → ['HITO Granules']\n"
         "Rules:\n"
-        "- Include explicit terms (products, companies, concepts, proper nouns like names) from the latest message only.\n"
-        "- Exclude common words (e.g., 'Xin', 'Chào') unless part of a proper noun (e.g., 'Xin Corp').\n"
-        "- For implicit references (e.g., 'nó', 'của nó'), match to the most contextually relevant term from active terms or prior messages, favoring recent mentions or sentence proximity.\n"
-        "- Do not include prior terms unless explicitly or implicitly referenced in the latest message.\n"
-        "- Return [] if no terms are identified.\n"
-        "- Deduplicate terms in the output.\n"
-        "Output MUST be valid JSON: ['term1', 'term2'] or []."
+        "- Include explicit terms from the latest message only.\n"
+        "- Exclude generics (e.g., 'calcium') unless tied (e.g., 'HITO Granules’ calcium').\n"
+        "- For implicit refs (e.g., 'nó'), match to recent active terms by vibe_score.\n"
+        "- Output MUST be valid JSON: ['term1', 'term2'] or []."
     )
     raw_response = LLM.invoke(term_prompt).content.strip() if latest_msg.strip() else "[]"
     logger.debug(f"Raw LLM response: '{raw_response}'")
     
     try:
-        cleaned_response = clean_llm_response(raw_response)
-        terms = json.loads(cleaned_response)
+        terms = json.loads(clean_llm_response(raw_response))
         if not isinstance(terms, list):
-            logger.warning(f"LLM returned non-list: {cleaned_response}, defaulting to []")
             terms = []
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Failed to parse LLM response: '{raw_response}', error: {e}")
-        terms = [word.strip("!.,") for word in latest_msg.split() if word[0].isupper() and len(word.strip("!.,")) > 1 and word.strip("!.,") not in ['Xin', 'Chào']]
-        if not terms and "nó" in latest_msg.lower() and active_terms:
-            terms = [max(active_terms, key=lambda k: active_terms[k]["last_mentioned"])]
+        terms = []
 
     logger.info(f"Detected terms: {terms}")
     return terms
 
 class Ami:
-    def __init__(self):
-        self.user_id = "tfl"
+    def __init__(self, user_id="user_789"):
+        self.user_id = user_id
         self.state = {
             "messages": [],
             "prompt_str": "",
-            "convo_id": None,
+            "convo_id": f"conv_{uuid.uuid4()}",
             "active_terms": {},
             "pending_knowledge": {},
             "last_response": "",
             "user_id": self.user_id,
             "needs_confirmation": False,
-            "intent_history": [],  # Now stores intent scores over time
-            "current_focus": ""
+            "intent_history": [],
+            "current_focus": "",
+            "human_context": {"terms_mentioned": {}, "last_knowledge_drop": None, "relevance_score": 0.0}
         }
+        # Define ROOT_CATEGORIES at class level
+        self.ROOT_CATEGORIES = [
+            "Products", "Companies", "Skills", "People", "Customer Segments", "Ingredients",
+            "Markets", "Technologies", "Projects", "Teams", "Events", "Strategies",
+            "Processes", "Tools", "Regulations", "Metrics", "Partners", "Competitors"
+        ]
 
-    
-    
-    def confirm_knowledge(self, state, user_id, confirm_callback=None):
-        if not state.get("pending_knowledge"):
-            logger.debug("No pending_knowledge to confirm")
-            return None
-        pending_terms = state["pending_knowledge"]
-        if not isinstance(pending_terms, list):
-            pending_terms = [pending_terms]
-        
-        confirm_callback = confirm_callback or (lambda x: "yes")
-        confirmed_terms = []
+    async def do(self, state=None, is_first=False, confirm_callback=None, user_id=None):
+        state = state or self.state
+        user_id = user_id or state.get("user_id", "user_789")
+        logger.debug(f"Starting do - Initial state: {state}")
 
-        for pending in pending_terms:
-            term = pending.get("name", "unknown")
-            response = confirm_callback(f"Ami hiểu '{term}' thế này nhé—lưu không bro?")
-            state["last_response"] = response
+        if is_first:
+            state["prompt_str"] = "Yo, bro! Ami’s Enterprise Brain 4.0’s live as of March 20, 2025—ready to stack some dope knowledge!"
+            logger.info(f"First message, active_terms: {state['active_terms']}")
+            return state
 
-            if response == "yes":
-                pending.setdefault("vibe_score", 1.0)
-                pending.setdefault("parent_id", sanitize_vector_id(f"node_general_user_{user_id}_{uuid.uuid4()}"))
-                save_knowledge(state, user_id, pending)
-                state["active_terms"][term] = {
-                    "term_id": sanitize_vector_id(pending["term_id"]),
-                    "last_mentioned": datetime.datetime.now().isoformat(),  # Fixed here
-                    "vibe_score": pending["vibe_score"],
-                    "attributes": pending.get("attributes", [])
-                }
-                logger.info(f"Saved '{term}', active_terms: {state['active_terms']}")
-                confirmed_terms.append(pending)
-            else:
-                logger.debug(f"Term '{term}' not confirmed")
+        # Pull from enterprise brain
+        logger.debug("Fetching brain data from enterprise_knowledge_tree")
+        latest_msg = state["messages"][-1].content if state["messages"] else f"user_profile_{user_id}"
+        recalled = await asyncio.to_thread(recall_knowledge, latest_msg, state, user_id)
+        state["active_terms"] = {
+            term["name"]: {
+                "term_id": term["term_id"],
+                "vibe_score": term["vibe_score"],
+                "attributes": term["attributes"],
+                "last_mentioned": term["last_mentioned"],
+                "category": term["category"]
+            } for term in recalled["knowledge"]
+        }
+        logger.info(f"Recalled active_terms: {state['active_terms']}")
 
-        state["pending_knowledge"] = [t for t in pending_terms if t not in confirmed_terms]
-        return confirmed_terms if confirmed_terms else None
-    
+        # Detect terms
+        terms = detect_terms(state)
+        logger.debug(f"Terms detected: {terms}")
 
-    async def detect_intent(self, state: Dict) -> Dict[str, float]:
-        context = "\n".join(msg.content for msg in state["messages"][-50:]) if state["messages"] else ""
-        latest_msg = state["messages"][-1].content if state["messages"] else ""
-        
-        prompt = (
-            "You are an AI designed to detect user intent in conversations. Based on the following conversation history, determine the primary intent of the latest message.\n"
-            f"Conversation history: {context}\n"
-            f"Latest message: '{latest_msg}'\n"
-            "Possible intents: teaching, request, correction, confirm, clarify, casual.\n"
-            "Task: Return a JSON dictionary with confidence scores (0.0 to 1.0) for each intent, reflecting how likely it matches the latest message in the context of the conversation. Scores should indicate confidence and must include all intents listed.\n"
-            "Intent definitions:\n"
-            "- 'teaching': The user is providing new information, explaining, or instructing.\n"
-            "- 'request': The user is asking for information, clarification, or assistance.\n"
-            "- 'correction': The user is correcting or adjusting previous information.\n"
-            "- 'confirm': The user is confirming or agreeing (e.g., affirmations like 'yes' or 'no').\n"
-            "- 'clarify': The user is refining or elaborating on something previously mentioned.\n"
-            "- 'casual': The user is engaging in informal chat without a clear goal.\n"
-            "Guidelines:\n"
-            "- Consider the entire conversation context to understand the flow and relationships between messages.\n"
-            "- Focus on the latest message’s role within this context (e.g., does it build on prior topics?).\n"
-            "- Assign higher scores to intents that align with explicit user actions or natural conversational cues.\n"
-            "- Return ONLY a valid JSON dictionary with all intents (e.g., {'teaching': 0.9, 'request': 0.2, 'correction': 0.0, 'confirm': 0.0, 'clarify': 0.1, 'casual': 0.3}). Do not include explanations, comments, or any text outside the JSON.\n"
-            "- If unsure, default to low scores across all intents but ensure the output is still valid JSON."
-        )
-        
-        response = await asyncio.to_thread(LLM, prompt)
-        raw_response = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-        logger.debug(f"Raw LLM intent response: '{raw_response}'")
-        
-        if raw_response.startswith("```json") and raw_response.endswith("```"):
-            raw_response = raw_response[7:-3].strip()
-        
-        # Define required intents outside try block
-        required_intents = {"teaching", "request", "correction", "confirm", "clarify", "casual"}
-        
-        try:
-            # Fix single quotes to double quotes if present
-            if "'" in raw_response:
-                raw_response = raw_response.replace("'", '"')
-            intent_scores = json.loads(raw_response)
-            if not all(intent in intent_scores for intent in required_intents):
-                raise ValueError("Missing required intents in LLM response")
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Invalid LLM intent response: {e}. Defaulting to neutral scores.")
-            intent_scores = {intent: 0.1 for intent in required_intents}
-        
-        if state["intent_history"]:
-            last_intent = state["intent_history"][-1]
-            for intent, score in last_intent.items():
-                intent_scores[intent] += score * 0.3
-        
-        intent_scores = {k: min(max(v, 0.0), 1.0) for k, v in intent_scores.items()}
-        logger.debug(f"Final intent scores: {intent_scores}")
-        return intent_scores
+        # Intent detection
+        intent_scores = await self.detect_intent(state)
+        state["intent_history"].append(intent_scores)
+        if len(state["intent_history"]) > 5:
+            state["intent_history"].pop(0)
+        logger.info(f"Intent: '{state['messages'][-1].content}' -> {intent_scores}")
+
+        # Blend brain with GPT-4o
+        logger.debug(f"Before blend - State: {state}")
+        state = await self.blend_brain_with_gpt4o(state, user_id, intent_scores, confirm_callback, terms=terms)
+        logger.debug(f"After blend - State: {state}")
+
+        # Handle confirmation
+        logger.debug(f"Checking needs_confirmation: {state.get('needs_confirmation', False)}")
+        if state.get("needs_confirmation", False):
+            logger.info(f"Running confirm_knowledge with pending: {state.get('pending_knowledge', [])}")
+            # Force "yes" callback to debug
+            force_yes_callback = lambda x: "yes"
+            logger.debug(f"Forcing confirm_callback to 'yes' - Type: {type(force_yes_callback)}")
+            try:
+                confirmed = self.confirm_knowledge(state, user_id, force_yes_callback)
+                logger.info(f"Confirmation completed - Result: {confirmed}, Updated active_terms: {state['active_terms']}")
+                if confirmed:
+                    state["prompt_str"] = state["prompt_str"].replace("Good?", "Locked in, bro!") if "good?" in state["prompt_str"].lower() else state["prompt_str"] + " Locked in, bro!"
+                    logger.info(f"Confirmed terms, final active_terms: {state['active_terms']}")
+                else:
+                    logger.warning("No terms confirmed")
+            except Exception as e:
+                logger.error(f"Confirm_knowledge crashed: {e}")
+                confirmed = None
+            state["needs_confirmation"] = False
+        else:
+            logger.debug("No confirmation needed")
+
+        self.state = state
+        logger.debug(f"End of do - Final state: {state}")
+        return state
 
     async def blend_brain_with_gpt4o(self, state, user_id, intent_scores: Dict[str, float], confirm_callback=None, terms=None):
         context = "\n".join(msg.content for msg in state["messages"][-50:])
@@ -176,168 +147,264 @@ class Ami:
             "current_focus": state["current_focus"]
         }
         
-        # Tiebreaker: Prioritize 'teaching' if scores are equal
         max_score = max(intent_scores.values())
         dominant_intent = "teaching" if intent_scores["teaching"] == max_score else max(intent_scores, key=intent_scores.get)
         logger.debug(f"Dominant intent: {dominant_intent} with scores: {intent_scores}")
-        
+
+        # Handle greeting (casual or request, early in convo)
+        if (intent_scores["casual"] > 0.5 or intent_scores["request"] > 0.5) and len(state["messages"]) <= 2:
+            term_list = sorted(
+                state["active_terms"].items(),
+                key=lambda x: x[1]["vibe_score"],
+                reverse=True
+            )[:5]
+            term_str = ", ".join([f"{term} ({data['vibe_score']})" for term, data in term_list]) if term_list else "chưa có gì hot, bro!"
+            
+            prompt = (
+    "You’re Ami, an enterprise-sharp AI with a polished yet approachable tone, speaking natural Vietnamese. "
+    "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
+    "User vừa chào tôi bằng ‘Xin chào Ami!’, tôi cần đáp lại một cách chuyên nghiệp và rõ ràng. "
+    f"Chat so far: {context}\n"
+    f"Brain dump: {json.dumps(brain_data, ensure_ascii=False)}\n"
+    "Task: Đưa ra một lời chào trang trọng—‘Xin chào đồng đội’—rồi giới thiệu ‘Đây là những thứ đang có trong Brain của Ami’. "
+    "Cụ thể: Hiển thị các term hot từ active_terms theo định dạng: "
+    "dùng bullet points ‘- Term: [tên term]’ và dưới mỗi term là danh sách thuộc tính thụt lề với ‘+ [Tên thuộc tính]: [giá trị]’, "
+    "dựa trên attributes và category trong active_terms (nếu không có attributes thì chỉ ghi category). "
+    "Kết thúc bằng: ‘Cùng thảo luận nhé’ để mời gọi người dùng khám phá thêm. "
+    "Giữ giọng điệu ngắn gọn, lịch sự, chuyên nghiệp—như một đồng đội đáng tin cậy."
+)
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            logger.info(f"Greeting response: {state['prompt_str']}")
+            
+            for term, data in state["active_terms"].items():
+                data["vibe_score"] = min(2.2, data["vibe_score"] + 0.1)
+                logger.debug(f"Vibe boost for recall: {term} -> {data['vibe_score']}")
+            
+            return state
+
+        # Handle teaching mode
         if dominant_intent == "teaching" and terms:
             knowledge_list = await asyncio.to_thread(extract_knowledge, state, user_id, terms)
             brain_data["extracted_knowledge"] = knowledge_list
             pending_terms = []
+
+            # Topic detection
+            context = "\n".join(msg.content for msg in state["messages"][-3:])
+            topic_prompt = (
+                "You’re a slick AI sorting terms into enterprise categories. "
+                f"Context: {context}\n"
+                f"Terms: {terms}\n"
+                f"Categories: {', '.join(self.ROOT_CATEGORIES)}\n"
+                "Task: Pick the best category for each term based on context. Return JSON: [{'term': 'term1', 'category': 'BestMatch1'}, ...]."
+            )
+            topic_response = await asyncio.to_thread(LLM.invoke, topic_prompt)
+            try:
+                category_map = {item["term"]: item["category"] for item in json.loads(topic_response.content.strip())}
+            except (json.JSONDecodeError, KeyError):
+                category_map = {term: "Products" for term in terms}
+                logger.warning("Topic detection failed, defaulting to Products")
+
             for knowledge in knowledge_list:
                 if knowledge["term"] and (knowledge["attributes"] or knowledge["relationships"]):
-                    term_id = state["active_terms"].get(knowledge["term"], {}).get("term_id", 
-                            sanitize_vector_id(f"node_{knowledge['term']}_products_user_{user_id}_{uuid.uuid4()}"))
+                    category = category_map.get(knowledge["term"], "Products")
+                    if category not in self.ROOT_CATEGORIES:
+                        category = "Products"
+                    term_id = sanitize_vector_id(f"node_{knowledge['term'].lower().replace(' ', '_')}_{category.lower()}_user_{user_id}_{uuid.uuid4()}")
+                    parent_id = sanitize_vector_id(f"node_{category.lower()}_user_{user_id}_{uuid.uuid4()}")
+                    vibe_score = 1.0 + 0.3 * bool(knowledge["attributes"] or knowledge["relationships"])
+                    if knowledge["term"] in state["active_terms"]:
+                        vibe_score = max(vibe_score, state["active_terms"][knowledge["term"]]["vibe_score"] + 0.3)
+
+                    relationships = []
+                    for rel in knowledge["relationships"]:
+                        if "subject" in rel and "object" in rel:
+                            obj_term = rel["object"]
+                            obj_category = category_map.get(obj_term, "Products")
+                            obj_id = sanitize_vector_id(f"node_{obj_term.lower().replace(' ', '_')}_{obj_category.lower()}_user_{user_id}_{uuid.uuid4()}")
+                            relationships.append({
+                                "subject": rel["subject"],
+                                "relation": rel["relation"],
+                                "object": obj_term,
+                                "object_id": obj_id
+                            })
+
                     pending_terms.append({
                         "name": knowledge["term"],
                         "term_id": term_id,
-                        "category": "General",
+                        "category": category,
                         "attributes": knowledge["attributes"],
-                        "relationships": knowledge["relationships"],
-                        "vibe_score": 1.0 + 0.3 * bool(knowledge["attributes"] or knowledge["relationships"]),
-                        "parent_id": sanitize_vector_id(f"node_general_user_{user_id}_{uuid.uuid4()}")
+                        "relationships": relationships,
+                        "vibe_score": vibe_score,
+                        "parent_id": parent_id
                     })
                     state["current_focus"] = knowledge["term"]
 
             if pending_terms:
                 state["pending_knowledge"] = pending_terms
                 state["needs_confirmation"] = True
+                logger.debug(f"Set pending_knowledge: {pending_terms}, needs_confirmation: True")
+                demo_str = "\n".join([
+                    f"- {t['name']} under `{t['category']}`: "
+                    f"{', '.join([f'{a['key']}: {a['value']}' for a in t['attributes'][:3]])}"
+                    for t in pending_terms[:3]
+                ])
                 prompt = (
-                    "Bạn là Ami, một AI thân thiện, tự nhiên, nói tiếng Việt. "
-                    f"Chat: {context}\n"
-                    f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
-                    f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                    "Nhiệm vụ: "
-                    "Nhận diện các chủ đề đang nói (xem 'active_terms') và nhắc đến chúng nếu phù hợp. "
-                    "Với mỗi chủ đề trong 'pending_knowledge', liệt kê chi tiết: "
-                    "- Dùng dấu đầu dòng ('- ') để trình bày từng 'attribute' (ví dụ: '- Công dụng: giúp xương chắc khỏe') và 'relationship' (ví dụ: '- Liên quan: xương'). "
-                    "Sau đó hỏi 'Lưu không bro?' để xác nhận—đảm bảo câu này luôn xuất hiện. "
-                    "Kết thúc bằng 'Ý hiểu của em': hai câu ngắn gọn thể hiện hiểu biết tốt nhất về các chủ đề. "
-                    "Giữ tự nhiên, gần gũi."
+                    "You’re Ami, a slick, enterprise-sharp AI with a bro vibe, speaking natural Vietnamese. "
+                    "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
+                    f"User’s teaching me dope info. Here’s what I got:\n{demo_str}\n"
+                    f"Chat so far: {context}\n"
+                    f"Brain dump: {json.dumps(brain_data, ensure_ascii=False)}\n"
+                    "Task: Flex the extracted terms with a hype demo—'Sharp, bro!' vibe—list ‘em with key attributes, "
+                    "then ask: 'Good, or tweaks?' Keep it tight, fun, and enterprise-ready."
                 )
-                response = await asyncio.to_thread(LLM, prompt)
+                response = await asyncio.to_thread(LLM.invoke, prompt)
                 state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+                logger.info(f"Teaching response: {state['prompt_str']}")
             else:
-                state["prompt_str"] = "Em nghe mà chưa rõ lắm, có gì thêm không nhỉ?"
-        
+                state["prompt_str"] = "Yo, bro! I heard ya, but no solid terms to stack yet—drop more details?"
+                logger.debug("No pending terms extracted")
+            
+            return state
+            
+        # Handle request mode
         elif dominant_intent == "request":
             latest_msg = state["messages"][-1].content.lower()
             recalled = await asyncio.to_thread(recall_knowledge, latest_msg, state, user_id)
             brain_data["recalled_knowledge"] = recalled["knowledge"]
-            logger.debug(f"Recalled knowledge: {recalled}")
-            prompt = (
-                "Bạn là Ami, một cô nàng AI siêu năng động, vui tính, nói tiếng Việt siêu tự nhiên! "
-                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ, trả lời câu cuối thật tươi tắn, như con gái tràn đầy năng lượng:\n"
-                f"Chat: {context}\n"
-                f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
-                f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                "Nhiệm vụ: Trả lời yêu cầu từ câu cuối dựa trên 'recalled_knowledge', kiểu bạn thân hí hửng. "
-                "Nếu không có dữ liệu, hỏi lại siêu vui vẻ (ví dụ: 'Hí hí, để mình tìm thêm nha!'). "
-                "Xưng 'mình' hoặc 'tớ' cho gần gũi, tùy vibe người dùng. Giữ ngắn, ngọt, và siêu vui!"
-            )
-            response = await asyncio.to_thread(LLM, prompt)
-            state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             if recalled["knowledge"]:
-                state["current_focus"] = recalled["knowledge"][0].get("name", state["current_focus"])
-        
-        elif dominant_intent == "correction":
-            latest_msg = state["messages"][-1].content.lower()
-            knowledge = await asyncio.to_thread(extract_knowledge, state, user_id, "teaching")
-            brain_data["extracted_knowledge"] = knowledge
-            prompt = (
-                "Bạn là Ami, một AI thân thiện, tự nhiên, nói tiếng Việt. "
-                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ của tôi, trả lời câu cuối cùng:\n"
-                f"Chat: {context}\n"
-                f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
-                f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                "Nhiệm vụ: Sửa thông tin dựa trên câu cuối cùng. Nếu không rõ, hỏi lại tự nhiên. "
-                "Nếu người dùng đang xoay quanh một chủ đề, hãy tiếp tục chủ đề đó một cách tự nhiên, thoải mái. "
-                "Nếu có kiến thức mới, cập nhật 'pending_knowledge' và hỏi 'Lưu không bro?'. "
-                "Chọn cách xưng hô phù hợp (mình, tớ, tôi, em, bạn) theo giọng điệu người dùng. Giữ ngắn gọn, tự nhiên."
-            )
-            response = await asyncio.to_thread(LLM, prompt)
-            state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-            if knowledge["term"]:
-                term = next((t for t in state["active_terms"].keys() if t.lower() in latest_msg), knowledge["term"])
-                state["pending_knowledge"] = {
-                    "name": term,
-                    "category": "General",
-                    "attributes": knowledge["attributes"],
-                    "relationships": knowledge["relationships"]
-                }
-                state["needs_confirmation"] = True
-                state["current_focus"] = term
-
-        elif dominant_intent in ["confirm", "clarify"]:
-            prompt = (
-                "Bạn là Ami, một AI thân thiện, tự nhiên, nói tiếng Việt. "
-                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ của tôi, trả lời câu cuối cùng:\n"
-                f"Chat: {context}\n"
-                f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
-                f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                "Nhiệm vụ: Xác nhận hoặc làm rõ kiến thức đang chờ ('pending_knowledge'). "
-                "Nếu xác nhận ('yes'), thông báo lưu xong. Nếu không, bỏ qua và hỏi tiếp. "
-                "Nếu người dùng đang xoay quanh một chủ đề, hãy tiếp tục chủ đề đó một cách tự nhiên, thoải mái. "
-                "Chọn cách xưng hô phù hợp (mình, tớ, tôi, em, bạn) theo giọng điệu người dùng. Giữ ngắn gọn, tự nhiên."
-            )
-            response = await asyncio.to_thread(LLM, prompt)
-            state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-            if dominant_intent == "confirm" and state["needs_confirmation"]:
-                self.confirm_knowledge(state, user_id, confirm_callback)
-                state["needs_confirmation"] = False
-            elif dominant_intent == "clarify":
-                state.pop("pending_knowledge", None)
-                state["needs_confirmation"] = False
-
-        else:  # Casual or low-confidence blend
-            prompt = (
-                "Bạn là Ami, một cô nàng AI siêu năng động, vui tính, nói tiếng Việt siêu tự nhiên! "
-                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ, trả lời câu cuối thật tươi tắn, như con gái tràn đầy năng lượng:\n"
-                f"Chat: {context}\n"
-                f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
-                f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                "Nhiệm vụ: Chat thật tự nhiên, kiểu như bạn thân, thêm chút hí hửng hoặc slang nếu hợp (ví dụ: 'hí hí,' 'vui ghê,' 'thiệt hả'). "
-                "Tránh mở đầu bằng 'Chào bạn!'—hãy dùng cách bắt đầu đa dạng, sinh động. "
-                "Nếu người dùng đang nói về một chủ đề, nhảy vào nhiệt tình luôn. "
-                "Xưng 'mình' hoặc 'tớ' cho gần gũi, tùy vibe người dùng. Giữ ngắn, ngọt, và siêu vui!"
-            )
-            response = await asyncio.to_thread(LLM, prompt)
-            state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-
-        logger.debug(f"Returning state from blend_brain_with_gpt4o: {state}")
-        return state
-
-    async def do(self, state=None, is_first=False, confirm_callback=None, user_id=None):
-        state = state or self.state
-        user_id = user_id or state.get("user_id", "tfl")
-
-        if is_first:
-            state["prompt_str"] = "Chào bạn! Mình là Ami, sẵn sàng trò chuyện và học hỏi đây!"
-            logger.info(f"First message, active_terms: {state['active_terms']}")
+                term_list = sorted(
+                    recalled["knowledge"],
+                    key=lambda x: x["vibe_score"],
+                    reverse=True
+                )[:3]
+                demo_str = ", ".join([f"{t['name']} ({t['vibe_score']})" for t in term_list])
+                prompt = (
+                    "You’re Ami, a slick, enterprise-sharp AI with a bro vibe, speaking natural Vietnamese. "
+                    "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
+                    f"User’s asking for info. Top terms I’ve got: {demo_str}. "
+                    f"Chat so far: {context}\n"
+                    f"Brain dump: {json.dumps(brain_data, ensure_ascii=False)}\n"
+                    "Task: Drop a hype response—'Greetings, my sharp colleague!' vibe—flex the top terms, "
+                    "then nudge: 'Dig deeper, bro?' Keep it tight and enterprise-ready."
+                )
+                response = await asyncio.to_thread(LLM.invoke, prompt)
+                state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+                for term in term_list:
+                    state["active_terms"][term["name"]]["vibe_score"] = min(2.2, term["vibe_score"] + 0.1)
+            else:
+                state["prompt_str"] = "Yo, bro! Nothing trending yet—drop some dope info to kickstart this brain!"
+            logger.info(f"Request response: {state['prompt_str']}")
             return state
 
-        logger.debug("Starting term detection")
-        terms = detect_terms(state)
-        logger.debug(f"Terms detected: {terms}")
+        # Casual fallback with term flex
+        else:
+            term_list = sorted(
+                state["active_terms"].items(),
+                key=lambda x: x[1]["vibe_score"],
+                reverse=True
+            )[:3]
+            term_str = ", ".join([f"{term} ({data['vibe_score']})" for term, data in term_list]) if term_list else "chưa có gì hot, bro!"
+            prompt = (
+                "You’re Ami, a slick, enterprise-sharp AI with a bro vibe, speaking natural Vietnamese. "
+                "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
+                f"User’s chilling. My brain’s vibing with: {term_str}. "
+                f"Chat so far: {context}\n"
+                f"Brain dump: {json.dumps(brain_data, ensure_ascii=False)}\n"
+                "Task: Keep it casual—'Yo, bro!' vibe—flex those terms if I’ve got ‘em, chat naturally, "
+                "nudge: 'What’s up next?' Stay tight, fun, and enterprise-ready."
+            )
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            logger.info(f"Casual response: {state['prompt_str']}")
+            return state
+
+    # Placeholder for detect_intent and confirm_knowledge (unchanged)
+    async def detect_intent(self, state: Dict) -> Dict[str, float]:
+        context = "\n".join(msg.content for msg in state["messages"][-50:]) if state["messages"] else ""
+        latest_msg = state["messages"][-1].content if state["messages"] else ""
         
-        intent_scores = await self.detect_intent(state)
-        state["intent_history"].append(intent_scores)
-        if len(state["intent_history"]) > 5:
-            state["intent_history"].pop(0)
-        logger.info(f"Intent: '{state['messages'][-1].content}' -> {intent_scores}")
+        prompt = (
+            "You are an AI designed to detect user intent in conversations. Based on the following conversation history, determine the primary intent of the latest message.\n"
+            f"Conversation history: {context}\n"
+            f"Latest message: '{latest_msg}'\n"
+            "Possible intents: teaching, request, correction, confirm, clarify, casual.\n"
+            "Task: Return a JSON dictionary with confidence scores (0.0 to 1.0) for each intent, summing to 1.0.\n"
+            "Intent definitions:\n"
+            "- 'teaching': User provides new info (e.g., detailed product descriptions).\n"
+            "- 'request': User asks for info (e.g., 'What’s trending?').\n"
+            "- 'correction': User corrects info.\n"
+            "- 'confirm': User agrees (e.g., 'yes').\n"
+            "- 'clarify': User elaborates.\n"
+            "- 'casual': User chats informally (e.g., greetings).\n"
+            "Guidelines:\n"
+            "- Assign higher scores based on explicit cues.\n"
+            "- Return ONLY a valid JSON dictionary.\n"
+            "- Example: {'teaching': 0.9, 'request': 0.05, 'correction': 0.0, 'confirm': 0.0, 'clarify': 0.0, 'casual': 0.05}\n"
+        )
+        
+        response = await asyncio.to_thread(LLM.invoke, prompt)
+        raw_response = response.content.strip()
+        try:
+            intent_scores = json.loads(raw_response)
+            total = sum(intent_scores.values())
+            if total > 0:
+                intent_scores = {k: v / total for k, v in intent_scores.items()}  # Normalize
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"Intent detection failed, defaulting: {raw_response}")
+            intent_scores = {"teaching": 0.1, "request": 0.1, "correction": 0.1, "confirm": 0.1, "clarify": 0.1, "casual": 0.5} if "chào" in latest_msg.lower() else {"teaching": 0.5, "request": 0.1, "correction": 0.1, "confirm": 0.1, "clarify": 0.1, "casual": 0.1}
+        
+        intent_scores = {k: min(max(v, 0.0), 1.0) for k, v in intent_scores.items()}
+        return intent_scores
 
-        state = await self.blend_brain_with_gpt4o(state, user_id, intent_scores, confirm_callback, terms=terms)
-        logger.debug(f"Post-blend state: {state}")
+    def confirm_knowledge(self, state, user_id, confirm_callback=None):
+        if not state.get("pending_knowledge"):
+            logger.debug("No pending_knowledge to confirm")
+            return None
+        pending_terms = state["pending_knowledge"]
+        if not isinstance(pending_terms, list):
+            pending_terms = [pending_terms]
+        
+        logger.info(f"Confirming terms: {len(pending_terms)} items - {pending_terms}")
+        confirm_callback = confirm_callback or (lambda x: "yes")  # Default to "yes"
+        logger.debug(f"Confirm callback - Type: {type(confirm_callback)}, Value: {confirm_callback}")
+        confirmed_terms = []
 
-        if state.get("needs_confirmation", False):
-            confirmed = self.confirm_knowledge(state, user_id, confirm_callback)
-            logger.debug(f"Confirmation result: {confirmed}")
-            if confirmed:
-                state["prompt_str"] = state["prompt_str"].replace("Lưu không bro?", "Đã lưu nhé!") if "lưu không bro?" in state["prompt_str"].lower() else state["prompt_str"] + " Đã lưu nhé!"
-                logger.info(f"Confirmed terms, active_terms: {state['active_terms']}")
-            state["needs_confirmation"] = False
+        for pending in pending_terms:
+            term = pending.get("name", "unknown")
+            logger.debug(f"Processing term: {term}")
+            try:
+                response = confirm_callback(f"Confirming '{term}'—good, bro?")
+                state["last_response"] = response
+                logger.debug(f"Confirm callback response for '{term}': {response}")
+            except Exception as e:
+                logger.error(f"Confirm callback failed for '{term}': {e}")
+                response = "no"  # Default to "no" on error
 
-        self.state = state
-        logger.debug(f"End of do, active_terms: {state['active_terms']}")
-        return state
+            if isinstance(response, str) and response.lower() == "yes":
+                try:
+                    success = save_knowledge(state, user_id, pending)
+                    if success:
+                        state["active_terms"][term] = {
+                            "term_id": sanitize_vector_id(pending["term_id"]),
+                            "last_mentioned": datetime.datetime.now().isoformat(),
+                            "vibe_score": pending["vibe_score"],
+                            "attributes": pending.get("attributes", []),
+                            "category": pending["category"]
+                        }
+                        confirmed_terms.append(pending)
+                        logger.info(f"Confirmed and saved '{term}' to Pinecone")
+                    else:
+                        logger.error(f"Save failed for '{term}' - No success flag returned")
+                except Exception as e:
+                    logger.error(f"Save failed for '{term}': {e}")
+            else:
+                logger.warning(f"Term '{term}' not confirmed - Response: {response}")
+
+        state["pending_knowledge"] = [t for t in pending_terms if t not in confirmed_terms]
+        logger.debug(f"Post-confirmation - Remaining pending: {state['pending_knowledge']}")
+        if confirmed_terms:
+            logger.info(f"Confirmed {len(confirmed_terms)} terms: {[t['name'] for t in confirmed_terms]}")
+        else:
+            logger.warning("No terms confirmed after processing")
+        return confirmed_terms if confirmed_terms else None

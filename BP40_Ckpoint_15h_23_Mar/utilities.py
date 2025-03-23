@@ -301,6 +301,92 @@ def extract_knowledge(state, user_id=None, intent=None):
         return {"term": None, "attributes": [], "relationships": [], "confidence": 0.0}
 
 
+def recall_knowledge(message, state, user_id=None):
+    #intent = detect_intent(state)
+    namespace = f"enterprise_knowledge_{user_id}"
+    
+    active_terms = state.get("active_terms", {})
+    query_text = f"{message} {' '.join(active_terms.keys())}"  # e.g., "Tell me about HITO? HITO"
+    query_embedding = EMBEDDINGS.embed_query(query_text)
+    
+    results = index.query(
+        vector=query_embedding,
+        top_k=5,
+        include_metadata=True,
+        namespace=namespace
+    )
+    #logger.info(f"Query results: {results}")
+    logger.info(f"Query found {len(results['matches'])} matches")
+    
+    nodes = []
+    now = datetime.now()
+    
+    # If query fails, try direct fetch by term_id
+    if not results["matches"] and active_terms:
+        logger.info("Query returned no matches, attempting direct fetch by term_id")
+        term_ids = [v["term_id"] for v in active_terms.values()]
+        fetched = index.fetch(term_ids, namespace=namespace).vectors
+        logger.info(f"Direct fetch results: {fetched}")
+        for term_id, data in fetched.items():
+            meta = data.metadata
+            days_since = (now - datetime.fromisoformat(meta["created_at"])).days
+            vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
+            vibe_score = min(2.2, max(0.1, vibe_score + 0.1))
+            if meta["name"] in active_terms:
+                vibe_score = min(2.2, max(vibe_score, active_terms[meta["name"]]["vibe_score"]))
+            meta["vibe_score"] = vibe_score
+            nodes.append({"id": term_id, "meta": meta, "score": 1.0})  # High score for direct match
+    else:
+        for r in results["matches"]:
+            meta = r.metadata
+            logger.info(f"Node metadata: {meta}")
+            days_since = (now - datetime.fromisoformat(meta["created_at"])).days
+            vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
+            vibe_score = min(2.2, max(0.1, vibe_score + 0.1))
+            if meta["name"] in active_terms:
+                vibe_score = min(2.2, max(vibe_score, active_terms[meta["name"]]["vibe_score"]))
+            meta["vibe_score"] = vibe_score
+            nodes.append({"id": r.id, "meta": meta, "score": r.score})
+    
+    nodes = [n for n in nodes if "parent_id" in n["meta"] and n["meta"]["name"] != n["meta"]["category"]]
+    if not nodes:
+        logger.warning(f"No child nodes found in {namespace} for query: '{query_text}'")
+        return {"knowledge": [], "terms": {}}
+    
+    nodes = sorted(nodes, key=lambda x: (x["score"], x["meta"]["created_at"]), reverse=True)
+    
+    merged = {}
+    for n in nodes[:3]:
+        name = n["meta"]["name"]
+        if name not in merged:
+            merged[name] = {
+                "name": name,
+                "vibe_score": n["meta"]["vibe_score"],
+                "attributes": json.loads(n["meta"].get("attributes", "[]")),
+                "relationships": json.loads(n["meta"].get("relationships", "[]"))
+            }
+        else:
+            new_attrs = json.loads(n["meta"].get("attributes", "[]"))
+            attr_dict = {a["key"]: a["value"] for a in merged[name]["attributes"]}
+            for a in new_attrs:
+                if a["key"] not in attr_dict or len(a["value"]) > len(attr_dict[a["key"]]):
+                    attr_dict[a["key"]] = a["value"]
+            merged[name]["attributes"] = [{"key": k, "value": v} for k, v in attr_dict.items()]
+            merged[name]["relationships"] = list({(r["subject"], r["relation"], r["object"]): r for r in merged[name]["relationships"] + json.loads(n["meta"].get("relationships", "[]"))}.values())
+            merged[name]["vibe_score"] = max(merged[name]["vibe_score"], n["meta"]["vibe_score"])
+    
+    state["active_terms"] = {n["meta"]["name"]: {"term_id": n["id"], "vibe_score": n["meta"]["vibe_score"]} for n in nodes[:3]}
+    knowledge = list(merged.values())
+    terms = {k["name"]: {
+        "attributes": json.dumps(k["attributes"], ensure_ascii=False),
+        "relationships": json.dumps(k["relationships"], ensure_ascii=False),
+        "vibe_score": k["vibe_score"],
+        "category": n["meta"]["category"],
+        "created_at": n["meta"]["created_at"],
+        "name": k["name"],
+        "parent_id": n["meta"].get("parent_id", None)
+    } for k, n in zip(knowledge, nodes)}
+    return {"knowledge": knowledge, "terms": terms}
 # Test the 5-turn convo
 import time
 if __name__ == "__main__":
