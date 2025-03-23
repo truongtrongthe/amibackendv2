@@ -78,14 +78,9 @@ class Ami:
         if raw_response.startswith("```json") and raw_response.endswith("```"):
             raw_response = raw_response[7:-3].strip()
         
-        # Define required intents outside try block
-        required_intents = {"teaching", "request", "correction", "confirm", "clarify", "casual"}
-        
         try:
-            # Fix single quotes to double quotes if present
-            if "'" in raw_response:
-                raw_response = raw_response.replace("'", '"')
             intent_scores = json.loads(raw_response)
+            required_intents = {"teaching", "request", "correction", "confirm", "clarify", "casual"}
             if not all(intent in intent_scores for intent in required_intents):
                 raise ValueError("Missing required intents in LLM response")
         except (json.JSONDecodeError, ValueError) as e:
@@ -156,20 +151,23 @@ class Ami:
             recalled = await asyncio.to_thread(recall_knowledge, latest_msg, state, user_id)
             brain_data["recalled_knowledge"] = recalled["knowledge"]
             logger.debug(f"Recalled knowledge: {recalled}")
+            # Use the highest score from matches as confidence
+            #confidence = max([match["score"] for match in recalled["knowledge"]], default=0.0) if recalled["knowledge"] else 0.0
             prompt = (
-                "Bạn là Ami, một cô nàng AI siêu năng động, vui tính, nói tiếng Việt siêu tự nhiên! "
-                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ, trả lời câu cuối thật tươi tắn, như con gái tràn đầy năng lượng:\n"
+                "Bạn là Ami, một AI thân thiện, tự nhiên, nói tiếng Việt. "
+                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ của tôi, trả lời câu cuối cùng:\n"
                 f"Chat: {context}\n"
                 f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
                 f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-                "Nhiệm vụ: Trả lời yêu cầu từ câu cuối dựa trên 'recalled_knowledge', kiểu bạn thân hí hửng. "
-                "Nếu không có dữ liệu, hỏi lại siêu vui vẻ (ví dụ: 'Hí hí, để mình tìm thêm nha!'). "
-                "Xưng 'mình' hoặc 'tớ' cho gần gũi, tùy vibe người dùng. Giữ ngắn, ngọt, và siêu vui!"
+                "Nhiệm vụ: Trả lời yêu cầu thông tin từ câu cuối cùng dựa trên 'recalled_knowledge'. Nếu không có dữ liệu, nói tự nhiên và hỏi thêm. "
+                "Nếu người dùng đang xoay quanh một chủ đề, hãy tiếp tục chủ đề đó một cách tự nhiên, thoải mái. "
+                "Chọn cách xưng hô phù hợp (mình, tớ, tôi, em, bạn) theo giọng điệu người dùng. Giữ ngắn gọn, tự nhiên."
             )
             response = await asyncio.to_thread(LLM, prompt)
             state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             if recalled["knowledge"]:
                 state["current_focus"] = recalled["knowledge"][0].get("name", state["current_focus"])
+
         elif dominant_intent == "correction":
             latest_msg = state["messages"][-1].content.lower()
             knowledge = await asyncio.to_thread(extract_knowledge, state, user_id, "teaching")
@@ -221,15 +219,14 @@ class Ami:
 
         else:  # Casual or low-confidence blend
             prompt = (
-            "Bạn là Ami, một cô nàng AI siêu năng động, vui tính, nói tiếng Việt siêu tự nhiên! "
-            "Dựa trên đoạn chat sau và dữ liệu bộ nhớ, trả lời câu cuối thật tươi tắn, như con gái tràn đầy năng lượng:\n"
-            f"Chat: {context}\n"
-            f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
-            f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
-            "Nhiệm vụ: Chat thật tự nhiên, kiểu như bạn thân, thêm chút hí hửng hoặc slang nếu hợp (ví dụ: 'hí hí,' 'vui ghê,' 'thiệt hả'). "
-            "Tránh mở đầu bằng 'Chào bạn!'—hãy dùng cách bắt đầu đa dạng, sinh động. "
-            "Nếu người dùng đang nói về một chủ đề, nhảy vào nhiệt tình luôn. "
-            "Xưng 'mình' hoặc 'tớ' cho gần gũi, tùy vibe người dùng. Giữ ngắn, ngọt, và siêu vui!"
+                "Bạn là Ami, một AI thân thiện, tự nhiên, nói tiếng Việt. "
+                "Dựa trên đoạn chat sau và dữ liệu bộ nhớ của tôi, trả lời câu cuối cùng thoải mái, gần gũi như người thật:\n"
+                f"Chat: {context}\n"
+                f"Bộ nhớ: {json.dumps(brain_data, ensure_ascii=False)}\n"
+                f"Intent scores: {json.dumps(intent_scores, ensure_ascii=False)}\n"
+                "Nhiệm vụ: Trò chuyện tự nhiên, tận dụng bộ nhớ nếu liên quan. "
+                "Nếu người dùng đang xoay quanh một chủ đề, hãy tiếp tục chủ đề đó một cách tự nhiên, thoải mái. "
+                "Chọn cách xưng hô phù hợp (mình, tớ, tôi, em, bạn) theo giọng điệu người dùng. Giữ ngắn gọn, tự nhiên."
             )
             response = await asyncio.to_thread(LLM, prompt)
             state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
