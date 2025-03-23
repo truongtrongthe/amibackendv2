@@ -63,6 +63,113 @@ def initialize_preset_brain():
 initialize_preset_brain()
 
 
+def detect_intent(state, user_id=None):
+    logger.info("Detecting intent")
+    messages = state["messages"][-3:] if state["messages"] else []
+    # Handle both dicts and HumanMessage objects
+    convo_history = " | ".join([m["content"] if isinstance(m, dict) else m.content for m in messages[:-1]]) if len(messages) > 1 else ""
+    latest_msg = messages[-1]["content"] if isinstance(messages[-1], dict) else messages[-1].content if messages else ""
+    last_ai_msg = state.get("prompt_str", "")
+    active_terms = state.get("active_terms", {})
+    intent_history = state.get("intent_history", [])
+
+    if not latest_msg.strip():
+        logger.info("Empty input, defaulting to casual")
+        return "casual"
+
+    latest_lower = latest_msg.lower()
+
+    # Dual-language rule-based checks
+    if "Is this still about" in last_ai_msg or "Confirm or clarify" in last_ai_msg:
+        if latest_lower in ["yes", "yep", "correct", "có", "đúng", "phải"]:
+            logger.info(f"Rule-based: Detected 'confirm' for '{latest_msg}'")
+            return "confirm"
+        if latest_lower in ["no", "nope", "wrong", "không", "sai"]:
+            logger.info(f"Rule-based: Detected 'clarify' for '{latest_msg}'")
+            return "clarify"
+
+    if any(kw in latest_lower for kw in ["bye", "see ya", "later", "goodbye", "tạm biệt", "hẹn gặp"]):
+        logger.info(f"Rule-based: Detected 'goodbye' for '{latest_msg}'")
+        return "goodbye"
+
+    if any(kw in latest_lower for kw in ["save", "forget", "delete", "add", "do it", "stop", "lưu", "xóa", "thêm", "làm", "dừng"]):
+        logger.info(f"Rule-based: Detected 'command' for '{latest_msg}'")
+        return "command"
+
+    # Move teaching up to catch declarative statements first
+    if not latest_lower.endswith("?") and any(term.lower() in latest_lower for term in active_terms.keys()):
+        if any(kw in latest_lower for kw in ["là", "is", "có"]) and not any(kw in latest_lower for kw in ["không", "no", "sai"]):  # Declarative, not negation
+            logger.info(f"Rule-based: Detected 'teaching' for '{latest_msg}'")
+            return "teaching"
+
+    if latest_lower.endswith("?") or "không" in latest_lower or "à" in latest_lower or "hả" in latest_lower:
+        # Request
+        if any(kw in latest_lower for kw in ["tell", "about", "what is", "describe", "explain", "what’s", "how’s", "nói", "về", "là gì", "mô tả", "giải thích", "thế nào", "ra sao", "bao nhiêu"]):
+            if any(term.lower() in latest_lower for term in active_terms.keys()) or any(kw in latest_lower for kw in ["weather", "time", "news", "thời tiết", "giờ", "tin tức"]):
+                logger.info(f"Rule-based: Detected 'request' for '{latest_msg}'")
+                return "request"
+        # Confirmation (tighter rules)
+        if any(kw in latest_lower for kw in ["does", "can", "are", "will", "có thể", "được", "sẽ"]) or "sure" in latest_lower or "chắc" in latest_lower:
+            if any(term.lower() in latest_lower for term in active_terms.keys()):
+                logger.info(f"Rule-based: Detected 'confirmation' for '{latest_msg}'")
+                return "confirmation"
+        # Asking (AI)
+        if any(kw in latest_lower for kw in ["you", "can you", "what can", "how do you", "are you", "bạn", "có thể", "bạn làm gì", "làm sao", "bạn có"]):
+            if not any(term.lower() in latest_lower for term in active_terms.keys()):
+                logger.info(f"Rule-based: Detected 'asking' for '{latest_msg}'")
+                return "asking"
+
+    if any(kw in latest_lower for kw in ["no", "not", "wrong", "actually", "không", "chẳng", "sai", "thật ra"]) and active_terms and last_ai_msg:
+        logger.info(f"Rule-based: Detected 'correction' for '{latest_msg}'")
+        return "correction"
+
+    if any(kw in latest_lower for kw in ["maybe", "might", "có thể", "có lẽ"]):
+        logger.info(f"Rule-based: Detected 'teaching' for '{latest_msg}'")
+        return "teaching"
+
+    if latest_msg.endswith("!") and not latest_lower.endswith("?") and any(kw in latest_lower for kw in ["wow", "cool", "great", "hate", "love", "ôi", "tuyệt", "hết sức", "ghét", "thích"]):
+        logger.info(f"Rule-based: Detected 'emotional' for '{latest_msg}'")
+        return "emotional"
+
+    # LLM fallback (unchanged)
+    prompt = f"""Given:
+    - Latest message: '{latest_msg}'
+    - Last 2 messages: '{convo_history}'
+    - Last AI reply: '{last_ai_msg}'
+    - Active terms: {list(active_terms.keys())}
+    - Intent history: {intent_history[-2:]}
+    Classify as 'teaching', 'request', 'asking', 'casual', 'correction', 'confirmation', 'command', 'emotional', or 'goodbye'. Return ONLY JSON: {{"intent": "teaching", "confidence": 0.95}}.
+    Rules:
+    - 'teaching': Adds knowledge (e.g., "HITO boosts height", "Nó có thể từ Nhật"). Declarative, tentative ("maybe", "có thể" → 0.5-0.7).
+    - 'request': Asks for info (e.g., "Tell me about HITO", "Thời tiết thế nào?"). Questions with topics or general (weather, time).
+    - 'asking': Queries AI (e.g., "What can you do?", "Bạn làm gì được?"). "You"/"bạn" focus, no topics.
+    - 'casual': Chit-chat (e.g., "Hey!", "Ngày đẹp nhỉ"). Neutral tone.
+    - 'correction': Fixes info (e.g., "No, HITO’s from Korea"). Negation after AI reply.
+    - 'confirmation': Yes/no check (e.g., "Is HITO good?"). "Is"/"có" questions or "yes"/"no" after confirmation prompt.
+    - 'command': Orders AI (e.g., "Save this"). Imperatives.
+    - 'emotional': Feelings (e.g., "Wow, cool!"). Exclamations.
+    - 'goodbye': Ends convo (e.g., "Bye")."""
+    
+    response = clean_llm_response(LLM.invoke(prompt).content)
+    try:
+        result = json.loads(response)
+        intent = result["intent"]
+        confidence = result["confidence"]
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Intent parse error: {e}. Raw: '{response}'")
+        json_match = re.search(r'\{.*"intent":\s*"([^"]+)".*"confidence":\s*([0-9.]+).*\}', response, re.DOTALL)
+        if json_match:
+            intent = json_match.group(1)
+            confidence = float(json_match.group(2))
+        else:
+            intent = "casual"
+            confidence = 0.5
+
+    logger.info(f"Final intent: '{intent}' (confidence: {confidence})")
+    state["intent_history"] = intent_history + [intent]
+    return intent
+
+
 def detect_topic(state):
     messages = state["messages"][-3:] if state["messages"] else []
     latest_msg = messages[-1].content if messages else ""
@@ -300,6 +407,126 @@ def extract_knowledge(state, user_id=None, intent=None):
         logger.info(f"Active terms after failure: {state['active_terms']}")
         return {"term": None, "attributes": [], "relationships": [], "confidence": 0.0}
 
+def save_knowledge(state, user_id, confirmed=True):
+    logger.info(f"Entering save_knowledge for user_id: {user_id}, confirmed: {confirmed}")
+    if not confirmed or "pending_knowledge" not in state or not state["pending_knowledge"]:
+        logger.info("Save skipped: Not confirmed or no pending knowledge")
+        return
+
+    pending = state["pending_knowledge"]
+    term_id = pending["term_id"]
+    category = pending["category"]
+    namespace = f"enterprise_knowledge_{user_id}"
+    parent_id = pending["parent_id"]
+    logger.info(f"Pending knowledge: {pending}")
+
+    # Preserve vibe_score from active_terms if it exists and is higher
+    vibe_score = pending["vibe_score"]
+    if pending["name"] in state["active_terms"]:
+        existing_vibe = state["active_terms"][pending["name"]]["vibe_score"]
+        vibe_score = max(vibe_score, existing_vibe)
+        logger.info(f"Preserving vibe_score from active_terms: {vibe_score} (was {pending['vibe_score']})")
+    else:
+        logger.info(f"Using pending vibe_score: {vibe_score}")
+
+    # Query Pinecone for existing node
+    query_embedding = EMBEDDINGS.embed_query(pending["name"])
+    logger.info(f"Querying Pinecone for existing node: {pending['name']}")
+    existing = index.query(
+        vector=query_embedding,
+        top_k=1,
+        include_metadata=True,
+        namespace=namespace,
+        filter={"name": pending["name"], "category": category}
+    )
+    logger.info(f"Query result: {existing}")
+
+    # Determine term_id and whether to update or create
+    if existing["matches"]:
+        term_id = existing["matches"][0]["id"]
+        logger.info(f"Found existing node: {term_id}, updating...")
+    else:
+        term_id = pending["term_id"]
+        logger.info(f"No existing node found for '{pending['name']}', creating new: {term_id}")
+
+    # Upsert root node (category) if not exists
+    root_metadata = {
+        "name": category,
+        "category": category,
+        "vibe_score": 1.0,
+        "created_at": datetime.now().isoformat()
+    }
+    root_embedding = EMBEDDINGS.embed_query(category)
+    try:
+        if not index.fetch([parent_id], namespace=namespace).vectors.get(parent_id):
+            logger.info(f"Upserting root node: {parent_id}")
+            index.upsert([(parent_id, root_embedding, root_metadata)], namespace=namespace)
+            logger.info(f"Created root node: {parent_id} in {namespace}")
+    except Exception as e:
+        logger.error(f"Root node upsert failed: {e}")
+        return
+
+    # Merge existing node data for Pinecone storage
+    existing_node = index.fetch([term_id], namespace=namespace).vectors.get(term_id, None)
+    if existing_node:
+        old_meta = existing_node.metadata
+        old_attributes = json.loads(old_meta.get("attributes", "[]"))
+        old_relationships = json.loads(old_meta.get("relationships", "[]"))
+        attributes = list({(a["key"], a["value"]): a for a in old_attributes + pending["attributes"]}.values())
+        relationships = list({(r["subject"], r["relation"], r["object"]): r for r in old_relationships + pending["relationships"]}.values())
+        created_at = old_meta["created_at"]
+        logger.info(f"Merging with existing node - Attributes: {len(attributes)}, Relationships: {len(relationships)}")
+    else:
+        attributes = pending["attributes"]
+        relationships = pending["relationships"]
+        created_at = datetime.now().isoformat()
+        logger.info("Creating new node - No existing data to merge")
+
+    # Prepare embedding and metadata for Pinecone
+    embedding_text = f"{pending['name']} " + " ".join([f"{a['key']}:{a['value']}" for a in attributes])
+    embedding = EMBEDDINGS.embed_query(embedding_text)
+    metadata = {
+        "name": pending["name"],
+        "category": category,
+        "parent_id": parent_id,
+        "attributes": json.dumps(attributes, ensure_ascii=False),
+        "relationships": json.dumps(relationships, ensure_ascii=False),
+        "vibe_score": vibe_score,
+        "created_at": created_at
+    }
+    logger.info(f"Saving metadata: {metadata}")
+
+    # Upsert to Pinecone
+    try:
+        upsert_result = index.upsert([(term_id, embedding, metadata)], namespace=namespace)
+        logger.info(f"Saved/Updated child node: {term_id} to {namespace} - Result: {upsert_result}")
+        # Update active_terms with only this turn’s pending attributes
+        state["active_terms"][pending["name"]] = {
+            "term_id": term_id,
+            "vibe_score": vibe_score,
+            "attributes": pending["attributes"]  # Only current turn’s attrs
+        }
+    except Exception as e:
+        logger.error(f"Child node upsert failed: {e}")
+        return
+
+    # Save conversation metadata
+    convo_id = state.get("convo_id", "default_convo")
+    convo_meta_id = f"convo_{convo_id}_{uuid.uuid4()}"
+    convo_embedding = EMBEDDINGS.embed_query(" ".join([m.content for m in state["messages"][-3:]]))
+    convo_metadata = {
+        "state": json.dumps(state, default=str, ensure_ascii=False),
+        "last_updated": datetime.now().isoformat()
+    }
+    try:
+        index.upsert([(convo_meta_id, convo_embedding, convo_metadata)], namespace="convo_metadata")
+        logger.info(f"Saved convo metadata: {convo_meta_id} to convo_metadata")
+    except Exception as e:
+        logger.error(f"Convo metadata upsert failed: {e}")
+
+    # Clear pending_knowledge and log exit
+    del state["pending_knowledge"]
+    logger.info(f"Exiting save_knowledge - Active Terms: {state['active_terms']}")
 
 def recall_knowledge(message, state, user_id=None):
     #intent = detect_intent(state)
