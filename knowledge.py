@@ -182,86 +182,170 @@ def save_knowledge(state, user_id, pending=None):
     logger.info(f"Exiting save_knowledge - Active Terms: {state['active_terms']}")
     return True
 
-def recall_knowledge(message, state, user_id=None):
+def recall_knowledge(message, state, user_id=None, fetch_all=False):
+    """
+    Recall knowledge from Pinecone based on the input message.
+    If fetch_all=True, attempts to retrieve all vectors in the namespace.
+    
+    Args:
+        message (str): The input message to query knowledge for.
+        state (dict): The current conversation state.
+        user_id (str, optional): The user ID for namespace scoping.
+        fetch_all (bool): If True, fetch all vectors instead of a limited set.
+    
+    Returns:
+        dict: {"knowledge": list of knowledge items, "terms": dict of terms}
+    """
+    user_id = user_id or state.get("user_id", "user_789")
     namespace = f"enterprise_knowledge_tree_{user_id}"
     active_terms = state.get("active_terms", {})
     
-    # Use active terms or "HITO" if teaching context
-    query_text = message if message != f"user_profile_{user_id}" else "HITO" if "HITO" in message else " ".join(active_terms.keys())
-    if not query_text.strip():
-        query_text = "default_query"
-    results = index.query(
-        vector=EMBEDDINGS.embed_query(query_text),
-        top_k=10,
-        include_metadata=True,
-        namespace=namespace,
-        filter={"parent_id": {"$exists": True}}
+    # Determine query text
+    query_text = (
+        message if message != f"user_profile_{user_id}"
+        else " ".join(active_terms.keys()) if active_terms
+        else "default_query"
     )
-    logger.info(f"Query found {len(results['matches'])} matches for '{query_text}'")
+    logger.info(f"Recalling knowledge for query: '{query_text}' in namespace: {namespace}")
     
     nodes = []
     now = datetime.datetime.now(datetime.timezone.utc)
     
-    if not results["matches"] and active_terms:
-        logger.info("Query returned no matches, attempting direct fetch by term_id")
-        term_ids = [v["term_id"] for v in active_terms.values()]
-        fetched = index.fetch(term_ids, namespace=namespace).vectors
-        for term_id, data in fetched.items():
-            meta = data.metadata
-            days_since = (now - datetime.datetime.fromisoformat(meta["created_at"])).days
-            vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
-            vibe_score = min(2.2, max(0.1, vibe_score))
-            nodes.append({"id": term_id, "meta": meta, "score": 1.0})
-    else:
+    if fetch_all:
+        # Attempt to fetch all vectors (workaround since Pinecone query needs top_k)
+        # First, query with a high top_k to get as many as possible
+        results = index.query(
+            vector=EMBEDDINGS.embed_query(query_text),
+            top_k=1000,  # High limit; adjust based on your data size
+            include_metadata=True,
+            namespace=namespace,
+            filter={"parent_id": {"$exists": True}}
+        )
+        logger.info(f"Fetch_all query found {len(results['matches'])} matches")
+        
         for r in results["matches"]:
             meta = r.metadata
-            attributes = meta.get("attributes", "[]")
-            relationships = meta.get("relationships", "[]")
-            if isinstance(attributes, str):
-                attributes = json.loads(attributes)
-            if isinstance(relationships, str):
-                relationships = json.loads(relationships)
+            attributes = (
+                json.loads(meta["attributes"])
+                if isinstance(meta.get("attributes"), str) and meta["attributes"]
+                else meta.get("attributes", [])
+            )
+            relationships = (
+                json.loads(meta["relationships"])
+                if isinstance(meta.get("relationships"), str) and meta["relationships"]
+                else meta.get("relationships", [])
+            )
             meta["attributes"] = attributes
             meta["relationships"] = relationships
+            
             days_since = (now - datetime.datetime.fromisoformat(meta["created_at"])).days
             vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
             vibe_score = min(2.2, max(0.1, vibe_score))
-            nodes.append({"id": r.id, "meta": meta, "score": r.score})
-    
-    if not nodes:
-        preset_results = index.query(
-            vector=EMBEDDINGS.embed_query("preset_profile"),
-            top_k=5,
+            
+            nodes.append({
+                "id": r.id,
+                "meta": meta,
+                "score": r.score
+            })
+        
+        # If no nodes or incomplete, fallback to presets
+        if not nodes:
+            logger.info("No user knowledge for fetch_all, querying preset_knowledge_tree")
+            preset_results = index.query(
+                vector=EMBEDDINGS.embed_query("preset_profile"),
+                top_k=1000,  # High limit for presets
+                include_metadata=True,
+                namespace="preset_knowledge_tree"
+            )
+            nodes = [
+                {"id": r.id, "meta": r.metadata, "score": r.score}
+                for r in preset_results["matches"]
+            ]
+            logger.info(f"Fallback to preset_knowledge_tree: {len(nodes)} nodes")
+    else:
+        # Standard limited recall (for non-greeting cases)
+        results = index.query(
+            vector=EMBEDDINGS.embed_query(query_text),
+            top_k=10,
             include_metadata=True,
-            namespace="preset_knowledge_tree"
+            namespace=namespace,
+            filter={"parent_id": {"$exists": True}}
         )
-        nodes = [{"id": r.id, "meta": r.metadata, "score": r.score} for r in preset_results["matches"]]
-        logger.info(f"Fallback to preset_knowledge_tree: {len(nodes)} nodes")
+        logger.info(f"Query found {len(results['matches'])} matches for '{query_text}'")
+        
+        if results["matches"]:
+            for r in results["matches"]:
+                meta = r.metadata
+                attributes = json.loads(meta.get("attributes", "[]")) if isinstance(meta.get("attributes"), str) else meta.get("attributes", [])
+                relationships = json.loads(meta.get("relationships", "[]")) if isinstance(meta.get("relationships"), str) else meta.get("relationships", [])
+                meta["attributes"] = attributes
+                meta["relationships"] = relationships
+                
+                days_since = (now - datetime.datetime.fromisoformat(meta["created_at"])).days
+                vibe_score = meta["vibe_score"] - (0.05 * (days_since // 30))
+                vibe_score = min(2.2, max(0.1, vibe_score))
+                
+                nodes.append({
+                    "id": r.id,
+                    "meta": meta,
+                    "score": r.score
+                })
+        
+        if not nodes and active_terms:
+            term_ids = [v["term_id"] for v in active_terms.values()]
+            fetched = index.fetch(term_ids, namespace=namespace).vectors
+            for term_id, data in fetched.items():
+                # ... same processing as above ...
+                nodes.append({
+                    "id": term_id,
+                    "meta": data.metadata,
+                    "score": 1.0
+                })
+        
+        if not nodes:
+            preset_results = index.query(
+                vector=EMBEDDINGS.embed_query("preset_profile"),
+                top_k=5,
+                include_metadata=True,
+                namespace="preset_knowledge_tree"
+            )
+            nodes = [
+                {"id": r.id, "meta": r.metadata, "score": r.score}
+                for r in preset_results["matches"]
+            ]
+            logger.info(f"Fallback to preset_knowledge_tree: {len(nodes)} nodes")
     
+    # Sort nodes by score and recency
     nodes = sorted(nodes, key=lambda x: (x["score"], x["meta"]["created_at"]), reverse=True)
     
-    merged = {}
-    for n in nodes[:5]:
-        name = n["meta"]["name"]
-        if name not in merged:
-            merged[name] = {
-                "name": name,
-                "vibe_score": n["meta"]["vibe_score"],
-                "attributes": n["meta"]["attributes"],
-                "relationships": n["meta"]["relationships"],
-                "term_id": n["id"],
-                "last_mentioned": n["meta"]["created_at"],
-                "category": n["meta"]["category"]
-            }
-    
-    state["active_terms"] = {
-        n["meta"]["name"]: {
-            "term_id": n["id"],
+    # Build knowledge list with all nodes
+    knowledge = [
+        {
+            "name": n["meta"]["name"],
             "vibe_score": n["meta"]["vibe_score"],
-            "attributes": merged[n["meta"]["name"]]["attributes"],
+            "attributes": n["meta"]["attributes"],
+            "relationships": n["meta"]["relationships"],
+            "term_id": n["id"],
             "last_mentioned": n["meta"]["created_at"],
             "category": n["meta"]["category"]
-        } for n in nodes[:5]
+        }
+        for n in nodes
+    ]
+    
+    # Update active_terms with all nodes, using unique keys
+    state["active_terms"] = {
+        f"{n['meta']['name']}_{n['id']}": {
+            "term_id": n["id"],
+            "vibe_score": n["meta"]["vibe_score"],
+            "attributes": n["meta"]["attributes"],
+            "last_mentioned": n["meta"]["created_at"],
+            "category": n["meta"]["category"]
+        }
+        for n in nodes
     }
-    knowledge = list(merged.values())
-    return {"knowledge": knowledge, "terms": {k["name"]: k for k in knowledge}}
+    
+    logger.info(f"Recalled active_terms: {state['active_terms']}")
+    return {
+        "knowledge": knowledge,
+        "terms": {f"{k['name']}_{k['term_id']}": k for k in knowledge}  # Unique keys
+    }

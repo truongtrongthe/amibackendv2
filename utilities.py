@@ -13,7 +13,7 @@ import logging
 # Setup logging
 
 #logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)  # Flask server noise
 logging.getLogger("http.client").setLevel(logging.WARNING)  # HTTP requests
 logging.getLogger("urllib3").setLevel(logging.WARNING)  # HTTP-related
@@ -27,41 +27,20 @@ CATEGORIES = ["Products", "Companies", "Skills", "People", "Customer Segments", 
               "Technologies", "Projects", "Teams", "Events", "Strategies", "Processes", "Tools", 
               "Regulations", "Metrics", "Partners", "Competitors"]
 
-PRESET_KNOWLEDGE = {
-    "Products": {"text": "Generic Supplement", "confidence": 0.9},
-    "Companies": {"text": "Generic Corp", "confidence": 0.85},
-}
 
 def sanitize_vector_id(text):
     return text.replace(" ", "_").lower()
 
+
 def clean_llm_response(response):
-    response = response.strip()
-    # Remove language prefix/suffix, markdown, and extra text
-    for lang in ['python', 'json', '']:
-        response = re.sub(rf'^{lang}\s*[\n\r]*', '', response, flags=re.MULTILINE)
-        response = re.sub(rf'[\n\r]*\s*{lang}$', '', response, flags=re.MULTILINE)
-    if response.startswith("```") and response.endswith("```"):
-        response = response[3:-3].strip()
-    # Strip any trailing text after JSON
-    json_match = re.match(r'\{.*\}', response, re.DOTALL)
-    return json_match.group(0) if json_match else response
-
-def initialize_preset_brain():
-    for category, data in PRESET_KNOWLEDGE.items():
-        vector_id = f"node_{sanitize_vector_id(category)}_preset_{uuid.uuid4()}"
-        embedding = EMBEDDINGS.embed_query(data["text"])
-        metadata = {
-            "name": data["text"], "category": category, "vibe_score": 1.0,
-            "attributes": [], "relationships": [], "created_at": datetime.now().isoformat()
-        }
-        try:
-            index.upsert([(vector_id, embedding, metadata)], namespace="preset_knowledge_tree")
-        except Exception as e:
-            logger.error(f"Preset upsert failed: {e}")
-
-initialize_preset_brain()
-
+    cleaned = response.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:].strip()
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3].strip()
+    if cleaned.startswith("'") and cleaned.endswith("'"):
+        cleaned = cleaned[1:-1].replace("'", '"')
+    return cleaned
 
 def detect_topic(state):
     messages = state["messages"][-3:] if state["messages"] else []
@@ -301,37 +280,3 @@ def extract_knowledge(state, user_id=None, intent=None):
         return {"term": None, "attributes": [], "relationships": [], "confidence": 0.0}
 
 
-# Test the 5-turn convo
-import time
-if __name__ == "__main__":
-    state = {
-    "messages": [],
-    "convo_id": "conv_67890",
-    "active_terms": {},
-    "pending_knowledge": {},
-    "user_id": "brian",
-    "intent": "Idle",
-    "intent_history": []
-    }
-    user_id = "brian_789"
-
-    turns = [
-        "HITO là sản phẩm bổ sung canxi hỗ trợ phát triển chiều cao (từ 2 tuổi trở lên, đăc biệt dành cho người trưởng thành),Đối tượng KH: Việt kiều 20-30 tuổi (cốm viên) Và mẹ có con từ 12-18 tuổi ở VN (sữa, thạch). Sản phẩm cao cấp, công thức toàn diện. Được đội ngũ chuyên viên đồng hành, cung cấp thông tin chuyên khoa, cá nhân hóa. Bộ tứ canxi hữu cơ kết hợp giúp hệ xương phát tri. ển toàn diện: Canxi cá tuyết, canxi tảo đỏ, canxi Gluconate, bột nhung hươu, ở trên bảng thành phần sp A+. Sản phẩm được CLB hàng đầu VN tín nhiệm và đưa vào chế độ dinh dưỡng cho các lứa cầu thủ chuyên nghiệp. Sản phẩm canxi duy nhất được CLB Bóng đá Hoàng Anh Gia Lai tin dùng. Website: https://hitovietnam.com/. Canxi cá tuyết: cá tuyết sống ở mực nước sâu hàng nghìn mét dưới mực nước biển nên có hệ xương vững chắc, mật độ xương cao. Theo chuyên gia Hito thì xương cá tuyết có cầu tạo gần giống hệ xương người, dồi dào canxi hữu cơ (gấp 9-10 lần canxi so với các nguồn khác), tương thích sinh học cao, tăng hấp thụ tối đa canxi vào xương",
-        "Thành Phần chính của nó là: Aquamin F( 32% canxi , canxi từ tảo biển đỏ): Bổ sung canxin hữu cơ dễ hấp thu mà còn không lắng cặn, không bị nóng trong hay táo bón như canxin vô cơ .Củng cố hệ xương, bổ sung canxi giúp xương chắc khỏe, dẻo dai. bảo vệ và tham gia vào quá trình hình thành dịch nhầy ở khớp, giúp khớp chuyển động linh hoạt, thoải mái hơn.giúp ngăn ngừa việc hình thành khối u ở gan, polyp trực tràng. Đồng thời bảo vệ sức khỏe đường tiêu hóa",
-        "Ngoài ra còn có Collagen Type II: Giúp tăng tế bào não , tăng vận động cho các khớp nối, giảm đau với bệnh viêm khớp mạn tính, phòng ngừa  và làm giảm viêm khớp dạng thấp, bảo vệ tim mạch, chống ăn mòn hoặc  chống đông máu mạnh mẽ ngăn ngừa các cục máu đông  giảm tỉ lệ đột quỵ.",
-        "Phụ Liệu : Lactose , polyvinylpyrrolidone K30, Bột talc, Kali sorbat, Hương sữa vừa đủ 1 gói. Lactose là đường tự nhiên có trong thành phần của sữa mẹ, sữa bò, sữa động vật nên an toàn tuyệt đối cho sức khỏe.polyvinylpyrrolidone K30 là chất kết dính cho dạng hạt tồn tại dưới dạng màu trăng màu vàng nhạt có khả năng hấp thụ tốt"
-    ]
-    for i, turn in enumerate(turns):
-        state["messages"].append(HumanMessage(turn))
-        intent = detect_intent(state)
-        knowledge = extract_knowledge(state, user_id, intent)
-        print(f"Turn {i+1} Confidence: {knowledge['confidence']:.1f}, Needs Confirmation: {knowledge['confidence'] < 0.8}")
-        print(f"Attributes: {knowledge['attributes']}")
-        print(f"Relationships: {knowledge['relationships']}")
-
-    #print("Wait a moment so pinecone upsert done...")
-    # Turn 5
-    #time.sleep(3)
-    #state["messages"].append(HumanMessage("What’s HITO?"))
-    #recall = recall_knowledge("Tell me about HITO!", state, user_id)
-    #print(f"Turn 5 Recall: {recall}")

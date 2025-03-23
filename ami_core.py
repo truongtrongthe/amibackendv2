@@ -75,6 +75,7 @@ class Ami:
         state = state or self.state
         user_id = user_id or state.get("user_id", "user_789")
         logger.debug(f"Starting do - Initial state: {state}")
+        logger.info(f"Message count: {len(state['messages'])}")
 
         if is_first:
             state["prompt_str"] = "Yo, bro! Ami’s Enterprise Brain 4.0’s live as of March 20, 2025—ready to stack some dope knowledge!"
@@ -109,7 +110,7 @@ class Ami:
 
         # Blend brain with GPT-4o
         logger.debug(f"Before blend - State: {state}")
-        state = await self.blend_brain_with_gpt4o(state, user_id, intent_scores, confirm_callback, terms=terms)
+        state = await self.blend_brain(state, user_id, intent_scores, confirm_callback, terms=terms)
         logger.debug(f"After blend - State: {state}")
 
         # Handle confirmation
@@ -138,7 +139,7 @@ class Ami:
         logger.debug(f"End of do - Final state: {state}")
         return state
 
-    async def blend_brain_with_gpt4o(self, state, user_id, intent_scores: Dict[str, float], confirm_callback=None, terms=None):
+    async def blend_brain(self, state, user_id, intent_scores: Dict[str, float], confirm_callback=None, terms=None):
         context = "\n".join(msg.content for msg in state["messages"][-50:])
         brain_data = {
             "active_terms": state["active_terms"],
@@ -151,38 +152,52 @@ class Ami:
         dominant_intent = "teaching" if intent_scores["teaching"] == max_score else max(intent_scores, key=intent_scores.get)
         logger.debug(f"Dominant intent: {dominant_intent} with scores: {intent_scores}")
 
-        # Handle greeting (casual or request, early in convo)
-        if (intent_scores["casual"] > 0.5 or intent_scores["request"] > 0.5) and len(state["messages"]) <= 2:
+        # Handle greeting for first message or explicit greeting
+        latest_msg = state["messages"][-1].content.lower()
+        is_greeting = len(state["messages"]) <= 1 or "chào" in latest_msg
+        if is_greeting and (intent_scores["casual"] >= 0.5 or intent_scores["request"] >= 0.5):
+            # Build term display string with ALL active terms, using spaces instead of tabs
             term_list = sorted(
                 state["active_terms"].items(),
                 key=lambda x: x[1]["vibe_score"],
                 reverse=True
-            )[:5]
-            term_str = ", ".join([f"{term} ({data['vibe_score']})" for term, data in term_list]) if term_list else "chưa có gì hot, bro!"
-            
+            )
+            term_str = ""
+            for term_key, data in term_list:
+                term_name = term_key.split("_")[0]  # Strip ID for display
+                # Use 4 spaces for consistent indentation
+                attrs = "\n    ".join([f"+ {a['key']}: {a['value']}" for a in data["attributes"]]) if data["attributes"] else "\n    + Category: {data['category']}"
+                term_str += f"- Term: {term_name}{attrs}\n"
+            term_str = term_str.strip() or "Chưa có gì trong kho kiến thức, bro!"
+
             prompt = (
-    "You’re Ami, an enterprise-sharp AI with a polished yet approachable tone, speaking natural Vietnamese. "
-    "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
-    "User vừa chào tôi bằng ‘Xin chào Ami!’, tôi cần đáp lại một cách chuyên nghiệp và rõ ràng. "
-    f"Chat so far: {context}\n"
-    f"Brain dump: {json.dumps(brain_data, ensure_ascii=False)}\n"
-    "Task: Đưa ra một lời chào trang trọng—‘Xin chào đồng đội’—rồi giới thiệu ‘Đây là những thứ đang có trong Brain của Ami’. "
-    "Cụ thể: Hiển thị các term hot từ active_terms theo định dạng: "
-    "dùng bullet points ‘- Term: [tên term]’ và dưới mỗi term là danh sách thuộc tính thụt lề với ‘+ [Tên thuộc tính]: [giá trị]’, "
-    "dựa trên attributes và category trong active_terms (nếu không có attributes thì chỉ ghi category). "
-    "Kết thúc bằng: ‘Cùng thảo luận nhé’ để mời gọi người dùng khám phá thêm. "
-    "Giữ giọng điệu ngắn gọn, lịch sự, chuyên nghiệp—như một đồng đội đáng tin cậy."
-)
+                "You’re Ami, an enterprise-sharp AI with a polished yet approachable tone, speaking natural Vietnamese. "
+                "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
+                "User vừa chào tôi bằng một lời chào thân thiện, tôi cần đáp lại chuyên nghiệp và rõ ràng. "
+                f"Chat so far: {context}\n"
+                f"Brain dump: {json.dumps(brain_data, ensure_ascii=False)}\n"
+                "Task: Đưa ra một lời chào trang trọng—‘Xin chào đồng đội’—rồi giới thiệu ‘Đây là toàn bộ kiến thức hiện tại trong Brain của Ami’. "
+                "Hiển thị ALL active terms trong một khối ```plaintext```, giữ nguyên định dạng với:\n"
+                "- '- Term: [tên term]' cho các term trên dòng riêng\n"
+                "- Thuộc tính (hoặc category nếu không có attributes) thụt lề bằng đúng 4 spaces trước '+ [Tên thuộc tính]: [giá trị]'\n"
+                "Kết thúc bằng: ‘Cùng khám phá nhé, bro!’\n"
+                "Giữ giọng điệu ngắn gọn, lịch sự, chuyên nghiệp. KHÔNG thay đổi định dạng hoặc thêm khoảng trắng thừa vào danh sách terms, chỉ sao chép chính xác từ All terms.\n"
+                "Output theo cấu trúc:\n"
+                "Xin chào đồng đội! Đây là toàn bộ kiến thức hiện tại trong Brain của Ami:\n"
+                "```plaintext\n"
+                "[danh sách terms]\n"
+                "```\n"
+                "Cùng khám phá nhé, bro!\n"
+                f"All terms:\n{term_str}"
+            )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip() if hasattr(response, 'content') else str(response).strip()
-            logger.info(f"Greeting response: {state['prompt_str']}")
+            logger.debug(f"Raw prompt_str before logging:\n{repr(state['prompt_str'])}")
+            logger.info(f"Greeting response with all knowledge: {state['prompt_str']}")
             
-            for term, data in state["active_terms"].items():
+            for term_key, data in state["active_terms"].items():
                 data["vibe_score"] = min(2.2, data["vibe_score"] + 0.1)
-                logger.debug(f"Vibe boost for recall: {term} -> {data['vibe_score']}")
-            
             return state
-
         # Handle teaching mode
         if dominant_intent == "teaching" and terms:
             knowledge_list = await asyncio.to_thread(extract_knowledge, state, user_id, terms)
@@ -304,7 +319,7 @@ class Ami:
                 key=lambda x: x[1]["vibe_score"],
                 reverse=True
             )[:3]
-            term_str = ", ".join([f"{term} ({data['vibe_score']})" for term, data in term_list]) if term_list else "chưa có gì hot, bro!"
+            term_str = ", ".join([f"{term_key.split('_')[0]} ({data['vibe_score']})" for term_key, data in term_list]) if term_list else "chưa có gì hot, bro!"
             prompt = (
                 "You’re Ami, a slick, enterprise-sharp AI with a bro vibe, speaking natural Vietnamese. "
                 "Date’s March 20, 2025—Enterprise Brain 4.0’s live! "
