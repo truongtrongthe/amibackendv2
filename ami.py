@@ -4,7 +4,7 @@
 
 import json
 import time
-from typing import Annotated
+from typing import Annotated, List, Dict
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -14,7 +14,7 @@ from ami_core import Ami  # Ensure this points to the correct file
 from utilities import logger
 import asyncio
 
-# State - Aligned with AmiCore
+# State - Aligned with AmiCore, including intent_history
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     prompt_str: str
@@ -24,6 +24,9 @@ class State(TypedDict):
     last_response: str
     user_id: str
     needs_confirmation: bool
+    intent: str  # Kept for compatibility, though less critical with intent_history
+    current_focus: str
+    intent_history: List[Dict[str, float]]  # New: Tracks soft intent history
 
 # Graph
 ami_core = Ami()
@@ -35,13 +38,14 @@ async def ami_node(state: State, config=None):
     user_id = config.get("configurable", {}).get("user_id", "unknown") if config else "unknown"
     logger.info(f"ami_node - User ID: {user_id}")
 
-    # Dynamic confirmation callback based on test scenario
     def confirm_callback(prompt):
         if "lưu không bro?" in prompt.lower():
-            # Simulate user responses for the test flow
-            if "HITO" in state["messages"][-1].content:
-                return "yes" if "Yes" in state["messages"][-1].content else "no"
-            return "yes"  # Default to "yes" for other cases
+            # Check current_focus or latest message for context
+            if state.get("current_focus", "").lower() in state["messages"][-1].content.lower() or "hito" in state["messages"][-1].content.lower():
+                logger.debug(f"Confirming save for {state.get('current_focus', 'unknown')}")
+                return "yes"
+            return "yes"  # Default to yes for teaching unless explicitly contradicted
+        logger.debug("No confirmation needed")
         return "no"
 
     updated_state = await ami_core.do(state, not state.get("messages", []), confirm_callback=confirm_callback, user_id=user_id)
@@ -60,7 +64,7 @@ def convo_stream(user_input=None, user_id=None, thread_id=None):
     thread_id = thread_id or f"test_thread_{int(time.time())}"
     user_id = user_id or "tfl_default"
 
-    # Load or init state
+    # Load or init state with intent_history
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     default_state = {
         "messages": [],
@@ -70,7 +74,10 @@ def convo_stream(user_input=None, user_id=None, thread_id=None):
         "pending_knowledge": {},
         "last_response": "",
         "user_id": user_id,
-        "needs_confirmation": False
+        "needs_confirmation": False,
+        "intent": "",
+        "current_focus": "",
+        "intent_history": []  # New: Initialize intent_history
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
@@ -98,16 +105,15 @@ def convo_stream(user_input=None, user_id=None, thread_id=None):
             yield f"data: {json.dumps({'message': line.strip()})}\n\n"
             time.sleep(0.05)
 
-# Test the full 6-turn flow
+# Test the full 6-turn flow (circling Hạ Long)
 if __name__ == "__main__":
     turns = [
-        "Human hello Ami!",
-        "HITO là sản phẩm bổ sung canxi hỗ trợ phát triển chiều cao (từ 2 tuổi trở lên, đặc biệt dành cho người trưởng thành), Đối tượng KH: Việt kiều 20-30 tuổi (cốm viên) và mẹ có con từ 12-18 tuổi ở VN (sữa, thạch). Sản phẩm cao cấp, công thức toàn diện. Được đội ngũ chuyên viên đồng hành, cung cấp thông tin chuyên khoa, cá nhân hóa. Bộ tứ canxi hữu cơ kết hợp giúp hệ xương phát triển toàn diện: Canxi cá tuyết, canxi tảo đỏ, canxi Gluconate, bột nhung hươu, ở trên bảng thành phần sp A+. Sản phẩm được CLB hàng đầu VN tín nhiệm và đưa vào chế độ dinh dưỡng cho các lứa cầu thủ chuyên nghiệp. Sản phẩm canxi duy nhất được CLB Bóng đá Hoàng Anh Gia Lai tin dùng. Website: https://hitovietnam.com/. Canxi cá tuyết: cá tuyết sống ở mực nước sâu hàng nghìn mét dưới mực nước biển nên có hệ xương vững chắc, mật độ xương cao. Theo chuyên gia Hito thì xương cá tuyết có cấu tạo gần giống hệ xương người, dồi dào canxi hữu cơ (gấp 9-10 lần canxi so với các nguồn khác), tương thích sinh học cao, tăng hấp thụ tối đa canxi vào xương",
-        "It's made in Japan",
-        "Yes",
-        "Tell me about HITO",
-        "No, HITO’s from Vietnam",
-        "Giá HITO là bao nhiêu?",
+        "Xin chào Ami!",
+        "Hạ Long đẹp không?",
+        "Ý anh là cảnh ở đó ấy",
+        "Nói thêm về Hạ Long đi",
+        "Mấy cái vịnh ở đó thế nào?",
+        "Hạ Long có gì đặc biệt nữa không?"
     ]
     user_id = "TFL"
     thread_id = "teaching"

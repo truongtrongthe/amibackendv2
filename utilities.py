@@ -412,7 +412,7 @@ def save_knowledge(state, user_id, confirmed=True):
     pending = state["pending_knowledge"]
     term_id = pending["term_id"]
     category = pending["category"]
-    namespace = f"enterprise_knowledge_tree_{user_id}"
+    namespace = f"enterprise_knowledge_{user_id}"
     parent_id = pending["parent_id"]
     logger.info(f"Pending knowledge: {pending}")
 
@@ -526,7 +526,7 @@ def save_knowledge(state, user_id, confirmed=True):
 
 def recall_knowledge(message, state, user_id=None):
     #intent = detect_intent(state)
-    namespace = f"enterprise_knowledge_tree_{user_id}"
+    namespace = f"enterprise_knowledge_{user_id}"
     
     active_terms = state.get("active_terms", {})
     query_text = f"{message} {' '.join(active_terms.keys())}"  # e.g., "Tell me about HITO? HITO"
