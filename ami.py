@@ -29,7 +29,7 @@ graph_builder = StateGraph(State)
 
 async def teaching_node(state: State, config=None):
     start_time = time.time()
-    user_id = config.get("configurable", {}).get("user_id", "unknown") if config else "unknown"
+    user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     logger.info(f"teaching_node - User ID: {user_id}")
     updated_state = await teaching_ami.do(state, user_id=user_id)
     logger.debug(f"teaching_node took {time.time() - start_time:.2f}s")
@@ -45,7 +45,7 @@ async def pretrain_node(state: State, config=None):
 
 async def copilot_node(state: State, config=None):
     start_time = time.time()
-    user_id = config.get("configurable", {}).get("user_id", "unknown") if config else "unknown"
+    user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     logger.info(f"copilot_node - User ID: {user_id}")
     updated_state = await copilot_ami.do(state, user_id=user_id)
     logger.debug(f"copilot_node took {time.time() - start_time:.2f}s")

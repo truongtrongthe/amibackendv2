@@ -21,7 +21,7 @@ def ami_copilot():
 
     data = request.get_json() or {}
     user_input = data.get("user_input")
-    user_id = data.get("user_id", "tfl")
+    user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "copilot_thread")
 
     print("Headers:", request.headers)
@@ -48,7 +48,7 @@ def learn():
 
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
-    user_id = data.get("user_id", "Teacher")  # Default to "Teacher" for teaching mode
+    user_id = data.get("user_id", "thefusionlab")  # Default to "thefusionlab" for if enterprise doesn't specify name
     thread_id = data.get("thread_id", "global_thread")
 
     print("Headers:", request.headers)
@@ -75,7 +75,7 @@ def pretrain():
 
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
-    user_id = data.get("user_id", "Teacher")  # Default to "Teacher" for teaching mode
+    user_id = data.get("user_id", "thefusionlab")  # Default to "thefusionlab" for teaching mode
     thread_id = data.get("thread_id", "global_thread")
 
     print("Headers:", request.headers)

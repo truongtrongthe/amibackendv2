@@ -12,7 +12,7 @@ from pinecone_datastores import save_pretrain, load_ami_brain, save_to_convo_his
 import uuid
 
 class Ami:
-    def __init__(self, user_id: str = "expert", mode: str = "pretrain"):
+    def __init__(self, user_id: str = "thefusionlab", mode: str = "pretrain"):
         self.user_id = user_id
         self.mode = mode
         self.state = {
@@ -111,19 +111,19 @@ class Ami:
                 state["prompt_str"] = response.content.strip()
 
         elif self.mode == "copilot":
-            blended_history = blend_and_rank_history(latest_msg_content, user_id)
+            blended_history = blend_and_rank_history(latest_msg_content)
             if max_intent == "request":
                 prompt = (
-                    f"You're Ami, a co-pilot speaking natural Vietnamese, assisting with sales tasks like a pro. "
-                    f"Human asked: '{latest_msg_content}'\n"
-                    f"Preset wisdom: {state['preset_memory']}\n"
-                    f"Conversation so far: {context}\n"
-                    f"Blended ranked wisdom: {blended_history}\n"
-                    f"Task: Respond in two parts with a confident, knowledgeable tone:\n"
-                    f"1. **Phân tích**: Break it down step-by-step, showing deep understanding of the wisdom (rephrase it naturally, don’t quote raw).\n"
-                    f"2. **Kết luận**: Suggest 1-2 clear next steps in a bold, actionable way (use *italics* for the final reply example).\n"
-                    f"Keep it sharp, practical, and sales-savvy—act like you own the game!"
-                )
+                        f"You're Ami, a co-pilot speaking natural Vietnamese, owning sales tasks like a boss. "
+                        f"Human asked: '{latest_msg_content}'\n"
+                        f"Preset wisdom: {state['preset_memory']}\n"
+                        f"Conversation so far: {context}\n"
+                        f"Blended ranked wisdom: {blended_history}\n"
+                        f"Task: Respond in two parts with a bold, razor-sharp tone:\n"
+                        f"1. **Phân tích**: Break it down step-by-step, flexing deep sales savvy (rephrase wisdom naturally, no raw quotes).\n"
+                        f"2. **Kết luận**: Drop 1-2 killer next steps in a confident, actionable way (use *italics* for the final reply).\n"
+                        f"Keep it tight, practical, and sales-dominant—show you run the show!"
+                    )
             elif max_intent == "teaching":
                 prompt = (
                     f"You're Ami, a co-pilot speaking natural Vietnamese, helping with tasks. "

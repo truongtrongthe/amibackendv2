@@ -1,4 +1,7 @@
-# [No changes needed—keeping it as the last version for reference]
+# pinecone_datastores.py
+# Built by: The Fusion Lab
+# Date: March 24, 2025
+
 import pinecone
 import os
 from pinecone import Pinecone, ServerlessSpec
@@ -62,6 +65,7 @@ def load_ami_history(input: str, user_id: str = "thefusionlab", top_k: int = 50)
         include_metadata=True,
         namespace=namespace
     )
+    logger.debug(f"load_ami_history results for {user_id}, input: {input[:50]}...: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -80,6 +84,7 @@ def load_ami_brain(user_id: str = "thefusionlab") -> str:
         include_metadata=True,
         namespace=namespace
     )
+    logger.debug(f"load_ami_brain results for {user_id}: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -118,6 +123,7 @@ def load_convo_history(input: str, user_id: str, top_k: int = 50) -> str:
         include_metadata=True,
         namespace=namespace
     )
+    logger.debug(f"load_convo_history results for {user_id}, input: {input[:50]}...: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -136,6 +142,7 @@ def load_all_convo_history(user_id: str) -> str:
         include_metadata=True,
         namespace=namespace
     )
+    logger.debug(f"load_all_convo_history results for {user_id}: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -145,8 +152,10 @@ def load_all_convo_history(user_id: str) -> str:
             history += f"\n- {raw} (from {timestamp}, {meta.get('source', 'enterprise')})"
     return history if history else "Chưa có gì tui học được cả."
 
-def blend_and_rank_history(input: str, user_id: str, top_k: int = 50) -> str:
+def blend_and_rank_history(input: str, user_id: str = None, top_k: int = 50) -> str:
+    logger.debug(f"Querying blend_and_rank_history with input: {input[:50]}..., user_id: {user_id}")
     query_vector = EMBEDDINGS.embed_query(input)
+    
     preset_results = ami_index.query(
         vector=query_vector,
         top_k=top_k,
@@ -157,24 +166,46 @@ def blend_and_rank_history(input: str, user_id: str, top_k: int = 50) -> str:
         vector=query_vector,
         top_k=top_k,
         include_metadata=True,
-        namespace=f"wisdom_{user_id}"
+        namespace=f"wisdom_thefusionlab"
     )
-    from datetime import datetime
+    
+    logger.debug(f"preset_results from ami_index: {preset_results}")
+    logger.debug(f"ent_results from enterprise_index: {ent_results}")
+    
     all_matches = preset_results["matches"] + ent_results["matches"]
-    ranked = sorted(
-        all_matches,
-        key=lambda r: (
-            r.score * 
-            r.metadata.get("confidence", 0.5) *  # Default to 0.5 if missing
-            (1 / (datetime.now() - (
-                datetime.fromisoformat(r.metadata["created_at"]) 
-                if "created_at" in r.metadata else datetime.now()
-            )).days + 1)
-        ),
-        reverse=True
-    )
+    if not all_matches:
+        logger.debug("No matches found in either index.")
+        return "Chưa có lịch sử liên quan."
+    
+    ranked = []
+    for r in all_matches:
+        try:
+            created_at = datetime.fromisoformat(r.metadata["created_at"].replace("Z", "+00:00"))
+            days_diff = (datetime.now() - created_at).days + 1
+            score = (
+                r.score * 
+                r.metadata.get("confidence", 0.5) *  # Default to 0.5 if missing
+                (1 / days_diff)
+            )
+            ranked.append({
+                "raw": r.metadata["raw"],
+                "score": score,
+                "source": r.metadata.get("source", "unknown"),
+                "created_at": r.metadata.get("created_at", "unknown")
+            })
+        except Exception as e:
+            logger.warning(f"Failed to rank match {r.metadata.get('raw', 'unknown')}: {e}")
+            continue
+    
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    logger.debug(f"Ranked matches: {ranked}")
+    
+    if not ranked or max(r["score"] for r in ranked) < 0.8:  # Blueprint’s 80% threshold
+        logger.debug("No matches above relevance threshold (0.8).")
+        return "Chưa có lịch sử liên quan."
+    
     history = "\n".join(
-        f"- {r.metadata['raw']} (from {r.metadata.get('created_at', 'unknown')}, {r.metadata.get('source', 'unknown')})"
+        f"- {r['raw']} (from {r['created_at']}, {r['source']}) [score: {r['score']:.4f}]"
         for r in ranked[:top_k]
     )
-    return history if history else "Chưa có lịch sử liên quan."
+    return history
