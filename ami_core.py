@@ -163,7 +163,7 @@ class Ami:
         latest_msg_content = latest_msg.content if isinstance(latest_msg, HumanMessage) else latest_msg
 
         if self.mode == "pretrain" and latest_msg_content.strip() == "Xin chào Ami!":
-            all_history = load_ami_brain(user_id)
+            all_history = load_ami_brain()
             prompt = (
                 f"You're Ami, a smart girl speaking natural Vietnamese. "
                 f"All I’ve learned from you so far: {all_history}\n"
@@ -188,13 +188,14 @@ class Ami:
         if self.mode == "pretrain":
             # Save to Preset Memory if teaching intent is significant (≥ 0.3)
             if intent_scores.get("teaching", 0) >= 0.3 and latest_msg_content.strip():
-                save_pretrain(latest_msg_content, user_id)
+                save_pretrain(latest_msg_content)
                 logger.info(f"Saved to Preset Memory: '{latest_msg_content}'")
                 # Refresh preset_memory to reflect the new addition
                 state["preset_memory"] = load_ami_brain(user_id)
             
             if max_intent == "teaching":
                 convo_history = load_ami_history(latest_msg_content, user_id)
+                #context = f"{convo_history} \n {context}"
                 prompt = (
                     f"You're Ami, a smart girl speaking natural Vietnamese. "
                     f"Conversation so far: {context}\n"
@@ -207,7 +208,7 @@ class Ami:
 
             elif max_intent == "request":
                 if latest_msg_content.lower().strip() == "what you have":
-                    all_history = load_ami_brain(user_id)
+                    all_history = load_ami_brain()
                     prompt = (
                         f"You're Ami, a smart girl speaking natural Vietnamese. "
                         f"Human asked: '{latest_msg_content}'\n"
@@ -218,7 +219,7 @@ class Ami:
                     response = await asyncio.to_thread(LLM.invoke, prompt)
                     state["prompt_str"] = response.content.strip()
                 else:
-                    convo_history = load_ami_history(latest_msg_content, user_id)
+                    convo_history = load_ami_history(latest_msg_content)
                     prompt = (
                         f"You're Ami, a smart girl speaking natural Vietnamese. "
                         f"Human asked: '{latest_msg_content}'\n"

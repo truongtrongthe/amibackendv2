@@ -92,7 +92,7 @@ def load_ami_brain(user_id: str = "thefusionlab") -> str:
             raw = meta.get("raw", "")
             timestamp = meta.get("created_at", "unknown time")
             history += f"\n- {raw} (from {timestamp}, {meta.get('source', 'preset')})"
-    return history if history else "Inocent Ami."
+    return history if history else "Innocent Smart Ami."
 
 def save_to_convo_history(input: str, user_id: str) -> bool:
     logger.info(f"Saving to convo history for user: {user_id}")
