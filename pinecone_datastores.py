@@ -166,11 +166,11 @@ def blend_and_rank_history(input: str, user_id: str = None, top_k: int = 50) -> 
         vector=query_vector,
         top_k=top_k,
         include_metadata=True,
-        namespace=f"wisdom_thefusionlab"
+        namespace="wisdom_thefusionlab"
     )
     
     logger.debug(f"preset_results from ami_index: {preset_results}")
-    logger.debug(f"ent_results from enterprise_index: {ent_results}")
+    logger.debug(f"ent_results from 9well_index: {ent_results}")
     
     all_matches = preset_results["matches"] + ent_results["matches"]
     if not all_matches:
@@ -184,7 +184,7 @@ def blend_and_rank_history(input: str, user_id: str = None, top_k: int = 50) -> 
             days_diff = (datetime.now() - created_at).days + 1
             score = (
                 r.score * 
-                r.metadata.get("confidence", 0.5) *  # Default to 0.5 if missing
+                r.metadata.get("confidence", 0.5) * 
                 (1 / days_diff)
             )
             ranked.append({
@@ -200,8 +200,8 @@ def blend_and_rank_history(input: str, user_id: str = None, top_k: int = 50) -> 
     ranked.sort(key=lambda x: x["score"], reverse=True)
     logger.debug(f"Ranked matches: {ranked}")
     
-    if not ranked or max(r["score"] for r in ranked) < 0.8:  # Blueprint’s 80% threshold
-        logger.debug("No matches above relevance threshold (0.8).")
+    if not ranked:  # Only check if empty, remove threshold
+        logger.debug("No matches available.")
         return "Chưa có lịch sử liên quan."
     
     history = "\n".join(
