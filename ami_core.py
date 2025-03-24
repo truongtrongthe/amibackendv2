@@ -48,10 +48,28 @@ def load_convo_history(input: str, user_id: str, top_k: int = 50) -> str:
             history += f"\n- {raw} (from {timestamp})"
     return history if history else "Chưa có lịch sử liên quan."
 
+def load_all_convo_history(user_id: str) -> str:
+    namespace = f"wisdom_{user_id}"
+    dummy_vector = EMBEDDINGS.embed_query("fetch all")
+    results = index.query(
+        vector=dummy_vector,
+        top_k=10000,
+        include_metadata=True,
+        namespace=namespace
+    )
+    history = ""
+    if results["matches"]:
+        for r in results["matches"]:
+            meta = r.metadata
+            raw = meta.get("raw", "")
+            timestamp = meta.get("created_at", "unknown time")
+            history += f"\n- {raw} (from {timestamp})"
+    return history if history else "Chưa có gì tui học được cả."
+
 class Ami:
     def __init__(self, user_id: str = "expert", mode: str = "teaching"):
         self.user_id = user_id
-        self.mode = mode  # "teaching" or "copilot"
+        self.mode = mode
         self.state = {
             "messages": [],
             "prompt_str": "",
@@ -74,7 +92,22 @@ class Ami:
         # Extract string content
         latest_msg_content = latest_msg.content if isinstance(latest_msg, HumanMessage) else latest_msg
 
-        # Detect intent
+        # Teaching Mode: Handle blank message as convo opener
+        if self.mode == "teaching" and latest_msg_content.strip() == "Xin chào Ami!":
+            all_history = load_all_convo_history(user_id)
+            prompt = (
+                f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
+                f"All I’ve learned from you so far: {all_history}\n"
+                f"Task: Summarize the key points I’ve learned in bullet-point format "
+                f"(e.g., '- Point 1\n- Point 2'). Keep it concise and natural to flex my brain!"
+            )
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            state["prompt_str"] = response.content.strip()
+            self.state = state
+            logger.info(f"Response: {state['prompt_str']}")
+            return state
+
+        # Detect intent for non-blank messages
         intent_scores = await self.detect_intent(state)
         state["intent_history"].append(intent_scores)
         if len(state["intent_history"]) > 5:
@@ -96,15 +129,33 @@ class Ami:
                     f"Latest message: '{latest_msg_content}'\n"
                     f"Task: Show you get it deeply and respond naturally—keep it sharp."
                 )
+                response = await asyncio.to_thread(LLM.invoke, prompt)
+                state["prompt_str"] = response.content.strip()
+
             elif max_intent == "request":
-                convo_history = load_convo_history(latest_msg_content, user_id)
-                prompt = (
-                    f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
-                    f"Human asked: '{latest_msg_content}'\n"
-                    f"Conversation so far: {context}\n"
-                    f"Past stuff you told me: {convo_history}\n"
-                    f"Task: Reply based on relevant history, or ask for more if it’s thin."
-                )
+                if latest_msg_content.lower().strip() == "what you have":
+                    all_history = load_all_convo_history(user_id)
+                    prompt = (
+                        f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
+                        f"Human asked: '{latest_msg_content}'\n"
+                        f"All I’ve learned from you: {all_history}\n"
+                        f"Task: Summarize the key points from everything I’ve learned so far. "
+                        f"Keep it concise, natural, and show off my understanding!"
+                    )
+                    response = await asyncio.to_thread(LLM.invoke, prompt)
+                    state["prompt_str"] = response.content.strip()
+                else:
+                    convo_history = load_convo_history(latest_msg_content, user_id)
+                    prompt = (
+                        f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
+                        f"Human asked: '{latest_msg_content}'\n"
+                        f"Conversation so far: {context}\n"
+                        f"Past stuff you told me: {convo_history}\n"
+                        f"Task: Reply based on relevant history, or ask for more if it’s thin."
+                    )
+                    response = await asyncio.to_thread(LLM.invoke, prompt)
+                    state["prompt_str"] = response.content.strip()
+
             else:  # Casual
                 prompt = (
                     f"You're Ami, a chill Vietnamese buddy. "
@@ -112,10 +163,11 @@ class Ami:
                     f"Latest: '{latest_msg_content}'\n"
                     f"Task: Vibe back naturally, keep it light."
                 )
+                response = await asyncio.to_thread(LLM.invoke, prompt)
+                state["prompt_str"] = response.content.strip()
 
         elif self.mode == "copilot":
             if max_intent == "request":
-                # Query expert history (not current user)
                 convo_history = load_convo_history(latest_msg_content, "expert")
                 prompt = (
                     f"You're Ami, a co-pilot speaking natural Vietnamese, helping with tasks. "
@@ -125,7 +177,6 @@ class Ami:
                     f"Task: Suggest next steps based on expert history, or ask for clarification if needed."
                 )
             elif max_intent == "teaching":
-                # Don’t save, just nudge toward request
                 prompt = (
                     f"You're Ami, a co-pilot speaking natural Vietnamese. "
                     f"Conversation so far: {context}\n"
@@ -139,9 +190,8 @@ class Ami:
                     f"Latest: '{latest_msg_content}'\n"
                     f"Task: Vibe back naturally, keep it light."
                 )
-
-        response = await asyncio.to_thread(LLM.invoke, prompt)
-        state["prompt_str"] = response.content.strip()
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            state["prompt_str"] = response.content.strip()
 
         self.state = state
         logger.info(f"Response: {state['prompt_str']}")
@@ -165,4 +215,3 @@ class Ami:
         except json.JSONDecodeError:
             logger.warning("Intent parsing failed, defaulting")
             return {"teaching": 0.5, "request": 0.3, "casual": 0.2}
-
