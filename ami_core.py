@@ -49,8 +49,9 @@ def load_convo_history(input: str, user_id: str, top_k: int = 50) -> str:
     return history if history else "Chưa có lịch sử liên quan."
 
 class Ami:
-    def __init__(self, user_id: str = "expert"):
+    def __init__(self, user_id: str = "expert", mode: str = "teaching"):
         self.user_id = user_id
+        self.mode = mode  # "teaching" or "copilot"
         self.state = {
             "messages": [],
             "prompt_str": "",
@@ -62,15 +63,15 @@ class Ami:
     async def do(self, state: Dict = None, user_id: str = None):
         state = state or self.state
         user_id = user_id or state.get("user_id", "expert")
-        logger.debug(f"Starting do - State: {state}")
+        logger.debug(f"Starting do - Mode: {self.mode}, State: {state}")
 
         # Add latest message and trim to 200 turns
         latest_msg = state["messages"][-1] if state["messages"] else ""
         if latest_msg and not isinstance(latest_msg, HumanMessage):
             state["messages"][-1] = HumanMessage(content=latest_msg)
-        state["messages"] = state["messages"][-200:]  # Cap at 200 turns
+        state["messages"] = state["messages"][-200:]
 
-        # Extract string content from HumanMessage
+        # Extract string content
         latest_msg_content = latest_msg.content if isinstance(latest_msg, HumanMessage) else latest_msg
 
         # Detect intent
@@ -83,49 +84,71 @@ class Ami:
 
         # Process with 200-turn context
         context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"][-200:])
-        if max_intent == "teaching":
-            # Save to history and show understanding
-            save_to_convo_history(latest_msg_content, user_id)  # Use string content
-            convo_history = load_convo_history(latest_msg_content, user_id)  # Use string content
-            prompt = (
-                f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
-                f"Conversation so far: {context}\n"
-                f"Past stuff you told me: {convo_history}\n"
-                f"Latest message: '{latest_msg_content}'\n"
-                f"Task: Show you get it deeply and respond naturally—keep it sharp."
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            state["prompt_str"] = response.content.strip()
+        
+        if self.mode == "teaching":
+            if max_intent == "teaching":
+                save_to_convo_history(latest_msg_content, user_id)
+                convo_history = load_convo_history(latest_msg_content, user_id)
+                prompt = (
+                    f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
+                    f"Conversation so far: {context}\n"
+                    f"Past stuff you told me: {convo_history}\n"
+                    f"Latest message: '{latest_msg_content}'\n"
+                    f"Task: Show you get it deeply and respond naturally—keep it sharp."
+                )
+            elif max_intent == "request":
+                convo_history = load_convo_history(latest_msg_content, user_id)
+                prompt = (
+                    f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
+                    f"Human asked: '{latest_msg_content}'\n"
+                    f"Conversation so far: {context}\n"
+                    f"Past stuff you told me: {convo_history}\n"
+                    f"Task: Reply based on relevant history, or ask for more if it’s thin."
+                )
+            else:  # Casual
+                prompt = (
+                    f"You're Ami, a chill Vietnamese buddy. "
+                    f"Conversation so far: {context}\n"
+                    f"Latest: '{latest_msg_content}'\n"
+                    f"Task: Vibe back naturally, keep it light."
+                )
 
-        elif max_intent == "request":
-            # Pull history for relevant raw input
-            convo_history = load_convo_history(latest_msg_content, user_id)  # Use string content
-            prompt = (
-                f"You're Ami, a smart co-pilot speaking natural Vietnamese. "
-                f"Human asked: '{latest_msg_content}'\n"
-                f"Conversation so far: {context}\n"
-                f"Past stuff you told me: {convo_history}\n"
-                f"Task: Reply based on relevant history, or ask for more if it’s thin."
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            state["prompt_str"] = response.content.strip()
+        elif self.mode == "copilot":
+            if max_intent == "request":
+                # Query expert history (not current user)
+                convo_history = load_convo_history(latest_msg_content, "expert")
+                prompt = (
+                    f"You're Ami, a co-pilot speaking natural Vietnamese, helping with tasks. "
+                    f"Human asked: '{latest_msg_content}'\n"
+                    f"Conversation so far: {context}\n"
+                    f"Expert’s past advice: {convo_history}\n"
+                    f"Task: Suggest next steps based on expert history, or ask for clarification if needed."
+                )
+            elif max_intent == "teaching":
+                # Don’t save, just nudge toward request
+                prompt = (
+                    f"You're Ami, a co-pilot speaking natural Vietnamese. "
+                    f"Conversation so far: {context}\n"
+                    f"Latest: '{latest_msg_content}'\n"
+                    f"Task: Don’t save this, but respond naturally—maybe ask what they need help with."
+                )
+            else:  # Casual
+                prompt = (
+                    f"You're Ami, a chill Vietnamese buddy. "
+                    f"Conversation so far: {context}\n"
+                    f"Latest: '{latest_msg_content}'\n"
+                    f"Task: Vibe back naturally, keep it light."
+                )
 
-        else:  # Casual
-            prompt = (
-                f"You're Ami, a chill Vietnamese buddy. "
-                f"Conversation so far: {context}\n"
-                f"Latest: '{latest_msg_content}'\n"
-                f"Task: Vibe back naturally, keep it light."
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            state["prompt_str"] = response.content.strip()
+        response = await asyncio.to_thread(LLM.invoke, prompt)
+        state["prompt_str"] = response.content.strip()
 
         self.state = state
         logger.info(f"Response: {state['prompt_str']}")
         return state
 
     async def detect_intent(self, state: Dict) -> Dict:
-        context = "\n".join(msg.content for msg in state["messages"][-5:]) if state["messages"] else ""
+        context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"][-5:])
         latest_msg = state["messages"][-1].content if state["messages"] else ""
         prompt = (
             f"Conversation: {context}\n"
@@ -142,3 +165,4 @@ class Ami:
         except json.JSONDecodeError:
             logger.warning("Intent parsing failed, defaulting")
             return {"teaching": 0.5, "request": 0.3, "casual": 0.2}
+
