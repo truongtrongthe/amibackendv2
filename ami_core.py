@@ -58,7 +58,7 @@ class Ami:
 
         context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"][-200:])
         
-        if self.mode == "teaching":
+        if self.mode == "training":
             if max_intent == "teaching":
                 save_to_convo_history(latest_msg_content, user_id)
                 convo_history = load_convo_history(latest_msg_content, user_id)
@@ -186,8 +186,8 @@ class Ami:
         context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"][-200:])
         
         if self.mode == "pretrain":
-            # Save to Preset Memory if teaching intent is significant (≥ 0.3)
-            if intent_scores.get("teaching", 0) >= 0.3 and latest_msg_content.strip():
+            # Save to Preset Memory if teaching intent is significant (≥ 0.2)
+            if intent_scores.get("teaching", 0) >= 0.2 and latest_msg_content.strip():
                 save_pretrain(latest_msg_content)
                 logger.info(f"Saved to Preset Memory: '{latest_msg_content}'")
                 # Refresh preset_memory to reflect the new addition

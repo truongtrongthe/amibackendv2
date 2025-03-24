@@ -1,5 +1,5 @@
 # main.py
-# Purpose: Flask app with /pilot for Copilot Mode and /learning for Teaching Mode
+# Purpose: Flask app with /pilot for Copilot Mode and /learning for Training Mode
 # Date: March 23, 2025
 
 from flask import Flask, Response, request
@@ -49,13 +49,13 @@ def learn():
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")  # Default to "thefusionlab" for if enterprise doesn't specify name
-    thread_id = data.get("thread_id", "global_thread")
+    thread_id = data.get("thread_id", "training_thread")
 
     print("Headers:", request.headers)
     print("Learning API called!")
 
     return Response(
-        convo_stream(user_input, user_id, thread_id, mode="teaching"),  # Teaching Mode
+        convo_stream(user_input, user_id, thread_id, mode="training"),  # Training Mode
         mimetype='text/event-stream',
         headers={
             'X-Accel-Buffering': 'no',
@@ -75,14 +75,14 @@ def pretrain():
 
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
-    user_id = data.get("user_id", "thefusionlab")  # Default to "thefusionlab" for teaching mode
-    thread_id = data.get("thread_id", "global_thread")
+    user_id = data.get("user_id", "thefusionlab")  # Default to "thefusionlab" for pretrain mode
+    thread_id = data.get("thread_id", "pretrain_thread")
 
     print("Headers:", request.headers)
     print("Learning API called!")
 
     return Response(
-        convo_stream(user_input, user_id, thread_id, mode="pretrain"),  # Teaching Mode
+        convo_stream(user_input, user_id, thread_id, mode="pretrain"),  # Pretrain Mode
         mimetype='text/event-stream',
         headers={
             'X-Accel-Buffering': 'no',

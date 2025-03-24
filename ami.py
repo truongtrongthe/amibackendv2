@@ -1,5 +1,5 @@
 # ami.py
-# Purpose: State and graph harness with dual nodes for Teaching and Copilot modes
+# Purpose: State and graph harness with dual nodes for Training and Copilot modes
 # Date: March 23, 2025
 
 import json
@@ -22,17 +22,17 @@ class State(TypedDict):
     intent_history: List[Dict[str, float]]
     preset_memory: str  # Added to state
 
-teaching_ami = Ami(mode="teaching")
+training_ami = Ami(mode="training")
 copilot_ami = Ami(mode="copilot")
 pretrain_ami = Ami(mode="pretrain")
 graph_builder = StateGraph(State)
 
-async def teaching_node(state: State, config=None):
+async def training_node(state: State, config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
-    logger.info(f"teaching_node - User ID: {user_id}")
-    updated_state = await teaching_ami.do(state, user_id=user_id)
-    logger.debug(f"teaching_node took {time.time() - start_time:.2f}s")
+    logger.info(f"training_node - User ID: {user_id}")
+    updated_state = await training_ami.do(state, user_id=user_id)
+    logger.debug(f"training_node took {time.time() - start_time:.2f}s")
     return updated_state
 
 async def pretrain_node(state: State, config=None):
@@ -51,23 +51,23 @@ async def copilot_node(state: State, config=None):
     logger.debug(f"copilot_node took {time.time() - start_time:.2f}s")
     return updated_state
 
-graph_builder.add_node("teaching", teaching_node)
+graph_builder.add_node("training", training_node)
 graph_builder.add_node("copilot", copilot_node)
 graph_builder.add_node("pretrain", pretrain_node)
 
 def route_mode(state: State, config: Dict) -> str:
-    mode = config.get("configurable", {}).get("mode", "teaching")
+    mode = config.get("configurable", {}).get("mode", "copilot")
     return mode
 
-graph_builder.add_conditional_edges(START, route_mode, {"teaching": "teaching", "copilot": "copilot", "pretrain": "pretrain"})
-graph_builder.add_edge("teaching", END)
+graph_builder.add_conditional_edges(START, route_mode, {"training": "training", "copilot": "copilot", "pretrain": "pretrain"})
+graph_builder.add_edge("training", END)
 graph_builder.add_edge("copilot", END)
 graph_builder.add_edge("pretrain", END)
 
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-def convo_stream(user_input=None, user_id=None, thread_id=None, mode="teaching"):
+def convo_stream(user_input=None, user_id=None, thread_id=None, mode="copilot"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
     user_id = user_id or "thefusionlab"
@@ -80,7 +80,7 @@ def convo_stream(user_input=None, user_id=None, thread_id=None, mode="teaching")
         "convo_id": thread_id,
         "user_id": user_id,
         "intent_history": [],
-        "preset_memory": teaching_ami.state["preset_memory"] if mode == "teaching" else copilot_ami.state["preset_memory"] if mode == "copilot" else pretrain_ami.state["preset_memory"]
+        "preset_memory": training_ami.state["preset_memory"] if mode == "training" else copilot_ami.state["preset_memory"] if mode == "copilot" else pretrain_ami.state["preset_memory"]
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
