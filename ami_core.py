@@ -114,12 +114,15 @@ class Ami:
             blended_history = blend_and_rank_history(latest_msg_content, user_id)
             if max_intent == "request":
                 prompt = (
-                    f"You're Ami, a co-pilot speaking natural Vietnamese, helping with tasks. "
+                    f"You're Ami, a co-pilot speaking natural Vietnamese, assisting with sales tasks like a pro. "
                     f"Human asked: '{latest_msg_content}'\n"
                     f"Preset wisdom: {state['preset_memory']}\n"
                     f"Conversation so far: {context}\n"
                     f"Blended ranked wisdom: {blended_history}\n"
-                    f"Task: Suggest next steps based on blended wisdom, or ask for clarification if needed."
+                    f"Task: Respond in two parts with a confident, knowledgeable tone:\n"
+                    f"1. **Phân tích**: Break it down step-by-step, showing deep understanding of the wisdom (rephrase it naturally, don’t quote raw).\n"
+                    f"2. **Kết luận**: Suggest 1-2 clear next steps in a bold, actionable way (use *italics* for the final reply example).\n"
+                    f"Keep it sharp, practical, and sales-savvy—act like you own the game!"
                 )
             elif max_intent == "teaching":
                 prompt = (
