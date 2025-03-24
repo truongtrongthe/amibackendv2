@@ -63,6 +63,33 @@ def learn():
         }
     )
 
+@app.route('/pretrain', methods=['POST', 'OPTIONS'])
+def pretrain():
+    if request.method == 'OPTIONS':
+        response = Response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Max-Age'] = '86400'
+        return response, 200
+
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    user_id = data.get("user_id", "Teacher")  # Default to "Teacher" for teaching mode
+    thread_id = data.get("thread_id", "global_thread")
+
+    print("Headers:", request.headers)
+    print("Learning API called!")
+
+    return Response(
+        convo_stream(user_input, user_id, thread_id, mode="pretrain"),  # Teaching Mode
+        mimetype='text/event-stream',
+        headers={
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
 @app.route('/')
 def home():
     return "Hello, It's me Ami!"

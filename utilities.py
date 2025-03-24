@@ -1,8 +1,6 @@
 # utilities.py (Final Blue Print 4.0 - Enterprise Brain, deployed March 20, 2025)
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.messages import HumanMessage
-from datetime import datetime
-from pinecone_datastores import index  # Assuming this is your Pinecone index setup
+
 import logging
 
 # Setup logging
