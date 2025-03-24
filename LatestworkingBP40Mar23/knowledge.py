@@ -29,23 +29,25 @@ def extract_knowledge(state, user_id=None, terms=None):
     for term in terms:
         logger.info(f"Extracting for term: '{term}'")
         attr_prompt = (
-                        f"Given:\n"
-                        f"- Latest message: '{latest_msg}'\n"
-                        f"- Prior messages: '{convo_history}'\n"
-                        f"- Main term: '{term}'\n"
-                        "List descriptive properties about '{term}' as a JSON list of dicts. "
-                        "Focus on features (e.g., 'Use', 'Approach'), states (e.g., 'Concern'), or purposes specific to '{term}'. "
-                        "Infer from context or examples, even if implicit. Examples:\n"
-                        "- 'HITO Granule là viên nang dễ sử dụng' → [{\"key\": \"Ease of Use\", \"value\": \"easy to use\"}] if term is 'HITO Granule'\n"
-                        "- 'Khi khách lo lắng sản phẩm khó dùng' → [{\"key\": \"Concern\", \"value\": \"difficulty using product\"}] if term is 'khách'\n"
-                        "- 'Hỏi xem khách mua bằng tiền mặt hay vay' → [{\"key\": \"Financial Inquiry\", \"value\": \"cash or bank loan\"}] if term is 'Customer Handling'\n"
-                        "Rules:\n"
-                        "- Assign properties if '{term}' is central to the action or description.\n"
-                        "- Avoid redundancy (e.g., don’t repeat across similar terms like 'sản phẩm' and 'HITO Granule').\n"
-                        "- Return `[]` if nothing fits.\n"
-                        "Output ONLY the list, no prefix."
-                    )
-        
+            f"Given:\n"
+            f"- Latest message: '{latest_msg}'\n"
+            f"- Prior messages: '{convo_history}'\n"
+            f"- Main term: '{term}'\n"
+            "List descriptive properties about '{term}' as a JSON-compatible Python list of dicts. "
+            "Examples:\n"
+            "- 'HITO is a height booster' → [{\"key\": \"Use\", \"value\": \"height booster\"}]\n"
+            "- 'GenX Fast là sản phẩm của công ty mình' → []\n"
+            "- 'Nó hỗ trợ Vitamin D' → [] if term is Calcium\n"
+            "- 'Nó hỗ trợ Vitamin D' → [{\"key\": \"Use\", \"value\": \"hỗ trợ Calcium\"}] if term is Vitamin D and Calcium is prior\n"
+            "Rules:\n"
+            "- Include features (e.g., 'Use'), origins (e.g., 'Origin'), benefits, prices (e.g., 'Price') specific to '{term}'.\n"
+            "- Use prior message context to infer properties (e.g., 'nó' refers to prior term like 'Calcium').\n"
+            "- Assign properties to '{term}' only if it’s the subject or object of the action in the latest message.\n"
+            "- Avoid duplicating prior attributes unless restated (e.g., don’t repeat 'giúp xương chắc khỏe' from prior messages).\n"
+            "- Return `[]` if nothing fits '{term}' in the latest message.\n"
+            "Output ONLY the list, no 'python' or 'json' prefix."
+        )
+        logger.info("Before attributes extraction")
         attr_response = clean_llm_response(LLM.invoke(attr_prompt).content)
         logger.info(f"Raw attributes response: '{attr_response}'")
         try:
@@ -55,35 +57,34 @@ def extract_knowledge(state, user_id=None, terms=None):
             attributes = []
 
         rel_prompt = (
-                    f"Given:\n"
-                    f"- Latest message: '{latest_msg}'\n"
-                    f"- Prior messages: '{convo_history}'\n"
-                    f"- Main term: '{term}'\n"
-                    "List relationships involving '{term}' as a JSON list of dicts with node IDs. "
-                    "Dynamically spot connections via verbs, prepositions, or roles. Examples:\n"
-                    "- 'HITO Granule là viên nang' → [{\"subject\": \"HITO Granule\", \"relation\": \"Is\", \"object\": \"viên nang\", \"subject_id\": \"node_hito_granule_products_user_{user_id}_{uuid.uuid4()}\"}]\n"
-                    "- 'Khi khách lo lắng' → [{\"subject\": \"Customer Handling\", \"relation\": \"Targets\", \"object\": \"khách\", \"subject_id\": \"node_customer_handling_skills_user_{user_id}_{uuid.uuid4()}\"}] if term is 'Customer Handling'\n"
-                    "- 'Mua để sinh sống hay đầu tư' → [{\"subject\": \"Thái Nguyên\", \"relation\": \"Purpose\", \"object\": \"sinh sống hoặc đầu tư\", \"subject_id\": \"node_thai_nguyen_places_user_{user_id}_{uuid.uuid4()}\"}] if term is 'Thái Nguyên'\n"
-                    "Rules:\n"
-                    "- '{term}' can be subject or object—pick the natural fit.\n"
-                    "- Use relation types like 'Is', 'Purpose', 'Targets', 'Involves', 'Related To' based on context (e.g., 'để' → 'Purpose', 'hỏi' → 'Involves').\n"
-                    "- Pull objects from the message, including examples.\n"
-                    "- Node IDs: `node_<subject>_<category>_user_{user_id}_<uuid>` (category from context or 'unknown').\n"
-                    "- Return `[]` if no clear relationships.\n"
-                    "Output ONLY the list, no prefix."
-                )
+            f"Given:\n"
+            f"- Latest message: '{latest_msg}'\n"
+            f"- Prior messages: '{convo_history}'\n"
+            f"- Main term: '{term}'\n"
+            "List relationships as a JSON-compatible Python list of dicts with node IDs. "
+            "Examples:\n"
+            "- 'GenX Fast là sản phẩm của công ty mình' → [{\"subject\": \"GenX Fast\", \"relation\": \"Produced By\", \"object\": \"công ty mình\", \"subject_id\": \"node_genx_fast_unknown_user_{user_id}_{uuid.uuid4()}\"}]\n"
+            "- 'Nó hỗ trợ Vitamin D' → [{\"subject\": \"Vitamin D\", \"relation\": \"Supports\", \"object\": \"Calcium\", \"subject_id\": \"node_vitamin_d_unknown_user_{user_id}_{uuid.uuid4()}\"}] if term is Vitamin D and Calcium is prior\n"
+            "- 'Nó hỗ trợ Vitamin D' → [] if term is Calcium\n"
+            "Rules:\n"
+            "- Identify external entities (e.g., companies) or prior terms connected via verbs/prepositions (e.g., 'của', 'hỗ trợ') involving '{term}'.\n"
+            "- Generate unique node IDs: `node_<subject>_<category>_user_{user_id}_<uuid>`.\n"
+            "- Return `[]` if no clear relationships for '{term}' in the latest message.\n"
+            "Output ONLY the list, no 'python' or 'json' prefix."
+        )
+        logger.info("Before relationships extraction")
         rel_response = clean_llm_response(LLM.invoke(rel_prompt).content)
         logger.info(f"Raw relationships response: '{rel_response}'")
         try:
             relationships = json.loads(rel_response)
-            # Fill in subject_id if missing
-            for rel in relationships:
-                if "subject_id" not in rel:
-                    category = "unknown"  # Could refine this with category_map from do()
-                    rel["subject_id"] = f"node_{rel['subject'].lower().replace(' ', '_')}_{category}_user_{user_id}_{uuid.uuid4()}"
         except (ValueError, SyntaxError):
             logger.warning(f"JSON parse failed, defaulting to empty: {rel_response}")
             relationships = []
+
+        for rel in relationships:
+            if "subject_id" not in rel:
+                category = "Unknown"
+                rel["subject_id"] = f"node_{rel['subject'].lower().replace(' ', '_')}_{category.lower()}_user_{user_id}_{uuid.uuid4()}"
 
         results.append({
             "term": term,
@@ -94,7 +95,6 @@ def extract_knowledge(state, user_id=None, terms=None):
 
     logger.info(f"Extracted: {results}")
     return results
-
 
 def save_knowledge(state, user_id, pending=None):
     if pending is None:
@@ -270,46 +270,3 @@ def recall_knowledge(message, state, user_id=None, fetch_all=False):
     logger.info(f"Recalled active_terms: {state['active_terms']}")
     return {"knowledge": knowledge, "terms": {f"{k['name']}_{k['term_id']}": k for k in knowledge}}
 
-def detect_terms(state):
-    latest_msg = state["messages"][-1].content if state["messages"] else ""
-    convo_history = " | ".join(m.content for m in state["messages"][-5:-1]) if state["messages"][:-1] else "None"
-
-    logger.debug(f"Detecting terms in: '{latest_msg}'")
-    term_prompt = (
-        f"Given:\n"
-        f"- Latest message: '{latest_msg}'\n"
-        f"- Prior messages: '{convo_history}'\n"
-        "Identify key terms—proper nouns (e.g., names, places), core concepts, or implied nouns that carry the vibe. "
-        "Return JSON: ['term1', 'term2']. Common cases:\n"
-        "- Questions: Extract subjects/objects (e.g., 'What’s a good CRM?' → ['CRM']).\n"
-        "- Statements: Grab focal points (e.g., 'I love Hạ Long' → ['Hạ Long']).\n"
-        "- Advice: Include actions/concepts (e.g., 'Profile customers well' → ['customers', 'profile']).\n"
-        "- Casual: Catch names or standout words (e.g., 'Yo Ami, what’s up?' → ['Ami']).\n"
-        "Rules:\n"
-        "- Prioritize terms that drive meaning or repeat in context.\n"
-        "- Include implicit terms if they’re the vibe (e.g., 'quiet spot' → ['quiet']).\n"
-        "- Avoid filler words (e.g., 'the', 'a').\n"
-        "- Output MUST be valid JSON: ['term1', 'term2'] or []."
-    )
-   
-    raw_response = LLM.invoke(term_prompt).content.strip() if latest_msg.strip() else "[]"
-    cleaned_response = clean_llm_response(raw_response)
-    
-    try:
-        terms = json.loads(cleaned_response)
-        if not isinstance(terms, list):
-            terms = []
-    except json.JSONDecodeError as e:
-        logger.warning(f"Term parsing failed: '{raw_response}', error: {e}")
-        # Fallback: Extract nouns heuristically if LLM fails
-        terms = []
-        if latest_msg:
-            words = latest_msg.lower().split()
-            for word in words:
-                if len(word) > 2 and word not in {"the", "a", "is", "to", "and"}:  # Basic filter
-                    terms.append(word)
-        if not terms:
-            terms = []
-    
-    logger.info(f"Detected terms: {terms}")
-    return terms
