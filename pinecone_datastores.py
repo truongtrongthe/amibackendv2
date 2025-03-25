@@ -13,7 +13,7 @@ import uuid
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
 ami_index_name = "ami"
-ent_index_name = "bvhv"
+ent_index_name = "9well"
 
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
