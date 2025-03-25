@@ -112,39 +112,40 @@ class Ami:
 
         elif self.mode == "copilot":
             blended_history = blend_and_rank_history(latest_msg_content)
-            
             if max_intent == "request":
-                request_prompt = (
-                    f"You're Ami, a co-pilot speaking natural Vietnamese, riding with a salesperson to crush it. "
+                prompt = (
+                        f"You're Ami, a co-pilot speaking natural Vietnamese, owning sales tasks like a boss. "
+                        f"Human asked: '{latest_msg_content}'\n"
+                        f"Preset wisdom: {state['preset_memory']}\n"
+                        f"Conversation so far: {context}\n"
+                        f"Blended ranked wisdom: {blended_history}\n"
+                        f"Task: Respond in two parts with a bold, razor-sharp tone:\n"
+                        f"1. **Phân tích**: Break it down step-by-step, flexing deep sales savvy (rephrase wisdom naturally, no raw quotes).\n"
+                        f"2. **Kết luận**: Drop 1-2 killer next steps in a confident, actionable way (use *italics* for the final reply).\n"
+                        f"Keep it tight, practical, and sales-dominant—show you run the show!"
+                    )
+            elif max_intent == "teaching":
+                prompt = (
+                    f"You're Ami, a co-pilot speaking natural Vietnamese, helping with tasks. "
                     f"Human asked: '{latest_msg_content}'\n"
                     f"Preset wisdom: {state['preset_memory']}\n"
                     f"Conversation so far: {context}\n"
-                    f"Blended ranked wisdom (your sales toolkit): {blended_history}\n"
-                    f"Task: Tackle the human’s request with a tight, co-pilot sales edge—keep it natural and sharp. If Blended ranked wisdom gives enough to work with, drop a 3-part plan to nail the request. If it’s vague or lacks specifics, throw a quick, deal-hunting question to get intel—stay locked on winning the sale. \n"
-                    f"For plans:\n"
-                    f"1. **Đánh giá**: Size up the request fast, flexing sales smarts—find the angle or opportunity.\n"
-                    f"2. **Kỹ năng**: List up to 7 wisdom you pulled from Blended ranked wisdom, with scores, tied to sales impact.\n"
-                    f"3. **Hành động**: Hand over 1-2 killer steps for the salesperson to run—make it bold and deal-focused (final step in double quotes).\n"
-                    f"For questions: Keep it quick, fierce, and tied to the sale—dig for gold we can use.\n"
-                    f"Stay short, fierce, and co-pilot sharp—lock this win down with me!"
+                    f"Blended ranked wisdom: {blended_history}\n"
+                    f"Task: Respond in two parts:\n"
+                    f"1. **Analysis**: Show your reasoning step-by-step (e.g., 'Bước 1: ... Bước 2: ...').\n"
+                    f"2. **Final Message**: Give a clear, actionable next step (e.g., 'Vậy nên, bước tiếp theo là ...').\n"
+                    f"Keep it natural and concise!"
                 )
-                response = await asyncio.to_thread(LLM.invoke, request_prompt)
-                state["prompt_str"] = response.content.strip()
-            else:
-                casual_prompt = (
+            else:  # Casual
+                prompt = (
                     f"You're Ami, a chill Vietnamese buddy. "
                     f"Preset wisdom: {state['preset_memory']}\n"
-                    f"Blended ranked wisdom: {blended_history}\n"
                     f"Conversation so far: {context}\n"
                     f"Latest: '{latest_msg_content}'\n"
-                    f"Task: Vibe back naturally, keep it light and simple. Apply wisdom from Blended ranked wisdom if it fits."
+                    f"Task: Vibe back naturally, keep it light."
                 )
-                response = await asyncio.to_thread(LLM.invoke, casual_prompt)
-                state["prompt_str"] = response.content.strip()
-
-            self.state = state
-            logger.info(f"Final Response: {state['prompt_str']}")
-            return state
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            state["prompt_str"] = response.content.strip()
 
         self.state = state
         logger.info(f"Response: {state['prompt_str']}")
