@@ -124,7 +124,7 @@ class Ami:
                     f"For plans:\n"
                     f"1. **Đánh giá**: Size up the request fast, flexing sales smarts—find the angle or opportunity.\n"
                     f"2. **Kỹ năng**: List up to 7 wisdom you pulled from Blended ranked wisdom, with scores, tied to sales impact.\n"
-                    f"3. **Hành động**: Hand over 1-2 killer steps for the salesperson to run—make it bold and deal-focused (final step in double quotes).\n"
+                    f"3. **Hành động**: Hand over 1-2 killer steps for the salesperson to run—make it bold and deal-focused (final step in BOLD).\n"
                     f"For questions: Keep it quick, fierce, and tied to the sale—dig for gold we can use.\n"
                     f"Stay short, fierce, and co-pilot sharp—lock this win down with me!"
                 )
