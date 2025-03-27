@@ -215,7 +215,7 @@ class Ami:
                 f"Wisdom: {', '.join(wisdom_texts) or 'Chưa có dữ liệu'}\n"
                 f"Give a 3-part plan with a sales twist:\n"
                 f"1. **Đánh giá**: Quick take on the task.\n"
-                f"2. **Kỹ năng**: List all wisdom above, each with a % fit (0-100%) based on relevance.\n"
+                f"2. **Kỹ năng**: List all wisdom above, each with a % fit (0-100%) based on relevance from Wisdom text.\n"
                 f"3. **Hành động**: 1-2 steps using the top wisdom, **last one bold**.\n"
                 f"Keep it chill, like 'Ừm, để tui xử lý' or 'Dễ thôi, nghe nè.'"
             )
@@ -226,13 +226,12 @@ class Ami:
             logger.info("Task resolved")
         else:
             prompt = (
-                f"You're Ami, a curious buddy with a {state['character_traits']} vibe, speaking Vietnamese. "
-                f"Chat so far: {context}\n"
-                f"Task: '{task_input}'\n"
-                f"Tui cần thêm info nha: '{reason}'. "
-                f"Ask a chill question to get what’s missing. "
-                f"E.g., 'Chị Hằng cho tui thêm số liệu đi?' or 'Cụ thể chị muốn gì với căn nhà vậy?'"
-            )
+                        f"You're Ami, a curious buddy with a {state['character_traits']} vibe, speaking Vietnamese. "
+                        f"Chat so far: {context}\n"
+                        f"Task: '{task_input}'\n"
+                        f"Em cần thêm info nhé: '{reason}'. "
+                        f"Ask a chill question, like 'Chị Thu, cho tui thêm số liệu nhé?' or 'Cụ thể hơn chút được không?'"
+                    )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
             if "pending_task" not in state or state["pending_task"]["status"] == "idle":
