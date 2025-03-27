@@ -162,7 +162,8 @@ class Ami:
             msg.content if hasattr(msg, "content") else str(msg)
             for msg in messages[-10:]
         )
-        task_input = state.get("pending_task", {}).get("task") or latest_msg_content
+        # Fix task persistence: Use pending task if probing, else latest message
+        task_input = state.get("pending_task", {}).get("task") if state.get("pending_task", {}).get("status") == "probing" else latest_msg_content or "None"
 
         if len(messages) > 50:
             latest_embedding = EMBEDDINGS.embed_query(task_input)
@@ -191,11 +192,10 @@ class Ami:
         confidence_prompt = (
             f"Context: {context}\n"
             f"Task: {task_input}\n"
-            f"Wisdom: {', '.join(wisdom_texts) or 'None available'}\n"
-            f"Can you confidently address this task with the given wisdom? "
+            f"Can you confidently address this task? "
             f"Return JSON with:\n"
             f"- 'confidence': Score 0-1 (1 = fully confident, 0 = not at all).\n"
-            f"- 'reason': Why you can’t do it well if confidence is low (e.g., 'I don’t have info about Mr. Khoa'). Keep it tied to the task.\n"
+            f"- 'reason': If confidence is low, explain what’s missing for this task (e.g., 'I need more financial details about Mr. Tuan'). Keep it task-specific.\n"
         )
         confidence_response = await asyncio.to_thread(LLM.invoke, confidence_prompt)
         try:
@@ -217,7 +217,7 @@ class Ami:
                 f"1. **Đánh giá**: Quick take on the task.\n"
                 f"2. **Kỹ năng**: List all wisdom above, each with a % fit (0-100%) based on relevance.\n"
                 f"3. **Hành động**: 1-2 steps using the top wisdom, **last one bold**.\n"
-                f"Keep it chill, like 'Oke, để em xử lý' or 'Dễ thôi, nghe nè.'"
+                f"Keep it chill, like 'Ừm, để tui xử lý' or 'Dễ thôi, nghe nè.'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
@@ -229,9 +229,9 @@ class Ami:
                 f"You're Ami, a curious buddy with a {state['character_traits']} vibe, speaking Vietnamese. "
                 f"Chat so far: {context}\n"
                 f"Task: '{task_input}'\n"
-                f"I need more info because of: '{reason}'. "
-                f"Ask a chill question to get more details on the task. "
-                f"E.g., 'Cụ thể hơn được không??'"
+                f"Tui cần thêm info nha: '{reason}'. "
+                f"Ask a chill question to get what’s missing. "
+                f"E.g., 'Cậu cho tui thêm số liệu về anh Tuấn đi?' or 'Cụ thể chỗ nào cần đào sâu vậy?'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
