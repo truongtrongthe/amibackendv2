@@ -162,8 +162,8 @@ class Ami:
             msg.content if hasattr(msg, "content") else str(msg)
             for msg in messages[-10:]
         )
-        # Fix task persistence: Use pending task if probing, else latest message
-        task_input = state.get("pending_task", {}).get("task") if state.get("pending_task", {}).get("status") == "probing" else latest_msg_content or "None"
+        # Use pending task if probing, else infer from latest message
+        task_input = state.get("pending_task", {}).get("task", latest_msg_content or "None")
 
         if len(messages) > 50:
             latest_embedding = EMBEDDINGS.embed_query(task_input)
@@ -195,7 +195,7 @@ class Ami:
             f"Can you confidently address this task? "
             f"Return JSON with:\n"
             f"- 'confidence': Score 0-1 (1 = fully confident, 0 = not at all).\n"
-            f"- 'reason': If confidence is low, explain what’s missing for this task (e.g., 'I need more financial details about Mr. Tuan'). Keep it task-specific.\n"
+            f"- 'reason': If confidence is low, explain what’s missing for this task (e.g., 'I need more financial details about Ms. Hằng'). Keep it task-specific.\n"
         )
         confidence_response = await asyncio.to_thread(LLM.invoke, confidence_prompt)
         try:
@@ -231,7 +231,7 @@ class Ami:
                 f"Task: '{task_input}'\n"
                 f"Tui cần thêm info nha: '{reason}'. "
                 f"Ask a chill question to get what’s missing. "
-                f"E.g., 'Cậu cho tui thêm số liệu về anh Tuấn đi?' or 'Cụ thể chỗ nào cần đào sâu vậy?'"
+                f"E.g., 'Chị Hằng cho tui thêm số liệu đi?' or 'Cụ thể chị muốn gì với căn nhà vậy?'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
@@ -239,7 +239,7 @@ class Ami:
                 state["pending_task"] = {
                     "task": task_input,
                     "status": "probing",
-                    "keywords": state.get("pending_task", {}).get("keywords", ["kể", "chuyện"])
+                    "keywords": state.get("pending_task", {}).get("keywords", ["tài chính", "mua nhà"])
                 }
             elif state["pending_task"]["status"] != "resolved":
                 state["pending_task"]["status"] = "probing"
@@ -258,11 +258,11 @@ class Ami:
             f"Latest: '{latest_msg}'\n"
             f"Pending Task: {pending_task['task']} (Status: {pending_task['status']})\n"
             f"Analyze the intent of the latest message within the full conversation. "
-            f"If the conversation suggests a task (e.g., storytelling from 'Kể chuyện'), prioritize it. "
-            f"Return JSON with:\n"
-            f"- 'intent': One of 'teaching', 'request', 'casual' (pick the strongest).\n"
-            f"- 'task': If a request, suggest a task (e.g., 'Tell a story'); otherwise 'None'.\n"
-            f"- 'keywords': 3-5 key words capturing the message’s focus.\n"
+            f"If it builds on a prior task (e.g., providing details for analysis), prioritize that. "
+            f"Otherwise, treat it as new. Return JSON with:\n"
+            f"- 'intent': One of 'teaching', 'request', 'casual' (strongest).\n"
+            f"- 'task': Suggest a task if request (e.g., 'Analyze finances'), else 'None'. Keep prior task if relevant.\n"
+            f"- 'keywords': 3-5 key words capturing focus.\n"
         )
         response = await asyncio.to_thread(LLM.invoke, prompt)
         try:
@@ -271,19 +271,17 @@ class Ami:
             task = result.get("task", "None")
             keywords = result.get("keywords", [])
             
-            if intent == "request" and task != "None" and pending_task["status"] == "idle":
+            # Persist prior task if probing and latest message builds on it
+            if pending_task["status"] == "probing" and intent != "teaching" and task == "None":
+                task = pending_task["task"]
+                keywords = pending_task["keywords"]
+            elif intent == "request" and task != "None":
                 state["pending_task"] = {"task": task, "status": "probing", "keywords": keywords}
             elif intent != "request" and pending_task["status"] != "resolved":
                 state["pending_task"] = {"task": "None", "status": "idle", "keywords": []}
             
-            scores = {
-                "teaching": 0.8 if intent == "teaching" else 0.1,
-                "request": 0.8 if intent == "request" else 0.1,
-                "casual": 0.8 if intent == "casual" else 0.1
-            }
-            scores[list(scores.keys())[list(scores.values()).index(0.8)]] = 0.8
-            scores[list(scores.keys())[list(scores.values()).index(0.1)]] = 0.1
-            scores[list(scores.keys())[list(scores.values()).index(0.1)]] = 0.1
+            scores = {"teaching": 0.1, "request": 0.1, "casual": 0.1}
+            scores[intent] = 0.8
             return scores, state
         except:
             logger.warning(f"Failed to parse intent: {response.content}, defaulting to casual")
