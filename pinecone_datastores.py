@@ -5,7 +5,7 @@
 import os
 from pinecone import Pinecone
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from utilities import EMBEDDINGS, logger
+from utilities import EMBEDDINGS, logger,LLM
 from datetime import datetime
 import uuid
 import asyncio
@@ -16,8 +16,8 @@ from typing import Dict
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
-ami_index_name = "ami"
-ent_index_name = "thefusionlab"
+ami_index_name = "dev"
+ent_index_name = os.getenv("ENT")
 
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
@@ -75,7 +75,6 @@ async def save_pretrain(input: str, user_id: str = "thefusionlab", context: str 
     embedding = EMBEDDINGS.embed_query(input)
     categories = await infer_categories(input, context)
     categories_json = json.dumps(categories)
-    # Check if character requires context
     has_character_with_context = any(
         cat["english"] == "character" and cat.get("requires_context", False) 
         for cat in categories
@@ -97,30 +96,28 @@ async def save_pretrain(input: str, user_id: str = "thefusionlab", context: str 
         logger.error(f"Upsert failed: {e}")
         return False
 
-async def save_to_convo_history(input: str, user_id: str) -> bool:
+async def save_to_convo_history(input: str, user_id: str,context: str = "") -> bool:
     """Save input to Enterprise Memory with bilingual multi-category tagging."""
-    logger.info(f"Saving to Enterprise Memory for user: {user_id}")
     namespace = f"wisdom_{user_id}"
     embedding = EMBEDDINGS.embed_query(input)
-    
-    # Infer bilingual categories
-    categories = await infer_categories(input)
-    logger.debug(f"Inferred categories for input '{input[:50]}...': {categories}")
-    
-    # Serialize categories as a JSON string for Pinecone
+    categories = await infer_categories(input, context)
     categories_json = json.dumps(categories)
-    
+    has_character_with_context = any(
+        cat["english"] == "character" and cat.get("requires_context", False) 
+        for cat in categories
+    )
+    raw_content = f"{context}\nLatest: {input}" if has_character_with_context and context else input
     metadata = {
         "created_at": datetime.now().isoformat(),
-        "raw": input,
+        "raw": raw_content,
         "confidence": 0.8,
-        "source": "enterprise",
-        "categories": categories_json  # Store as a string
+        "source": "preset",
+        "categories": categories_json
     }
     convo_id = f"{user_id}_{uuid.uuid4()}"
     try:
-        upsert_result = ent_index.upsert([(convo_id, embedding, metadata)], namespace=namespace)
-        logger.info(f"Saved to Enterprise Memory: {convo_id} - Categories: {[f'{c['original']} ({c['english']})' for c in categories]} - Result: {upsert_result}")
+        ent_index.upsert([(convo_id, embedding, metadata)], namespace=namespace)
+        logger.info(f"Saved to Preset Memory: {convo_id} - Categories: {categories}")
         return True
     except Exception as e:
         logger.error(f"Upsert failed: {e}")
@@ -136,7 +133,7 @@ def load_ami_history(input: str, user_id: str = "thefusionlab", top_k: int = 50)
         include_metadata=True,
         namespace=namespace
     )
-    logger.debug(f"load_ami_history results for {user_id}, input: {input[:50]}...: {results}")
+    #logger.debug(f"load_ami_history results for {user_id}, input: {input[:50]}...: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -158,7 +155,7 @@ def load_convo_history(input: str, user_id: str, top_k: int = 50) -> str:
         include_metadata=True,
         namespace=namespace
     )
-    logger.debug(f"load_convo_history results for {user_id}, input: {input[:50]}...: {results}")
+    #logger.debug(f"load_convo_history results for {user_id}, input: {input[:50]}...: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -180,7 +177,7 @@ def load_ami_brain(user_id: str = "thefusionlab") -> str:
         include_metadata=True,
         namespace=namespace
     )
-    logger.debug(f"load_ami_brain results for {user_id}: {results}")
+    #logger.debug(f"load_ami_brain results for {user_id}: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -202,7 +199,7 @@ def load_all_convo_history(user_id: str) -> str:
         include_metadata=True,
         namespace=namespace
     )
-    logger.debug(f"load_all_convo_history results for {user_id}: {results}")
+    #logger.debug(f"load_all_convo_history results for {user_id}: {results}")
     history = ""
     if results["matches"]:
         for r in results["matches"]:
@@ -227,8 +224,7 @@ def load_character_traits(user_id: str) -> str:
             if any(cat["english"] == "character" for cat in categories) and r.metadata["confidence"] >= 0.8:
                 traits += f"\n- {r.metadata['raw']} (from {r.metadata['created_at']})"
         return traits if traits else "No character traits yet."
-# blend_and_rank_history unchanged for now, will update later
-# pinecone_datastore.py
+
 async def blend_and_rank_brain(
     input: str,
     user_id: str = "thefusionlab",
@@ -237,13 +233,14 @@ async def blend_and_rank_brain(
     weights: dict = {"score": 1, "confidence": 0.9, "recency": 1},
     boost_input: float = 3.0
 ) -> dict:
-    """Blend and rank wisdom from Preset and Enterprise Memory, prioritizing character traits."""
+    """Retrieve and rank wisdom from Preset and Enterprise Memory, prioritizing character traits."""
     logger.debug(f"Querying blend_and_rank_brain with input: {input[:50]}..., user_id: {user_id}")
     query_vector = EMBEDDINGS.embed_query(input)
     user_namespace = f"wisdom_{user_id}"
     preset_namespace = "wisdom_thefusionlab"
 
-    # Query both indexes
+    top_k = int(top_k)  # Ensure integer
+
     preset_results = ami_index.query(
         vector=query_vector, top_k=top_k, include_metadata=True, namespace=preset_namespace
     )
@@ -258,11 +255,9 @@ async def blend_and_rank_brain(
             "categories": [],
             "wisdoms": [],
             "awareness_categories": [],
-            "character_wisdom": [],  # New
-            "confidence": 0.3
+            "character_wisdom": []
         }
 
-    # Process and rank wisdoms
     ranked_wisdoms = []
     for r in all_matches:
         try:
@@ -276,36 +271,36 @@ async def blend_and_rank_brain(
                 (weights["recency"] / days_diff)
             )
             categories = json.loads(meta["categories"])
-            has_character = any(cat["english"] == "character" for cat in categories)
+            has_character = any(cat["english"].lower() == "character" for cat in categories)
             ranked_wisdoms.append({
                 "text": meta["raw"],
                 "score": base_score,
+                "raw_score": r["score"],
                 "source": meta["source"],
                 "created_at": created_at,
                 "categories": categories,
                 "confidence": confidence,
-                "conflict": r["score"] < 0.2,  # Blueprint conflict flag
-                "is_character": has_character  # New
+                "is_character": has_character
             })
         except Exception as e:
             logger.warning(f"Failed to rank wisdom {meta.get('raw', 'unknown')}: {e}")
             continue
 
-    # Filter out conflicts and sort
-    ranked_wisdoms = [w for w in ranked_wisdoms if not w["conflict"]]
+    # Removed conflict filter: ranked_wisdoms = [w for w in ranked_wisdoms if not w["conflict"]]
     ranked_wisdoms.sort(key=lambda x: x["score"], reverse=True)
-    top_wisdoms = ranked_wisdoms[:top_k]
+    logger.debug(f"Top wisdoms: {[w['text'][:50] + '...' for w in ranked_wisdoms[:top_k]]}")
 
-    # Score categories
+    character_wisdom = [w for w in ranked_wisdoms if w["is_character"]][:2]
+    logger.debug(f"Character wisdom: {[w['text'][:50] + '...' for w in character_wisdom]}")
+
     category_scores = {}
-    for wisdom in top_wisdoms:
+    for wisdom in ranked_wisdoms[:top_k]:
         for cat in wisdom["categories"]:
-            eng_cat = cat["english"]
+            eng_cat = cat["english"].lower()
             category_scores[eng_cat] = category_scores.get(eng_cat, 0) + wisdom["score"]
 
-    # Boost input-related categories
     input_categories = await infer_categories(input)
-    input_cat_names = {cat["english"] for cat in input_categories}
+    input_cat_names = {cat["english"].lower() for cat in input_categories}
     logger.debug(f"Inferred input categories: {list(input_cat_names)}")
     for cat in input_cat_names:
         if cat in category_scores:
@@ -315,23 +310,14 @@ async def blend_and_rank_brain(
             category_scores[cat] = 0.1 * boost_input
             logger.debug(f"Added and boosted {cat} to {category_scores[cat]}")
 
-    # Select top categories
     sorted_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
     awareness_categories = sorted_categories[:top_n_categories]
     top_category_names = [cat[0] for cat in awareness_categories if cat[1] > 0]
     logger.debug(f"Selected awareness categories: {top_category_names}")
 
-    # Extract character wisdom (top 1-2 traits)
-    character_wisdom = [w for w in top_wisdoms if w["is_character"]]
-    top_character_wisdom = character_wisdom[:2]  # Blueprint: top 1-2 traits
-
-    # Overall confidence
-    confidence = max([w["score"] * w["confidence"] for w in top_wisdoms], default=0.3) if top_wisdoms else 0.3
-
     return {
         "categories": top_category_names,
-        "wisdoms": top_wisdoms[:3],  # Top 3 general wisdoms
+        "wisdoms": ranked_wisdoms[:3],
         "awareness_categories": awareness_categories,
-        "character_wisdom": [w["text"] for w in top_character_wisdom],  # Character-specific
-        "confidence": confidence
+        "character_wisdom": [w["text"] for w in character_wisdom]
     }
