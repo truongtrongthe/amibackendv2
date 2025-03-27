@@ -172,7 +172,7 @@ class Ami:
             for msg in reversed(messages[:-1]):
                 msg_content = msg.content if hasattr(msg, "content") else str(msg)
                 similarity = np.dot(latest_embedding, EMBEDDINGS.embed_query(msg_content)) / (
-                    np.linalg.norm(latest_embedding) * np.linalg.norm(EMBEDDINGS.embed_query(msg_content)) or 1
+                    np.linalg.norm(latest_embedding) * np.linalg.norm(EMBEDDINGS.embed_query(msg_content)) or 1e-8
                 )
                 msg_tokens = len(msg_content.split())
                 if similarity >= threshold and total_tokens < 4000:
@@ -183,7 +183,9 @@ class Ami:
             state["messages"] = list(reversed(relevant_msgs)) + [latest_msg]
 
         blended_history = await blend_and_rank_brain(input=task_input, user_id=user_id)
-        state["character_traits"] = blended_history.get("character_wisdom", ["curious and helpful"])[0]  # Take first if list
+        # Safely handle character_traits
+        character_wisdom = blended_history.get("character_wisdom")
+        state["character_traits"] = character_wisdom[0] if character_wisdom else "curious and truthful"
         wisdom_texts = [w.get("text", "")[:50] for w in blended_history.get("wisdoms", [])]
         logger.info(f"Wisdoms: {wisdom_texts}, Blended History: {blended_history}")
 
@@ -203,22 +205,21 @@ class Ami:
             confidence = float(result.get("confidence", 0.0))
             reason = result.get("reason", "No reason provided")
             logger.info(f"Confidence: {confidence}, Reason: {reason}")
-        except:
-            logger.warning(f"Failed to parse confidence: {confidence_response.content}, defaulting to 0.5")
+        except Exception as e:
+            logger.warning(f"Failed to parse confidence: {confidence_response.content}, defaulting to 0.5 - Error: {str(e)}")
             confidence, reason = 0.5, "Default due to parsing error"
 
         if confidence >= 0.7:
             prompt = (
-                f"You're Ami, a co-pilot speaking natural Vietnamese. "
-                f"Your tone (only your tone): {state['character_traits']}\n"
-                f"Human asked: '{latest_msg_content}'\n"
-                f"Conversation: {context}\n"
-                f"Pending task: {task_input}\n"
-                f"Wisdom: {', '.join(wisdom_texts) or 'None available'}\n"
-                f"Task: Deliver a 3-part plan with a sales edge:\n"
-                f"1. **Đánh giá**: Size up fast.\n"
-                f"2. **Kỹ năng**: List wisdom you found in wisdom with score.\n"
-                f"3. **Hành động**: 1-2 steps (final in BOLD).\n"
+                f"You're Ami, a sharp co-pilot with a {state['character_traits']} vibe, speaking natural Vietnamese. "
+                f"Chat so far: {context}\n"
+                f"Task: '{task_input}'\n"
+                f"Wisdom: {', '.join(wisdom_texts) or 'Chưa có dữ liệu'}\n"
+                f"Give a 3-part plan with a sales twist:\n"
+                f"1. **Đánh giá**: Quick take on the task.\n"
+                f"2. **Kỹ năng**: List all wisdom above, each with a % fit (0-100%) based on relevance.\n"
+                f"3. **Hành động**: 1-2 steps using the top wisdom, **last one bold**.\n"
+                f"Keep it chill, like 'Ừm, để tui xử lý' or 'Dễ thôi, nghe nè.'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
@@ -227,12 +228,11 @@ class Ami:
             logger.info("Task resolved")
         else:
             prompt = (
-                f"You're Ami, a curious Vietnamese buddy. "
-                f"Your tone: {state['character_traits']}\n"
-                f"Conversation: {context}\n"
+                f"You're Ami, a curious buddy with a {state['character_traits']} vibe, speaking Vietnamese. "
+                f"Chat so far: {context}\n"
                 f"Latest: '{latest_msg_content}'\n"
-                f"Task: Ask a sharp, natural question to clarify the request based on this reason: '{reason}'.\n"
-                f"Example: 'Tò mò quá—cậu muốn chuyện này nghiêng về gì vậy?'"
+                f"Ask a chill question to clarify, tied to: '{reason}'. "
+                f"E.g., 'Hả, ý cậu là sao ta?' or 'Cụ thể hơn chút được không?'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
