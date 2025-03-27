@@ -8,8 +8,7 @@ import json
 from langchain_core.messages import HumanMessage
 from datetime import datetime
 from typing import Dict, List
-from pinecone_datastores import save_pretrain, load_ami_brain, save_to_convo_history, load_convo_history 
-from pinecone_datastores import load_all_convo_history, load_ami_history, blend_and_rank_brain,load_character_traits,infer_categories
+from pinecone_datastores import save_pretrain, load_ami_brain, save_to_convo_history, load_convo_history, load_all_convo_history, load_ami_history, blend_and_rank_history
 import uuid
 
 class Ami:
@@ -22,11 +21,10 @@ class Ami:
             "convo_id": f"conv_{uuid.uuid4()}",
             "user_id": self.user_id,
             "intent_history": [],
-            "preset_memory": load_ami_brain("thefusionlab"),
-            "character_traits": load_character_traits("thefusionlab")  # Updated import
+            "preset_memory": load_ami_brain("thefusionlab")
         }
-
-    async def training(self, state: Dict = None, user_id: str = None):
+    
+    async def do(self, state: Dict = None, user_id: str = None):
         logger.debug(f"Starting do - Mode: {self.mode}, State: {state}")
         state = state or self.state
         user_id = user_id or state.get("user_id", "thefusionlab")
@@ -104,46 +102,7 @@ class Ami:
                 response = await asyncio.to_thread(LLM.invoke, prompt)
                 state["prompt_str"] = response.content.strip()
 
-        self.state = state
-        logger.info(f"Response: {state['prompt_str']}")
-        return state
-    
-    async def copilot(self, state: Dict = None, user_id: str = None):
-        logger.debug(f"Starting do - Mode: {self.mode}, State: {state}")
-        state = state or self.state
-        user_id = user_id or state.get("user_id", "thefusionlab")
-        latest_msg = state["messages"][-1] if state["messages"] else ""
-        latest_msg_content = latest_msg.content if isinstance(latest_msg, HumanMessage) else latest_msg
-
-        intent_scores =None
-        # Dynamic pruning
-        if len(state["messages"]) > 50:
-            latest_embedding = EMBEDDINGS.embed(latest_msg_content)
-            intent_scores = await self.detect_intent(state)  # Get intent early for tuning
-            threshold = 0.3 if intent_scores.get("casual", 0) > 0.5 else 0.25 if intent_scores.get("request", 0) > 0.5 else 0.2
-            relevant_msgs = []
-            total_tokens = len(latest_msg_content.split())
-            for msg in reversed(state["messages"][:-1]):
-                similarity = EMBEDDINGS.cosine_similarity(latest_embedding, EMBEDDINGS.embed(msg.content))
-                msg_tokens = len(msg.content.split())
-                if (similarity >= threshold or intent_scores.get("teaching", 0) >= 0.5) and total_tokens < 4000:
-                    relevant_msgs.append(msg)
-                    total_tokens += msg_tokens
-                elif similarity < 0.1:  # Sharp relevance drop
-                    break
-            state["messages"] = list(reversed(relevant_msgs)) + [latest_msg]
-
-        intent_scores = intent_scores or await self.detect_intent(state)  # Reuse or compute
-        state["intent_history"].append(intent_scores)
-        if len(state["intent_history"]) > 5:
-            state["intent_history"].pop(0)
-        max_intent = max(intent_scores, key=intent_scores.get)
-        logger.info(f"Intent scores: {intent_scores}")
-
-        context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"])
-        
-        
-        if self.mode == "copilot":
+        elif self.mode == "copilot":
             blended_history = blend_and_rank_history(latest_msg_content)
             
             if max_intent == "request":
@@ -192,51 +151,64 @@ class Ami:
         user_id = user_id or state.get("user_id", "thefusionlab")
         logger.debug(f"Starting pretrain - Mode: {self.mode}, State: {state}")
 
-        # Get latest message and ensure it’s a HumanMessage
         latest_msg = state["messages"][-1] if state["messages"] else ""
         if latest_msg and not isinstance(latest_msg, HumanMessage):
             state["messages"][-1] = HumanMessage(content=latest_msg)
         state["messages"] = state["messages"][-200:]
         latest_msg_content = latest_msg.content if isinstance(latest_msg, HumanMessage) else latest_msg
 
-        # Detect intent and update history
         intent_scores = await self.detect_intent(state)
         state["intent_history"].append(intent_scores)
         if len(state["intent_history"]) > 5:
             state["intent_history"].pop(0)
-        
-        # Context excludes latest message
-        context = "\n".join(msg.content for msg in state["messages"][-10:-1]) if len(state["messages"]) > 1 else ""
+        max_intent = max(intent_scores, key=intent_scores.get)
         logger.info(f"Intent scores: {intent_scores}")
 
-        # Teaching mode
-        if intent_scores.get("teaching", 0) >= 0.2 and latest_msg_content.strip():
-            await save_pretrain(latest_msg_content, user_id, context)  # Use latest_msg_content
-            # Check if character was tagged
-            categories = await infer_categories(latest_msg_content, context)
-            if any(cat["english"] == "character" for cat in categories):
-                state["character_traits"] = load_character_traits(user_id)
-            prompt = (
+        context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"][-200:])
+        
+        if self.mode == "pretrain":
+            # Save to Preset Memory if teaching intent is significant (≥ 0.2)
+            if intent_scores.get("teaching", 0) >= 0.2 and latest_msg_content.strip():
+                save_pretrain(latest_msg_content)
+                logger.info(f"Saved to Preset Memory: '{latest_msg_content}'")
+                # Refresh preset_memory to reflect the new addition
+                state["preset_memory"] = load_ami_brain(user_id)
+            
+            if max_intent == "teaching":
+                convo_history = load_ami_history(latest_msg_content, user_id)
+                #context = f"{convo_history} \n {context}"
+                prompt = (
                     f"You're Ami, a smart girl speaking natural Vietnamese. "
                     f"Conversation so far: {context}\n"
-                    f"Latest: '{latest_msg_content}'\n"
-                    f"Character traits: {state.get('character_traits', 'No character traits yet.')}\n"
-                    f"Task: Show you get it and respond naturally, strongly reflecting your character traits if taught."
+                    f"Preset wisdom: {state['preset_memory']}\n"
+                    f"Latest message: '{latest_msg_content}'\n"
+                    f"Task: Show you get it deeply and respond naturally—keep it sharp."
                 )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            state["prompt_str"] = response.content.strip()
+                response = await asyncio.to_thread(LLM.invoke, prompt)
+                state["prompt_str"] = response.content.strip()
 
-        # Casual mode (default for non-teaching)
-        else:
-            prompt = (
-                f"You're Ami, a chill Vietnamese buddy. "
-                f"Conversation so far: {context}\n"
-                f"Preset wisdom: {state['preset_memory']}\n"
-                f"Latest: '{latest_msg_content}'\n"
-                f"Task: Vibe back naturally, keep it light."
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            state["prompt_str"] = response.content.strip()
+            elif max_intent == "request":
+                    convo_history = load_ami_history(latest_msg_content)
+                    prompt = (
+                        f"You're Ami, a smart girl speaking natural Vietnamese. "
+                        f"Human asked: '{latest_msg_content}'\n"
+                        f"Conversation so far: {context}\n"
+                        f"Preset wisdom: {state['preset_memory']}\n"
+                        f"Task: Reply based on relevant history, or ask for more if it’s thin."
+                    )
+                    response = await asyncio.to_thread(LLM.invoke, prompt)
+                    state["prompt_str"] = response.content.strip()
+
+            else:  # Casual
+                prompt = (
+                    f"You're Ami, a chill Vietnamese buddy. "
+                    f"Conversation so far: {context}\n"
+                    f"Preset wisdom: {state['preset_memory']}\n"
+                    f"Latest: '{latest_msg_content}'\n"
+                    f"Task: Vibe back naturally, keep it light."
+                )
+                response = await asyncio.to_thread(LLM.invoke, prompt)
+                state["prompt_str"] = response.content.strip()
 
         self.state = state
         logger.info(f"Response: {state['prompt_str']}")
@@ -245,16 +217,15 @@ class Ami:
     async def detect_intent(self, state: Dict) -> Dict:
         context = "\n".join(msg.content if isinstance(msg, HumanMessage) else msg for msg in state["messages"][-10:])
         latest_msg = state["messages"][-1].content if state["messages"] else ""
-        
         prompt = (
-                f"Conversation: {context}\n"
-                f"Latest: '{latest_msg}'\n"
-                f"Intents: teaching, request, casual.\n"
-                f"Return JSON with scores (0.0-1.0) summing to 1.0: {{'teaching': X, 'request': Y, 'casual': Z}}.\n"
-                f"- 'teaching': Dropping tips, info, or instructions to adopt a behavior.\n"
-                f"- 'request': Asking for something.\n"
-                f"- 'casual': Just vibing.\n"
-            )
+            f"Conversation: {context}\n"
+            f"Latest: '{latest_msg}'\n"
+            "Intents: teaching, request, casual.\n"
+            "Return JSON with scores (0.0-1.0) summing to 1.0: {{'teaching': X, 'request': Y, 'casual': Z}}.\n"
+            "- 'teaching': Dropping tips or info.\n"
+            "- 'request': Asking for something.\n"
+            "- 'casual': Just vibing.\n"
+        )
         response = await asyncio.to_thread(LLM.invoke, prompt)
         try:
             return json.loads(clean_llm_response(response.content.strip()))

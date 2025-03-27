@@ -31,7 +31,7 @@ async def training_node(state: State, config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     logger.info(f"training_node - User ID: {user_id}")
-    updated_state = await training_ami.training(state, user_id=user_id)
+    updated_state = await training_ami.do(state, user_id=user_id)
     logger.debug(f"training_node took {time.time() - start_time:.2f}s")
     return updated_state
 
@@ -47,7 +47,7 @@ async def copilot_node(state: State, config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     logger.info(f"copilot_node - User ID: {user_id}")
-    updated_state = await copilot_ami.copilot(state, user_id=user_id)
+    updated_state = await copilot_ami.do(state, user_id=user_id)
     logger.debug(f"copilot_node took {time.time() - start_time:.2f}s")
     return updated_state
 
@@ -80,16 +80,7 @@ def convo_stream(user_input=None, user_id=None, thread_id=None, mode="copilot"):
         "convo_id": thread_id,
         "user_id": user_id,
         "intent_history": [],
-        "preset_memory": (
-            training_ami.state.get("preset_memory", "No preset memory yet.") if mode == "training" 
-            else copilot_ami.state.get("preset_memory", "No preset memory yet.") if mode == "copilot" 
-            else pretrain_ami.state.get("preset_memory", "No preset memory yet.")
-        ),
-        "character_traits": (
-            training_ami.state.get("character_traits", "No character traits yet.") if mode == "training" 
-            else copilot_ami.state.get("character_traits", "No character_traits yet.") if mode == "copilot" 
-            else pretrain_ami.state.get("character_traits", "No character_traits yet.")
-        )
+        "preset_memory": training_ami.state["preset_memory"] if mode == "training" else copilot_ami.state["preset_memory"] if mode == "copilot" else pretrain_ami.state["preset_memory"]
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
