@@ -16,7 +16,7 @@ from typing import Dict
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
-ami_index_name = "dev"
+ami_index_name = os.getenv("PRESET")
 ent_index_name = os.getenv("ENT")
 
 llm = ChatOpenAI(model="gpt-4o", streaming=True)
