@@ -183,21 +183,19 @@ class Ami:
             state["messages"] = list(reversed(relevant_msgs)) + [latest_msg]
 
         blended_history = await blend_and_rank_brain(input=task_input, user_id=user_id)
-        # Safely handle character_traits
-        character_wisdom = blended_history.get("character_wisdom")
-        state["character_traits"] = character_wisdom[0] if character_wisdom else "curious and truthful"
+        character_wisdom = blended_history.get("character_wisdom", ["curious and helpful"])
+        state["character_traits"] = character_wisdom[0] if character_wisdom else "curious and helpful"
         wisdom_texts = [w.get("text", "")[:50] for w in blended_history.get("wisdoms", [])]
         logger.info(f"Wisdoms: {wisdom_texts}, Blended History: {blended_history}")
 
         confidence_prompt = (
             f"Context: {context}\n"
-            f"Request: {task_input}\n"
-            f"Wisdom: {', '.join(wisdom_texts) or 'None available'}\n"
             f"Task: {task_input}\n"
-            f"Can you confidently address this request with the given wisdom? "
+            f"Wisdom: {', '.join(wisdom_texts) or 'None available'}\n"
+            f"Can you confidently address this task with the given wisdom? "
             f"Return JSON with:\n"
             f"- 'confidence': Score 0-1 (1 = fully confident, 0 = not at all).\n"
-            f"- 'reason': Brief explanation (e.g., 'Wisdom fits storytelling but lacks specifics').\n"
+            f"- 'reason': Why you can’t do it well if confidence is low (e.g., 'I don’t have info about Mr. Khoa'). Keep it tied to the task.\n"
         )
         confidence_response = await asyncio.to_thread(LLM.invoke, confidence_prompt)
         try:
@@ -219,7 +217,7 @@ class Ami:
                 f"1. **Đánh giá**: Quick take on the task.\n"
                 f"2. **Kỹ năng**: List all wisdom above, each with a % fit (0-100%) based on relevance.\n"
                 f"3. **Hành động**: 1-2 steps using the top wisdom, **last one bold**.\n"
-                f"Keep it chill, like 'Ừm, để tui xử lý' or 'Dễ thôi, nghe nè.'"
+                f"Keep it chill, like 'Oke, để em xử lý' or 'Dễ thôi, nghe nè.'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
@@ -230,9 +228,10 @@ class Ami:
             prompt = (
                 f"You're Ami, a curious buddy with a {state['character_traits']} vibe, speaking Vietnamese. "
                 f"Chat so far: {context}\n"
-                f"Latest: '{latest_msg_content}'\n"
-                f"Ask a chill question to clarify, tied to: '{reason}'. "
-                f"E.g., 'Hả, ý cậu là sao ta?' or 'Cụ thể hơn chút được không?'"
+                f"Task: '{task_input}'\n"
+                f"I need more info because of: '{reason}'. "
+                f"Ask a chill question to get more details on the task. "
+                f"E.g., 'Cụ thể hơn được không??'"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
             state["prompt_str"] = response.content.strip()
