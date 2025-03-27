@@ -210,14 +210,14 @@ class Ami:
         if confidence >= 0.7:
             prompt = (
                 f"You're Ami, a co-pilot speaking natural Vietnamese. "
-                f"Your tone: {state['character_traits']}\n"
+                f"Your tone (only your tone): {state['character_traits']}\n"
                 f"Human asked: '{latest_msg_content}'\n"
                 f"Conversation: {context}\n"
                 f"Pending task: {task_input}\n"
                 f"Wisdom: {', '.join(wisdom_texts) or 'None available'}\n"
                 f"Task: Deliver a 3-part plan with a sales edge:\n"
                 f"1. **Đánh giá**: Size up fast.\n"
-                f"2. **Kỹ năng**: List wisdom.\n"
+                f"2. **Kỹ năng**: List wisdom you found in wisdom with score.\n"
                 f"3. **Hành động**: 1-2 steps (final in BOLD).\n"
             )
             response = await asyncio.to_thread(LLM.invoke, prompt)
