@@ -5,7 +5,7 @@
 import os
 from pinecone import Pinecone
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from utilities import EMBEDDINGS, logger,LLM
+from utilities import EMBEDDINGS, logger
 from datetime import datetime
 import uuid
 import asyncio
@@ -19,7 +19,7 @@ pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 ami_index_name = os.getenv("PRESET")
 ent_index_name = os.getenv("ENT")
 
-llm = ChatOpenAI(model="gpt-4o", streaming=True)
+inferLLM = ChatOpenAI(model="gpt-4o", streaming=False)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
 
 ami_index = pc.Index(ami_index_name)
@@ -43,7 +43,7 @@ async def infer_categories(input: str,context : str="") -> list:
     Default to 'Chưa Phân Loại' (Uncategorized) if unsure.
     """
     try:
-        response = await asyncio.to_thread(llm.invoke, category_prompt)  # Adjust if llm.invoke is async
+        response = await asyncio.to_thread(inferLLM.invoke, category_prompt)  # Adjust if llm.invoke is async
         raw_content = response.content.strip()
 
         # Extract JSON from potential markdown blocks
@@ -96,7 +96,7 @@ async def save_pretrain(input: str, user_id: str = "thefusionlab", context: str 
         logger.error(f"Upsert failed: {e}")
         return False
 
-async def save_to_convo_history(input: str, user_id: str,context: str = "") -> bool:
+async def save_training(input: str, user_id: str,context: str = "") -> bool:
     """Save input to Enterprise Memory with bilingual multi-category tagging."""
     namespace = f"wisdom_{user_id}"
     embedding = EMBEDDINGS.embed_query(input)
@@ -117,7 +117,7 @@ async def save_to_convo_history(input: str, user_id: str,context: str = "") -> b
     convo_id = f"{user_id}_{uuid.uuid4()}"
     try:
         ent_index.upsert([(convo_id, embedding, metadata)], namespace=namespace)
-        logger.info(f"Saved to Preset Memory: {convo_id} - Categories: {categories}")
+        logger.info(f"Saved to Enterprise Memory: {convo_id} - Categories: {categories}")
         return True
     except Exception as e:
         logger.error(f"Upsert failed: {e}")

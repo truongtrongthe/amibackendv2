@@ -8,6 +8,8 @@ import json
 from langchain_core.messages import HumanMessage
 from datetime import datetime
 from typing import Dict, List
+from pinecone_datastores import save_pretrain, load_ami_brain 
+from pinecone_datastores import load_all_convo_history, load_ami_history, blend_and_rank_brain,load_character_traits,infer_categories
 import uuid
 import numpy as np
 class Ami:
