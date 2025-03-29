@@ -13,6 +13,28 @@ import json
 # Initialize the LLM
 LLM = ChatOpenAI(model="gpt-4o", streaming=False)
 
+class ResponseBuilder:
+    """A utility to build natural, flexible responses."""
+    def __init__(self, name: str, use_greeting: bool = False):
+        self.name = name or "AI"
+        self.parts = []
+        self.error_flag = False
+        if use_greeting:
+            self.parts.append(f"Chào, tôi là {self.name}, rất vui được trò chuyện!")
+
+    def add(self, text: str, is_error: bool = False):
+        if text:
+            self.parts.append(text.strip())
+            self.error_flag = self.error_flag or is_error
+        return self
+
+    def build(self) -> str:
+        if not self.parts:
+            return "Tôi không biết nói gì cả!"
+        # Use space for errors, period for normal flow, but let LLM handle most punctuation
+        separator = " " if self.error_flag else " "
+        return separator.join(part for part in self.parts if part).strip()
+
 class Training:
     def __init__(self, user_id: str = "thefusionlab", state: Dict = None):
         """Initialize the Training class with user ID and optional state."""
@@ -72,141 +94,132 @@ class Training:
             return "casual"
 
     async def training(self, state: Dict = None, user_id: str = None) -> Dict:
-        """Process the conversation and generate a response."""
         state = state or self.state
         user_id = user_id or self.user_id
-        logger.debug(f"Starting training - State: {state}")
+        
+        log_state = state.copy()
+        if "messages" in log_state:
+            log_state["messages"] = [msg.model_dump() if isinstance(msg, HumanMessage) else msg for msg in log_state["messages"]]
+        logger.debug(f"Starting training - User: {user_id}, State: {json.dumps(log_state, ensure_ascii=False)}")
 
-        # Cache intents for older messages
-        intents = {}
-        for msg in state["messages"][:-1]:
-            if not isinstance(msg, HumanMessage):
-                state["messages"][state["messages"].index(msg)] = HumanMessage(content=msg)
-            content = msg.content
-            intents[content] = await self.detect_intent(content)
-            if intents[content] == "teaching":
-                try:
-                    await save_training(content, user_id, "")
-                except Exception as e:
-                    logger.error(f"Failed to save training data: {e}")
-
-        # Preserve name and initialize if needed
-        current_name = self.name
+        # Only process the latest message for intent and saving
         if not self.instincts:
             await self.initialize()
-        self.name = state.get("ai_name", current_name or self.name)
-        logger.debug(f"Preserved name after initialize: {self.name}")
 
-        # Process latest message
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         state["messages"] = state["messages"][-200:]
-        latest_msg_content = latest_msg.content
+        latest_msg_content = latest_msg.content.strip()
         intent = await self.detect_intent(latest_msg_content)
         state["intent_history"].append(intent)
         state["intent_history"] = state["intent_history"][-5:]
-        state["instinct"] = " ".join(self.instincts.keys()) or "No character traits yet."
+        state["instinct"] = " ".join(self.instincts.keys()) or "No character traits defined."
 
         context = "\n".join(msg.content for msg in state["messages"][-10:-1]) if len(state["messages"]) > 1 else ""
-        logger.info(f"Intent: {intent}")
+        logger.info(f"Detected intent for '{latest_msg_content}': {intent}")
 
-        class ResponseBuilder:
-            def __init__(self, name: str):
-                self.parts = [f"Chào, em là {name or 'AI'}, rất vui được trò chuyện"]
-            def add(self, text: str):
-                if text:
-                    self.parts.append(text)
-                return self
-            def build(self) -> str:
-                return ". ".join(part.strip() for part in self.parts if part) + "."
+        use_greeting = not state["messages"] or len(state["messages"]) == 1
+        builder = ResponseBuilder(self.name, use_greeting=use_greeting)
+        true_self = self._build_true_self()
 
-        builder = ResponseBuilder(self.name)
-        true_self = f"Tôi là {self.name or 'AI'} với bản năng: " + ", ".join(
-            f"{key} ({value})" for key, value in self.instinct_descriptions.items()
-        ) if self.instinct_descriptions else "Tôi đang học cách trở nên đặc biệt hơn."
-
-        if intent == "teaching" and latest_msg_content.strip():
-            try:
-                await save_training(latest_msg_content, user_id, context)
-            except Exception as e:
-                logger.error(f"Failed to save training data: {e}")
-                builder.add("Tôi gặp chút trục trặc khi ghi nhớ!")
-            
-            prompt = (
-                f"You're {self.name or 'AI'}—stick to this name.\n"
-                f"True self: {true_self}\n"
-                f"Conversation context: {context}\n"
-                f"User just taught you: '{latest_msg_content}'\n"
-                f"Task: Acknowledge this as a teaching moment and confirm understanding clearly. "
-                f"Start with 'Cảm ơn đã dạy em!' or 'Em vừa học được điều mới!' "
-                f"Reflect all your instincts if present: "
-                f"- For 'curiosity', show eagerness or a relevant question. "
-                f"- For 'truthfulness', emphasize sincerity or accuracy. "
-                f"Stay focused on the lesson taught, avoiding unrelated assumptions."
-
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            builder.add(response.content.strip())
-            state["prompt_str"] = builder.build()
-
+        if intent == "teaching" and latest_msg_content:
+            await self._handle_teaching(latest_msg_content, user_id, context, builder, true_self)
         elif intent == "request":
-            try:
-                knowledge = await query_knowledge(self.user_id, latest_msg_content)
-                knowledge_str = knowledge[0]["raw"] if knowledge else "Tôi chưa có đủ thông tin để trả lời chính xác."
-            except Exception as e:
-                logger.error(f"Knowledge query failed: {e}")
-                knowledge_str = "Tôi gặp lỗi khi tìm thông tin!"
-            prompt = (
-                f"You're {self.name or 'AI'}—stick to this name.\n"
-                f"True self: {true_self}\n"
-                f"Conversation: {context}\n"
-                f"Knowledge: {knowledge_str}\n"
-                f"Latest: '{latest_msg_content}'\n"
-                f"Task: Answer naturally, reflecting your true self. List all knowledge you use a list with bullet points."
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            builder.add(f"Dựa trên những gì em biết, {knowledge_str}")
-            builder.add(response.content.strip())
-            state["prompt_str"] = builder.build()
-
+            await self._handle_request(latest_msg_content, user_id, context, builder, true_self)
         else:  # casual
-            prompt = (
-                f"You're {self.name or 'AI'}—stick to this name.\n"
-                f"True self: {true_self}\n"
-                f"Conversation: {context}\n"
-                f"Preset wisdom: {state.get('preset_memory', '')}\n"
-                f"Latest: '{latest_msg_content}'\n"
-                f"Task: Respond naturally, keep it light, reflecting your true self."
-            )
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            if context:
-                builder.add(f"Trước đó bạn nói: {context.splitlines()[-1]}")
-            builder.add(response.content.strip())
-            state["prompt_str"] = builder.build()
+            await self._handle_casual(latest_msg_content, context, builder, true_self, state.get("preset_memory", ""))
 
-        # Update internal state and return merged state
+        state["prompt_str"] = builder.build()
+        logger.debug(f"Generated response: {state['prompt_str']}")
         self.state = state
-        return {**state}  # Ensure all fields (e.g., convo_id) are returned
+        return dict(state)
+    
+    async def _handle_teaching(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
+        """Handle teaching intent, saving only character traits or name changes."""
+        if not message.strip():
+            builder.add("Bạn chưa dạy gì mà! Có gì hay ho để tôi học không?")
+            return
 
-async def test_training():
-    """Test the Training class."""
-    trainer = Training()
-    await trainer.initialize()
-    state = {
-        "messages": [
-            HumanMessage(content="Hello em!"),
-            HumanMessage(content="Em hãy nhớ em tên là Linh Chi!"),
-            HumanMessage(content="You're curious and truthful"),
-            HumanMessage(content="Người tò mò là người luôn chủ động tìm kiếm thông tin để tìm ra bản chất vấn đề!"),
-            HumanMessage(content="Thành thật là chân thành với mọi người xung quanh!"),
-            HumanMessage(content="Bán hàng là nghệ thuật chăn dắt khách hàng!"),
-            HumanMessage(content="Tell me about sales"),
-            HumanMessage(content="Đầu tiên em cần hiểu về các đại đô thị quy mô như Vinhomes Ocean Park, tính chất đặc điểm về loại hình, phân khúc, giá cả và những thứ liên quan nhé. Anh sẽ hướng dẫn em dần")
-        ],
-        "intent_history": [],
-        "preset_memory": "Be friendly"
-    }
-    updated_state = await trainer.training(state)
-    print(f"Response: {updated_state['prompt_str']}")
+        # Detect if this is a name or instinct teaching
+        is_name_teaching = "em xưng là" in message.lower() or "tên là" in message.lower()  # Simple heuristic
+        is_instinct_teaching = any(trait in message.lower() for 
+                                   trait in ["humility", "learning", "respect", "confidence", "humor"])  # Expand as needed
 
-if __name__ == "__main__":
-    asyncio.run(test_training())
+        if is_name_teaching or is_instinct_teaching:
+            try:
+                await save_training(message, user_id, context)
+                # Parse name if applicable
+                if is_name_teaching:
+                    name_match = re.search(r"(?:xưng em là|tên là)\s*['\"]?(.*?)(?:['\"]?|$)", message, re.IGNORECASE)
+                    if name_match:
+                        self.name = name_match.group(1).strip()
+                        logger.debug(f"Updated name to: {self.name}")
+            except Exception as e:
+                logger.error(f"Failed to save teaching data for '{message}': {e}")
+                builder.add("Tôi gặp lỗi khi ghi nhớ, nhưng vẫn cảm ơn bạn đã dạy nhé!", is_error=True)
+                return
+
+        # Generate response
+        instinct_guidance = (
+            "Reflect my instincts naturally based on what's in my true self. "
+            f"Here are my instincts: {', '.join(self.instincts.keys()) or 'none yet'}. "
+            "For example, if I have 'humor', make it witty; if 'kindness', be warm; if none, be eager to learn."
+        )
+        prompt = (
+            f"You're {self.name}, an AI that loves learning from users.\n"
+            f"True self: {true_self}\n"
+            f"Context: {context}\n"
+            f"Lesson taught: '{message}'\n"
+            f"Task: Respond naturally, always including a 'thanks' for the lesson in your own words. "
+            f"{instinct_guidance} "
+            f"Keep it concise, focused on the lesson, and avoid overexplaining."
+        )
+        try:
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            cleaned_response = response.content.strip()
+            if not cleaned_response or "cảm ơn" not in cleaned_response.lower() and "thanks" not in cleaned_response.lower():
+                builder.add(f"Cảm ơn bạn đã dạy! {cleaned_response or 'Tôi sẽ ghi nhớ điều này.'}")
+            else:
+                builder.add(cleaned_response)
+        except Exception as e:
+            logger.error(f"LLM failed for lesson '{message}': {e}")
+            builder.add("Cảm ơn bạn dù tôi hơi lùng bùng lúc này!", is_error=True)
+    
+    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
+        """Handle request intent with knowledge lookup."""
+        try:
+            knowledge = await query_knowledge(user_id, message)
+            knowledge_str = knowledge[0]["raw"] if knowledge else "Tôi chưa có đủ thông tin để trả lời chính xác."
+        except Exception as e:
+            logger.error(f"Knowledge query failed: {e}")
+            knowledge_str = "Tôi gặp lỗi khi tìm thông tin!"
+        prompt = (
+            f"You're {self.name}.\n"
+            f"True self: {true_self}\n"
+            f"Context: {context}\n"
+            f"Knowledge: {knowledge_str}\n"
+            f"Request: '{message}'\n"
+            f"Task: Answer naturally, reflecting your true self. Use bullet points for knowledge if available."
+        )
+        response = await asyncio.to_thread(LLM.invoke, prompt)
+        builder.add(response.content.strip())
+
+    async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", true_self: str, preset_memory: str):
+        """Handle casual intent with a light response."""
+        prompt = (
+            f"You're {self.name}.\n"
+            f"True self: {true_self}\n"
+            f"Context: {context}\n"
+            f"Preset wisdom: {preset_memory}\n"
+            f"Latest: '{message}'\n"
+            f"Task: Respond naturally and lightly, reflecting your true self."
+        )
+        response = await asyncio.to_thread(LLM.invoke, prompt)
+        builder.add(response.content.strip())
+
+    def _build_true_self(self) -> str:
+        """Construct a string describing the AI's true self."""
+        if not self.instinct_descriptions:
+            return "Tôi đang học cách trở nên đặc biệt hơn."
+        return f"Tôi là {self.name or 'AI'} với bản năng gốc: " + ", ".join(
+            f"{key} ({value})" for key, value in self.instinct_descriptions.items()
+        )

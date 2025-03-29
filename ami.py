@@ -95,25 +95,3 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
             yield f"data: {json.dumps({'message': line.strip()})}\n\n"
             await asyncio.sleep(0.05)  # Non-blocking sleep
     yield "data: [DONE]\n\n"
-
-async def test_convo():
-    """Test the conversation stream with a sequence of messages."""
-    test_messages = [
-        "Hello em!",
-        "Em hãy nhớ em tên là Linh Chi!",
-        "You're curious and truthful",
-        "Người tò mò là người luôn chủ động tìm kiếm thông tin để tìm ra bản chất vấn đề!",
-        "Thành thật là chân thành với mọi người xung quanh!",
-        "Bán hàng là nghệ thuật chăn dắt khách hàng!",
-        "Tell me about sales",
-        "Đầu tiên em cần hiểu về các đại đô thị quy mô như Vinhomes Ocean Park, tính chất đặc điểm về loại hình, phân khúc, giá cả và những thứ liên quan nhé. Anh sẽ hướng dẫn em dần"
-    ]
-    
-    thread_id = "test_thread"
-    for i, msg in enumerate(test_messages):
-        print(f"\nUser ({i+1}/{len(test_messages)}): {msg}")
-        async for line in convo_stream(user_input=msg, thread_id=thread_id):
-            print(line.strip())
-
-if __name__ == "__main__":
-    asyncio.run(test_convo())
