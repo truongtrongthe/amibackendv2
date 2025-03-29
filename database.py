@@ -20,6 +20,8 @@ ent_index_name = os.getenv("ENT")
 ami_index = pc.Index(ami_index_name)
 ent_index = pc.Index(ent_index_name)
 
+
+
 inferLLM = ChatOpenAI(model="gpt-4o", streaming=False)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
 
@@ -27,7 +29,8 @@ def index_name(index) -> str:
     return "ami_index" if index == ami_index else "ent_index"
 
 AI_NAME = None
-
+logger.info("ami Index=",ami_index_name)
+logger.info("ENT Index=",ent_index_name)
 async def infer_categories(input: str, context: str = "") -> Dict:
     category_prompt = f"""
     Conversation Context: '{context}'
