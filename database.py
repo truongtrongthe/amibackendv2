@@ -284,7 +284,7 @@ async def query_knowledge(user_id: str, query: str, top_k: int = 3) -> List[Dict
     logger.info(f"Queried {len(knowledge)} knowledge entries for '{query}'")
     return knowledge
 
-async def generate_response(user_id: str, query: str) -> str:
+async def _generate_response(user_id: str, query: str) -> str:
     global AI_NAME
     instincts = await load_instincts(user_id)
     response_parts = [f"Xin chào, tôi là {AI_NAME or 'AI'}."]
@@ -310,35 +310,3 @@ async def generate_response(user_id: str, query: str) -> str:
         response_parts.append("Tôi chưa có nhiều thông tin—hãy cho tôi biết thêm nhé!")
     
     return " ".join(response_parts)
-
-async def test_scenario():
-    user_id = "thefusionlab"
-    
-    print("\n--- Training ---")
-    messages = [
-        "Em xưng là Linh Chi trong cac cuộc hội thoại nhé",
-        "You should always be curious and truthful",
-        "Curiosity means asking why and seeking deeper understanding",
-        "Để thuyết phục khách mua nhà cần thông tin ngân hàng",
-        "Trung thực là thể hiện sự chân thành trong giao tiếp"
-    ]
-    for input_text in messages:
-        success = await save_training(input_text, user_id)
-        print(f"Save '{input_text}' successful: {success}")
-    
-    print("\n--- Waiting 5 seconds for index sync ---")
-    await asyncio.sleep(5)  # Increased delay
-    
-    print("\n--- Recall Test ---")
-    queries = [
-        "Tell me about buying a house",
-        "How’s it going today?",
-        "Anh Tuấn hỏi mua nhà"
-    ]
-    for query in queries:
-        response = await generate_response(user_id, query)
-        print(f"Query: '{query}'")
-        print(f"Response: {response}\n")
-
-if __name__ == "__main__":
-    asyncio.run(test_scenario())
