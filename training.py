@@ -357,7 +357,7 @@ class Training:
             f"Task: Trả lời yêu cầu một cách tự nhiên và ngắn gọn bằng tiếng Việt, phản ánh bản thân và bản năng của tôi. "
             f"Cấu trúc câu trả lời theo định dạng Markdown sau:\n"
             f"1. '### **Phân Tích:**' - Phân tích ngắn gọn bằng tiếng Việt để hiểu yêu cầu này là về gì, bôi đậm các từ khóa chính.\n"
-            f"2. '### **Giải Thích:**' - Giải thích các bước suy nghĩ bằng tiếng Việt dẫn đến câu trả lời, dùng dấu đầu dòng (-) và bôi đậm từ khóa chính, tiếp theo là sub-section '#### **Kiến thức đã dùng:**' liệt kê kiến thức kèm điểm 'score' (ví dụ, '- [Kiến thức] (**Độ Nhạy: XX.XXX%**)'), thêm một dòng trống sau phần này.\n"
+            f"2. '### **Giải Thích:**' - Giải thích các bước suy nghĩ bằng tiếng Việt dẫn đến câu trả lời, dùng dấu đầu dòng (-) và bôi đậm từ khóa chính, tiếp theo là sub-section '#### **Kiến thức đã dùng:**' liệt kê TẤT CẢ kiến thức kèm điểm 'score' (ví dụ, '- [Kiến thức] (**Độ Nhạy: XX.XXX%**)'), thêm một dòng trống sau phần này.\n"
             f"3. '### **Câu Chốt:**' - Đưa ra kết quả cuối cùng bằng tiếng Việt, chỉ bôi đậm tiêu đề '### **Câu Chốt: **' bằng cú pháp Markdown, nội dung trả lời để nguyên không bôi đậm toàn bộ, bôi đậm từ khóa chính trong câu, tránh câu chúc kiểu robot, thay bằng lời tự nhiên.\n"
             f"{instinct_guidance}\n"
             f"Example:\n"
