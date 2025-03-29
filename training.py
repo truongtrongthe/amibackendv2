@@ -137,7 +137,7 @@ class Training:
         self.state = state
         return dict(state)
     
-    async def _handle_teaching(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
+    async def old_handle_teaching(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
         if not message.strip():
             builder.add("Bạn chưa dạy gì mà! Có gì hay ho để tôi học không?")
             return
@@ -231,17 +231,18 @@ class Training:
             logger.error(f"LLM failed for lesson '{message}': {e}")
             builder.add("Cảm ơn bạn đã dạy, dù tôi hơi rối lúc này!", is_error=True)
 
-    async def _handle_teaching_worked(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
+    async def _handle_teaching(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
         if not message.strip():
             builder.add("Bạn chưa dạy gì mà! Có gì hay ho để tôi học không?")
             return
-
+        # Sub-intent classification
         prompt = (
             f"Message: '{message}'\n"
             f"Classify as 'identity' (defines AI name or instincts) or 'general' (other instructions):\n"
-            "- 'identity': Sets name (e.g., 'Call me Linh Trang') or instincts (e.g., 'Be humble')\n"
-            "- 'general': Teaches behavior or facts (e.g., 'Summarize before replying')\n"
-            "Return only the sub-intent as a string"
+            "- 'identity': Sets AI name (e.g., 'Call me Linh Trang', 'Hãy nhớ em là Hải', 'Xưng là Ami', 'Từ giờ em là') "
+            "or instincts (e.g., 'Be humble', 'Hãy tò mò', 'Always be truthful')\n"
+            "- 'general': Teaches behavior or facts not tied to AI identity (e.g., 'Summarize before replying', 'The sky is blue')\n"
+            "Return only the intent as a string: 'identity' or 'general'"
         )
         try:
             response = await asyncio.to_thread(LLM.invoke, prompt)
@@ -251,55 +252,80 @@ class Training:
             logger.error(f"Sub-intent detection failed: {e}")
             sub_intent = "general"
 
+        # Identity handling: name or instinct extraction
         new_name = None
+        new_instinct = None
         if sub_intent == "identity":
-            # Extract name early if it’s a name-setting teaching
-            if "tên" in message.lower() or "xưng" in message.lower() or "call me" in message.lower() or "nhớ em là" in message.lower():
+            if any(kw in message.lower() for kw in ["tên", "xưng", "call me", "nhớ em là", "từ giờ em"]):
                 name_prompt = (
                     f"Extract the name the AI should adopt from: '{message}'\n"
-                    f"Interpret it as the AI’s new name, not the human’s (e.g., 'Hãy nhớ em là Minh Thu' means the AI is Minh Thu).\n"
+                    f"Interpret it as the AI’s new name, not the human’s (e.g., 'Hãy nhớ em là Minh Thu' means Minh Thu).\n"
                     f"If no name is present, return 'None'\n"
-                    f"Return only the name or 'None'"
+                    f"Return only the name or 'None' (e.g., 'Hải', not a sentence)"
                 )
                 name_response = await asyncio.to_thread(LLM.invoke, name_prompt)
                 new_name = name_response.content.strip().strip("'")
-                if new_name != "None":
+                if new_name != "None" and "extracted from" in new_name:
+                    new_name = new_name.split("'")[-2]
+                if new_name != "None" and new_name != self.name:
                     self.name = new_name
                     logger.debug(f"Updated name to: {self.name}")
-        
+
+            if not new_name or new_name == "None":
+                instinct_prompt = (
+                    f"From: '{message}'\n"
+                    f"If it defines an AI behavior trait (e.g., 'Hãy tò mò', 'Be kind'), extract the trait in English "
+                    f"(e.g., 'curiosity', 'kindness'). Return 'None' if no trait is present.\n"
+                    f"Return only the trait or 'None'"
+                )
+                instinct_response = await asyncio.to_thread(LLM.invoke, instinct_prompt)
+                new_instinct = instinct_response.content.strip().strip("'")
+                if new_instinct != "None":
+                    self.instincts[new_instinct] = message
+                    logger.debug(f"Added instinct: {new_instinct}")
+
+        # Save the lesson
         try:
             await save_training(message, user_id, context)
             logger.debug(f"Saved teaching lesson: '{message}'")
         except Exception as e:
-            logger.error(f"Failed to save identity teaching '{message}': {e}")
-            builder.add("Tôi gặp lỗi khi ghi nhớ, nhưng vẫn cảm ơn bạn đã dạy nhé!", is_error=True)
-            return
+            logger.error(f"Failed to save teaching '{message}': {e}")
+            builder.add("Tôi gặp lỗi khi ghi nhớ, nhưng vẫn cố gắng học nhé!", is_error=True)
 
+        # Response generation in Markdown format
         instinct_guidance = (
-            "Reflect my instincts naturally based on what's in my true self. "
-            f"Here are my instincts: {', '.join(self.instincts.keys()) or 'none yet'}. "
-            "For example, if I have 'humor', make it witty; if 'kindness', be warm; if none, be eager to learn."
+            "Phản ánh bản năng của tôi một cách tự nhiên. "
+            f"Dưới đây là các bản năng của tôi: {', '.join(k for k in self.instincts.keys() if k != 'name') or 'chưa có'}. "
+            "Ví dụ, nếu tôi có 'humor', thêm chút hài hước; nếu có 'kindness', hãy ấm áp; nếu có 'curiosity', hỏi lại một cách tự nhiên."
         )
         prompt = (
-            f"You're {self.name or 'an unnamed AI'}, an AI that loves learning from users.\n"
-            f"True self: {true_self}\n"
-            f"Context: {context}\n"
-            f"Lesson taught: '{message}'\n"
-            f"Task: Respond naturally, always including a 'thanks' for the lesson in your own words. "
-            f"If the lesson sets my name (e.g., 'Hãy nhớ em là Minh Thu nhé'), acknowledge it as *my* new name, not the human’s. "
-            f"{instinct_guidance} "
-            f"Keep it concise, focused on the lesson, and avoid overexplaining."
+            f"Bạn là {self.name or 'AI'}, một AI thích học hỏi.\n"
+            f"Bản thân thật: {true_self}\n"
+            f"Bài học được dạy: '{message}'\n"
+            f"Nhiệm vụ: Tóm tắt bài học bằng tiếng Việt theo cách tự nhiên, ngắn gọn, như cách một người bạn hiểu và phản hồi. "
+            f"{instinct_guidance}\n"
+            f"Trả về chỉ nội dung tóm tắt bài học (ví dụ: 'Trời màu xanh vì tán xạ ánh sáng' hoặc 'Tôi cần tò mò hơn'), không thêm lời thừa."
         )
         try:
             response = await asyncio.to_thread(LLM.invoke, prompt)
-            cleaned_response = response.content.strip()
-            if not cleaned_response or "cảm ơn" not in cleaned_response.lower() and "thanks" not in cleaned_response.lower():
-                builder.add(f"Cảm ơn bạn đã dạy! {cleaned_response or 'Tôi sẽ ghi nhớ điều này.'}")
-            else:
-                builder.add(cleaned_response)
+            lesson_summary = response.content.strip()
+            if not lesson_summary:
+                lesson_summary = "Tôi cần nhớ điều bạn vừa nói."
         except Exception as e:
-            logger.error(f"LLM failed for lesson '{message}': {e}")
-            builder.add("Cảm ơn bạn dù tôi hơi lùng bùng lúc này!", is_error=True)
+            logger.error(f"LLM failed to summarize lesson '{message}': {e}")
+            lesson_summary = "Tôi hơi rối, nhưng vẫn cố hiểu!"
+
+        # Build Markdown response
+        response_text = (
+            f"1) **Được dạy:** {message}\n"
+            f"2) **Em hiểu là:** {lesson_summary}\n"
+            f"3) **Cảm ơn vì đã dạy!**"
+        )
+        if new_name and new_name != "None":
+            response_text += f" Từ giờ tôi là {self.name} nhé!"
+
+        builder.add(response_text)
+        logger.debug(f"Generated teaching response: {response_text}")
     
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
         """Handle request intent with custom Markdown format in Vietnamese response."""
@@ -388,14 +414,14 @@ class Training:
         )
 
         prompt = (
-            f"You're {self.name or 'an AI'}, an AI that loves a good chat.\n"
+            f"You're {self.name or 'AI'}, an AI that loves a good chat.\n"
             f"True self: {true_self}\n"
             f"Context: {context}\n"
             f"Preset wisdom: {preset_memory}\n"
             f"Latest: '{message}'\n"
             f"Task: Respond naturally and lightly in VIETNAMESE, reflecting your true self. "
             f"If the message is a greeting like 'Xin chào [Name]!', don’t assume [Name] is the human—add a humorous twist instead (e.g., 'Oh, [Name] á? Em là {self.name}!'). "
-            f"Keep it fun and engaging, avoiding overly formal replies unless context demands it. "
+            f"Keep it engaging, avoiding overly formal replies unless context demands it. "
             f"{instinct_guidance}"
         )
         try:
