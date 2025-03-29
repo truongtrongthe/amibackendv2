@@ -29,8 +29,6 @@ def index_name(index) -> str:
     return "ami_index" if index == ami_index else "ent_index"
 
 AI_NAME = None
-logger.info("ami Index=",ami_index_name)
-logger.info("ENT Index=",ent_index_name)
 async def infer_categories(input: str, context: str = "") -> Dict:
     category_prompt = f"""
     Conversation Context: '{context}'
@@ -250,7 +248,7 @@ async def find_knowledge(user_id: str, primary: str, special: str = "description
     logger.info(f"Found {len(knowledge)} entries for primary: {primary}, special: {special}")
     return knowledge
 
-async def query_knowledge(user_id: str, query: str, top_k: int = 3) -> List[Dict]:
+async def query_knowledge(user_id: str, query: str, top_k: int = 5) -> List[Dict]:
     query_embedding = EMBEDDINGS.embed_query(query)
     ns = "wisdom_bank"
     knowledge = []

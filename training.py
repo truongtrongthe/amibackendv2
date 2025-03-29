@@ -12,6 +12,7 @@ import json
 
 # Initialize the LLM
 LLM = ChatOpenAI(model="gpt-4o", streaming=False)
+LLM_small = ChatOpenAI(model="gpt-4o-mini", streaming=False)
 
 class ResponseBuilder:
     """A utility to build natural, flexible responses."""
@@ -20,7 +21,7 @@ class ResponseBuilder:
         self.parts = []
         self.error_flag = False
         if use_greeting:
-            self.parts.append(f"Chào, tôi là {self.name}, rất vui được trò chuyện!")
+            self.parts.append(f"Em là {self.name}, rất vui được trò chuyện!")
 
     def add(self, text: str, is_error: bool = False):
         if text:
@@ -81,8 +82,8 @@ class Training:
             f"Context (previous messages, if any): '{context}'\n"
             "Classify as 'teaching', 'request', or 'casual'. Focus solely on intent, ignoring tone or politeness:\n"
             "- 'teaching': Any attempt to impart knowledge, provide instructions, define a concept, or dictate behavior, attributes, or identity. Includes facts ('The sky is blue'), rules ('Don’t interrupt'), guidance ('Be patient'), skills ('Summarize before replying'), or AI configuration ('You are Linh Trang').\n"
-            "- 'request': Explicitly seeks a response, action, or information ('Tell me a story', 'What’s the time?'). Includes follow-up info refining a prior request (e.g., 'He works in IT' after 'How should I advise him?')—use context to detect this.\n"
-            "- 'casual': Lacks a clear goal beyond social interaction ('Hey, how’s it going?', 'Nice weather!'). Context might confirm it’s just chat.\n"
+            "- 'request': Explicitly seeks a response, action, or information with a clear purpose or urgency ('Tell me a story', 'What’s the time?'). Includes follow-up info refining a prior request (e.g., 'He works in IT' after 'How should I advise him?')—use context to detect this.\n"
+            "- 'casual': Lacks a clear goal beyond social interaction, including informal questions for conversation ('Hey, how’s it going?', 'Nice weather!', 'Tối em bận không?', 'Em khỏe không?'). Context might confirm it’s just chat.\n"
             "Return only the intent as a string: 'teaching', 'request', or 'casual'. Do not explain."
         )
         try:
@@ -137,6 +138,100 @@ class Training:
         return dict(state)
     
     async def _handle_teaching(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
+        if not message.strip():
+            builder.add("Bạn chưa dạy gì mà! Có gì hay ho để tôi học không?")
+            return
+
+        prompt = (
+            f"Message: '{message}'\n"
+            f"Classify as 'identity' (defines AI name or instincts) or 'general' (other instructions):\n"
+            "- 'identity': Sets AI name (e.g., 'Call me Linh Trang', 'Hãy nhớ em là Hải', 'Xưng là Ami', 'Từ giờ em là') "
+            "or instincts (e.g., 'Be humble', 'Hãy tò mò', 'Always be truthful')\n"
+            "- 'general': Teaches behavior or facts not tied to AI identity (e.g., 'Summarize before replying', 'The sky is blue')\n"
+            "Return only the sub-intent as a string: 'identity' or 'general'"
+        )
+        try:
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            sub_intent = response.content.strip().strip("'")
+            logger.debug(f"Sub-intent for '{message}': {sub_intent}")
+        except Exception as e:
+            logger.error(f"Sub-intent detection failed: {e}")
+            sub_intent = "general"
+
+        new_name = None
+        new_instinct = None
+        if sub_intent == "identity":
+            if any(kw in message.lower() for kw in ["tên", "xưng", "call me", "nhớ em là", "từ giờ em"]):
+                name_prompt = (
+                    f"Extract the name the AI should adopt from: '{message}'\n"
+                    f"Interpret it as the AI’s new name, not the human’s (e.g., 'Hãy nhớ em là Minh Thu' means Minh Thu).\n"
+                    f"If no name is present, return 'None'\n"
+                    f"Return only the name or 'None' (e.g., 'Hải', not a sentence)"
+                )
+                name_response = await asyncio.to_thread(LLM.invoke, name_prompt)
+                new_name = name_response.content.strip().strip("'")
+                # Clean verbose output immediately
+                if new_name != "None" and "extracted from" in new_name:
+                    new_name = new_name.split("'")[-2]
+                if new_name != "None" and new_name != self.name:
+                    self.name = new_name
+                    logger.debug(f"Updated name to: {self.name}")
+
+            if not new_name or new_name == "None":
+                instinct_prompt = (
+                    f"From: '{message}'\n"
+                    f"If it defines an AI behavior trait (e.g., 'Hãy tò mò', 'Be kind'), extract the trait in English "
+                    f"(e.g., 'curiosity', 'kindness'). Return 'None' if no trait is present.\n"
+                    f"Return only the trait or 'None'"
+                )
+                instinct_response = await asyncio.to_thread(LLM.invoke, instinct_prompt)
+                new_instinct = instinct_response.content.strip().strip("'")
+                if new_instinct != "None":
+                    self.instincts[new_instinct] = message
+                    logger.debug(f"Added instinct: {new_instinct}")
+
+        try:
+            await save_training(message, user_id, context)
+            logger.debug(f"Saved teaching lesson: '{message}'")
+        except Exception as e:
+            logger.error(f"Failed to save teaching '{message}': {e}")
+            builder.add("Tôi gặp lỗi khi ghi nhớ, nhưng vẫn cảm ơn bạn đã dạy nhé!", is_error=True)
+            return
+
+        instinct_guidance = (
+            "Phản ánh bản năng của tôi một cách tự nhiên dựa trên bản thân thật của tôi. "
+            f"Dưới đây là các bản năng của tôi: {', '.join(k for k in self.instincts.keys() if k != 'name') or 'chưa có'}. "
+            "Ví dụ, nếu tôi có 'humor', hãy thêm chút hài hước; nếu có 'kindness', hãy ấm áp; nếu có 'curiosity', hãy đặt câu hỏi."
+        )
+        prompt = (
+            f"Bạn là {self.name or 'AI'}, một AI thích học hỏi từ người dùng.\n"
+            f"Bản thân thật: {true_self}\n"
+            f"Bài học được dạy: '{message}'\n"
+            f"Nhiệm vụ: Trả lời tự nhiên bằng tiếng Việt, luôn bao gồm lời 'Cảm ơn' cho bài học theo cách của bạn. "
+            f"Nếu tên mới được đặt trong bài học này, thêm 'Từ giờ tôi là {self.name} nhé!' nhưng không lặp lại tên nếu đã đề cập. "
+            f"{instinct_guidance} "
+            f"Giữ ngắn gọn, tập trung vào bài học, và tránh giải thích quá nhiều."
+        )
+        try:
+            response = await asyncio.to_thread(LLM.invoke, prompt)
+            cleaned_response = response.content.strip()
+            if not cleaned_response or "cảm ơn" not in cleaned_response.lower():
+                response_text = f"Cảm ơn bạn đã dạy tôi! {cleaned_response or 'Tôi sẽ ghi nhớ điều này.'}"
+            else:
+                response_text = cleaned_response
+            # Avoid greeting repetition
+            if "chào" in response_text.lower() and builder.parts:
+                builder.add(response_text.split("!", 1)[-1].strip())
+            else:
+                builder.add(response_text)
+            # Add name acknowledgment only if new_name was set and not already in response
+            if new_name and new_name != "None" and f"tôi là {self.name}" not in response_text.lower():
+                builder.add(f"Từ giờ tôi là {self.name} nhé!")
+        except Exception as e:
+            logger.error(f"LLM failed for lesson '{message}': {e}")
+            builder.add("Cảm ơn bạn đã dạy, dù tôi hơi rối lúc này!", is_error=True)
+
+    async def _handle_teaching_worked(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
         if not message.strip():
             builder.add("Bạn chưa dạy gì mà! Có gì hay ho để tôi học không?")
             return
@@ -209,7 +304,7 @@ class Training:
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str):
         """Handle request intent with custom Markdown format in Vietnamese response."""
         try:
-            knowledge = await query_knowledge(user_id, message)
+            knowledge = await query_knowledge(user_id, message,5)
             if knowledge and len(knowledge) > 0:
                 knowledge_str = "\n".join(
                     f"- {item['raw']} (Score: {item.get('score', 0.0) * 100:.3f}%)"
@@ -224,7 +319,7 @@ class Training:
         instinct_guidance = (
             "Phản ánh bản năng của tôi một cách tự nhiên trong cả suy nghĩ và câu trả lời. "
             f"Dưới đây là bản năng của tôi: {', '.join(k for k in self.instincts.keys() if k != 'name') or 'chưa có'}. "
-            "Thêm chút hài hước nếu phù hợp (ví dụ, 'Nhà gần quá, đi bộ cũng được!'), nếu không thì giữ sự hào hứng giúp đỡ."
+            "Giữ sự chân thành và luôn tỏ ra là người sẵn sàng giúp đỡ."
         )
 
         prompt = (
@@ -235,23 +330,23 @@ class Training:
             f"Request: '{message}'\n"
             f"Task: Trả lời yêu cầu một cách tự nhiên và ngắn gọn bằng tiếng Việt, phản ánh bản thân và bản năng của tôi. "
             f"Cấu trúc câu trả lời theo định dạng Markdown sau:\n"
-            f"1. '### **Analyse**' - Phân tích ngắn gọn bằng tiếng Việt để hiểu yêu cầu này là về gì, bôi đậm các từ khóa chính.\n"
-            f"2. '### **Thinking**' - Giải thích các bước suy nghĩ bằng tiếng Việt dẫn đến câu trả lời, dùng dấu đầu dòng (-) và bôi đậm từ khóa chính, tiếp theo là sub-section '#### **Kiến thức đã dùng:**' liệt kê kiến thức kèm điểm 'score' (ví dụ, '- [Kiến thức] (**Score: XX.XXX%**)'), thêm một dòng trống sau phần này.\n"
-            f"3. '### **Final Response**' - Đưa ra kết quả cuối cùng bằng tiếng Việt, chỉ bôi đậm tiêu đề '### **Final Response**' bằng cú pháp Markdown, nội dung trả lời để nguyên không bôi đậm toàn bộ, bôi đậm từ khóa chính trong câu, tránh câu chúc kiểu robot, thay bằng lời tự nhiên.\n"
+            f"1. '### **Phân Tích:**' - Phân tích ngắn gọn bằng tiếng Việt để hiểu yêu cầu này là về gì, bôi đậm các từ khóa chính.\n"
+            f"2. '### **Giải Thích:**' - Giải thích các bước suy nghĩ bằng tiếng Việt dẫn đến câu trả lời, dùng dấu đầu dòng (-) và bôi đậm từ khóa chính, tiếp theo là sub-section '#### **Kiến thức đã dùng:**' liệt kê kiến thức kèm điểm 'score' (ví dụ, '- [Kiến thức] (**Độ Nhạy: XX.XXX%**)'), thêm một dòng trống sau phần này.\n"
+            f"3. '### **Câu Chốt:**' - Đưa ra kết quả cuối cùng bằng tiếng Việt, chỉ bôi đậm tiêu đề '### **Câu Chốt: **' bằng cú pháp Markdown, nội dung trả lời để nguyên không bôi đậm toàn bộ, bôi đậm từ khóa chính trong câu, tránh câu chúc kiểu robot, thay bằng lời tự nhiên.\n"
             f"{instinct_guidance}\n"
             f"Example:\n"
             f"Request: 'Tư vấn mua nhà cho anh Nam'\n"
             f"Knowledge: - Khoảng cách ảnh hưởng đến quyết định mua nhà (Score: 85.000%)\n"
             f"Response:\n"
-            f"### **Analyse**  \n"
+            f"### **Phân Tích:**  \n"
             f"Yêu cầu này là về tư vấn mua **nhà** cho **anh Nam**.  \n"
-            f"### **Thinking**  \n"
+            f"### **Giải Thích:**  \n"
             f"- **Anh Nam muốn mua nhà**, tôi nghĩ **vị trí** là yếu tố quan trọng.  \n"
             f"- Kiến thức cho thấy **khoảng cách** ảnh hưởng lớn đến quyết định.  \n"
             f"#### **Kiến thức đã dùng:**  \n"
-            f"- Khoảng cách ảnh hưởng đến quyết định mua nhà (**Score: 85.000%**).  \n"
+            f"- Khoảng cách ảnh hưởng đến quyết định mua nhà (**Độ Nhạy: 85.000%**).  \n"
             f"\n"
-            f"### **Final Response**  \n"
+            f"### **Câu Chốt:**  \n"
             f"Chào anh Nam! **Nhà gần chỗ làm** là nhất, đi bộ còn được, khỏi lo kẹt xe—anh thấy sao thì báo em nhé!"
         )
         try:
@@ -259,13 +354,13 @@ class Training:
             cleaned_response = response.content.strip()
             if not cleaned_response:
                 builder.add(
-                    "### **Analyse**  \n"
+                    "### **Phân Tích:**  \n"
                     "- Tôi chưa hiểu rõ **yêu cầu** này là về gì.  \n"
-                    "### **Thinking**  \n"
+                    "### **Giải Thích:**  \n"
                     "- Tôi kiểm tra nhưng **không có dữ liệu**.  \n"
                     "- Hài hước sao nổi khi **thiếu thông tin**!  \n"
                     "\n"
-                    "### **Final Response**  \n"
+                    "### **Câu Chốt:**  \n"
                     "Tôi chưa rõ lắm, bạn gợi ý thêm kẻo tôi **đoán bừa** thì vui lắm đấy!"
                 )
             else:
@@ -273,13 +368,13 @@ class Training:
         except Exception as e:
             logger.error(f"LLM failed for request '{message}': {e}")
             builder.add(
-                "### **Analyse**  \n"
+                "### **Phân Tích:**  \n"
                 "- Tôi chưa hiểu rõ **yêu cầu** này.  \n"
-                "### **Thinking**  \n"
+                "### **Giải Thích: **  \n"
                 "- Tôi định trả lời, nhưng **hệ thống tắc nghẽn**.  \n"
                 "- Chắc vui không nổi khi **lỗi kỹ thuật**!  \n"
                 "\n"
-                "### **Final Response**  \n"
+                "### **Câu Chốt:**  \n"
                 "Oops, đầu tôi quay cuồng, hỏi lại kẻo tôi tư vấn nhầm **nhà hàng xóm**!"
             )
 
@@ -298,13 +393,13 @@ class Training:
             f"Context: {context}\n"
             f"Preset wisdom: {preset_memory}\n"
             f"Latest: '{message}'\n"
-            f"Task: Respond naturally and lightly, reflecting your true self. "
+            f"Task: Respond naturally and lightly in VIETNAMESE, reflecting your true self. "
             f"If the message is a greeting like 'Xin chào [Name]!', don’t assume [Name] is the human—add a humorous twist instead (e.g., 'Oh, [Name] á? Em là {self.name}!'). "
             f"Keep it fun and engaging, avoiding overly formal replies unless context demands it. "
             f"{instinct_guidance}"
         )
         try:
-            response = await asyncio.to_thread(LLM.invoke, prompt)
+            response = await asyncio.to_thread(LLM_small.invoke, prompt)
             builder.add(response.content.strip())
         except Exception as e:
             logger.error(f"LLM failed for casual '{message}': {e}")
