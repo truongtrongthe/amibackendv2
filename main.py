@@ -10,32 +10,49 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes, all origins
 
 @app.route('/pilot', methods=['POST', 'OPTIONS'])
-def ami_copilot():
+def pilot():
     if request.method == 'OPTIONS':
         response = Response()
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Max-Age'] = '86400'  # Cache preflight for 1 day
+        response.headers['Access-Control-Max-Age'] = '86400'
         return response, 200
 
     data = request.get_json() or {}
-    user_input = data.get("user_input")
-    user_id = data.get("user_id", "thefusionlab")
-    thread_id = data.get("thread_id", "copilot_thread")
+    user_input = data.get("user_input", "")
+    user_id = data.get("user_id", "thefusionlab")  # Default user_id
+    thread_id = data.get("thread_id", "pilot_thread")
 
     print("Headers:", request.headers)
-    print("Copilot API called!")
+    print("Pilot API called!")
+
+    # Define a generator to handle the async convo_stream
+    def generate():
+        # Run the async generator synchronously
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,mode="pilot")
+        
+        try:
+            while True:
+                # Get the next value from the async generator
+                next_value = loop.run_until_complete(anext(async_gen))
+                yield next_value
+        except StopAsyncIteration:
+            # End of stream
+            pass
+        finally:
+            loop.close()
 
     return Response(
-        convo_stream(user_input, user_id, thread_id, mode="copilot"),  # Copilot Mode
+        generate(),
         mimetype='text/event-stream',
         headers={
             'X-Accel-Buffering': 'no',
             'Access-Control-Allow-Origin': '*'
         }
     )
-
 @app.route('/training', methods=['POST', 'OPTIONS'])
 def learn():
     if request.method == 'OPTIONS':
@@ -81,6 +98,50 @@ def learn():
         }
     )
 
+@app.route('/havefun', methods=['POST', 'OPTIONS'])
+def funny():
+    if request.method == 'OPTIONS':
+        response = Response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Max-Age'] = '86400'
+        return response, 200
+
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    user_id = data.get("user_id", "thefusionlab")  # Default user_id
+    thread_id = data.get("thread_id", "chat_thread")
+
+    print("Headers:", request.headers)
+    print("Fun API called!")
+
+    # Define a generator to handle the async convo_stream
+    def generate():
+        # Run the async generator synchronously
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,mode="funny")
+        
+        try:
+            while True:
+                # Get the next value from the async generator
+                next_value = loop.run_until_complete(anext(async_gen))
+                yield next_value
+        except StopAsyncIteration:
+            # End of stream
+            pass
+        finally:
+            loop.close()
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
 @app.route('/')
 def home():
     return "Hello, It's me Ami!"

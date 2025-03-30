@@ -1,5 +1,5 @@
 # ami.py
-# Purpose: Simplified state and graph harness for Training mode
+# Purpose: Simplified state and graph harness for Training and Pilot modes
 # Date: March 28, 2025
 
 import json
@@ -11,6 +11,8 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 from training import Training
+from pilot import Pilot
+from fun import Fun
 from utilities import logger
 import asyncio
 
@@ -20,50 +22,81 @@ class State(TypedDict):
     prompt_str: str
     convo_id: str
     user_id: str
-    intent_history: List[str]  # Simplified to a list of strings
+    intent_history: List[str]
     preset_memory: str
+    instinct: str
 
-# Initialize Training instance
-training_ami = Training(user_id="thefusionlab")  # Default user_id set here
+# Initialize Training, Pilot, and Fun instances
+training_ami = Training(user_id="thefusionlab")
+pilot_ami = Pilot(user_id="brian")
+funnyguy = Fun(user_id="thefusionlab")
 
 # Set up the graph
 graph_builder = StateGraph(State)
 
 async def training_node(state: State, config=None):
-    """Process the state through the Training class."""
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     logger.info(f"training_node - User ID: {user_id}")
-    
-    # Ensure Training is initialized (called only once if needed)
-    if not training_ami.instincts:  # Check if initialized
+    if not training_ami.instincts:
         await training_ami.initialize()
-    
-    # Call the training method
     updated_state = await training_ami.training(state=state, user_id=user_id)
     logger.debug(f"training_node took {time.time() - start_time:.2f}s")
     return updated_state
 
-# Add the training node to the graph
-graph_builder.add_node("training", training_node)
+async def pilot_node(state: State, config=None):
+    start_time = time.time()
+    user_id = config.get("configurable", {}).get("user_id", "brian") if config else "brian"
+    logger.info(f"pilot_node - User ID: {user_id}")
+    if not pilot_ami.instincts:
+        await pilot_ami.initialize()
+    updated_state = await pilot_ami.pilot(state=state, user_id=user_id)
+    logger.debug(f"pilot_node took {time.time() - start_time:.2f}s")
+    return updated_state
 
-# Simplified routing: always go to training
-graph_builder.add_edge(START, "training")
+async def fun_node(state: State, config=None):
+    start_time = time.time()
+    user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
+    logger.info(f"funny node - User ID: {user_id}")
+    # Fix: Initialize funnyguy, not pilot_ami
+    if not funnyguy.instincts:
+        await funnyguy.initialize()
+    updated_state = await funnyguy.havefun(state=state, user_id=user_id)
+    logger.debug(f"fun node took {time.time() - start_time:.2f}s")
+    return updated_state
+
+# Add nodes to the graph
+graph_builder.add_node("training", training_node)
+graph_builder.add_node("pilot", pilot_node)
+graph_builder.add_node("funny", fun_node)
+
+# Define routing logic based on mode
+def route_by_mode(state: State, config=None):
+    mode = config.get("configurable", {}).get("mode", "training")
+    if mode == "training":
+        return "training"
+    elif mode == "pilot":
+        return "pilot"
+    else:
+        return "funny"
+
+# Add edges
+graph_builder.add_conditional_edges(START, route_by_mode, {"training": "training", "pilot": "pilot", "funny": "funny"})
 graph_builder.add_edge("training", END)
+graph_builder.add_edge("pilot", END)
+graph_builder.add_edge("funny", END)
 
 # Set up memory persistence
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None):
-    """Stream the conversation response."""
+async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, mode: str = "training"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
-    user_id = user_id or "thefusionlab"
+    user_id = user_id or ("thefusionlab" if mode == "training" else "thefusionlab")
 
-    logger.info(f"Running in training mode for user {user_id}, thread {thread_id}")
+    logger.info(f"Running in {mode} mode for user {user_id}, thread {thread_id}")
 
-    # Load or initialize state
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     default_state = {
         "messages": [],
@@ -71,27 +104,31 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
         "convo_id": thread_id,
         "user_id": user_id,
         "intent_history": [],
-        "preset_memory": "Be friendly"  # Default preset
+        "preset_memory": "Be friendly",
+        "instinct": ""
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
-    # Add user input to messages if provided
     if user_input:
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
 
-    logger.debug(f"convo_stream init - Input: '{user_input}', Convo ID: {thread_id}")
+    logger.debug(f"convo_stream init - Input: '{user_input}', Convo ID: {thread_id}, Mode: {mode}")
 
-    # Process the state through the graph
-    config = {"configurable": {"thread_id": thread_id, "user_id": user_id}}
+    config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "mode": mode}}
     updated_state = await convo_graph.ainvoke(state, config)
-    await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="training")
+
+    if mode == "training":
+        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="training")
+    elif mode == "pilot":
+        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="pilot")
+    else:
+        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="funny")
 
     logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")
 
-    # Stream the response
     response_lines = updated_state["prompt_str"].split('\n')
     for line in response_lines:
         if line.strip():
             yield f"data: {json.dumps({'message': line.strip()})}\n\n"
-            await asyncio.sleep(0.05)  # Non-blocking sleep
+            await asyncio.sleep(0.05)
     yield "data: [DONE]\n\n"
