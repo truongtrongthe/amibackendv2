@@ -56,14 +56,15 @@ async def pilot_node(state: State, config=None):
 
 async def fun_node(state: State, config=None):
     start_time = time.time()
-    user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
+    user_id = config.get("configurable", {}).get("user_id", "thefusionlab")
     logger.info(f"funny node - User ID: {user_id}")
-    # Fix: Initialize funnyguy, not pilot_ami
     if not funnyguy.instincts:
         await funnyguy.initialize()
-    updated_state = await funnyguy.havefun(state=state, user_id=user_id)
+    
+    async for response_chunk in funnyguy.havefun(state=state, user_id=user_id):
+        state["prompt_str"] = response_chunk
+        yield state
     logger.debug(f"fun node took {time.time() - start_time:.2f}s")
-    return updated_state
 
 # Add nodes to the graph
 graph_builder.add_node("training", training_node)
@@ -90,6 +91,7 @@ graph_builder.add_edge("funny", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
+# ami.py (updated convo_stream)
 async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, mode: str = "training"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
@@ -115,20 +117,23 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
     logger.debug(f"convo_stream init - Input: '{user_input}', Convo ID: {thread_id}, Mode: {mode}")
 
     config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "mode": mode}}
-    updated_state = await convo_graph.ainvoke(state, config)
 
-    if mode == "training":
-        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="training")
-    elif mode == "pilot":
-        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="pilot")
-    else:
-        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="funny")
+    async for event in convo_graph.astream(state, config):
+        prompt_str = (
+            event.get("training", {}).get("prompt_str") or
+            event.get("pilot", {}).get("prompt_str") or
+            event.get("funny", {}).get("prompt_str")
+        )
+        if prompt_str:
+            logger.info(f"Streaming prompt_str: {prompt_str}")
+            # Split by newlines and yield each line progressively
+            lines = prompt_str.split('\n')
+            for line in lines:
+                if line.strip():
+                    yield f"data: {json.dumps({'message': line.strip()})}\n\n"
+                    await asyncio.sleep(0.1)  # Ensure progressive streaming
+            # Update state after each chunk
+            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, {"prompt_str": prompt_str}, as_node=mode)
 
-    logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")
-
-    response_lines = updated_state["prompt_str"].split('\n')
-    for line in response_lines:
-        if line.strip():
-            yield f"data: {json.dumps({'message': line.strip()})}\n\n"
-            await asyncio.sleep(0.05)
     yield "data: [DONE]\n\n"
+    logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")
