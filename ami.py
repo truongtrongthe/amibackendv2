@@ -1,6 +1,6 @@
 # ami.py
-# Purpose: Simplified state and graph harness for Training and Pilot modes
-# Date: March 28, 2025
+# Purpose: Simplified state and graph harness for Training, Pilot, and Funny modes
+# Date: March 28, 2025 (Updated March 31, 2025)
 
 import json
 import time
@@ -26,7 +26,7 @@ class State(TypedDict):
     preset_memory: str
     instinct: str
 
-# Initialize Training, Pilot, and Fun instances
+# Initialize instances
 training_ami = Training(user_id="thefusionlab")
 pilot_ami = Pilot(user_id="brian")
 funnyguy = Fun(user_id="thefusionlab")
@@ -61,9 +61,11 @@ async def fun_node(state: State, config=None):
     if not funnyguy.instincts:
         await funnyguy.initialize()
     
+    # Yield each response chunk directly as it’s generated
     async for response_chunk in funnyguy.havefun(state=state, user_id=user_id):
         state["prompt_str"] = response_chunk
-        yield state
+        logger.info(f"Streaming chunk from fun_node: {response_chunk}")
+        yield {"prompt_str": response_chunk}  # Yield a dict compatible with astream
     logger.debug(f"fun node took {time.time() - start_time:.2f}s")
 
 # Add nodes to the graph
@@ -91,7 +93,6 @@ graph_builder.add_edge("funny", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-# ami.py (updated convo_stream)
 async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, mode: str = "training"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
@@ -119,19 +120,20 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
     config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "mode": mode}}
 
     async for event in convo_graph.astream(state, config):
-        prompt_str = (
-            event.get("training", {}).get("prompt_str") or
-            event.get("pilot", {}).get("prompt_str") or
-            event.get("funny", {}).get("prompt_str")
-        )
+        if mode == "funny":
+            # Extract prompt_str from fun_node’s yielded dict
+            prompt_str = event.get("funny", {}).get("prompt_str", "")
+        else:
+            prompt_str = (
+                event.get("training", {}).get("prompt_str") or
+                event.get("pilot", {}).get("prompt_str") or
+                ""
+            )
+        
         if prompt_str:
             logger.info(f"Streaming prompt_str: {prompt_str}")
-            # Split by newlines and yield each line progressively
-            lines = prompt_str.split('\n')
-            for line in lines:
-                if line.strip():
-                    yield f"data: {json.dumps({'message': line.strip()})}\n\n"
-                    await asyncio.sleep(0.05)  # Ensure progressive streaming
+            yield f"data: {json.dumps({'message': prompt_str})}\n\n"
+            await asyncio.sleep(0.01)  # Small delay for smooth streaming
             # Update state after each chunk
             await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, {"prompt_str": prompt_str}, as_node=mode)
 
