@@ -131,7 +131,7 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
             for line in lines:
                 if line.strip():
                     yield f"data: {json.dumps({'message': line.strip()})}\n\n"
-                    await asyncio.sleep(0.1)  # Ensure progressive streaming
+                    await asyncio.sleep(0.05)  # Ensure progressive streaming
             # Update state after each chunk
             await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, {"prompt_str": prompt_str}, as_node=mode)
 

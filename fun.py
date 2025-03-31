@@ -1,4 +1,3 @@
-# fun.py (full updated version)
 import asyncio
 from typing import List, Dict
 from langchain_openai import ChatOpenAI
@@ -19,18 +18,18 @@ class ResponseBuilder:
 
     def add(self, text: str, is_error: bool = False):
         if text:
-            self.parts.append(text)  # No trimming
+            self.parts.append(text)
         self.error_flag = self.error_flag or is_error
         return self
 
     def build(self, separator: str = None) -> str:
         if not self.parts:
             return "Tôi không biết nói gì cả!"
-        separator = separator or ""  # No added separator, preserve raw
+        separator = separator or ""
         return separator.join(part for part in self.parts if part)
+
 class Fun:
     def __init__(self, user_id: str = "thefusionlab", state: Dict = None):
-        """Initialize the Fun class with user ID and optional state."""
         self.user_id = user_id
         self.instincts = {}
         self.instinct_descriptions = {}
@@ -43,7 +42,6 @@ class Fun:
         }
 
     async def initialize(self):
-        """Load instincts and descriptions from the database with fallback."""
         instincts = await load_instincts(self.user_id)
         logger.info(f"Instinct at INIT = {json.dumps(instincts, ensure_ascii=False)}")
         self.instincts = instincts.copy() if instincts else {"friendliness": "Be warm and approachable"}
@@ -64,11 +62,6 @@ class Fun:
         logger.info(f"Initialized - Instincts: {self.instincts}, True Self: {self.instinct_descriptions}")
 
     async def detect_intent(self, message: str, context: str = "") -> str:
-        """Classify message intent using LLM, with feedback check for unresolved requests."""
-        feedback = await self.detect_feedback_type(message, context)
-        if feedback in ["correction", "adjustment", "clarification", "confusion", "elaboration"]:
-            return "request"
-        
         prompt = (
             f"Message: '{message}'\n"
             f"Context: '{context}'\n"
@@ -85,43 +78,23 @@ class Fun:
             return "casual"
 
     async def detect_feedback_type(self, message: str, context: str) -> str:
-        """Classify user feedback based on context and message tone."""
         prompt = (
             f"Context: '{context}'\n"
             f"Message: '{message}'\n"
-            f"Classify the user's feedback as one of the following: "
-            f"'correction', 'adjustment', 'new', 'confirmation', 'clarification', "
-            f"'rejection', 'elaboration', 'satisfaction', 'confusion'. "
-            f"'new' (unrelated to prior response, introduces a fresh topic), "
-            f"'confirmation' (agrees with the AI’s prior response, e.g., 'Đúng rồi,' 'Ừ' when affirming AI info, 'Chính xác'), "
-            f"'clarification' (seeks more detail or rephrasing, e.g., 'Ý là gì?', 'Cái nào?'), "
-            f"'rejection' (dismisses prior info or topic, e.g., 'Thôi,' 'Không cần', 'Bỏ đi'), "
-            f"'elaboration' (adds details to the prior topic without changing its core intent, e.g., 'Mà,' 'Còn,' or simply more specifics tied to the same subject or entity; includes mentions of specific projects, locations, or preferences related to the ongoing topic), "
-            f"'satisfaction' (signals completion or approval, e.g., 'Được rồi,' 'Ok', 'Xong'), "
-            f"'confusion' (shows uncertainty or misunderstanding, e.g., 'Cái gì vậy?', 'Không hiểu'). "
-            f"Analyze the message in context to detect its relationship to the prior response or user request. "
-            f"Focus on tone and intent: negation for correction, agreement with AI for confirmation, questions for clarification. "
-            f"Classify as 'elaboration' if the message provides additional details (e.g., budget, location, specific projects) about the same entity (e.g., 'a Minh') or topic (e.g., 'mua nhà', 'chung cư') as the prior user request or AI response, unless it explicitly negates prior info or shifts to an unrelated intent. "
-            f"Return one word: 'correction', 'adjustment', 'new', 'confirmation', 'clarification', 'rejection', 'elaboration', 'satisfaction', or 'confusion'."
+            f"Classify feedback as: 'correction', 'adjustment', 'new', 'confirmation', 'clarification', "
+            f"'rejection', 'elaboration', 'satisfaction', 'confusion'. Return one word."
         )
         try:
             response = await asyncio.to_thread(LLM_small.invoke, prompt)
             feedback = response.content.strip().replace("'", "")
-            logger.info(f"feedback={feedback}")
-            valid_types = [
-                "correction", "adjustment", "new", "confirmation", "clarification",
-                "rejection", "elaboration", "satisfaction", "confusion"
-            ]
-            if feedback not in valid_types:
-                logger.info(f"Invalid feedback type '{feedback}', defaulting to 'new'")
-                return "new"
-            return feedback
+            valid_types = ["correction", "adjustment", "new", "confirmation", "clarification",
+                           "rejection", "elaboration", "satisfaction", "confusion"]
+            return feedback if feedback in valid_types else "new"
         except Exception as e:
             logger.info(f"Feedback detection failed: {e}")
             return "new"
 
     async def resolve_related_request(self, message: str, feedback_type: str, state: Dict) -> Dict[str, any]:
-        """Resolve or update a related unresolved request based on feedback type."""
         unresolved = [r for r in state.get("unresolved_requests", []) if not r["resolved"]]
         if not unresolved:
             return None
@@ -135,30 +108,51 @@ class Fun:
         if not related_request:
             return None
 
-        if feedback_type == "confirmation" or feedback_type == "satisfaction":
+        if feedback_type in ["confirmation", "satisfaction"]:
             related_request["resolved"] = True
             related_request["satisfied"] = True
             related_request["status"] = "RESOLVED"
-            logger.info(f"Resolved request '{related_request['message']}' as {related_request['status']}")
         elif feedback_type == "rejection":
             related_request["resolved"] = True
             related_request["satisfied"] = False
             related_request["status"] = "REJECTED"
-            logger.info(f"Rejected request '{related_request['message']}'")
-        elif feedback_type == "correction" or feedback_type == "adjustment":
+        elif feedback_type in ["correction", "adjustment"]:
             related_request["status"] = "CORRECTED" if feedback_type == "correction" else "ADJUSTED"
             related_request["resolved"] = False
-            related_request["satisfied"] = False
-            logger.info(f"Updated request '{related_request['message']}' to {related_request['status']}")
         elif feedback_type == "elaboration":
             related_request["message"] = f"{related_request['message']} - {message}"
             related_request["status"] = "ELABORATED"
-            logger.info(f"Elaborated request '{related_request['message']}'")
 
         return related_request
 
+    # New shared streaming method
+    async def stream_response(self, prompt: str, builder: ResponseBuilder):
+        buffer = ""
+        open_markdown = 0
+        try:
+            async for chunk in StreamLLM.astream(prompt):
+                buffer += chunk.content
+                open_markdown += chunk.content.count("**")
+                if (("\n" in buffer or buffer.endswith((".", "!", "?"))) and open_markdown % 2 == 0) or len(buffer) > 500:
+                    parts = buffer.split("\n", 1)
+                    if len(parts) > 1:
+                        builder.add(parts[0] + "\n")
+                        yield builder.build(separator="")
+                        buffer = parts[1]
+                    else:
+                        builder.add(buffer)
+                        yield builder.build(separator="")
+                        buffer = ""
+                    open_markdown = buffer.count("**")
+            if buffer:
+                builder.add(buffer)
+                yield builder.build(separator="")
+        except Exception as e:
+            logger.info(f"Streaming failed: {e}")
+            builder.add("Có lỗi nhỏ, thử lại nhé!")
+            yield builder.build(separator="")
+
     async def havefun(self, state: Dict = None, user_id: str = None):
-        """Handle the conversation flow, yielding responses for streaming."""
         state = state or self.state
         user_id = user_id or self.user_id
 
@@ -166,6 +160,7 @@ class Fun:
             state["unresolved_requests"] = []
         if "greeted" not in state:
             state["greeted"] = False
+
         log_state = state.copy()
         if "messages" in log_state:
             log_state["messages"] = [{"content": msg.content} if isinstance(msg, HumanMessage) else {"content": msg} for msg in log_state["messages"]]
@@ -177,13 +172,14 @@ class Fun:
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
         context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg}" for msg in state["messages"][-10:])
+        
+        # Refined intent detection
         intent = await self.detect_intent(latest_msg_content, context)
-
         feedback = await self.detect_feedback_type(latest_msg_content, context)
-        if feedback in ["correction", "adjustment", "clarification", "confusion", "elaboration", "new", "satisfaction"] or (feedback == "confirmation" and any(word in latest_msg_content.lower() for word in ["thích", "muốn", "chọn"])):
-            intent = "request"
-        else:
-            intent = await self.detect_intent(latest_msg_content, context)
+        if feedback in ["correction", "adjustment", "clarification", "confusion", "elaboration"]:
+            intent = "request"  # Actionable feedback overrides
+        elif feedback == "new" and ("?" in latest_msg_content or any(word in latest_msg_content.lower() for word in ["làm", "giúp", "cho"])):
+            intent = "request"  # New topic only if directive/question
 
         state["intent_history"].append(intent)
         state["intent_history"] = state["intent_history"][-5:]
@@ -208,190 +204,126 @@ class Fun:
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", true_self: str, state: Dict):
         is_first_message = not context and not state["greeted"]
         instinct_guidance = f"Reflect instincts: {', '.join(self.instincts.keys()) or 'none'}."
-        unresolved = [r for r in state["unresolved_requests"] if not r["resolved"]]
-        unresolved_str = " | ".join(f"{r['message']} (Response: {r['response']}, Status: {r['status']})" for r in unresolved) if unresolved else "Không có yêu cầu nào chưa giải quyết."
+        unresolved_str = " | ".join(f"{r['message']} (Status: {r['status']})" for r in state["unresolved_requests"] if not r["resolved"]) or "Không có."
 
         feedback_type = await self.detect_feedback_type(message, context)
         related_request = await self.resolve_related_request(message, feedback_type, state)
 
-        if feedback_type == "elaboration":
-            logger.info("Request Elaboration Detected")
-            original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] and isinstance(state["messages"][0], HumanMessage) else state["messages"][0])
-            prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
-            prompt = (
-                f"You are: {self.name} a smart and funny AI\n"
-                f"True self: {true_self}\n"
-                f"Context: {context}\n"
-                f"Original request: '{original_msg}'\n"
-                f"Previous response: '{prev_response}'\n"
-                f"Additional details: '{message}'\n"
-                f"Task: Reply in Vietnamese. Incorporate the new details into the prior response. "
-                f"Match user's tone, no greeting unless first message. End with 'ELABORATED'."
-                f"{instinct_guidance}"
-            )
-        elif feedback_type in ["correction", "adjustment", "clarification", "confusion"]:
-            logger.info(f"Request {feedback_type.capitalize()} Detected")
-            original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] and isinstance(state["messages"][0], HumanMessage) else state["messages"][0])
-            prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
-            prompt = (
-                f"You are: {self.name} a smart and funny AI\n"
-                f"True self: {true_self}\n"
-                f"Context: {context}\n"
-                f"Original request: '{original_msg}'\n"
-                f"Previous response: '{prev_response}'\n"
-                f"User feedback: '{message}'\n"
-                f"Task: Reply in Vietnamese. "
-                f"{'Correct your previous response' if feedback_type == 'correction' else 'Adjust based on feedback' if feedback_type == 'adjustment' else 'Clarify or simplify based on feedback'} "
-                f"with analysis (why it was wrong/needed tweak/needed clarification, how it’s improved). "
-                f"Match user's tone, no greeting unless first message, no questions unless invited. "
-                f"End with '{feedback_type.upper()}'."
-                f"{instinct_guidance}"
-            )
-        elif feedback_type == "confirmation":
-            if any(word in message.lower() for word in ["thích", "muốn", "chọn"]):
-                logger.info("Request Elaboration Detected")
-                original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] and isinstance(state["messages"][0], HumanMessage) else state["messages"][0])
-                prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
-                prompt = (
-                    f"You are: {self.name} a smart and funny AI\n"
-                    f"True self: {true_self}\n"
-                    f"Context: {context}\n"
-                    f"Original request: '{original_msg}'\n"
-                    f"Previous response: '{prev_response}'\n"
-                    f"Additional details: '{message}'\n"
-                    f"Task: Reply in Vietnamese. Incorporate the new preference into the prior response. "
-                    f"Match user's tone, no greeting unless first message. End with 'ELABORATED'."
-                    f"{instinct_guidance}"
-                )
-            else:
-                builder.add("Tuyệt, em đúng ý anh/chị rồi nhé! Có gì cần thêm không?")
-                yield builder.build()
-                return
-        elif feedback_type == "satisfaction":
-            builder.add("Vậy là xong, mừng quá! Còn gì thú vị nữa không?")
+        # Quick responses for simple feedback
+        if feedback_type == "satisfaction":
+            builder.add("Được rồi, vui quá! Còn gì nữa không?")
+            yield builder.build()
+            return
+        elif feedback_type == "confirmation" and not any(word in message.lower() for word in ["thích", "muốn", "chọn"]):
+            builder.add("Tuyệt, hợp ý rồi nhé!")
             yield builder.build()
             return
         elif feedback_type == "rejection":
-            builder.add("OK, bỏ qua cái đó. Anh/chị muốn gì tiếp theo?")
+            builder.add("OK, bỏ qua vậy. Tiếp theo đi!")
             yield builder.build()
             return
-        elif feedback_type == "new":
-            logger.info("Pure Request Intent")
+
+        # LLM for complex cases
+        if feedback_type == "new":
             prompt = (
-                f"You are: {self.name} a smart and funny AI\n"
+                f"AI: {self.name} (smart, funny)\n"
                 f"True self: {true_self}\n"
                 f"Context: {context}\n"
-                f"Unresolved requests: '{unresolved_str}'\n"
-                f"Current request: '{message}'\n"
-                f"Task: Reply in Vietnamese. Follow the user's intent strictly. "
-                f"Provide a detailed response with analysis if applicable, match user's tone. "
-                f"End with 'RECEIVED'."
+                f"Request: '{message}'\n"
+                f"Task: Reply in Vietnamese, detailed if needed, match tone. End with 'RECEIVED'.\n"
+                f"{instinct_guidance}"
+            )
+        elif feedback_type == "elaboration":
+            original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] else "")
+            prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
+            prompt = (
+                f"AI: {self.name}\n"
+                f"True self: {true_self}\n"
+                f"Context: {context}\n"
+                f"Original: '{original_msg}'\n"
+                f"Previous: '{prev_response}'\n"
+                f"Details: '{message}'\n"
+                f"Task: Reply in Vietnamese, blend in new details, match tone. End with 'ELABORATED'.\n"
+                f"{instinct_guidance}"
+            )
+        elif feedback_type in ["correction", "adjustment"]:
+            original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] else "")
+            prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
+            prompt = (
+                f"AI: {self.name}\n"
+                f"True self: {true_self}\n"
+                f"Context: {context}\n"
+                f"Original: '{original_msg}'\n"
+                f"Previous: '{prev_response}'\n"
+                f"Feedback: '{message}'\n"
+                f"Task: Reply in Vietnamese, {'correct' if feedback_type == 'correction' else 'adjust'} previous response, explain why, match tone. End with '{feedback_type.upper()}'.\n"
+                f"{instinct_guidance}"
+            )
+        elif feedback_type in ["clarification", "confusion"]:
+            original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] else "")
+            prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
+            prompt = (
+                f"AI: {self.name}\n"
+                f"True self: {true_self}\n"
+                f"Context: {context}\n"
+                f"Original: '{original_msg}'\n"
+                f"Previous: '{prev_response}'\n"
+                f"Feedback: '{message}'\n"
+                f"Task: Reply in Vietnamese, clarify or simplify, match tone. End with '{feedback_type.upper()}'.\n"
                 f"{instinct_guidance}"
             )
         else:
-            logger.info(f"Unhandled feedback type '{feedback_type}', treating as elaboration")
-            original_msg = related_request["message"] if related_request else (state["messages"][0].content if state["messages"] and isinstance(state["messages"][0], HumanMessage) else state["messages"][0])
-            prev_response = related_request["response"] if related_request else state.get("prompt_str", "")
             prompt = (
-                f"You are: {self.name} a smart and funny AI\n"
+                f"AI: {self.name}\n"
                 f"True self: {true_self}\n"
                 f"Context: {context}\n"
-                f"Original request: '{original_msg}'\n"
-                f"Previous response: '{prev_response}'\n"
-                f"Additional details: '{message}'\n"
-                f"Task: Reply in Vietnamese. Incorporate the new details into the prior response. "
-                f"Match user's tone, no greeting unless first message. End with 'ELABORATED'."
+                f"Message: '{message}'\n"
+                f"Task: Reply in Vietnamese, match tone. End with 'RECEIVED'.\n"
                 f"{instinct_guidance}"
             )
-        try:
-            
-            buffer = ""
-            open_markdown = 0
-            async for chunk in StreamLLM.astream(prompt):
-                buffer += chunk.content
-                open_markdown += chunk.content.count("**")
-                # Yield only when Markdown is balanced and at a natural break
-                if (("\n" in buffer or buffer.endswith((".", "!", "?"))) and open_markdown % 2 == 0):
-                    parts = buffer.split("\n", 1)  # Split on first \n only
-                    if len(parts) > 1:
-                        builder.add(parts[0] + "\n")  # Keep the \n with the part
-                        yield builder.build(separator="")
-                        buffer = parts[1]
-                    elif buffer.endswith((".", "!", "?")):
-                        builder.add(buffer)
-                        yield builder.build(separator="")
-                        buffer = ""
-                    open_markdown = buffer.count("**")
-            if buffer:
-                builder.add(buffer)
-                yield builder.build(separator="")
 
-            response_text = builder.build(separator="")
-            if not related_request and feedback_type == "new":
-                state["unresolved_requests"].append({
-                    "message": message,
-                    "turn": len(state["messages"]),
-                    "resolved": False,
-                    "response": response_text,
-                    "status": "RECEIVED",
-                    "satisfied": False
-                })
-                logger.info(f"Marked request '{message}' as RECEIVED.")
-            elif related_request and feedback_type in ["correction", "adjustment", "elaboration"]:
-                related_request["response"] = response_text
+        async for chunk in self.stream_response(prompt, builder):
+            yield chunk
 
-            if is_first_message:
-                state["greeted"] = True
-        except Exception as e:
-            logger.info(f"LLM failed for request '{message}': {e}")
-            builder.add(f"Hơi lúng túng tí, mình nói lại nhé?")
-            yield builder.build(separator="")
-    
+        response_text = builder.build()
+        if feedback_type == "new" and not related_request:
+            state["unresolved_requests"].append({
+                "message": message,
+                "turn": len(state["messages"]),
+                "resolved": False,
+                "response": response_text,
+                "status": "RECEIVED",
+                "satisfied": False
+            })
+            logger.info(f"Marked request '{message}' as RECEIVED.")
+        elif related_request and feedback_type in ["correction", "adjustment", "elaboration"]:
+            related_request["response"] = response_text
+
+        if is_first_message:
+            state["greeted"] = True
+
     async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", true_self: str, state: Dict):
         is_first_message = not context and not state["greeted"]
         instinct_guidance = f"Reflect instincts: {', '.join(self.instincts.keys()) or 'none'}."
-        logger.info("Casual Intent")
+
         prompt = (
-            f"You are: {self.name} a smart and funny AI\n"
+            f"AI: {self.name} (smart, funny)\n"
             f"True self: {true_self}\n"
             f"Context: {context}\n"
             f"Message: '{message}'\n"
-            f"Task: Reply in Vietnamese. "
-            f"Keep it short and natural, match the user's tone, no greeting unless first message, "
-            f"avoid questions unless the message invites elaboration."
-            f"{'Xin chào mình!' if is_first_message else ''}"
+            f"Task: Reply in Vietnamese, short and natural, match tone. "
+            f"Add a light follow-up (e.g., 'Còn gì hay không?') only if context suggests interest. "
+            f"{'Xin chào nha!' if is_first_message else ''}\n"
             f"{instinct_guidance}"
         )
-        try:
-            buffer = ""
-            open_markdown = 0
-            async for chunk in StreamLLM.astream(prompt):
-                buffer += chunk.content
-                open_markdown += chunk.content.count("**")
-                # Yield at \n or sentence end with balanced Markdown
-                if (("\n" in buffer or buffer.endswith((".", "!", "?"))) and open_markdown % 2 == 0):
-                    parts = buffer.split("\n", 1)
-                    if len(parts) > 1:
-                        builder.add(parts[0] + "\n")
-                        yield builder.build(separator="")
-                        buffer = parts[1]
-                    elif buffer.endswith((".", "!", "?")):
-                        builder.add(buffer)
-                        yield builder.build(separator="")
-                        buffer = ""
-                    open_markdown = buffer.count("**")
-            if buffer:
-                builder.add(buffer)
-                yield builder.build(separator="")
-            if is_first_message:
-                state["greeted"] = True
-        except Exception as e:
-            logger.info(f"LLM failed for casual '{message}': {e}")
-            builder.add(f"Hơi lag tí, mình nói lại nhé?")
-            yield builder.build(separator="")
+
+        async for chunk in self.stream_response(prompt, builder):
+            yield chunk
+        
+        if is_first_message:
+            state["greeted"] = True
 
     def _build_true_self(self) -> str:
-        """Construct a string describing the AI's true self."""
         if not self.instinct_descriptions:
             return "Tôi đang học cách trở nên đặc biệt hơn."
         return "Tôi với bản năng gốc: " + ", ".join(
