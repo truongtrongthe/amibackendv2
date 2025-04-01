@@ -84,7 +84,7 @@ def havefun():
     print("Headers:", request.headers)
     print("Fun API called!")
 
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="funny")
+    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
     return create_stream_response(async_gen)
 
 @app.route('/')

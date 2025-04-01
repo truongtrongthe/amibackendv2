@@ -1,7 +1,4 @@
 # ami.py
-# Purpose: Simplified state and graph harness for Training, Pilot, and Funny modes
-# Date: March 28, 2025 (Updated March 31, 2025)
-
 import json
 import time
 from typing import Annotated, List, Dict
@@ -12,11 +9,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage
 from training import Training
 from pilot import Pilot
-from fun import Fun
+from mc import MC  # Import MC directly
 from utilities import logger
 import asyncio
 
-# Define the state structure
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     prompt_str: str
@@ -26,12 +22,10 @@ class State(TypedDict):
     preset_memory: str
     instinct: str
 
-# Initialize instances
 training_ami = Training(user_id="thefusionlab")
 pilot_ami = Pilot(user_id="brian")
-funnyguy = Fun(user_id="thefusionlab")
+mc = MC(user_id="thefusionlab")
 
-# Set up the graph
 graph_builder = StateGraph(State)
 
 async def training_node(state: State, config=None):
@@ -54,26 +48,25 @@ async def pilot_node(state: State, config=None):
     logger.debug(f"pilot_node took {time.time() - start_time:.2f}s")
     return updated_state
 
-async def fun_node(state: State, config=None):
+async def mc_node(state: State, config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab")
-    logger.info(f"funny node - User ID: {user_id}")
-    if not funnyguy.instincts:
-        await funnyguy.initialize()
+    logger.info(f"MC node - User ID: {user_id}")
     
-    # Yield each response chunk directly as it’s generated
-    async for response_chunk in funnyguy.havefun(state=state, user_id=user_id):
+    if not mc.instincts:
+        await mc.initialize()
+    
+    async for response_chunk in mc.trigger(state=state, user_id=user_id):
         state["prompt_str"] = response_chunk
-        logger.info(f"Streaming chunk from fun_node: {response_chunk}")
-        yield {"prompt_str": response_chunk}  # Yield a dict compatible with astream
-    logger.debug(f"fun node took {time.time() - start_time:.2f}s")
+        state["unresolved_requests"] = mc.state["unresolved_requests"]  # Sync from MC instance
+        logger.info(f"Streaming chunk from mc_node: {response_chunk}")
+        yield {"prompt_str": response_chunk, "unresolved_requests": state["unresolved_requests"]}
+    logger.debug(f"mc node took {time.time() - start_time:.2f}s")
 
-# Add nodes to the graph
 graph_builder.add_node("training", training_node)
 graph_builder.add_node("pilot", pilot_node)
-graph_builder.add_node("funny", fun_node)
+graph_builder.add_node("mc", mc_node)
 
-# Define routing logic based on mode
 def route_by_mode(state: State, config=None):
     mode = config.get("configurable", {}).get("mode", "training")
     if mode == "training":
@@ -81,22 +74,24 @@ def route_by_mode(state: State, config=None):
     elif mode == "pilot":
         return "pilot"
     else:
-        return "funny"
+        return "mc"
 
-# Add edges
-graph_builder.add_conditional_edges(START, route_by_mode, {"training": "training", "pilot": "pilot", "funny": "funny"})
+graph_builder.add_conditional_edges(START, route_by_mode, {"training": "training", "pilot": "pilot", "mc": "mc"})
 graph_builder.add_edge("training", END)
 graph_builder.add_edge("pilot", END)
-graph_builder.add_edge("funny", END)
+graph_builder.add_edge("mc", END)
 
-# Set up memory persistence
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, mode: str = "training"):
+
+# ami.py (partial update)
+
+
+async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, mode: str = "mc"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
-    user_id = user_id or ("thefusionlab" if mode == "training" else "thefusionlab")
+    user_id = user_id or "thefusionlab"
 
     logger.info(f"Running in {mode} mode for user {user_id}, thread {thread_id}")
 
@@ -108,34 +103,28 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
         "user_id": user_id,
         "intent_history": [],
         "preset_memory": "Be friendly",
-        "instinct": ""
+        "instinct": "",
+        "unresolved_requests": mc.state.get("unresolved_requests", [])  # Initialize from STATE_STORE
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
     if user_input:
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
 
-    logger.debug(f"convo_stream init - Input: '{user_input}', Convo ID: {thread_id}, Mode: {mode}")
-
     config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "mode": mode}}
 
-    async for event in convo_graph.astream(state, config):
-        if mode == "funny":
-            # Extract prompt_str from fun_node’s yielded dict
-            prompt_str = event.get("funny", {}).get("prompt_str", "")
-        else:
-            prompt_str = (
-                event.get("training", {}).get("prompt_str") or
-                event.get("pilot", {}).get("prompt_str") or
-                ""
-            )
-        
-        if prompt_str:
-            logger.info(f"Streaming prompt_str: {prompt_str}")
-            yield f"data: {json.dumps({'message': prompt_str})}\n\n"
-            await asyncio.sleep(0.01)  # Small delay for smooth streaming
-            # Update state after each chunk
-            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, {"prompt_str": prompt_str}, as_node=mode)
+    async for event in convo_graph.astream(state, config, stream_mode="updates"):
+        logger.info(f"Raw event: {event}")
+        if mode == "mc" and "mc" in event:
+            prompt_str = event["mc"].get("prompt_str", "")
+            unresolved_requests = event["mc"].get("unresolved_requests", mc.state["unresolved_requests"])
+            if prompt_str:
+                logger.info(f"Streaming prompt_str: {prompt_str}")
+                yield f"data: {json.dumps({'message': prompt_str})}\n\n"
+                await asyncio.sleep(0.01)
+                state["prompt_str"] = prompt_str
+                state["unresolved_requests"] = unresolved_requests
+                await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
 
     yield "data: [DONE]\n\n"
     logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")

@@ -6,7 +6,7 @@ import logging
 # Setup logging
 
 #logging.basicConfig(level=logging.DEBUG, format="%(levelname)s:%(name)s:%(message)s")
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)  # Flask server noise
 logging.getLogger("http.client").setLevel(logging.WARNING)  # HTTP requests
 logging.getLogger("urllib3").setLevel(logging.WARNING)  # HTTP-related
