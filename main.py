@@ -85,11 +85,12 @@ def havefun():
 
 @app.route('/labels', methods=['GET', 'OPTIONS'])
 async def get_labels():
-    print(f"Received request: {request.method} {request.path}")  # Log the request
+    print(f"Received request: {request.method} {request.path}")
     if request.method == 'OPTIONS':
         return handle_options()
     
-    labels = loop.run_until_complete(get_all_labels(lang="original"))
+    labels = await get_all_labels(lang="original")
+    print(f"Labels from DB: {labels}")
     if not labels:
         return jsonify({"error": "No labels found"}), 404
     
