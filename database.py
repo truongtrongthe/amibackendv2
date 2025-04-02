@@ -23,7 +23,7 @@ ent_index = pc.Index(ent_index_name)
 
 
 inferLLM = ChatOpenAI(model="gpt-4o", streaming=False)
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
+#embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
 
 def index_name(index) -> str:
     return "ami_index" if index == ami_index else "ent_index"
@@ -176,6 +176,104 @@ async def save_training(input: str, user_id: str, context: str = "", mode: str =
     
     return True
 
+async def save_training_with_chunk(
+    input: str,
+    user_id: str,
+    context: str = "",
+    mode: str = "default",
+    doc_id: str = None,
+    chunk_id: str = None,
+    is_raw: bool = False
+) -> bool:
+    global AI_NAME
+    embedding = EMBEDDINGS.embed_query(input)
+    ns = "wisdom_bank"
+    target_index = ami_index if mode == "pretrain" else ent_index
+
+    # Generate a default chunk_id if none provided
+    chunk_id = chunk_id or str(uuid.uuid4())  # Ensure chunk_id is always a string
+
+    # If this is a raw chunk, save it directly with minimal processing
+    if is_raw:
+        metadata = {
+            "created_at": datetime.now().isoformat(),
+            "raw": input,
+            "confidence": 0.95,  # High confidence for raw data fidelity
+            "source": "document",
+            "user_id": user_id,
+            "doc_id": doc_id or "unknown",  # Fallback for doc_id
+            "chunk_id": chunk_id,  # Always a string
+            "categories_primary": "raw",
+            "categories_special": "document"
+        }
+        convo_id = f"{user_id}_{chunk_id}"
+        try:
+            target_index.upsert([(convo_id, embedding, metadata)], namespace=ns)
+            logger.info(f"Saved raw chunk to {index_name(target_index)}: {convo_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Raw upsert failed: {e}")
+            return False
+
+    # Otherwise, infer categories and extract knowledge
+    data = await infer_categories(input, context)
+    if data["needs_clarification"]:
+        logger.warning(f"Input '{input}' needs clarification.")
+        return False
+    
+    categories = data["categories"]
+    
+    # Handle naming
+    if categories["primary"] == "name":
+        name_prompt = f"Extract the name from '{input}' and return only the name."
+        name_response = await asyncio.to_thread(inferLLM.invoke, name_prompt)
+        AI_NAME = name_response.content.strip()
+        logger.debug(f"Set AI_NAME to: {AI_NAME}")
+
+    # Duplicate check
+    existing = await asyncio.to_thread(
+        target_index.query,
+        vector=embedding,
+        top_k=1,
+        include_metadata=True,
+        namespace=ns,
+        filter={
+            "user_id": user_id,
+            "categories_primary": categories["primary"],
+            "categories_special": categories.get("special", ""),
+            "raw": input
+        }
+    )
+    if existing.get("matches", []) and existing["matches"][0]["score"] > 0.99:
+        logger.info(f"Skipping duplicate: '{input}' already exists as {existing['matches'][0]['id']}")
+        return True
+
+    # Build metadata for knowledge
+    metadata = {
+        "created_at": datetime.now().isoformat(),
+        "raw": input,
+        "confidence": 0.85,
+        "source": "document",
+        "categories_primary": categories["primary"],
+        "categories_special": categories.get("special", ""),
+        "labels": json.dumps(data["labels"]),
+        "user_id": user_id,
+        "doc_id": doc_id or "unknown",  # Fallback for doc_id
+        "chunk_id": chunk_id  # Always a string
+    }
+    if categories["primary"] == "name":
+        metadata["name"] = AI_NAME
+
+    # Upsert knowledge
+    convo_id = f"{user_id}_{uuid.uuid4()}"
+    try:
+        target_index.upsert([(convo_id, embedding, metadata)], namespace=ns)
+        logger.info(f"Saved knowledge to {index_name(target_index)}: {convo_id} - Categories: {categories}")
+        return True
+    except Exception as e:
+        logger.error(f"Upsert failed: {e}")
+        return False
+
 async def load_instincts(user_id: str) -> Dict[str, str]:
     ns = "wisdom_bank"
     instincts = {}
@@ -285,6 +383,84 @@ async def query_knowledge(user_id: str, query: str, top_k: int = 5) -> List[Dict
     logger.info(f"Queried {len(knowledge)} knowledge entries for '{query}'")
     return knowledge
 
+
+
+async def get_all_primary_categories() -> set[str]:
+    """
+    Scans ent_index and returns a set of all unique primary categories.
+    Handles comma-separated categories_primary values.
+    """
+    ns = "wisdom_bank"
+    all_categories = set()
+    top_k = 10000  # Max allowed by Pinecone; adjust if needed
+
+    try:
+        # Query with a zero vector to fetch all entries
+        results = await asyncio.to_thread(
+            ent_index.query,
+            vector=[0] * 1536,  # Matches your OpenAI embedding size
+            top_k=top_k,
+            include_metadata=True,
+            namespace=ns,
+            filter={}  # No filter to get all entries
+        )
+        matches = results.get("matches", [])
+        
+        # Process each match
+        for match in matches:
+            categories = match["metadata"].get("categories_primary", "")
+            # Split comma-separated categories and strip whitespace
+            for category in categories.split(","):
+                category = category.strip()
+                if category:
+                    all_categories.add(category)
+
+        logger.info(f"Found {len(all_categories)} unique primary categories")
+        return all_categories
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve primary categories: {e}")
+        return set()
+
+async def get_raw_data_by_category(primary_category: str, top_k: int = 10000, user_id: str = None) -> List[str]:
+    """
+    Returns all raw data associated with a specific primary category from ent_index.
+    Fetches data with optional user_id filter and matches comma-separated categories_primary locally.
+    Logs categories_primary for debugging.
+    """
+    ns = "wisdom_bank"
+    raw_data = []
+
+    try:
+        filter_dict = {}
+        if user_id:
+            filter_dict["user_id"] = {"$eq": user_id}
+
+        results = await asyncio.to_thread(
+            ent_index.query,
+            vector=[0] * 1536,
+            top_k=top_k,
+            include_metadata=True,
+            namespace=ns,
+            filter=filter_dict
+        )
+        matches = results.get("matches", [])
+        
+        for match in matches:
+            categories = match["metadata"].get("categories_primary", "")
+            logger.info(f"Checking categories_primary: '{categories}' against '{primary_category}'")
+            if primary_category in [cat.strip() for cat in categories.split(",")]:
+                raw_text = match["metadata"].get("raw", "")
+                if raw_text:
+                    raw_data.append(raw_text)
+
+        logger.info(f"Found {len(raw_data)} raw entries for category '{primary_category}'")
+        return raw_data
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve raw data for '{primary_category}': {e}")
+        return []
+
 async def _generate_response(user_id: str, query: str) -> str:
     global AI_NAME
     instincts = await load_instincts(user_id)
@@ -311,3 +487,137 @@ async def _generate_response(user_id: str, query: str) -> str:
         response_parts.append("Tôi chưa có nhiều thông tin—hãy cho tôi biết thêm nhé!")
     
     return " ".join(response_parts)
+
+async def get_all_labels(lang:str ="english") -> set[str]:
+    """
+    Scans ent_index and returns a set of all unique English labels from the labels field.
+    """
+    ns = "wisdom_bank"
+    all_labels = set()
+    top_k = 10000  # Max allowed by Pinecone
+
+    try:
+        results = await asyncio.to_thread(
+            ent_index.query,
+            vector=[0] * 1536,
+            top_k=top_k,
+            include_metadata=True,
+            namespace=ns,
+            filter={}
+        )
+        matches = results.get("matches", [])
+        
+        for match in matches:
+            labels_json = match["metadata"].get("labels", "[]")
+            try:
+                labels = json.loads(labels_json)  # Parse JSON string to list
+                for label in labels:
+                    lang_label = label.get(lang, "").strip()
+                    if lang_label:
+                        all_labels.add(lang_label)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse labels JSON: {labels_json}, error: {e}")
+
+        logger.info(f"Found {len(all_labels)} unique English labels")
+        return all_labels
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve labels: {e}")
+        return set()
+
+async def get_raw_data_by_label(label: str, lang: str = "english", top_k: int = 10000) -> List[str]:
+    """
+    Returns all raw data associated with a specific English label from ent_index.
+    Fetches all data and filters locally based on the labels field.
+    """
+    ns = "wisdom_bank"
+    raw_data = []
+
+    try:
+        results = await asyncio.to_thread(
+            ent_index.query,
+            vector=[0] * 1536,
+            top_k=top_k,
+            include_metadata=True,
+            namespace=ns,
+            filter={}
+        )
+        matches = results.get("matches", [])
+        
+        # Filter locally for matching English labels
+        for match in matches:
+            labels_json = match["metadata"].get("labels", "[]")
+            try:
+                labels = json.loads(labels_json)
+                if any(l.get(lang, "").strip() == label for l in labels):
+                    raw_text = match["metadata"].get("raw", "")
+                    if raw_text:
+                        raw_data.append(raw_text)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse labels JSON: {labels_json}, error: {e}")
+
+        logger.info(f"Found {len(raw_data)} raw entries for label '{label}'")
+        return raw_data
+
+    except Exception as e:
+        logger.error(f"Failed to retrieve raw data for '{label}': {e}")
+        return []
+
+def clean_text(raw: str) -> str:
+    """
+    Cleans raw text by fixing Unicode issues and removing control characters.
+    """
+    # First, try decoding as UTF-8 if it's bytes-like, then fix escapes
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8')
+        # Replace common garbled patterns and remove control chars like \x95
+        raw = raw.encode().decode('utf-8', errors='replace')
+        raw = ''.join(c for c in raw if ord(c) >= 32 or c == '\n')  # Keep printable chars
+        return raw
+    except Exception:
+        return raw  # Fallback to original if cleaning fails
+async def main():
+    user_id = "user123"  # Test with your user_id
+
+    print("\n=== Categories ===")
+    categories = await get_all_primary_categories()
+    if not categories:
+        print("No categories found.")
+    else:
+        category_list = list(categories)
+        top_5_categories = category_list[:5]
+        print("Top 5 primary categories (first 5 found):")
+        for i, category in enumerate(top_5_categories, 1):
+            print(f"{i}. {category}")
+
+        for category in top_5_categories:
+            raw_data = await get_raw_data_by_category(category, user_id=user_id)
+            cleaned_data = [clean_text(text) for text in raw_data]
+            print(f"\nRaw data for '{category}' ({len(cleaned_data)} entries):")
+            for i, text in enumerate(cleaned_data[:5], 1):
+                print(f"{i}. {text}")
+            if len(cleaned_data) > 5:
+                print(f"... and {len(cleaned_data) - 5} more")
+
+    # Labels section (unchanged)
+    print("\n=== Labels ===")
+    labels = await get_all_labels(lang="original")
+    if not labels:
+        print("No labels found.")
+    else:
+        label_list = list(labels)
+        top_5_labels = label_list[:5]
+        print("Top 5 English labels (first 5 found):")
+        for i, label in enumerate(top_5_labels, 1):
+            print(f"{i}. {label}")
+
+        for label in top_5_labels:
+            raw_data = await get_raw_data_by_label(label,lang="original")
+            cleaned_data = [clean_text(text) for text in raw_data]
+            print(f"\nRaw data for '{label}' ({len(cleaned_data)} entries):")
+            for i, text in enumerate(cleaned_data[:5], 1):
+                print(f"{i}. {text}")
+            if len(cleaned_data) > 5:
+                print(f"... and {len(cleaned_data) - 5} more")
+
