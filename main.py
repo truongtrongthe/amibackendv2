@@ -89,8 +89,7 @@ async def get_labels():
     if request.method == 'OPTIONS':
         return handle_options()
     
-    labels = await get_all_labels(lang="original")
-    print(f"Labels from DB: {labels}")  # Log the database result
+    labels = loop.run_until_complete(get_all_labels(lang="original"))
     if not labels:
         return jsonify({"error": "No labels found"}), 404
     
