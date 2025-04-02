@@ -83,12 +83,11 @@ def havefun():
     async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
     return create_stream_response(async_gen)
 
-@app.route('/labels', methods=['GET', 'OPTIONS'])
-async def get_labels():
+def get_labels():
     if request.method == 'OPTIONS':
         return handle_options()
     
-    labels = get_all_labels(lang="original")
+    labels = loop.run_until_complete(get_all_labels(lang="original"))
     if not labels:
         return jsonify({"error": "No labels found"}), 404
     
