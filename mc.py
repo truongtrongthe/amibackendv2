@@ -282,8 +282,8 @@ class MC:
                 return
         
         if feedback_type == "new" or not related_request:
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} answer in Vietnamese, explain if needed.\n{instinct_guidance}"
-            logger.info(f"new request prompt={prompt}")
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Based on the following information:\n {kwcontext} answer in Vietnamese with a sharp, sales-oriented response that maximizes impact, reasoning beyond explicit info to drive persuasion and value. Explain if needed."
+            #logger.info(f"new request prompt={prompt}")
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             response_text = builder.build()
@@ -294,8 +294,8 @@ class MC:
                 "bank_name": bank_name  # Already had this, keeping it
             })
         elif feedback_type in ["elaboration", "clarification"]:
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese.\n{instinct_guidance}"
-            logger.info(f"Elaborate request prompt={prompt}")
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Based on the following information:\n {kwcontext} {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese, providing a sharp and persuasive explanation that enhances understanding and drives value."
+            #logger.info(f"Elaborate request prompt={prompt}")
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             related_request["response"] = builder.build()
@@ -308,7 +308,7 @@ class MC:
             knowledge = []
         
         kwcontext = "\n\n".join([entry["raw"] for entry in knowledge])
-        prompt = f"{self.name} (smart, funny)\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} Reply in Vietnamese, short and natural, show humor.\nReflect instincts: friendly"
+        prompt = f"{self.name} (smart, chill)\nContext: {context}\nMessage: '{message}'\nTask: Based on the following info:\n {kwcontext} Reply in Vietnamese, keep it short and casual with a fun vibe, then nudge them back to sales talk like it’s no big deal."
         logger.info(f"casual prompt={prompt}")
         async for chunk in self.stream_response(prompt, builder):
             yield chunk
