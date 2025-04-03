@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage
 import json
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
-
+from database import query_knowledge
 LLM = ChatOpenAI(model="gpt-4o-mini", streaming=False)
 StreamLLM = ChatOpenAI(model="gpt-4o-mini", streaming=True)
 
@@ -192,13 +192,14 @@ class MC:
             yield builder.build(separator="\n")
 
     # mc.py (in trigger)
-    async def trigger(self, state: Dict = None, user_id: str = None):
+    async def trigger(self, state: Dict = None, user_id: str = None, bank_name: str = None):
         state = state or self.state.copy()
         user_id = user_id or self.user_id
+        bank_name = bank_name or state.get("bank_name", "")  # Get bank_name from state if not provided
         if "unresolved_requests" not in state:
             state["unresolved_requests"] = self.state.get("unresolved_requests", [])
 
-        logger.info(f"Starting Fun - User: {user_id}, State: {json.dumps({k: v if k != 'messages' else [{'content': m.content if isinstance(m, HumanMessage) else m} for m in v] for k, v in state.items()}, ensure_ascii=False)}")
+        logger.info(f"Starting Fun - User: {user_id}, Bank: {bank_name}, State: {json.dumps({k: v if k != 'messages' else [{'content': m.content if isinstance(m, HumanMessage) else m} for m in v] for k, v in state.items()}, ensure_ascii=False)}")
         
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
@@ -223,7 +224,7 @@ class MC:
         
         logger.info(f"intent in trigger={intent}")
         if intent == "request":
-            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent):
+            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, bank_name=bank_name):
                 state["prompt_str"] = response_chunk
                 yield state["prompt_str"]
         else:
@@ -235,11 +236,24 @@ class MC:
         self.state.update(state)
         STATE_STORE[self.convo_id] = self.state
         logger.info(f"Final response: {state['prompt_str']}")
-
-    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", feedback_type: str, state: Dict, intent: str):
+    
+    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", 
+                        feedback_type: str, state: Dict, intent: str, bank_name: str = ""):
         instinct_guidance = f"Reflect instincts: {', '.join(self.instincts.keys())}."
         related_request = await self.resolve_related_request(message, feedback_type, state, context)
         
+        logger.info(f"Handling request for user {user_id} with bank_name: {bank_name}")
+        
+        knowledge = await query_knowledge(user_id, message, bank_name=bank_name)
+    
+        if not knowledge:
+            knowledge =[]
+        
+        # Combine retrieved chunks into a context
+        kwcontext = "\n\n".join([entry["raw"] for entry in knowledge])
+
+        #prompt = f"Based on the following information:\n{kwcontext}\n\nAnswer this question: {query}"
+
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
                 related_request["resolved"] = True
@@ -261,17 +275,18 @@ class MC:
                 return
         
         if feedback_type == "new" or not related_request:
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Reply in Vietnamese, explain if needed. End with 'NEW'.\n{instinct_guidance}"
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} answer in Vietnamese, explain if needed.'.\n{instinct_guidance}"
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             response_text = builder.build()
             turn = sum(1 for msg in state["messages"] if isinstance(msg, HumanMessage))
             state["unresolved_requests"].append({
                 "message": message, "turn": turn, "resolved": False, "response": response_text,
-                "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True
+                "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True,
+                "bank_name": bank_name  # Store bank_name with the request if needed
             })
         elif feedback_type in ["elaboration", "clarification"]:
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese.End with CONTINUE\n{instinct_guidance}"
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese.\n{instinct_guidance}"
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             related_request["response"] = builder.build()

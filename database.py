@@ -93,11 +93,11 @@ async def infer_categories(input: str, context: str = "") -> Dict:
             "needs_clarification": False,
             "requires_context": False
         }
-async def save_training(input: str, user_id: str, context: str = "", mode: str = "default") -> bool:
+async def save_training(input: str, user_id: str, context: str = "", bank_name :str = "", mode: str = "default") -> bool:
     global AI_NAME
     embedding = EMBEDDINGS.embed_query(input)
     data = await infer_categories(input, context)
-    ns = "wisdom_bank"
+    ns = bank_name
     
     if data["needs_clarification"]:
         logger.warning(f"Input '{input}' needs clarification.")
@@ -183,26 +183,30 @@ async def save_training_with_chunk(
     mode: str = "default",
     doc_id: str = None,
     chunk_id: str = None,
+    bank_name: str ="",
     is_raw: bool = False
+    
 ) -> bool:
     global AI_NAME
     embedding = EMBEDDINGS.embed_query(input)
-    ns = "wisdom_bank"
+    logger.info(f"Bank name at Save training chunk={bank_name}")
+    ns = bank_name 
     target_index = ami_index if mode == "pretrain" else ent_index
 
+
     # Generate a default chunk_id if none provided
-    chunk_id = chunk_id or str(uuid.uuid4())  # Ensure chunk_id is always a string
+    chunk_id = chunk_id or str(uuid.uuid4())
 
     # If this is a raw chunk, save it directly with minimal processing
     if is_raw:
         metadata = {
             "created_at": datetime.now().isoformat(),
             "raw": input,
-            "confidence": 0.95,  # High confidence for raw data fidelity
+            "confidence": 0.95,
             "source": "document",
             "user_id": user_id,
-            "doc_id": doc_id or "unknown",  # Fallback for doc_id
-            "chunk_id": chunk_id,  # Always a string
+            "doc_id": doc_id or "unknown",
+            "chunk_id": chunk_id,
             "categories_primary": "raw",
             "categories_special": "document"
         }
@@ -218,11 +222,13 @@ async def save_training_with_chunk(
     # Otherwise, infer categories and extract knowledge
     data = await infer_categories(input, context)
     if data["needs_clarification"]:
-        logger.warning(f"Input '{input}' needs clarification.")
-        return False
-    
-    categories = data["categories"]
-    
+        logger.warning(f"Input '{input}' needs clarification, saving as unclassified.")
+        categories = {"primary": "unclassified", "special": ""}
+        labels = [{"original": "Chưa phân loại", "english": "Unclassified", "requires_context": True}]
+    else:
+        categories = data["categories"]
+        labels = data["labels"]
+
     # Handle naming
     if categories["primary"] == "name":
         name_prompt = f"Extract the name from '{input}' and return only the name."
@@ -256,10 +262,10 @@ async def save_training_with_chunk(
         "source": "document",
         "categories_primary": categories["primary"],
         "categories_special": categories.get("special", ""),
-        "labels": json.dumps(data["labels"]),
+        "labels": json.dumps(labels),
         "user_id": user_id,
-        "doc_id": doc_id or "unknown",  # Fallback for doc_id
-        "chunk_id": chunk_id  # Always a string
+        "doc_id": doc_id or "unknown",
+        "chunk_id": chunk_id
     }
     if categories["primary"] == "name":
         metadata["name"] = AI_NAME
@@ -346,9 +352,9 @@ async def find_knowledge(user_id: str, primary: str, special: str = "description
     logger.info(f"Found {len(knowledge)} entries for primary: {primary}, special: {special}")
     return knowledge
 
-async def query_knowledge(user_id: str, query: str, top_k: int = 5) -> List[Dict]:
+async def query_knowledge(user_id: str, query: str, bank_name :str = "", top_k: int = 10) -> List[Dict]:
     query_embedding = EMBEDDINGS.embed_query(query)
-    ns = "wisdom_bank"
+    ns = bank_name
     knowledge = []
     
     for index in [ami_index, ent_index]:
@@ -385,12 +391,12 @@ async def query_knowledge(user_id: str, query: str, top_k: int = 5) -> List[Dict
 
 
 
-async def get_all_primary_categories() -> set[str]:
+async def get_all_primary_categories(bank_name :str = "") -> set[str]:
     """
     Scans ent_index and returns a set of all unique primary categories.
     Handles comma-separated categories_primary values.
     """
-    ns = "wisdom_bank"
+    ns = bank_name
     all_categories = set()
     top_k = 10000  # Max allowed by Pinecone; adjust if needed
 
@@ -422,13 +428,13 @@ async def get_all_primary_categories() -> set[str]:
         logger.error(f"Failed to retrieve primary categories: {e}")
         return set()
 
-async def get_raw_data_by_category(primary_category: str, top_k: int = 10000, user_id: str = None) -> List[str]:
+async def get_raw_data_by_category(primary_category: str, top_k: int = 10000, user_id: str = None, bank_name: str = "") -> List[str]:
     """
     Returns all raw data associated with a specific primary category from ent_index.
     Fetches data with optional user_id filter and matches comma-separated categories_primary locally.
     Logs categories_primary for debugging.
     """
-    ns = "wisdom_bank"
+    ns = bank_name
     raw_data = []
 
     try:
@@ -488,11 +494,11 @@ async def _generate_response(user_id: str, query: str) -> str:
     
     return " ".join(response_parts)
 
-async def get_all_labels(lang:str ="english") -> set[str]:
+async def get_all_labels(lang:str ="english",bank_name: str= "") -> set[str]:
     """
     Scans ent_index and returns a set of all unique English labels from the labels field.
     """
-    ns = "wisdom_bank"
+    ns = bank_name
     all_labels = set()
     top_k = 10000  # Max allowed by Pinecone
 
@@ -525,12 +531,12 @@ async def get_all_labels(lang:str ="english") -> set[str]:
         logger.error(f"Failed to retrieve labels: {e}")
         return set()
 
-async def get_raw_data_by_label(label: str, lang: str = "english", top_k: int = 10000) -> List[str]:
+async def get_raw_data_by_label(label: str, lang: str = "english", bank_name :str ="", top_k: int = 10000) -> List[str]:
     """
     Returns all raw data associated with a specific English label from ent_index.
     Fetches all data and filters locally based on the labels field.
     """
-    ns = "wisdom_bank"
+    ns = bank_name
     raw_data = []
 
     try:
@@ -577,47 +583,4 @@ def clean_text(raw: str) -> str:
         return raw
     except Exception:
         return raw  # Fallback to original if cleaning fails
-async def main():
-    user_id = "user123"  # Test with your user_id
-
-    print("\n=== Categories ===")
-    categories = await get_all_primary_categories()
-    if not categories:
-        print("No categories found.")
-    else:
-        category_list = list(categories)
-        top_5_categories = category_list[:5]
-        print("Top 5 primary categories (first 5 found):")
-        for i, category in enumerate(top_5_categories, 1):
-            print(f"{i}. {category}")
-
-        for category in top_5_categories:
-            raw_data = await get_raw_data_by_category(category, user_id=user_id)
-            cleaned_data = [clean_text(text) for text in raw_data]
-            print(f"\nRaw data for '{category}' ({len(cleaned_data)} entries):")
-            for i, text in enumerate(cleaned_data[:5], 1):
-                print(f"{i}. {text}")
-            if len(cleaned_data) > 5:
-                print(f"... and {len(cleaned_data) - 5} more")
-
-    # Labels section (unchanged)
-    print("\n=== Labels ===")
-    labels = await get_all_labels(lang="original")
-    if not labels:
-        print("No labels found.")
-    else:
-        label_list = list(labels)
-        top_5_labels = label_list[:5]
-        print("Top 5 English labels (first 5 found):")
-        for i, label in enumerate(top_5_labels, 1):
-            print(f"{i}. {label}")
-
-        for label in top_5_labels:
-            raw_data = await get_raw_data_by_label(label,lang="original")
-            cleaned_data = [clean_text(text) for text in raw_data]
-            print(f"\nRaw data for '{label}' ({len(cleaned_data)} entries):")
-            for i, text in enumerate(cleaned_data[:5], 1):
-                print(f"{i}. {text}")
-            if len(cleaned_data) > 5:
-                print(f"... and {len(cleaned_data) - 5} more")
 

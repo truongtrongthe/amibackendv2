@@ -2,7 +2,7 @@ from supabase import create_client, Client
 from typing import List, Dict, Optional
 import os
 from datetime import datetime, UTC
-
+from utilities import logger
 # Initialize Supabase client
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
@@ -100,7 +100,7 @@ def get_organization(org_id: str) -> Optional[Organization]:
         )
     return None
 
-def create_brain(org_id: str, user_id: str, name: str) -> Brain:
+def create_brain(org_id: str, user_id: str, name: str,summary: str) -> Brain:
     """
     Create a new brain record with default values including created_date
     """
@@ -112,13 +112,14 @@ def create_brain(org_id: str, user_id: str, name: str) -> Brain:
     if not org_check.data:
         raise ValueError(f"Organization with id {org_id} does not exist")
 
+    logger.info(f"summary at create brain={summary}")
     temp_bank_name = f"temp_wisdom_bank_{org_id}"
     data = {
         "org_id": org_id,
         "name": name,
         "status": "training",
         "bank_name": temp_bank_name,
-        "summary": f"Brain created by user {user_id}",
+        "summary": summary,
         "created_date": datetime.now(UTC).isoformat()
     }
     

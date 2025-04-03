@@ -8,7 +8,7 @@ from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
-from docuhandler import process_document
+from docuhandler import process_document,summarize_document
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization
 
 app = Flask(__name__)
@@ -78,6 +78,23 @@ def havefun():
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
+    bank_name = data.get("bank_name","")
+
+    print("Headers:", request.headers)
+    print("Fun API called!")
+    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
+    return create_stream_response(async_gen)
+
+@app.route('/autopilot', methods=['POST', 'OPTIONS'])
+def gopilot():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    user_id = data.get("user_id", "thefusionlab")
+    thread_id = data.get("thread_id", "chat_thread")
+    bank_name = data.get("bank_name","")
+
     print("Headers:", request.headers)
     print("Fun API called!")
     async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
@@ -89,7 +106,11 @@ async def get_labels():
     if request.method == 'OPTIONS':
         return handle_options()
     
-    labels = await get_all_labels(lang="original")
+    bank_name = request.args.get('bank_name', '')
+    if not bank_name:
+        return jsonify({"error": "bank_name parameter is required"}), 400
+    
+    labels = await get_all_labels(lang="original",bank_name=bank_name)
     print(f"Labels from DB: {labels}")
     if not labels:
         return jsonify({"error": "No labels found"}), 404
@@ -105,8 +126,11 @@ async def get_label_details():
     label = request.args.get('label', '')
     if not label:
         return jsonify({"error": "Label parameter is required"}), 400
+    bank_name = request.args.get('bank_name', '')
+    if not bank_name:
+        return jsonify({"error": "bank_name parameter is required"}), 400
     
-    raw_data = await get_raw_data_by_label(label, lang="original")
+    raw_data = await get_raw_data_by_label(label, lang="original",bank_name=bank_name)
     if not raw_data:
         return jsonify({"error": f"No data found for label '{label}'"}), 404
     
@@ -119,8 +143,8 @@ async def get_label_details():
     }
     return jsonify(response_data), 200
 
-@app.route('/process-document', methods=['POST', 'OPTIONS'])
-def process_document_endpoint():
+@app.route('/summarize-document', methods=['POST', 'OPTIONS'])
+def summary_document_endpoint():
     if request.method == 'OPTIONS':
         return handle_options()
 
@@ -135,12 +159,46 @@ def process_document_endpoint():
         return jsonify({"error": "No file selected"}), 400
 
     # Run the async process_document function synchronously using the event loop
-    success = loop.run_until_complete(process_document(file, user_id, mode))
+    summary = loop.run_until_complete(summarize_document(file, user_id, mode))
+
+    if summary:
+        return jsonify({
+            "summary": summary
+        }), 200
+    else:
+        return jsonify({
+            "error": "Failed to process document"
+        }), 500
+
+@app.route('/process-document', methods=['POST', 'OPTIONS'])
+def process_document_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    if 'file' not in request.files or 'user_id' not in request.form or 'bank_name' not in request.form:
+        return jsonify({"error": "Missing file or user_id"}), 400
+
+    file = request.files['file']
+    user_id = request.form['user_id']
+    bank_name=request.form['bank_name']
+    mode = request.form.get('mode', 'default')  # Optional mode parameter
+    
+
+    if not file.filename:
+        return jsonify({"error": "No file selected"}), 400
+
+    # Run the async process_document function synchronously using the event loop
+    success = loop.run_until_complete(process_document(file, user_id, mode,bank_name))
 
     if success:
-        return jsonify({"message": "Document processed successfully"}), 200
+        return jsonify({
+            "message": "Document processed successfully"
+        }), 200
     else:
-        return jsonify({"error": "Failed to process document"}), 500
+        return jsonify({
+            "error": "Failed to process document"
+        }), 500
+
 
 @app.route('/brains', methods=['GET', 'OPTIONS'])
 def brains():
@@ -202,7 +260,7 @@ def brain_details():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/update-brain', methods=['PUT', 'OPTIONS'])
+@app.route('/update-brain', methods=['POST', 'OPTIONS'])
 def update_brain_endpoint():
     if request.method == 'OPTIONS':
         return handle_options()
@@ -241,12 +299,13 @@ def create_brain_endpoint():
     org_id = data.get("org_id", "")
     user_id = data.get("user_id", "")
     name = data.get("name", "")
+    summary=data.get("summary","")
     
     if not org_id or not user_id or not name:
         return jsonify({"error": "org_id, user_id, and name are required"}), 400
     
     try:
-        new_brain = create_brain(org_id, user_id, name)
+        new_brain = create_brain(org_id, user_id, name,summary)
         brain_data = {
             "id": new_brain.id,
             "brain_id": new_brain.brain_id,

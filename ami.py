@@ -48,9 +48,10 @@ async def pilot_node(state: State, config=None):
     logger.debug(f"pilot_node took {time.time() - start_time:.2f}s")
     return updated_state
 
-async def mc_node(state: State, config=None):
+async def mc_node(state: State,config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab")
+    bank_name = config.get("configurable", {}).get("bank_name", "")  # Get bank_name from config
     logger.info(f"MC node - User ID: {user_id}")
     
     if not mc.instincts:
@@ -58,9 +59,14 @@ async def mc_node(state: State, config=None):
     
     async for response_chunk in mc.trigger(state=state, user_id=user_id):
         state["prompt_str"] = response_chunk
-        state["unresolved_requests"] = mc.state["unresolved_requests"]  # Sync from MC instance
+        state["unresolved_requests"] = mc.state["unresolved_requests"]
+        state["bank_name"] = bank_name  # Ensure bank_name persists in state
         logger.info(f"Streaming chunk from mc_node: {response_chunk}")
-        yield {"prompt_str": response_chunk, "unresolved_requests": state["unresolved_requests"]}
+        yield {
+            "prompt_str": response_chunk,
+            "unresolved_requests": state["unresolved_requests"],
+            "bank_name": bank_name  # Include in yield if needed downstream
+        }
     logger.debug(f"mc node took {time.time() - start_time:.2f}s")
 
 graph_builder.add_node("training", training_node)
@@ -88,7 +94,7 @@ convo_graph = graph_builder.compile(checkpointer=checkpointer)
 # ami.py (partial update)
 
 
-async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, mode: str = "mc"):
+async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None,bank_name: str ="", mode: str = "mc"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
     user_id = user_id or "thefusionlab"
@@ -104,6 +110,7 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
         "intent_history": [],
         "preset_memory": "Be friendly",
         "instinct": "",
+        "bank_name":bank_name,
         "unresolved_requests": mc.state.get("unresolved_requests", [])  # Initialize from STATE_STORE
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
@@ -111,7 +118,15 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
     if user_input:
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
 
-    config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "mode": mode}}
+    
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "mode": mode,
+            "bank_name": bank_name  # Add bank_name to config
+        }
+    }
 
     async for event in convo_graph.astream(state, config, stream_mode="updates"):
         logger.info(f"Raw event: {event}")
