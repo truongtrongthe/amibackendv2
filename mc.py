@@ -283,8 +283,9 @@ class MC:
         
         if feedback_type == "new" or not related_request:
             #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Based on the following information:\n {kwcontext} answer in Vietnamese with a sharp, sales-oriented response that maximizes impact, reasoning beyond explicit info to drive persuasion and value. Explain if needed."
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, craft a concise, persuasive Vietnamese response that grabs attention, highlights value, and pushes the customer to act now. Reason beyond the info to amplify impact and urgency."
-            #logger.info(f"new request prompt={prompt}")
+            #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, craft a concise, persuasive Vietnamese response that grabs attention, highlights value, and pushes the customer to act now. Reason beyond the info to amplify impact and urgency."
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, pitch products in Vietnamese per instructions, with a concise, compelling push to buy now. Keep response short in 3-5 sentences"
+                        #logger.info(f"new request prompt={prompt}")
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             response_text = builder.build()
@@ -296,7 +297,8 @@ class MC:
             })
         elif feedback_type in ["elaboration", "clarification"]:
             #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Based on the following information:\n {kwcontext} {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese, providing a sharp and persuasive explanation that enhances understanding and drives value."
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, {'clarify' if feedback_type == 'clarification' else 'elaborate on'} the prior response in Vietnamese with a sharp, persuasive explanation that boosts understanding and compels action."           
+            #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, {'clarify' if feedback_type == 'clarification' else 'elaborate on'} the prior response in Vietnamese with a sharp, persuasive explanation that boosts understanding and compels action."
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, {'clarify' if feedback_type == 'clarification' else 'elaborate on'} the prior response in Vietnamese, spotlighting products per instructions with a sharp nudge to act."
             #logger.info(f"Elaborate request prompt={prompt}")
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
