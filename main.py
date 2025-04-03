@@ -82,7 +82,8 @@ def havefun():
 
     print("Headers:", request.headers)
     print("Fun API called!")
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
+    print("bankname=",bank_name)
+    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
     return create_stream_response(async_gen)
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
@@ -97,7 +98,7 @@ def gopilot():
 
     print("Headers:", request.headers)
     print("Fun API called!")
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
+    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
     return create_stream_response(async_gen)
 
 @app.route('/labels', methods=['GET', 'OPTIONS'])

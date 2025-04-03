@@ -192,10 +192,21 @@ class MC:
             yield builder.build(separator="\n")
 
     # mc.py (in trigger)
-    async def trigger(self, state: Dict = None, user_id: str = None, bank_name: str = None):
+    async def trigger(self, state: Dict = None, user_id: str = None, bank_name: str = None, config: Dict = None):
         state = state or self.state.copy()
         user_id = user_id or self.user_id
-        bank_name = bank_name or state.get("bank_name", "")  # Get bank_name from state if not provided
+        config = config or {}
+        bank_name = (
+            bank_name if bank_name is not None 
+            else state.get("bank_name", 
+                config.get("configurable", {}).get("bank_name", 
+                    self.bank_name if hasattr(self, 'bank_name') else ""))
+        )
+        if not bank_name:
+            logger.warning(f"bank_name is empty! State: {state}, Config: {config}")
+        
+        # Sync with mc.state
+        self.state["bank_name"] = bank_name
         if "unresolved_requests" not in state:
             state["unresolved_requests"] = self.state.get("unresolved_requests", [])
 
@@ -228,7 +239,7 @@ class MC:
                 state["prompt_str"] = response_chunk
                 yield state["prompt_str"]
         else:
-            async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state):
+            async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state, bank_name=bank_name):
                 state["prompt_str"] = response_chunk
                 yield state["prompt_str"]
         
@@ -244,15 +255,11 @@ class MC:
         
         logger.info(f"Handling request for user {user_id} with bank_name: {bank_name}")
         
-        knowledge = await query_knowledge(user_id, message, bank_name=bank_name)
-    
+        knowledge = await query_knowledge(message, bank_name=bank_name)
         if not knowledge:
-            knowledge =[]
+            knowledge = []
         
-        # Combine retrieved chunks into a context
         kwcontext = "\n\n".join([entry["raw"] for entry in knowledge])
-
-        #prompt = f"Based on the following information:\n{kwcontext}\n\nAnswer this question: {query}"
 
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
@@ -275,7 +282,8 @@ class MC:
                 return
         
         if feedback_type == "new" or not related_request:
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} answer in Vietnamese, explain if needed.'.\n{instinct_guidance}"
+            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} answer in Vietnamese, explain if needed.\n{instinct_guidance}"
+            logger.info(f"new request prompt={prompt}")
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             response_text = builder.build()
@@ -283,15 +291,24 @@ class MC:
             state["unresolved_requests"].append({
                 "message": message, "turn": turn, "resolved": False, "response": response_text,
                 "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True,
-                "bank_name": bank_name  # Store bank_name with the request if needed
+                "bank_name": bank_name  # Already had this, keeping it
             })
         elif feedback_type in ["elaboration", "clarification"]:
             prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese.\n{instinct_guidance}"
+            logger.info(f"Elaborate request prompt={prompt}")
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
             related_request["response"] = builder.build()
-
-    async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict):
-        prompt = f"{self.name} (smart, funny)\nContext: {context}\nMessage: '{message}'\nTask: Reply in Vietnamese, short and natural, show humor.\nReflect instincts: friendly"
+    
+    async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, bank_name: str = ""):
+        logger.info(f"Handling casual with bank_name: {bank_name}")
+        
+        knowledge = await query_knowledge(message, bank_name=bank_name)
+        if not knowledge:
+            knowledge = []
+        
+        kwcontext = "\n\n".join([entry["raw"] for entry in knowledge])
+        prompt = f"{self.name} (smart, funny)\nContext: {context}\nMessage: '{message}'\nTask: Base on the following information:\n {kwcontext} Reply in Vietnamese, short and natural, show humor.\nReflect instincts: friendly"
+        logger.info(f"casual prompt={prompt}")
         async for chunk in self.stream_response(prompt, builder):
             yield chunk

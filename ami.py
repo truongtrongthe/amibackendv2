@@ -47,27 +47,36 @@ async def pilot_node(state: State, config=None):
     updated_state = await pilot_ami.pilot(state=state, user_id=user_id)
     logger.debug(f"pilot_node took {time.time() - start_time:.2f}s")
     return updated_state
-
-async def mc_node(state: State,config=None):
+# ami.py (partial update)
+async def mc_node(state: State, config=None):
     start_time = time.time()
+    config = config or {}
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab")
-    bank_name = config.get("configurable", {}).get("bank_name", "")  # Get bank_name from config
+    bank_name = config.get("configurable", {}).get("bank_name", "")
+    thread_id = config.get("configurable", {}).get("thread_id", "default_thread")
     logger.info(f"MC node - User ID: {user_id}")
-    
+
     if not mc.instincts:
         await mc.initialize()
     
-    async for response_chunk in mc.trigger(state=state, user_id=user_id):
+    # Ensure bank_name in mc.state
+    mc.state["bank_name"] = bank_name
+    
+    async for response_chunk in mc.trigger(state=state, user_id=user_id, bank_name=bank_name, config=config):
         state["prompt_str"] = response_chunk
-        state["unresolved_requests"] = mc.state["unresolved_requests"]
-        state["bank_name"] = bank_name  # Ensure bank_name persists in state
+        state["unresolved_requests"] = mc.state["unresolved_requests"]  # From mc.state
+        state["bank_name"] = mc.state["bank_name"]  # Sync from mc.state
         logger.info(f"Streaming chunk from mc_node: {response_chunk}")
         yield {
             "prompt_str": response_chunk,
             "unresolved_requests": state["unresolved_requests"],
-            "bank_name": bank_name  # Include in yield if needed downstream
+            "bank_name": state["bank_name"]
         }
+        # Persist state to graph
+        await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
+    
     logger.debug(f"mc node took {time.time() - start_time:.2f}s")
+
 
 graph_builder.add_node("training", training_node)
 graph_builder.add_node("pilot", pilot_node)
@@ -90,11 +99,7 @@ graph_builder.add_edge("mc", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-
-# ami.py (partial update)
-
-
-async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None,bank_name: str ="", mode: str = "mc"):
+async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, bank_name: str = "", mode: str = "mc"):
     start_time = time.time()
     thread_id = thread_id or f"thread_{int(time.time())}"
     user_id = user_id or "thefusionlab"
@@ -110,36 +115,49 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
         "intent_history": [],
         "preset_memory": "Be friendly",
         "instinct": "",
-        "bank_name":bank_name,
-        "unresolved_requests": mc.state.get("unresolved_requests", [])  # Initialize from STATE_STORE
+        "bank_name": bank_name,
+        "unresolved_requests": mc.state.get("unresolved_requests", [])
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
-
+    state["bank_name"] = bank_name
+    
+    logger.info(f"Initial state with bank_name: {state['bank_name']}")
     if user_input:
         state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
 
-    
     config = {
         "configurable": {
             "thread_id": thread_id,
             "user_id": user_id,
             "mode": mode,
-            "bank_name": bank_name  # Add bank_name to config
+            "bank_name": bank_name
         }
     }
 
+    logger.info(f"State before astream: {state}")
     async for event in convo_graph.astream(state, config, stream_mode="updates"):
         logger.info(f"Raw event: {event}")
         if mode == "mc" and "mc" in event:
             prompt_str = event["mc"].get("prompt_str", "")
             unresolved_requests = event["mc"].get("unresolved_requests", mc.state["unresolved_requests"])
+            event_bank_name = event["mc"].get("bank_name", bank_name)  # Get from event
+            
+            if unresolved_requests and isinstance(unresolved_requests, list):
+                for req in unresolved_requests:
+                    if "bank_name" not in req or not req["bank_name"]:
+                        req["bank_name"] = event_bank_name
+            
+            state["prompt_str"] = prompt_str
+            state["unresolved_requests"] = unresolved_requests
+            state["bank_name"] = event_bank_name  # Use event value
+            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
+            
             if prompt_str:
                 logger.info(f"Streaming prompt_str: {prompt_str}")
-                yield f"data: {json.dumps({'message': prompt_str})}\n\n"
+                yield f"data: {json.dumps({'message': prompt_str, 'bank_name': event_bank_name})}\n\n"
                 await asyncio.sleep(0.01)
-                state["prompt_str"] = prompt_str
-                state["unresolved_requests"] = unresolved_requests
-                await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
+        
+        logger.debug(f"State after event: {state}")
 
     yield "data: [DONE]\n\n"
     logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")

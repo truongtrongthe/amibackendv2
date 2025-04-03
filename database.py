@@ -352,11 +352,12 @@ async def find_knowledge(user_id: str, primary: str, special: str = "description
     logger.info(f"Found {len(knowledge)} entries for primary: {primary}, special: {special}")
     return knowledge
 
-async def query_knowledge(user_id: str, query: str, bank_name :str = "", top_k: int = 10) -> List[Dict]:
+async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> List[Dict]:
     query_embedding = EMBEDDINGS.embed_query(query)
     ns = bank_name
     knowledge = []
     
+    logger.info(f"Querying namespace={ns}")
     for index in [ami_index, ent_index]:
         try:
             # Broaden filter to include all non-character entries
@@ -365,10 +366,10 @@ async def query_knowledge(user_id: str, query: str, bank_name :str = "", top_k: 
                 top_k=top_k,
                 include_metadata=True,
                 namespace=ns,
-                filter={"user_id": user_id, "categories_special": {"$in": ["", "description"]}}
+                filter={"categories_special": {"$in": ["", "description"]}}
             )
             matches = results.get("matches", [])
-            logger.debug(f"Knowledge matches from {index_name(index)}: {matches}")
+            logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
             knowledge.extend([
                 {
                     "id": match["id"],
