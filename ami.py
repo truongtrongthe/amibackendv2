@@ -6,12 +6,14 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from training import Training
 from pilot import Pilot
 from mc import MC  # Import MC directly
 from utilities import logger
 import asyncio
+
+STATE_STORE = {}  # Thread-based state storage
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
@@ -106,9 +108,8 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
 
     logger.info(f"Running in {mode} mode for user {user_id}, thread {thread_id}")
 
-    checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
-    default_state = {
-        "messages": [],
+    # Minimal state, avoid messages channel
+    state = {
         "prompt_str": "",
         "convo_id": thread_id,
         "user_id": user_id,
@@ -118,46 +119,52 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
         "bank_name": bank_name,
         "unresolved_requests": mc.state.get("unresolved_requests", [])
     }
-    state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
-    state["bank_name"] = bank_name
-    
-    logger.info(f"Initial state with bank_name: {state['bank_name']}")
-    if user_input:
-        state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
+    messages = [HumanMessage(content=user_input)] if user_input else []  # Manage messages separately
 
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "user_id": user_id,
-            "mode": mode,
-            "bank_name": bank_name
-        }
-    }
+    config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "mode": mode, "bank_name": bank_name}}
 
-    logger.info(f"State before astream: {state}")
+    logger.info(f"State before astream: {json.dumps(state, default=str)}")
     async for event in convo_graph.astream(state, config, stream_mode="updates"):
         logger.info(f"Raw event: {event}")
         if mode == "mc" and "mc" in event:
-            prompt_str = event["mc"].get("prompt_str", "")
-            unresolved_requests = event["mc"].get("unresolved_requests", mc.state["unresolved_requests"])
-            event_bank_name = event["mc"].get("bank_name", bank_name)  # Get from event
+            if not isinstance(event["mc"], dict):
+                logger.warning(f"Skipping invalid 'mc' event: {event['mc']}")
+                continue
             
+            # Unwrap prompt_str
+            prompt_data = event["mc"].get("prompt_str", "")
+            while isinstance(prompt_data, dict) and "mc" in prompt_data:
+                prompt_data = prompt_data["mc"].get("prompt_str", "")
+            prompt_str = prompt_data if isinstance(prompt_data, str) else ""
+            
+            unresolved_requests = event["mc"].get("unresolved_requests", mc.state["unresolved_requests"])
+            event_bank_name = event["mc"].get("bank_name", bank_name)
+
             if unresolved_requests and isinstance(unresolved_requests, list):
                 for req in unresolved_requests:
                     if "bank_name" not in req or not req["bank_name"]:
                         req["bank_name"] = event_bank_name
             
-            state["prompt_str"] = prompt_str
-            state["unresolved_requests"] = unresolved_requests
-            state["bank_name"] = event_bank_name  # Use event value
-            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
-            
+            # Update state and messages
             if prompt_str:
+                state["prompt_str"] = prompt_str
+                messages.append(AIMessage(content=prompt_str))  # Append to separate list
                 logger.info(f"Streaming prompt_str: {prompt_str}")
                 yield f"data: {json.dumps({'message': prompt_str, 'bank_name': event_bank_name})}\n\n"
                 await asyncio.sleep(0.01)
+            else:
+                logger.debug("No prompt_str to stream")
+            
+            state["unresolved_requests"] = unresolved_requests
+            state["bank_name"] = event_bank_name
+            # Update state without messages channel
+            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
         
-        logger.debug(f"State after event: {state}")
+        logger.debug(f"State after event: {json.dumps(state, default=str)}")
+        logger.debug(f"Messages list: {json.dumps(messages, default=str)}")
 
     yield "data: [DONE]\n\n"
-    logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")
+    # Final state sync with messages
+    state["messages"] = messages
+    STATE_STORE[thread_id] = state
+    logger.debug(f"Final state saved: {json.dumps(state, default=str)}")

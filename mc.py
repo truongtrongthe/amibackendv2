@@ -214,7 +214,7 @@ class MC:
         
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
-        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg}" for msg in state["messages"][-10:])
+        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg}" for msg in state["messages"][-30:])
 
         if state["unresolved_requests"]:
             current_embedding = self.embedder.encode(latest_msg_content, convert_to_tensor=True)
@@ -237,11 +237,13 @@ class MC:
         if intent == "request":
             async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, bank_name=bank_name):
                 state["prompt_str"] = response_chunk
-                yield state["prompt_str"]
+                logger.debug(f"Yielding from trigger: {state['prompt_str']}")
+                yield {"mc": {"prompt_str": state["prompt_str"]}}  # Explicit dict
         else:
             async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state, bank_name=bank_name):
                 state["prompt_str"] = response_chunk
-                yield state["prompt_str"]
+                logger.debug(f"Yielding from trigger: {state['prompt_str']}")
+                yield {"mc": {"prompt_str": state["prompt_str"]}}  # Explicit dict
         
         state["messages"].append(state["prompt_str"])
         self.state.update(state)
@@ -249,60 +251,81 @@ class MC:
         logger.info(f"Final response: {state['prompt_str']}")
     
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", 
-                        feedback_type: str, state: Dict, intent: str, bank_name: str = ""):
-        instinct_guidance = f"Reflect instincts: {', '.join(self.instincts.keys())}."
+                         feedback_type: str, state: Dict, intent: str, bank_name: str = ""):
         related_request = await self.resolve_related_request(message, feedback_type, state, context)
-        
         logger.info(f"Handling request for user {user_id} with bank_name: {bank_name}")
         
-        knowledge = await query_knowledge(message, bank_name=bank_name)
-        if not knowledge:
-            knowledge = []
+        try:
+            # Query knowledge with full context for broader product relevance
+            knowledge = await query_knowledge(context, bank_name=bank_name) or []
+            kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
+        except Exception as e:
+            logger.error(f"Knowledge query failed: {e}")
+            builder.add("Oops, có lỗi khi tìm thông tin, thử lại nhé!")
+            yield builder.build()
+            return
+
+        # Sync LLM to build customer profile
         
-        kwcontext = "\n\n".join([entry["raw"] for entry in knowledge])
+        profile_prompt = (
+            f"Based on this conversation:\n{context}\n"
+            f"Infer the customer's interests, needs, or preferences (e.g., price-sensitive, looking for combos, curious about features). "
+            f"Summarize it in 1-2 sentences."
+        )
+        customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
+        logger.info(f"Customer profile: {customer_profile}")
+
+        # Main response prompt with profile and product info
+        base_prompt = (
+                    f"AI: {self.name}\n"
+                    f"Context: {context}\n"
+                    f"Message: '{message}'\n"
+                    f"Customer Profile: {customer_profile}\n"
+                    f"Product Info and Rules: {kwcontext}\n"
+                    f"Task: Reply in Vietnamese. Start casual and friendly, avoid greeting if already greeted. "
+                    f"Reason from the recent conversation in Context and align with the Customer Profile to pick the most relevant products or tips for their needs (e.g., stamina, fertility), limiting to 3 distinct items unless nudging to a sale, then use 3-5. "
+                    f"Extract and prioritize testimonials and skills explicitly labeled or clearly implied in Product Info and Rules, pulling the most relevant ones matching the Customer Profile and recent Context (e.g., testimonials for trust, closing actions for purchase intent). "
+                    f"Prioritize testimonial links when trust-building is needed (e.g., doubts about effectiveness). "
+                    f"If nudging to a sale, highlight specific benefits matching their goals in 3-5 sentences, weaving in testimonials or skills. Otherwise, hint at options casually."
+                )
 
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
-                related_request["resolved"] = True
-                related_request["satisfied"] = True
-                related_request["status"] = "RESOLVED"
-            builder.add("Tuyệt, hợp ý rồi nhé!")
-            yield builder.build()
+                related_request.update({"resolved": True, "satisfied": True, "status": "RESOLVED"})
+            prompt = base_prompt + " Customer seems happy—add a light push to close the deal with a product matching their profile."
+            async for chunk in self.stream_response(prompt, builder):
+                yield builder.build()
             return
         
         active_unresolved = [r for r in state["unresolved_requests"] if r["active"] and not r["resolved"]]
         if len(active_unresolved) > self.max_active_requests:
             oldest = min(active_unresolved, key=lambda r: r["turn"])
-            builder.add(f"Có nhiều câu hỏi chưa xong, như '{oldest['message']}'. Muốn tiếp tục với cái nào không, hay mình tập trung vào cái mới?")
+            builder.add(f"Nhiều câu hỏi chưa xong, như '{oldest['message']}'. Chọn cái nào hoặc 'dọn' để xóa bớt?")
             yield builder.build()
             if message.lower() in ["dọn", "bỏ"]:
                 state["unresolved_requests"] = [r for r in state["unresolved_requests"] if r["active"]]
                 builder.add("Đã dọn dẹp, tiếp tục nào!")
                 yield builder.build()
-                return
+            return
         
         if feedback_type == "new" or not related_request:
-            #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Based on the following information:\n {kwcontext} answer in Vietnamese with a sharp, sales-oriented response that maximizes impact, reasoning beyond explicit info to drive persuasion and value. Explain if needed."
-            #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, craft a concise, persuasive Vietnamese response that grabs attention, highlights value, and pushes the customer to act now. Reason beyond the info to amplify impact and urgency."
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, pitch products in Vietnamese per instructions, with a concise, compelling push to buy now. Keep response short in 3-5 sentences"
-                        #logger.info(f"new request prompt={prompt}")
-            async for chunk in self.stream_response(prompt, builder):
+            async for chunk in self.stream_response(base_prompt, builder):
                 yield builder.build()
             response_text = builder.build()
             turn = sum(1 for msg in state["messages"] if isinstance(msg, HumanMessage))
             state["unresolved_requests"].append({
                 "message": message, "turn": turn, "resolved": False, "response": response_text,
                 "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True,
-                "bank_name": bank_name  # Already had this, keeping it
+                "bank_name": bank_name
             })
+        
         elif feedback_type in ["elaboration", "clarification"]:
-            #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Based on the following information:\n {kwcontext} {'Clarify' if feedback_type == 'clarification' else 'Elaborate on'} prior response in Vietnamese, providing a sharp and persuasive explanation that enhances understanding and drives value."
-            #prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, {'clarify' if feedback_type == 'clarification' else 'elaborate on'} the prior response in Vietnamese with a sharp, persuasive explanation that boosts understanding and compels action."
-            prompt = f"AI: {self.name}\nContext: {context}\nMessage: '{message}'\nTask: Using {kwcontext}, {'clarify' if feedback_type == 'clarification' else 'elaborate on'} the prior response in Vietnamese, spotlighting products per instructions with a sharp nudge to act."
-            #logger.info(f"Elaborate request prompt={prompt}")
+            action = "clarify" if feedback_type == "clarification" else "elaborate on"
+            prompt = base_prompt + f" {action.capitalize()} the prior response, using product info that fits the customer profile if it flows naturally."
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
-            related_request["response"] = builder.build()
+            if related_request:
+                related_request["response"] = builder.build()
     
     async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, bank_name: str = ""):
         logger.info(f"Handling casual with bank_name: {bank_name}")
