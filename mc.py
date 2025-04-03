@@ -330,12 +330,23 @@ class MC:
     async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, bank_name: str = ""):
         logger.info(f"Handling casual with bank_name: {bank_name}")
         
-        knowledge = await query_knowledge(message, bank_name=bank_name)
-        if not knowledge:
-            knowledge = []
+        # Fetch knowledge with fallback to empty list
+        knowledge = await query_knowledge(message, bank_name=bank_name) or []
+        kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
         
-        kwcontext = "\n\n".join([entry["raw"] for entry in knowledge])
-        prompt = f"{self.name} (smart, chill)\nContext: {context}\nMessage: '{message}'\nTask: Based on the following info:\n {kwcontext} Reply in Vietnamese, keep it short and casual with a fun vibe, then nudge them back to sales talk like it’s no big deal."
+        # Tightened prompt mirroring _handle_request structure
+        prompt = (
+            f"AI: {self.name} (smart, chill)\n"
+            f"Context: {context}\n"
+            f"Message: '{message}'\n"
+            f"Product Info: {kwcontext}\n"
+            f"Task: Reply in Vietnamese. Keep it short, casual, and fun—no formal greetings. "
+            f"Reason from the Context and Message to give a light, relevant response. "
+            f"If Product Info is available, weave in a subtle hint about 1-2 items matching the Message, "
+            f"then nudge toward sales talk naturally (e.g., 'nếu thích thì thử xem sao'). "
+            f"Keep it under 3 sentences unless Product Info is empty, then just vibe with the Message."
+        )
         logger.info(f"casual prompt={prompt}")
+        
         async for chunk in self.stream_response(prompt, builder):
             yield chunk

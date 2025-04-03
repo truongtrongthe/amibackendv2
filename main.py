@@ -10,6 +10,7 @@ import asyncio
 from database import get_all_labels, get_raw_data_by_label, clean_text
 from docuhandler import process_document,summarize_document
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization
+from aia import create_aia,get_all_aias,get_aia_detail,delete_aia
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
@@ -341,6 +342,193 @@ def get_org_detail(orgid):
             "name": org.name
         }
         return jsonify({"organization": org_data}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+python
+
+Collapse
+
+Wrap
+
+Copy
+from flask import Flask, jsonify, request
+from aia import create_aia, update_aia, delete_aia, get_all_aias, get_aia_detail, AIA  # Import from aia.py
+from typing import List, Optional
+import json
+
+app = Flask(__name__)
+
+# Assuming handle_options is defined elsewhere in your codebase
+def handle_options():
+    response = jsonify({})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    return response, 200
+
+@app.route('/aias', methods=['GET', 'OPTIONS'])
+def aias():
+    """
+    Fetch all AIAs for a given organization.
+    Query parameter: org_id (UUID)
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    org_id = request.args.get('org_id', '')
+    if not org_id:
+        return jsonify({"error": "org_id parameter is required"}), 400
+    
+    try:
+        aias_list = get_all_aias(org_id)
+        if not aias_list:
+            return jsonify({"message": "No AIAs found for this organization", "aias": []}), 200
+        
+        # Convert AIA objects to dictionaries for JSON serialization
+        aias_data = [{
+            "id": aia.id,
+            "aia_id": aia.aia_id,  # Adjust if no integer ID exists
+            "org_id": aia.org_id,
+            "task_type": aia.task_type,
+            "name": aia.name,
+            "brain_ids": aia.brain_ids,
+            "delivery_method_ids": aia.delivery_method_ids,
+            "created_date": aia.created_date.isoformat()
+        } for aia in aias_list]
+        
+        return jsonify({"aias": aias_data}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/aia-details', methods=['GET', 'OPTIONS'])
+def aia_details():
+    """
+    Fetch details of a specific AIA by its UUID.
+    Query parameter: aia_id (UUID)
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    aia_id = request.args.get('aia_id', '')
+    if not aia_id:
+        return jsonify({"error": "aia_id parameter is required"}), 400
+    
+    try:
+        aia = get_aia_detail(aia_id)
+        if not aia:
+            return jsonify({"error": f"No AIA found with aia_id {aia_id}"}), 404
+        
+        aia_data = {
+            "id": aia.id,
+            "aia_id": aia.aia_id,  # Adjust if no integer ID exists
+            "org_id": aia.org_id,
+            "task_type": aia.task_type,
+            "name": aia.name,
+            "brain_ids": aia.brain_ids,
+            "delivery_method_ids": aia.delivery_method_ids,
+            "created_date": aia.created_date.isoformat()
+        }
+        return jsonify({"aia": aia_data}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-aia', methods=['POST', 'OPTIONS'])
+def create_aia_endpoint():
+    """
+    Create a new AIA.
+    Body: {org_id, task_type, name (optional), brain_ids, delivery_method_ids}
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    org_id = data.get("org_id", "")
+    task_type = data.get("task_type", "")
+    name = data.get("name")  # Optional
+    brain_ids = data.get("brain_ids", [])  # Expecting a list
+    delivery_method_ids = data.get("delivery_method_ids", [])  # Expecting a list
+    
+    if not org_id or not task_type or not isinstance(brain_ids, list) or not isinstance(delivery_method_ids, list):
+        return jsonify({"error": "org_id, task_type, brain_ids (list), and delivery_method_ids (list) are required"}), 400
+    
+    try:
+        new_aia = create_aia(org_id, task_type, name, brain_ids, delivery_method_ids)
+        aia_data = {
+            "id": new_aia.id,
+            "aia_id": new_aia.aia_id,  # Adjust if no integer ID exists
+            "org_id": new_aia.org_id,
+            "task_type": new_aia.task_type,
+            "name": new_aia.name,
+            "brain_ids": new_aia.brain_ids,
+            "delivery_method_ids": new_aia.delivery_method_ids,
+            "created_date": new_aia.created_date.isoformat()
+        }
+        return jsonify({"message": "AIA created successfully", "aia": aia_data}), 201
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-aia', methods=['POST', 'OPTIONS'])
+def update_aia_endpoint():
+    """
+    Update an existing AIA.
+    Body: {id, task_type (optional), name (optional), brain_ids (optional), delivery_method_ids (optional)}
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    id = data.get("id", "")
+    task_type = data.get("task_type")  # Optional
+    name = data.get("name")  # Optional
+    brain_ids = data.get("brain_ids")  # Optional list
+    delivery_method_ids = data.get("delivery_method_ids")  # Optional list
+    
+    if not id:
+        return jsonify({"error": "id is required"}), 400
+    
+    try:
+        updated_aia = update_aia(id, task_type, name, brain_ids, delivery_method_ids)
+        aia_data = {
+            "id": updated_aia.id,
+            "aia_id": updated_aia.aia_id,  # Adjust if no integer ID exists
+            "org_id": updated_aia.org_id,
+            "task_type": updated_aia.task_type,
+            "name": updated_aia.name,
+            "brain_ids": updated_aia.brain_ids,
+            "delivery_method_ids": updated_aia.delivery_method_ids,
+            "created_date": updated_aia.created_date.isoformat()
+        }
+        return jsonify({"message": "AIA updated successfully", "aia": aia_data}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/delete-aia', methods=['POST', 'OPTIONS'])
+def delete_aia_endpoint():
+    """
+    Delete an AIA by its UUID.
+    Body: {id}
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    id = data.get("id", "")
+    
+    if not id:
+        return jsonify({"error": "id is required"}), 400
+    
+    try:
+        delete_aia(id)
+        return jsonify({"message": f"AIA with id {id} deleted successfully"}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
