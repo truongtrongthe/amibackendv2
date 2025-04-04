@@ -345,28 +345,6 @@ def get_org_detail(orgid):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-python
-
-Collapse
-
-Wrap
-
-Copy
-from flask import Flask, jsonify, request
-from aia import create_aia, update_aia, delete_aia, get_all_aias, get_aia_detail, AIA  # Import from aia.py
-from typing import List, Optional
-import json
-
-app = Flask(__name__)
-
-# Assuming handle_options is defined elsewhere in your codebase
-def handle_options():
-    response = jsonify({})
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-    return response, 200
-
 @app.route('/aias', methods=['GET', 'OPTIONS'])
 def aias():
     """
