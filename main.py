@@ -10,7 +10,7 @@ import asyncio
 from database import get_all_labels, get_raw_data_by_label, clean_text
 from docuhandler import process_document,summarize_document
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization
-from aia import create_aia,get_all_aias,get_aia_detail,delete_aia
+from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
@@ -18,13 +18,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, al
 # Single event loop for the app
 loop = asyncio.get_event_loop()
 
-def async_to_sync_generator(async_gen):
-    """Convert an async generator to a synchronous generator using the app's event loop."""
-    while True:
-        try:
-            yield loop.run_until_complete(anext(async_gen))
-        except StopAsyncIteration:
-            break
 
 def handle_options():
     """Common OPTIONS handler for all endpoints."""
@@ -35,10 +28,10 @@ def handle_options():
     response.headers['Access-Control-Max-Age'] = '86400'
     return response, 200
 
-def create_stream_response(async_gen):
+def create_stream_response(gen):
     """Common response creator for streaming endpoints."""
-    sync_gen = async_to_sync_generator(async_gen)
-    response = Response(sync_gen, mimetype='text/event-stream')
+    
+    response = Response(gen, mimetype='text/event-stream')
     response.headers['X-Accel-Buffering'] = 'no'
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -84,8 +77,8 @@ def havefun():
     print("Headers:", request.headers)
     print("Fun API called!")
     print("bankname=",bank_name)
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
-    return create_stream_response(async_gen)
+    gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
+    return create_stream_response(gen)
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
 def gopilot():

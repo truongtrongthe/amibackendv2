@@ -2,11 +2,15 @@ import asyncio
 from typing import List, Dict
 from langchain_openai import ChatOpenAI
 from utilities import logger
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage,AIMessage
 import json
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from database import query_knowledge
+
+def add_messages(existing_messages, new_messages):
+    return existing_messages + new_messages
+
 LLM = ChatOpenAI(model="gpt-4o", streaming=False)
 StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
 
@@ -39,25 +43,24 @@ class MC:
                  similarity_threshold: float = 0.55, max_active_requests: int = 5):
         self.user_id = user_id
         self.convo_id = convo_id or "default_thread"
-        self.name = "Grok 3"
+        self.name = "Ami"
         self.instincts = {"friendly": "Be nice"}
         self.similarity_threshold = similarity_threshold
         self.max_active_requests = max_active_requests
-        self.state = STATE_STORE.get(self.convo_id, {
+        self.state = {
             "messages": [],
             "intent_history": [],
             "preset_memory": "Be friendly",
             "unresolved_requests": [],
             "convo_id": self.convo_id,
             "user_id": self.user_id,
-            "prompt_str": ""
-        })
-
+            "prompt_str": "",
+            "bank_name":""
+        }
     async def initialize(self):
         if not self.instincts:
             self.instincts = {"friendly": "Be nice"}
 
-    
     # mc.py (in detect_intent)
     async def detect_intent(self, message: str, context: str = "") -> str:
         prompt = (
@@ -210,11 +213,11 @@ class MC:
         if "unresolved_requests" not in state:
             state["unresolved_requests"] = self.state.get("unresolved_requests", [])
 
-        logger.info(f"Starting Fun - User: {user_id}, Bank: {bank_name}, State: {json.dumps({k: v if k != 'messages' else [{'content': m.content if isinstance(m, HumanMessage) else m} for m in v] for k, v in state.items()}, ensure_ascii=False)}")
-        
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
-        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg}" for msg in state["messages"][-26:])
+        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-26:])
+
+        logger.info(f"Triggering - User: {user_id}, Bank: {bank_name}, latest_msg: {latest_msg_content}, context: {context}")
 
         if state["unresolved_requests"]:
             current_embedding = self.embedder.encode(latest_msg_content, convert_to_tensor=True)
@@ -238,17 +241,22 @@ class MC:
             async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, bank_name=bank_name):
                 state["prompt_str"] = response_chunk
                 logger.debug(f"Yielding from trigger: {state['prompt_str']}")
-                yield {"mc": {"prompt_str": state["prompt_str"]}}  # Explicit dict
+                yield response_chunk
         else:
             async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state, bank_name=bank_name):
                 state["prompt_str"] = response_chunk
                 logger.debug(f"Yielding from trigger: {state['prompt_str']}")
-                yield {"mc": {"prompt_str": state["prompt_str"]}}  # Explicit dict
+                yield response_chunk
         
-        state["messages"].append(state["prompt_str"])
+        # Wrap response as AIMessage and append using add_messages
+        if state["prompt_str"]:
+            state["messages"] = add_messages(state["messages"], [AIMessage(content=state["prompt_str"])])
+        
         self.state.update(state)
-        STATE_STORE[self.convo_id] = self.state
         logger.info(f"Final response: {state['prompt_str']}")
+        
+        # Yield the final state as a special chunk
+        yield {"state": state}
     
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", 
                          feedback_type: str, state: Dict, intent: str, bank_name: str = ""):
@@ -267,41 +275,33 @@ class MC:
 
         # Sync LLM to build customer profile
         profile_prompt = (
-    f"Based on the conversation:\n{context}\n\n"
-    f"Build a concise customer profile that reflects their core interests, needs, and underlying intent. Focus especially on what is revealed in the most recent customer messages, without ignoring important patterns from earlier.\n\n"
-    f"Include both practical cues (e.g., price sensitivity, feature curiosity, interest in combos) and emotional signals (e.g., doubt, curiosity, urgency, trust concerns) that would influence their buying decision.\n\n"
-    f"If their intent has shifted, explain what triggered the shift. Do not overwrite previous traits unless the conversation clearly supports the change.\n\n"
-    f"Summarize in 1–2 sentences, focusing on what matters most to effectively guide the next step in the sales conversation."
-)
-
+        f"Based on the conversation:\n{context}\n\n"
+        f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to highlight what's driving them now, while weaving in key patterns from earlier if they still apply.\n\n"
+        f"Interests: What they're drawn to (e.g., product features, price). Needs: What they're seeking (e.g., info, reassurance). Hidden desires: Subtle motivations (e.g., trust, value, excitement).\n\n"
+        f"Add specific cues for sales: Product preferences (if hinted), pain points (e.g., cost concerns), and emotional triggers (e.g., doubt, urgency) that could sway their decision.\n\n"
+        f"If their focus shifts, note the trigger without erasing prior traits unless contradicted.\n\n"
+        f"Summarize in 1-2 sentences with a clear next-step action (e.g., 'Push feature X to build trust')."
+                )
 
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
         logger.info(f"Customer profile built: {customer_profile}")
 
         # Main response prompt with profile and product info
         base_prompt = (
-                        f"AI: {self.name}\n"
-                        f"Context: {context}\n"
-                        f"Message: '{message}'\n"
-                        f"Customer Profile: {customer_profile}\n"
-                        f"Rules: {kwcontext}\n"
-                        f"Task: Reply in Vietnamese in a casual and friendly tone. Avoid repeating greetings if one is already in Context.\n\n"
-
-                        f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages only where naturally relevant (e.g., 'You mentioned price earlier, so...').\n\n"
-
-                        f"2. Use the Customer Profile to select the most relevant products or instructions from Rules.\n\n"
-
-                        f"3. Retrieve and rank the top 2 **most impactful** testimonials from Rules based on relevance to both the Customer Profile AND specific cues from Context (e.g., doubts, curiosity, objections).\n\n"
-
-                        f"4. If hesitation or concerns appear in Context, introduce testimonials smoothly, explaining their relevance without sounding forced.\n\n"
-
-                        f"5. If guiding towards a sale, highlight benefits naturally, tying them back to prior interests or concerns in a conversational way. Use testimonials or sales skills strategically, making the transition organic rather than abrupt.\n\n"
-
-                        f"6. If not guiding towards a sale, hint at options casually while staying aligned with the ongoing discussion.\n\n"
-
-                        f"7. **Debug Info**: Return the inferred **Customer Profile** before generating a response. If no strong profile is detected, state 'Customer Profile unclear'."
-                    )
-
+            f"AI: {self.name}\n"
+            f"Context: {context}\n"
+            f"Message: '{message}'\n"
+            f"Customer Profile: {customer_profile}\n"
+            f"Rules: {kwcontext}\n"
+            f"Task: Reply in Vietnamese in a casual and friendly tone.Keep answer short in 2 sentences. Avoid repeating greetings if one is already in Context.\n\n"
+            f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages naturally where relevant (e.g., 'You asked about this earlier, so…').\n\n"
+            f"2. Use the Customer Profile's interests, needs, and sales cues to select the most relevant products or instructions from Rules. Match product features to their preferences or pain points.\n\n"
+            f"3. Retrieve and rank the top 2 **most impactful** testimonials from Rules based on the Customer Profile's emotional triggers (e.g., trust for skepticism, excitement for curiosity) and Context cues.\n\n"
+            f"4. If hesitation or concerns appear in Context, weave in a testimonial casually, tying it to their profile (e.g., 'Someone like you was unsure too, but…').\n\n"
+            f"5. If guiding towards a sale, highlight benefits tied to their interests or hidden desires, using the profile's next-step action as a guide. Make it conversational, not pushy.\n\n"
+            f"6. If not guiding towards a sale, hint at options casually, staying aligned with their profile and discussion flow.\n\n"
+            f"7. **Debug Info**: Skip re-inferring Customer Profile—use the provided one. If it's missing or vague, state 'Customer Profile incomplete, assuming curiosity-driven interest' and proceed."
+        )
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
                 related_request.update({"resolved": True, "satisfied": True, "status": "RESOLVED"})
@@ -333,6 +333,7 @@ class MC:
             })
         
         elif feedback_type in ["elaboration", "clarification"]:
+            logger.info("Jump to CLARIFICATION!")
             action = "clarify" if feedback_type == "clarification" else "elaborate on"
             prompt = base_prompt + f" {action.capitalize()} the prior response, using product info that fits the customer profile if it flows naturally."
             async for chunk in self.stream_response(prompt, builder):
