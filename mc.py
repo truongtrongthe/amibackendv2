@@ -267,11 +267,12 @@ class MC:
 
         # Sync LLM to build customer profile
         profile_prompt = (
-                        f"Based on the conversation:\n{context}\n\n"
-                        f"Analyze both what the AI has said and how the customer responded. Identify the customer's interests, needs, or preferences (e.g., price-sensitive, looking for combos, curious about features) in relation to the AI's suggestions.\n\n"
-                        f"Summarize concisely in **1-2 sentences**, ensuring the insights reflect the flow of the conversation and how the customer reacted to AI's responses."
-                    )
-
+                f"Based on the conversation:\n{context}\n\n"
+                f"Identify the customer's interests, needs, or preferences (e.g., price-sensitive, looking for combos, curious about features). "
+                f"Pay attention to both their **direct statements** and any **implied concerns or priorities** based on their responses.\n\n"
+                f"Ensure consistency in profiling. If their focus shifts (e.g., from price-sensitive to feature-driven), clearly state **what changed in the conversation** that led to this shift.\n\n"
+                f"Summarize concisely in **1-2 sentences**, capturing the most relevant insights that would help a salesperson guide the conversation effectively."
+            )
 
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
         logger.info(f"Customer profile built: {customer_profile}")
