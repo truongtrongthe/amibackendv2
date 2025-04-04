@@ -343,9 +343,8 @@ class MC:
             f"Message: '{message}'\n"
             f"Product Info: {kwcontext}\n"
             f"Task: Reply in Vietnamese. Keep it short, casual, and fun—no formal greetings or repeat vibes from Context. "
-            f"Skim the Context to catch the conversation flow—what has been said, what is shifted (e.g., from venting to asking)—and vibe off that with the Message. "
-            f"If Product Info fits, drop a subtle hint about 1-2 items tying to the Message and Context (e.g., 'you mentioned stamina before, this could help'), nudging sales naturally. "
-            f"Cap it at 3 sentences max—keep it light, fresh, and on-point with what has been chatted about."
+            f"Skim the Context to catch the conversation flow—what has been said, what is shifted (e.g., from venting to asking)—and vibe off that with the Message."
+            f"Keep it short at 2 sentences max. Keep it light, fresh, and on-point with what has been chatted about."
         )
         logger.info(f"casual prompt={prompt}")
         

@@ -68,7 +68,7 @@ async def mc_node(state: State, config=None):
         state["prompt_str"] = response_chunk
         state["unresolved_requests"] = mc.state["unresolved_requests"]  # From mc.state
         state["bank_name"] = mc.state["bank_name"]  # Sync from mc.state
-        logger.info(f"Streaming chunk from mc_node: {response_chunk}")
+        #logger.info(f"Streaming chunk from mc_node: {response_chunk}")
         yield {
             "prompt_str": response_chunk,
             "unresolved_requests": state["unresolved_requests"],
@@ -160,11 +160,11 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
             # Update state without messages channel
             await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
         
-        logger.debug(f"State after event: {json.dumps(state, default=str)}")
-        logger.debug(f"Messages list: {json.dumps(messages, default=str)}")
+        #logger.debug(f"State after event: {json.dumps(state, default=str)}")
+        #logger.debug(f"Messages list: {json.dumps(messages, default=str)}")
 
     yield "data: [DONE]\n\n"
     # Final state sync with messages
     state["messages"] = messages
     STATE_STORE[thread_id] = state
-    logger.debug(f"Final state saved: {json.dumps(state, default=str)}")
+    #logger.debug(f"Final state saved: {json.dumps(state, default=str)}")
