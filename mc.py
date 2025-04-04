@@ -214,7 +214,7 @@ class MC:
         
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
-        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg}" for msg in state["messages"][-30:])
+        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg}" for msg in state["messages"][-26:])
 
         if state["unresolved_requests"]:
             current_embedding = self.embedder.encode(latest_msg_content, convert_to_tensor=True)
@@ -282,12 +282,14 @@ class MC:
                     f"Message: '{message}'\n"
                     f"Customer Profile: {customer_profile}\n"
                     f"Product Info and Rules: {kwcontext}\n"
-                    f"Task: Reply in Vietnamese. Start casual and friendly, avoid greeting if already greeted. "
-                    f"Reason from the recent conversation in Context and align with the Customer Profile to pick the most relevant products or tips for their needs (e.g., stamina, fertility), limiting to 3 distinct items unless nudging to a sale, then use 3-5. "
-                    f"Extract and prioritize testimonials and skills explicitly labeled or clearly implied in Product Info and Rules, pulling the most relevant ones matching the Customer Profile and recent Context (e.g., testimonials for trust, closing actions for purchase intent). "
-                    f"Prioritize testimonial links when trust-building is needed (e.g., doubts about effectiveness). "
-                    f"If nudging to a sale, highlight specific benefits matching their goals in 3-5 sentences, weaving in testimonials or skills. Otherwise, hint at options casually."
-                )
+                    f"Task: Reply in Vietnamese. Start casual and friendly, avoid repeating greetings or info already given in Context. "
+                    f"Analyze the full Context to understand the conversation's flow—note what the user asked, what I've answered, and how their focus has shifted (e.g., from price to features). "
+                    f"Reason step-by-step from the recent messages in Context, explicitly referencing relevant prior exchanges where it fits naturally (e.g., 'You mentioned price earlier, so...'). "
+                    f"Align with the Customer Profile to pick the most relevant products or tips for their needs (e.g., stamina, fertility), limiting to 3 distinct items unless nudging to a sale, then use 3-5—don't repeat items already suggested unless building on them. "
+                    f"Extract and prioritize testimonials and skills from Product Info and Rules that match both the Customer Profile and specific cues from Context (e.g., doubts, curiosity), pulling the top 1-2 most relevant ones. "
+                    f"If trust-building is needed (e.g., user hesitated or questioned effectiveness in Context), weave in testimonial links and explain why they are relevant now. "
+                    f"If nudging to a sale, highlight specific benefits matching their goals in 3-5 sentences, tying back to their prior questions or interests in Context, and include testimonials or skills. Otherwise, hint at options casually while staying consistent with what has been discussed."
+                )   
 
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
@@ -340,11 +342,10 @@ class MC:
             f"Context: {context}\n"
             f"Message: '{message}'\n"
             f"Product Info: {kwcontext}\n"
-            f"Task: Reply in Vietnamese. Keep it short, casual, and fun—no formal greetings. "
-            f"Reason from the Context and Message to give a light, relevant response. "
-            f"If Product Info is available, weave in a subtle hint about 1-2 items matching the Message, "
-            f"then nudge toward sales talk naturally (e.g., 'nếu thích thì thử xem sao'). "
-            f"Keep it under 3 sentences unless Product Info is empty, then just vibe with the Message."
+            f"Task: Reply in Vietnamese. Keep it short, casual, and fun—no formal greetings or repeat vibes from Context. "
+            f"Skim the Context to catch the conversation flow—what has been said, what is shifted (e.g., from venting to asking)—and vibe off that with the Message. "
+            f"If Product Info fits, drop a subtle hint about 1-2 items tying to the Message and Context (e.g., 'you mentioned stamina before, this could help'), nudging sales naturally. "
+            f"Cap it at 3 sentences max—keep it light, fresh, and on-point with what has been chatted about."
         )
         logger.info(f"casual prompt={prompt}")
         
