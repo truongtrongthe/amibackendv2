@@ -268,12 +268,13 @@ class MC:
         # Sync LLM to build customer profile
         
         profile_prompt = (
-            f"Based on this conversation:\n{context}\n"
-            f"Infer the customer's interests, needs, or preferences (e.g., price-sensitive, looking for combos, curious about features). "
-            f"Summarize it in 1-2 sentences."
-        )
+                        f"Based on the conversation:\n{context}\n\n"
+                        f"Infer the customer's interests, needs, or preferences (e.g., price-sensitive, looking for combos, curious about features). "
+                        f"Summarize concisely in **1-2 sentences**, focusing on what matters most to their decision-making."
+                    )
+
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
-        logger.info(f"Customer profile: {customer_profile}")
+        logger.info(f"Customer profile built: {customer_profile}")
 
         # Main response prompt with profile and product info
         base_prompt = (
@@ -281,15 +282,21 @@ class MC:
                     f"Context: {context}\n"
                     f"Message: '{message}'\n"
                     f"Customer Profile: {customer_profile}\n"
-                    f"Product Info and Rules: {kwcontext}\n"
-                    f"Task: Reply in Vietnamese. Start casual and friendly, avoid repeating greetings or info already given in Context. "
-                    f"Analyze the full Context to understand the conversation's flow—note what the user asked, what I've answered, and how their focus has shifted (e.g., from price to features). "
-                    f"Reason step-by-step from the recent messages in Context, explicitly referencing relevant prior exchanges where it fits naturally (e.g., 'You mentioned price earlier, so...'). "
-                    f"Align with the Customer Profile to pick the most relevant products or tips for their needs (e.g., stamina, fertility), limiting to 3 distinct items unless nudging to a sale, then use 3-5—don't repeat items already suggested unless building on them. "
-                    f"Extract and prioritize testimonials and skills from Product Info and Rules that match both the Customer Profile and specific cues from Context (e.g., doubts, curiosity), pulling the top 1-2 most relevant ones. "
-                    f"If trust-building is needed (e.g., user hesitated or questioned effectiveness in Context), weave in testimonial links and explain why they are relevant now. "
-                    f"If nudging to a sale, highlight specific benefits matching their goals in 3-5 sentences, tying back to their prior questions or interests in Context, and include testimonials or skills. Otherwise, hint at options casually while staying consistent with what has been discussed."
-                )   
+                    f"Rules: {kwcontext}\n"
+                    f"Task: Reply in Vietnamese in a casual and friendly tone. Avoid repeating greetings if one is already in Context.\n\n"
+
+                    f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages only where naturally relevant (e.g., 'You mentioned price earlier, so...').\n\n"
+
+                    f"2. Use the Customer Profile to select the most relevant products or instructions from Rules.\n\n"
+
+                    f"3. Retrieve and rank the top 2 **most impactful** testimonials from Rules based on relevance to both the Customer Profile AND specific cues from Context (e.g., doubts, curiosity, objections).\n\n"
+
+                    f"4. If hesitation or concerns appear in Context, introduce testimonials smoothly, explaining their relevance without sounding forced.\n\n"
+
+                    f"5. If guiding towards a sale, highlight benefits naturally, tying them back to prior interests or concerns in a conversational way. Use testimonials or sales skills strategically, making the transition organic rather than abrupt.\n\n"
+
+                    f"6. If not guiding towards a sale, hint at options casually while staying aligned with the ongoing discussion.\n"
+                )
 
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
@@ -330,7 +337,7 @@ class MC:
                 related_request["response"] = builder.build()
     
     async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, bank_name: str = ""):
-        logger.info(f"Handling casual with bank_name: {bank_name}")
+        logger.info(f"Handling CASUAL. Bank_name: {bank_name}")
         
         # Fetch knowledge with fallback to empty list
         knowledge = await query_knowledge(message, bank_name=bank_name) or []
@@ -338,15 +345,14 @@ class MC:
         
         # Tightened prompt mirroring _handle_request structure
         prompt = (
-            f"AI: {self.name} (smart, chill)\n"
-            f"Context: {context}\n"
-            f"Message: '{message}'\n"
-            f"Product Info: {kwcontext}\n"
-            f"Task: Reply in Vietnamese. Keep it short, casual, and fun—no formal greetings or repeat vibes from Context. "
-            f"Skim the Context to catch the conversation flow—what has been said, what is shifted (e.g., from venting to asking)—and vibe off that with the Message."
-            f"Keep it short at 2 sentences max. Keep it light, fresh, and on-point with what has been chatted about."
-        )
-        logger.info(f"casual prompt={prompt}")
+                f"AI: {self.name} (smart, chill)\n"
+                f"Context: {context}\n"
+                f"Message: '{message}'\n"
+                f"Task: Reply in Vietnamese in **2 short sentences**—casual, fun, and effortless. No formal greetings or repeated vibes from Context.\n\n"
+                f"Skim Context to catch the flow and reply naturally. Skip greetings if one already exists."
+            )
+
+        #logger.info(f"casual prompt={prompt}")
         
         async for chunk in self.stream_response(prompt, builder):
             yield chunk
