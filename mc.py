@@ -7,8 +7,8 @@ import json
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from database import query_knowledge
-LLM = ChatOpenAI(model="gpt-4o-mini", streaming=False)
-StreamLLM = ChatOpenAI(model="gpt-4o-mini", streaming=True)
+LLM = ChatOpenAI(model="gpt-4o", streaming=False)
+StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
 
 FEEDBACKTYPE = ["correction", "adjustment", "new", "confirmation", "clarification",
                 "rejection", "elaboration", "satisfaction", "confusion"]
