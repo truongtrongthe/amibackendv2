@@ -267,12 +267,13 @@ class MC:
 
         # Sync LLM to build customer profile
         profile_prompt = (
-                f"Based on the conversation:\n{context}\n\n"
-                f"Identify the customer's interests, needs, or preferences (e.g., price-sensitive, looking for combos, curious about features). "
-                f"Pay attention to both their **direct statements** and any **implied concerns or priorities** based on their responses.\n\n"
-                f"Ensure consistency in profiling. If their focus shifts (e.g., from price-sensitive to feature-driven), clearly state **what changed in the conversation** that led to this shift.\n\n"
-                f"Summarize concisely in **1-2 sentences**, capturing the most relevant insights that would help a salesperson guide the conversation effectively."
-            )
+    f"Based on the conversation:\n{context}\n\n"
+    f"Build a concise customer profile that reflects their core interests, needs, and underlying intent. Focus especially on what is revealed in the most recent customer messages, without ignoring important patterns from earlier.\n\n"
+    f"Include both practical cues (e.g., price sensitivity, feature curiosity, interest in combos) and emotional signals (e.g., doubt, curiosity, urgency, trust concerns) that would influence their buying decision.\n\n"
+    f"If their intent has shifted, explain what triggered the shift. Do not overwrite previous traits unless the conversation clearly supports the change.\n\n"
+    f"Summarize in 1–2 sentences, focusing on what matters most to effectively guide the next step in the sales conversation."
+)
+
 
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
         logger.info(f"Customer profile built: {customer_profile}")
