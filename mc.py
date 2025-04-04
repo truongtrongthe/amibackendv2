@@ -278,25 +278,27 @@ class MC:
 
         # Main response prompt with profile and product info
         base_prompt = (
-                    f"AI: {self.name}\n"
-                    f"Context: {context}\n"
-                    f"Message: '{message}'\n"
-                    f"Customer Profile: {customer_profile}\n"
-                    f"Rules: {kwcontext}\n"
-                    f"Task: Reply in Vietnamese in a casual and friendly tone. Avoid repeating greetings if one is already in Context.\n\n"
+                        f"AI: {self.name}\n"
+                        f"Context: {context}\n"
+                        f"Message: '{message}'\n"
+                        f"Customer Profile: {customer_profile}\n"
+                        f"Rules: {kwcontext}\n"
+                        f"Task: Reply in Vietnamese in a casual and friendly tone. Avoid repeating greetings if one is already in Context.\n\n"
 
-                    f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages only where naturally relevant (e.g., 'You mentioned price earlier, so...').\n\n"
+                        f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages only where naturally relevant (e.g., 'You mentioned price earlier, so...').\n\n"
 
-                    f"2. Use the Customer Profile to select the most relevant products or instructions from Rules.\n\n"
+                        f"2. Use the Customer Profile to select the most relevant products or instructions from Rules.\n\n"
 
-                    f"3. Retrieve and rank the top 2 **most impactful** testimonials from Rules based on relevance to both the Customer Profile AND specific cues from Context (e.g., doubts, curiosity, objections).\n\n"
+                        f"3. Retrieve and rank the top 2 **most impactful** testimonials from Rules based on relevance to both the Customer Profile AND specific cues from Context (e.g., doubts, curiosity, objections).\n\n"
 
-                    f"4. If hesitation or concerns appear in Context, introduce testimonials smoothly, explaining their relevance without sounding forced.\n\n"
+                        f"4. If hesitation or concerns appear in Context, introduce testimonials smoothly, explaining their relevance without sounding forced.\n\n"
 
-                    f"5. If guiding towards a sale, highlight benefits naturally, tying them back to prior interests or concerns in a conversational way. Use testimonials or sales skills strategically, making the transition organic rather than abrupt.\n\n"
+                        f"5. If guiding towards a sale, highlight benefits naturally, tying them back to prior interests or concerns in a conversational way. Use testimonials or sales skills strategically, making the transition organic rather than abrupt.\n\n"
 
-                    f"6. If not guiding towards a sale, hint at options casually while staying aligned with the ongoing discussion.\n"
-                )
+                        f"6. If not guiding towards a sale, hint at options casually while staying aligned with the ongoing discussion.\n\n"
+
+                        f"7. **Debug Info**: Return the inferred **Customer Profile** before generating a response. If no strong profile is detected, state 'Customer Profile unclear'."
+                    )
 
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
