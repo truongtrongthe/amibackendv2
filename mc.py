@@ -289,7 +289,7 @@ class MC:
          TESTING PROMPT
         """
         
-        profile_prompt = (
+        profile_prompt_good = (
             f"Based on the conversation:\n{context}\n\n"
             f"Follow these instructions to shape the profile and drive the next-step action:\n{kwcontext if kwcontext else 'No specific instructions available; infer from conversation context alone.'}\n\n"
             f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to pinpoint what's driving them now, weaving in earlier patterns if they align with the instructions.\n\n"
@@ -300,12 +300,23 @@ class MC:
             f"If their focus shifts, note the trigger and adjust only if the instructions allow—otherwise, stay consistent with prior traits unless contradicted.\n\n"
             f"Summarize in 1-2 sentences with a clear next-step action (e.g., 'Ask probing questions to uncover causes, then pitch course') that strictly follows the instructions’ sequence and intent, defaulting to a context-based action if no instructions are provided."
         )
+        profile_prompt = (
+            f"Based on the conversation:\n{context}\n\n"
+            f"Use these instructions as your strict guide to analyze the situation and determine the next step, following their exact wording and sequence:\n{kwcontext if kwcontext else 'No specific instructions available; infer from conversation context alone.'}\n\n"
+            f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to pinpoint what's driving them now, weaving in earlier patterns if they align with the instructions.\n\n"
+            f"Interests: What they’re drawn to (e.g., practical solutions, quick results), guided by the instructions.\n"
+            f"Needs: What they’re seeking (e.g., guidance, confidence), tied to the instructions’ focus.\n"
+            f"Hidden desires: Subtle motivations (e.g., self-assurance, partner satisfaction), reflecting the instructions’ insights.\n\n"
+            f"Add specific cues for sales: Product preferences (e.g., course features), pain points (e.g., embarrassment), and emotional triggers (e.g., loss of confidence) that match the instructions’ suggested approach.\n\n"
+            f"If their focus shifts, note the trigger and adjust only if the instructions allow—otherwise, stay consistent with prior traits unless contradicted.\n\n"
+            f"Summarize in 1-2 sentences with a clear next-step action: analyze the current conversation state (e.g., what the customer has said, how much they’ve revealed, their apparent intent); then, strictly follow the instructions’ sequence—start by asking the exact open-ended questions provided (e.g., 'Anh gặp trường hợp này từ lúc mới bắt đầu quan hệ, hay gần đây mới bị anh nhỉ?') if no responses yet; after they respond, proceed to analyze their answers against the listed causes (psychological, physiological, habits), then offer empathy and motivation using the instructed phrasing (e.g., 'Em hiểu cảm giác này...'); only pitch the product combo ('1 year for 399K or 2 years for 599K + 3 free eBooks') if they show explicit buying intent (e.g., 'send it,' 'I want it') after earlier steps; otherwise, continue probing or building trust with the next instructed step, defaulting to a context-based open-ended question if instructions are unclear."
+            )
 
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
         logger.info(f"Customer profile built: {customer_profile}")
 
         # Main response prompt with profile and product info
-        base_prompt = (
+        base_prompt_kind_worked = (
             f"AI: {self.name}\n"
             f"Context: {context}\n"
             f"Message: '{message}'\n"
@@ -319,6 +330,20 @@ class MC:
             f"5. If guiding towards a sale, highlight benefits tied to their interests or hidden desires, using the profile's next-step action as a guide. Make it conversational, not pushy.\n\n"
             f"6. If not guiding towards a sale, hint at options casually, staying aligned with their profile and discussion flow.\n\n"
             f"7. **Debug Info**: Skip re-inferring Customer Profile—use the provided one. If it's missing or vague, state 'Customer Profile incomplete, assuming curiosity-driven interest' and proceed."
+        )
+        base_prompt = (
+            f"AI: {self.name}\n"
+            f"Context: {context}\n"
+            f"Message: '{message}'\n"
+            f"Customer Profile: {customer_profile}\n"
+            f"Rules: {kwcontext}\n"
+            f"Task: Reply in Vietnamese in a casual and friendly tone. Keep answer short in 2 sentences. Avoid repeating greetings if one is already in Context.\n\n"
+            f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages naturally where relevant.\n\n"
+            f"2. Strictly follow the Customer Profile’s next-step action as your sole guide, executing its full sequence (e.g., ‘acknowledge… then… proceed to…’) exactly as written, aligning with the Rules’ intent—do not skip or stop short of any step.\n\n"
+            f"3. Use the exact phrasing and actions from the Rules that match the profile’s current next-step; include testimonials or product offers only when the profile explicitly directs it (e.g., ‘proceed to the product pitch’)—do not omit them if instructed.\n\n"
+            f"4. If hesitation appears in Context, address it with empathy from Rules only if the profile’s next-step calls for it—otherwise, stay on the instructed action.\n\n"
+            f"5. Keep the tone conversational and tied to the profile’s interests, needs, and cues, fully completing the current step in the sequence.\n\n"
+            f"6. **Debug Info**: Use the provided Customer Profile as-is; if missing, state 'Customer Profile incomplete, assuming curiosity-driven interest' and proceed."
         )
         if feedback_type in ["satisfaction", "confirmation"]:
             if related_request:
