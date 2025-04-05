@@ -272,9 +272,10 @@ class MC:
             builder.add("Oops, có lỗi khi tìm thông tin, thử lại nhé!")
             yield builder.build()
             return
+        
 
         # Sync LLM to build customer profile
-        profile_prompt = (
+        profile_prompt_running_OK = (
         f"Based on the conversation:\n{context}\n\n"
         f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to highlight what's driving them now, while weaving in key patterns from earlier if they still apply.\n\n"
         f"Interests: What they're drawn to (e.g., product features, price). Needs: What they're seeking (e.g., info, reassurance). Hidden desires: Subtle motivations (e.g., trust, value, excitement).\n\n"
@@ -282,6 +283,23 @@ class MC:
         f"If their focus shifts, note the trigger without erasing prior traits unless contradicted.\n\n"
         f"Summarize in 1-2 sentences with a clear next-step action (e.g., 'Push feature X to build trust')."
                 )
+        
+
+        """
+         TESTING PROMPT
+        """
+        
+        profile_prompt = (
+            f"Based on the conversation:\n{context}\n\n"
+            f"Follow these instructions to shape the profile and drive the next-step action:\n{kwcontext if kwcontext else 'No specific instructions available; infer from conversation context alone.'}\n\n"
+            f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to pinpoint what's driving them now, weaving in earlier patterns if they align with the instructions.\n\n"
+            f"Interests: What they’re drawn to (e.g., practical solutions, quick results), guided by the instructions.\n"
+            f"Needs: What they’re seeking (e.g., guidance, confidence), tied to the instructions’ focus.\n"
+            f"Hidden desires: Subtle motivations (e.g., self-assurance, partner satisfaction), reflecting the instructions’ insights.\n\n"
+            f"Add specific cues for sales: Product preferences (e.g., course features), pain points (e.g., embarrassment), and emotional triggers (e.g., loss of confidence) that match the instructions’ suggested approach.\n\n"
+            f"If their focus shifts, note the trigger and adjust only if the instructions allow—otherwise, stay consistent with prior traits unless contradicted.\n\n"
+            f"Summarize in 1-2 sentences with a clear next-step action (e.g., 'Ask probing questions to uncover causes, then pitch course') that strictly follows the instructions’ sequence and intent, defaulting to a context-based action if no instructions are provided."
+        )
 
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
         logger.info(f"Customer profile built: {customer_profile}")
