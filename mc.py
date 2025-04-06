@@ -7,6 +7,9 @@ import json
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from database import query_knowledge
+from brainlog import create_brain_log
+import re
+from typing import Tuple
 
 def add_messages(existing_messages, new_messages):
     return existing_messages + new_messages
@@ -17,7 +20,6 @@ StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
 FEEDBACKTYPE = ["correction", "adjustment", "new", "confirmation", "clarification",
                 "rejection", "elaboration", "satisfaction", "confusion"]
 
-STATE_STORE = {}
 
 class ResponseBuilder:
     def __init__(self):
@@ -55,7 +57,8 @@ class MC:
             "convo_id": self.convo_id,
             "user_id": self.user_id,
             "prompt_str": "",
-            "bank_name":""
+            "bank_name":"",
+            "brain_uuid":""
         }
     async def initialize(self):
         if not self.instincts:
@@ -195,7 +198,7 @@ class MC:
             yield builder.build(separator="\n")
 
     # mc.py (in trigger)
-    async def trigger(self, state: Dict = None, user_id: str = None, bank_name: str = None, config: Dict = None):
+    async def trigger(self, state: Dict = None, user_id: str = None, bank_name: str = None, brain_uuid :str =None,config: Dict = None):
         state = state or self.state.copy()
         user_id = user_id or self.user_id
         config = config or {}
@@ -208,8 +211,16 @@ class MC:
         if not bank_name:
             logger.warning(f"bank_name is empty! State: {state}, Config: {config}")
         
+        brain_uuid = (
+            brain_uuid if brain_uuid is not None 
+            else state.get("brain_uuid", 
+                config.get("configurable", {}).get("brain_uuid", 
+                    self.bank_name if hasattr(self, 'brain_uuid') else ""))
+        )
+        
         # Sync with mc.state
         self.state["bank_name"] = bank_name
+        self.state["brain_uuid"] = brain_uuid
         if "unresolved_requests" not in state:
             state["unresolved_requests"] = self.state.get("unresolved_requests", [])
 
@@ -238,7 +249,7 @@ class MC:
         
         logger.info(f"intent in trigger={intent}")
         if intent == "request":
-            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, bank_name=bank_name):
+            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, bank_name=bank_name,brain_uuid=brain_uuid):
                 state["prompt_str"] = response_chunk
                 logger.debug(f"Yielding from trigger: {state['prompt_str']}")
                 yield response_chunk
@@ -259,7 +270,7 @@ class MC:
         yield {"state": state}
     
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", 
-                         feedback_type: str, state: Dict, intent: str, bank_name: str = ""):
+                         feedback_type: str, state: Dict, intent: str, bank_name: str = "",brain_uuid: str =""):
         related_request = await self.resolve_related_request(message, feedback_type, state, context)
         logger.info(f"Handling request for user {user_id} with bank_name: {bank_name}")
         
@@ -273,18 +284,6 @@ class MC:
             yield builder.build()
             return
         
-
-        # Sync LLM to build customer profile
-        profile_prompt_running_OK = (
-        f"Based on the conversation:\n{context}\n\n"
-        f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to highlight what's driving them now, while weaving in key patterns from earlier if they still apply.\n\n"
-        f"Interests: What they're drawn to (e.g., product features, price). Needs: What they're seeking (e.g., info, reassurance). Hidden desires: Subtle motivations (e.g., trust, value, excitement).\n\n"
-        f"Add specific cues for sales: Product preferences (if hinted), pain points (e.g., cost concerns), and emotional triggers (e.g., doubt, urgency) that could sway their decision.\n\n"
-        f"If their focus shifts, note the trigger without erasing prior traits unless contradicted.\n\n"
-        f"Summarize in 1-2 sentences with a clear next-step action (e.g., 'Push feature X to build trust')."
-                )
-        
-
         """
          TESTING PROMPT
         """
@@ -313,31 +312,28 @@ class MC:
             )
 
         customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
+        analysis = "\n".join(f"Customer Profile: {customer_profile}")
         logger.info(f"Customer profile built: {customer_profile}")
+        
+        
+        # Measure feasibility
+        possibility, missing = await self._measure_feasibility(message, context, customer_profile, kwcontext)
+        analysis = "\n".join([
+            f"Customer Profile Feasibility:",
+            f"  - Possibility: {possibility}%",
+            f"  - Missing Information: {', '.join(missing) if missing else 'Không thiếu thông tin nào'}"
+        ])
 
-        # Main response prompt with profile and product info
-        base_prompt_kind_worked = (
-            f"AI: {self.name}\n"
-            f"Context: {context}\n"
-            f"Message: '{message}'\n"
-            f"Customer Profile: {customer_profile}\n"
-            f"Rules: {kwcontext}\n"
-            f"Task: Reply in Vietnamese in a casual and friendly tone.Keep answer short in 2 sentences. Avoid repeating greetings if one is already in Context.\n\n"
-            f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages naturally where relevant (e.g., 'You asked about this earlier, so…').\n\n"
-            f"2. Use the Customer Profile's interests, needs, and sales cues to select the most relevant products or instructions from Rules. Match product features to their preferences or pain points.\n\n"
-            f"3. Retrieve and rank the top 2 **most impactful** testimonials from Rules based on the Customer Profile's emotional triggers (e.g., trust for skepticism, excitement for curiosity) and Context cues.\n\n"
-            f"4. If hesitation or concerns appear in Context, weave in a testimonial casually, tying it to their profile (e.g., 'Someone like you was unsure too, but…').\n\n"
-            f"5. If guiding towards a sale, highlight benefits tied to their interests or hidden desires, using the profile's next-step action as a guide. Make it conversational, not pushy.\n\n"
-            f"6. If not guiding towards a sale, hint at options casually, staying aligned with their profile and discussion flow.\n\n"
-            f"7. **Debug Info**: Skip re-inferring Customer Profile—use the provided one. If it's missing or vague, state 'Customer Profile incomplete, assuming curiosity-driven interest' and proceed."
-        )
+        # Optional: Log or use the analysis
+        logger.info(analysis)
+
         base_prompt = (
             f"AI: {self.name}\n"
             f"Context: {context}\n"
             f"Message: '{message}'\n"
             f"Customer Profile: {customer_profile}\n"
             f"Rules: {kwcontext}\n"
-            f"Task: Reply in Vietnamese in a casual and friendly tone. Keep answer short in 2 sentences. Avoid repeating greetings if one is already in Context.\n\n"
+            f"Task: Reply in Vietnamese in a casual and friendly tone. Keep answer short in 2-3 sentences. Avoid repeating greetings if one is already in Context.\n\n"
             f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages naturally where relevant.\n\n"
             f"2. Strictly follow the Customer Profile’s next-step action as your sole guide, executing its full sequence (e.g., ‘acknowledge… then… proceed to…’) exactly as written, aligning with the Rules’ intent—do not skip or stop short of any step.\n\n"
             f"3. Use the exact phrasing and actions from the Rules that match the profile’s current next-step; include testimonials or product offers only when the profile explicitly directs it (e.g., ‘proceed to the product pitch’)—do not omit them if instructed.\n\n"
@@ -364,6 +360,7 @@ class MC:
                 yield builder.build()
             return
         
+        
         if feedback_type == "new" or not related_request:
             async for chunk in self.stream_response(base_prompt, builder):
                 yield builder.build()
@@ -374,16 +371,18 @@ class MC:
                 "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True,
                 "bank_name": bank_name
             })
-        
+            await self._log_to_brain(brain_uuid, message, response_text, analysis)
         elif feedback_type in ["elaboration", "clarification"]:
             logger.info("Jump to CLARIFICATION!")
             action = "clarify" if feedback_type == "clarification" else "elaborate on"
             prompt = base_prompt + f" {action.capitalize()} the prior response, using product info that fits the customer profile if it flows naturally."
             async for chunk in self.stream_response(prompt, builder):
                 yield builder.build()
+            response_text = builder.build()
             if related_request:
                 related_request["response"] = builder.build()
-    
+            await self._log_to_brain(brain_uuid, message, response_text, analysis)
+        
     async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, bank_name: str = ""):
         logger.info(f"Handling CASUAL. Bank_name: {bank_name}")
         
@@ -404,3 +403,111 @@ class MC:
         
         async for chunk in self.stream_response(prompt, builder):
             yield chunk
+    
+    async def _measure_feasibility(self, message: str, context: str, customer_profile: str, kwcontext: str) -> Tuple[int, list[str]]:
+        """
+        Evaluate the feasibility of resolving the user's request based on available information and the customer profile's next-step action.
+        """
+        possibility_prompt = (
+            f"AI: {self.name}\n"
+            f"Context: {context if context else 'No conversation context provided; assume a generic customer interaction.'}\n"
+            f"Message: '{message if message else 'User request is unspecified; infer intent from context or profile.'}'\n"
+            f"Customer Profile: {customer_profile if customer_profile else 'No profile generated yet; assume a blank slate.'}\n"
+            f"Rules: {kwcontext if kwcontext else 'No specific instructions available; use general reasoning based on context and profile.'}\n"
+            f"Task: Assess whether the AI can successfully execute the next-step action outlined in the Customer Profile (treating any step as valid), given the provided context, message, and rules.\n"
+            f"Output: Return a valid JSON object with:\n"
+            f"- 'possibility': Integer (0-100) representing the percentage chance of success.\n"
+            f"- 'missing': List of specific missing information or resources (in Vietnamese) needed to increase the possibility, or an empty list if none.\n"
+            f"Consider: Availability of data (context, message, rules), clarity of the next-step action, and the AI's capability to act on it.\n"
+        )
+        try:
+            # Handle both sync and async LLM.invoke
+            if asyncio.iscoroutinefunction(LLM.invoke):
+                response = await LLM.invoke(possibility_prompt)
+            else:
+                response = LLM.invoke(possibility_prompt)
+
+            # Extract content from response (assuming AIMessage or similar)
+            raw_response = getattr(response, 'content', response).strip()
+            logger.debug(f"Preliminary reasoning raw response: '{raw_response}'")
+
+            if not raw_response:
+                logger.warning("LLM returned an empty response")
+                return 0, ["Không có phản hồi từ LLM để đánh giá"]
+
+            # Parse JSON
+            try:
+                prelim_result = json.loads(raw_response)
+            except json.JSONDecodeError:
+                json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+                if json_match:
+                    prelim_result = json.loads(json_match.group(0))
+                else:
+                    logger.error(f"Invalid JSON in response: '{raw_response}'")
+                    return 0, ["Phản hồi từ LLM không chứa JSON hợp lệ"]
+
+            # Validate fields
+            required_fields = {"possibility", "missing"}
+            if not required_fields.issubset(prelim_result.keys()):
+                missing_fields = required_fields - set(prelim_result.keys())
+                return 0, [f"Thiếu trường dữ liệu cần thiết: {', '.join(missing_fields)}"]
+
+            possibility = prelim_result["possibility"]
+            if not isinstance(possibility, (int, float)) or not 0 <= possibility <= 100:
+                return 0, [f"Giá trị 'possibility' không hợp lệ: {possibility}"]
+
+            missing = prelim_result["missing"]
+            if not isinstance(missing, list) or not all(isinstance(item, str) for item in missing):
+                return 0, [f"Danh sách 'missing' không hợp lệ: {missing}"]
+
+            return int(possibility), missing
+
+        except Exception as e:
+            logger.error(f"Feasibility evaluation failed for '{message}': {str(e)}")
+            return 0, [f"Lỗi hệ thống khi đánh giá: {str(e)}"]
+    
+    async def _log_to_brain(self, brainid: str, request: str, response: str, gaps: str) -> str:
+        """
+        Log a conversation entry to the brain system and return the created entry ID.
+        
+        Args:
+            brainid (str): Unique identifier for the brain instance.
+            request (str): The user's input or request.
+            response (str): The AI's response to the request.
+            gaps (str): Information about missing data or gaps (e.g., from feasibility analysis).
+        
+        Returns:
+            str: The ID of the created log entry.
+        
+        Raises:
+            ValueError: If required inputs are empty or invalid.
+            Exception: If log creation fails.
+        """
+        # Validate inputs
+        if not all([brainid, request, response]):
+            raise ValueError("brainid, request, and response must not be empty")
+
+        # Log the brain UUID for tracking
+        logger.info(f"BrainUUID: {brainid}")
+
+        # Format the log entry
+        entry = f"Human: {request}. AI: {response}"
+        logger.debug(f"Logging entry: '{entry}' with gaps: '{gaps}'")
+
+        try:
+            # Assuming create_brain_log is an async function; adjust if it's sync
+            new_log = await create_brain_log(brainid, entry, gaps) if asyncio.iscoroutinefunction(create_brain_log) else create_brain_log(brainid, entry, gaps)
+            
+            # Verify the log was created and has an entry_id
+            if not hasattr(new_log, 'entry_id') or not new_log.entry_id:
+                raise ValueError("Created log missing entry_id")
+            
+            # Log and print success
+            logger.info(f"Created log entry: {new_log.entry_id}")
+            print(f"Created log: {new_log.entry_id}")
+            
+            return new_log.entry_id
+
+        except Exception as e:
+            logger.error(f"Failed to log to brain {brainid}: {str(e)}")
+            raise Exception(f"Log creation failed: {str(e)}") from e

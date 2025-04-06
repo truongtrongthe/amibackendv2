@@ -310,29 +310,3 @@ def get_aia_detail(aia_id: str) -> Optional[AIA]:
         )
     return None
 
-
-# Example usage (for testing purposes; remove in production)
-if __name__ == "__main__":
-    try:
-        # Example: Create an AIA
-        new_aia = create_aia(
-            org_id="60a2445b-95f2-4c2f-a3c5-973c7bce6c6e",
-            task_type="Chat",
-            name="Support Chatbot",
-            brain_ids=[39, 38],
-            delivery_method_ids=[3, 2]  # Assuming Zalo and Messenger
-        )
-        print(f"Created AIA: {new_aia.id}")
-
-        # Example: Get all AIAs for an org
-        aias = get_all_aias("60a2445b-95f2-4c2f-a3c5-973c7bce6c6e")
-        for aia in aias:
-            print(f"AIA: {aia.name}, Task: {aia.task_type}")
-
-        # Example: Get AIA details
-        aia_detail = get_aia_detail(new_aia.id)
-        if aia_detail:
-            print(f"AIA Detail: {aia_detail.name}, Brains: {aia_detail.brain_ids}")
-
-    except Exception as e:
-        print(f"Error: {e}")

@@ -23,6 +23,7 @@ class State(TypedDict):
     instinct: str
     bank_name: str
     unresolved_requests: List[Dict]  # Corrected from List[str]
+    brain_uuid:str
 
 mc = MC(user_id="thefusionlab")
 
@@ -32,6 +33,8 @@ async def mc_node(state: State, config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     bank_name = config.get("configurable", {}).get("bank_name", "") if config else ""
+    brain_uuid = config.get("configurable", {}).get("brain_uuid", "") if config else ""
+    
     logger.info(f"MC Node - User ID: {user_id}, Bank Name: {bank_name}")
     
     if not mc.instincts:
@@ -39,7 +42,7 @@ async def mc_node(state: State, config=None):
     
     # Process the async generator output from trigger
     final_state = state  # Default to input state
-    async for output in mc.trigger(state=state, user_id=user_id, bank_name=bank_name, config=config):
+    async for output in mc.trigger(state=state, user_id=user_id, bank_name=bank_name,brain_uuid=brain_uuid, config=config):
         if isinstance(output, dict) and "state" in output:
             final_state = output["state"]  # Capture the final state
         else:
@@ -55,7 +58,7 @@ graph_builder.add_edge("mc", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, bank_name: str = "", mode: str = "mc"):
+def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, bank_name: str = "", brain_uuid: str ="", mode: str = "mc"):
     start_time = time.time()
     thread_id = thread_id or f"mc_thread_{int(time.time())}"
     user_id = user_id or "thefusionlab"
@@ -73,7 +76,8 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
         "preset_memory": "Be friendly",
         "instinct": "",
         "bank_name": bank_name,
-        "unresolved_requests": []
+        "unresolved_requests": [],
+        "brain_uuid":brain_uuid
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
@@ -85,7 +89,7 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
 
     # Run async graph synchronously
     async def process_state():
-        config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "bank_name": bank_name}}  # Added bank_name
+        config = {"configurable": {"thread_id": thread_id, "user_id": user_id, "bank_name": bank_name,"brain_uuid": brain_uuid}}  # Added bank adn brain
         updated_state = await convo_graph.ainvoke(state, config)
         await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="mc")
         return updated_state

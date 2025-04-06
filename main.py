@@ -6,15 +6,19 @@ from flask import Flask, Response, request, jsonify
 from flask_cors import CORS
 from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
+from typing import List, Optional  # Added List and Optional imports
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
 from docuhandler import process_document,summarize_document
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
+from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
+from contact import ContactManager
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
 
+cm = ContactManager()
 # Single event loop for the app
 loop = asyncio.get_event_loop()
 
@@ -73,11 +77,12 @@ def havefun():
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
     bank_name = data.get("bank_name","")
+    brain_uuid = data.get("brain_uuid","")
 
     print("Headers:", request.headers)
     print("Fun API called!")
     print("bankname=",bank_name)
-    gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
+    gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name,brain_uuid=brain_uuid,mode="mc")
     return create_stream_response(gen)
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
@@ -502,6 +507,320 @@ def delete_aia_endpoint():
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/brainlogs', methods=['GET', 'OPTIONS'])
+def brainlogs():
+    """
+    Fetch all brain logs for a given brain.
+    Query parameter: brain_id (UUID)
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    brain_id = request.args.get('brain_id', '')
+    if not brain_id:
+        return jsonify({"error": "brain_id parameter is required"}), 400
+    
+    try:
+        logs_list: List[BrainLog] = get_brain_logs(brain_id)
+        if not logs_list:
+            return jsonify({"message": "No logs found for this brain", "logs": []}), 200
+        
+        # Convert BrainLog objects to dictionaries for JSON serialization
+        logs_data = [{
+            "entry_id": log.entry_id,
+            "brain_id": log.brain_id,
+            "entry_values": log.entry_values,
+            "gap_analysis": log.gap_analysis,
+            "created_date": log.created_date.isoformat()
+        } for log in logs_list]
+        
+        return jsonify({"logs": logs_data}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/brain-log-detail', methods=['GET', 'OPTIONS'])
+def brain_log_detail():
+    """
+    Fetch details of a specific brain log by its entry_id.
+    Query parameter: entry_id (integer)
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    entry_id = request.args.get('entry_id', '')
+    if not entry_id:
+        return jsonify({"error": "entry_id parameter is required"}), 400
+    
+    try:
+        # Convert entry_id to int, since it's an integer in the database
+        entry_id_int = int(entry_id)
+        log: Optional[BrainLog] = get_brain_log_detail(entry_id_int)
+        if not log:
+            return jsonify({"error": f"No brain log found with entry_id {entry_id}"}), 404
+        
+        log_data = {
+            "entry_id": log.entry_id,
+            "brain_id": log.brain_id,
+            "entry_values": log.entry_values,
+            "gap_analysis": log.gap_analysis,
+            "created_date": log.created_date.isoformat()
+        }
+        return jsonify({"log": log_data}), 200
+    except ValueError as ve:
+        return jsonify({"error": "entry_id must be a valid integer"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/contact-details', methods=['GET', 'OPTIONS'])
+def contact_details():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    contact_id = request.args.get('contact_id', '')
+    if not contact_id:
+        return jsonify({"error": "contact_id parameter is required"}), 400
+    
+    try:
+        contact = cm.get_contact_details(int(contact_id))  # Convert to int since id is an integer
+        if not contact:
+            return jsonify({"error": f"No contact found with contact_id {contact_id}"}), 404
+        
+        contact_data = {
+            "id": contact["id"],
+            "uuid": contact["uuid"],
+            "type": contact["type"],
+            "first_name": contact["first_name"],
+            "last_name": contact["last_name"],
+            "email": contact["email"],
+            "phone": contact["phone"],
+            "created_at": contact["created_at"],
+            "profile": contact.get("profiles", None)  # Include profile if exists
+        }
+        return jsonify({"contact": contact_data}), 200
+    except ValueError:
+        return jsonify({"error": "contact_id must be an integer"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-contact', methods=['POST', 'OPTIONS'])
+def update_contact_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    contact_id = data.get("id", "")
+    type = data.get("type", "")
+    first_name = data.get("first_name", "")
+    last_name = data.get("last_name", "")
+    email = data.get("email", None)
+    phone = data.get("phone", None)
+    
+    if not contact_id:
+        return jsonify({"error": "id is required"}), 400
+    
+    try:
+        update_data = {}
+        if type:
+            update_data["type"] = type
+        if first_name:
+            update_data["first_name"] = first_name
+        if last_name:
+            update_data["last_name"] = last_name
+        if email is not None:
+            update_data["email"] = email
+        if phone is not None:
+            update_data["phone"] = phone
+        
+        updated_contact = cm.update_contact(int(contact_id), **update_data)
+        if not updated_contact:
+            return jsonify({"error": f"No contact found with id {contact_id}"}), 404
+        
+        contact_data = {
+            "id": updated_contact["id"],
+            "uuid": updated_contact["uuid"],
+            "type": updated_contact["type"],
+            "first_name": updated_contact["first_name"],
+            "last_name": updated_contact["last_name"],
+            "email": updated_contact["email"],
+            "phone": updated_contact["phone"],
+            "created_at": updated_contact["created_at"]
+        }
+        return jsonify({"message": "Contact updated successfully", "contact": contact_data}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-contact', methods=['POST', 'OPTIONS'])
+def create_contact_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    type = data.get("type", "")
+    first_name = data.get("first_name", "")
+    last_name = data.get("last_name", "")
+    email = data.get("email", None)
+    phone = data.get("phone", None)
+    
+    if not type or not first_name or not last_name:
+        return jsonify({"error": "type, first_name, and last_name are required"}), 400
+    
+    try:
+        new_contact = cm.create_contact(type, first_name, last_name, email, phone)
+        contact_data = {
+            "id": new_contact["id"],
+            "uuid": new_contact["uuid"],
+            "type": new_contact["type"],
+            "first_name": new_contact["first_name"],
+            "last_name": new_contact["last_name"],
+            "email": new_contact["email"],
+            "phone": new_contact["phone"],
+            "created_at": new_contact["created_at"]
+        }
+        return jsonify({"message": "Contact created successfully", "contact": contact_data}), 201
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/profile-details', methods=['GET', 'OPTIONS'])
+def profile_details():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    contact_id = request.args.get('contact_id', '')
+    if not contact_id:
+        return jsonify({"error": "contact_id parameter is required"}), 400
+    
+    try:
+        contact = cm.get_contact_details(int(contact_id))
+        if not contact or not contact.get("profiles"):
+            return jsonify({"error": f"No profile found for contact_id {contact_id}"}), 404
+        
+        profile = contact["profiles"]
+        profile_data = {
+            "id": profile["id"],
+            "uuid": profile["uuid"],
+            "contact_id": profile["contact_id"],
+            "profile_summary": profile["profile_summary"],
+            "general_info": profile["general_info"],
+            "personality": profile["personality"],
+            "hidden_desires": profile["hidden_desires"],
+            "linkedin_url": profile["linkedin_url"],
+            "social_media_urls": profile["social_media_urls"],
+            "best_goals": profile["best_goals"],
+            "updated_at": profile["updated_at"]
+        }
+        return jsonify({"profile": profile_data}), 200
+    except ValueError:
+        return jsonify({"error": "contact_id must be an integer"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-profile', methods=['POST', 'OPTIONS'])
+def update_profile_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    contact_id = data.get("contact_id", "")
+    profile_summary = data.get("profile_summary", None)
+    general_info = data.get("general_info", None)
+    personality = data.get("personality", None)
+    hidden_desires = data.get("hidden_desires", None)
+    linkedin_url = data.get("linkedin_url", None)
+    social_media_urls = data.get("social_media_urls", None)
+    best_goals = data.get("best_goals", None)
+    
+    if not contact_id:
+        return jsonify({"error": "contact_id is required"}), 400
+    
+    try:
+        update_data = {}
+        if profile_summary is not None:
+            update_data["profile_summary"] = profile_summary
+        if general_info is not None:
+            update_data["general_info"] = general_info
+        if personality is not None:
+            update_data["personality"] = personality
+        if hidden_desires is not None:
+            update_data["hidden_desires"] = hidden_desires
+        if linkedin_url is not None:
+            update_data["linkedin_url"] = linkedin_url
+        if social_media_urls is not None:
+            update_data["social_media_urls"] = social_media_urls
+        if best_goals is not None:
+            update_data["best_goals"] = best_goals
+        
+        updated_profile = cm.update_contact_profile(int(contact_id), **update_data)
+        if not updated_profile:
+            return jsonify({"error": f"No profile found for contact_id {contact_id}"}), 404
+        
+        profile_data = {
+            "id": updated_profile["id"],
+            "uuid": updated_profile["uuid"],
+            "contact_id": updated_profile["contact_id"],
+            "profile_summary": updated_profile["profile_summary"],
+            "general_info": updated_profile["general_info"],
+            "personality": updated_profile["personality"],
+            "hidden_desires": updated_profile["hidden_desires"],
+            "linkedin_url": updated_profile["linkedin_url"],
+            "social_media_urls": updated_profile["social_media_urls"],
+            "best_goals": updated_profile["best_goals"],
+            "updated_at": updated_profile["updated_at"]
+        }
+        return jsonify({"message": "Profile updated successfully", "profile": profile_data}), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-profile', methods=['POST', 'OPTIONS'])
+def create_profile_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    contact_id = data.get("contact_id", "")
+    profile_summary = data.get("profile_summary", None)
+    general_info = data.get("general_info", None)
+    personality = data.get("personality", None)
+    hidden_desires = data.get("hidden_desires", None)
+    linkedin_url = data.get("linkedin_url", None)
+    social_media_urls = data.get("social_media_urls", None)
+    best_goals = data.get("best_goals", None)
+    
+    if not contact_id:
+        return jsonify({"error": "contact_id is required"}), 400
+    
+    try:
+        new_profile = cm.create_contact_profile(
+            int(contact_id), profile_summary, general_info, personality,
+            hidden_desires, linkedin_url, social_media_urls, best_goals
+        )
+        profile_data = {
+            "id": new_profile["id"],
+            "uuid": new_profile["uuid"],
+            "contact_id": new_profile["contact_id"],
+            "profile_summary": new_profile["profile_summary"],
+            "general_info": new_profile["general_info"],
+            "personality": new_profile["personality"],
+            "hidden_desires": new_profile["hidden_desires"],
+            "linkedin_url": new_profile["linkedin_url"],
+            "social_media_urls": new_profile["social_media_urls"],
+            "best_goals": new_profile["best_goals"],
+            "updated_at": new_profile["updated_at"]
+        }
+        return jsonify({"message": "Profile created successfully", "profile": profile_data}), 201
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/')
 def home():
