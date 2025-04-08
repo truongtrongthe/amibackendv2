@@ -357,7 +357,7 @@ async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> L
     ns = bank_name
     knowledge = []
     
-    logger.info(f"Querying namespace={ns}")
+    logger.info(f"Querying namespace={ns} in Index:{ami_index_name} and {ent_index_name}")
     for index in [ami_index, ent_index]:
         try:
             # Broaden filter to include all non-character entries
@@ -370,7 +370,7 @@ async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> L
                 filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
             )
             matches = results.get("matches", [])
-            #logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
+            logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
             knowledge.extend([
                 {
                     "id": match["id"],
