@@ -877,20 +877,40 @@ def verify_webhook():
 def handle_message():
     data = request.json
     
-    # Use the consolidated function to process the webhook
-    success = process_facebook_webhook(data, convo_mgr)
-    
-    # Process message content for chatbot responses if needed
     try:
-        message_data = get_sender_text(data)
-        if message_data["messageText"] != "NO-DATA":
-            # Here you can add your existing chatbot logic 
-            # For example:
-            # response_text = "Thank you for your message!"
-            # send_message(message_data["senderID"], {"text": response_text})
-            pass
+        # Check if this is a "message echo" event (messages sent by our page)
+        entry = data.get("entry", [{}])[0]
+        messaging = entry.get("messaging", [{}])[0]
+        is_echo = messaging.get("message", {}).get("is_echo", False)
+        
+        if is_echo:
+            print(f"Received message echo event (message sent by our page)")
+        else:
+            print(f"Received message from user")
+            
+        # Always process the webhook to track messages in our database
+        success = process_facebook_webhook(data, convo_mgr)
+        
+        if not success:
+            print("Warning: Failed to process Facebook webhook")
+        
+        # For non-echo messages (from actual users), you might want to generate a response
+        if not is_echo:
+            try:
+                message_data = get_sender_text(data)
+                sender_id = message_data["senderID"]
+                message_text = message_data["messageText"]
+                
+                if message_text != "NO-DATA":
+                    # Here you can add your chatbot logic to generate responses
+                    # For example:
+                    # response_text = "Thank you for your message!"
+                    # send_text_to_facebook_user(sender_id, response_text, convo_mgr)
+                    pass
+            except Exception as e:
+                print(f"Error processing user message for response: {str(e)}")
     except Exception as e:
-        print(f"❌ Error processing message for response: {str(e)}")
+        print(f"Error in webhook handler: {str(e)}")
     
     # Always return 200 to Facebook
     return "", 200

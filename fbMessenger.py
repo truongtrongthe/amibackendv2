@@ -51,6 +51,17 @@ def get_sender_text(body):
 
 
 def send_message(sender_id, message_data):
+    """
+    Send a message to Facebook Messenger.
+    Currently DISABLED - simulates successful sending without making actual API calls.
+    
+    Args:
+        sender_id: Facebook user ID to send message to
+        message_data: Message data to send in Facebook format
+        
+    Returns:
+        1 for success, 0 for failure
+    """
     url = f"https://graph.facebook.com/v22.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     headers = {"Content-Type": "application/json"}
 
@@ -61,14 +72,15 @@ def send_message(sender_id, message_data):
     }
 
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            return 1
-        else:
-            print("❌ Error sending message:", response.text)
-            return 0
-    except requests.exceptions.RequestException as e:
-        print("❌ Exception during sending:", str(e))
+        logger.info(f"[SENDING DISABLED] Would send message to Facebook user {sender_id}: {json.dumps(message_data, indent=2)}")
+        # Disabled actual API call:
+        # response = requests.post(url, json=payload, headers=headers)
+        
+        # Simulate successful response
+        logger.info(f"[SIMULATION] Message would be sent successfully to {sender_id}")
+        return 1
+    except Exception as e:
+        logger.error(f"Exception during Facebook message sending simulation: {str(e)}")
         return 0
 
 
@@ -108,10 +120,20 @@ def parse_fb_message(webhook_event: Dict[str, Any]) -> Dict[str, Any]:
     """
     messaging = webhook_event.get("entry", [{}])[0].get("messaging", [{}])[0]
     
+    # Check if this is an echo message (sent by the page)
+    is_echo = messaging.get("message", {}).get("is_echo", False)
+    
     # Parse basic message information
     sender_id = messaging.get("sender", {}).get("id")
     recipient_id = messaging.get("recipient", {}).get("id")
     timestamp = messaging.get("timestamp")
+    
+    # For echo messages, the sender is actually the page and recipient is the user
+    if is_echo:
+        # Swap sender and recipient for echo messages
+        temp_id = sender_id
+        sender_id = recipient_id  # The actual user is the recipient in echoes
+        recipient_id = temp_id    # The page is the sender in echoes
     
     # Convert timestamp to ISO format if it's a Unix timestamp
     if timestamp and isinstance(timestamp, int):
@@ -119,14 +141,14 @@ def parse_fb_message(webhook_event: Dict[str, Any]) -> Dict[str, Any]:
     
     # Initialize message object
     message_obj = {
-        "id": f"fb_{timestamp}_{sender_id}" if timestamp else f"fb_{datetime.utcnow().isoformat()}_{sender_id}",
+        "id": f"fb_{timestamp}_{recipient_id}" if timestamp else f"fb_{datetime.utcnow().isoformat()}_{recipient_id}",
         "platform_msg_id": messaging.get("message", {}).get("mid"),
-        "sender_id": sender_id,
-        "sender_type": "contact",  # Assuming messages from Facebook are from contacts
-        "recipient_id": recipient_id,
+        "sender_id": "system" if is_echo else sender_id,  # For echoes, sender is system
+        "sender_type": "system" if is_echo else "contact",  # System for page messages, contact for user messages
+        "recipient_id": sender_id if is_echo else recipient_id,  # For echoes, recipient is the user
         "timestamp": timestamp or datetime.utcnow().isoformat(),
         "platform": "facebook",
-        "status": "received"
+        "status": "sent" if is_echo else "received"  # Echoes are outgoing messages
     }
     
     # Check if it's a text message
@@ -180,7 +202,8 @@ def parse_fb_message(webhook_event: Dict[str, Any]) -> Dict[str, Any]:
     
     # Add full Facebook data for reference
     message_obj["metadata"] = {
-        "facebook": messaging
+        "facebook": messaging,
+        "is_echo": is_echo
     }
     
     return message_obj
@@ -210,47 +233,82 @@ def save_fb_message_to_conversation(contact_id: int, platform_conversation_id: s
         print(f"❌ Error saving Facebook message to conversation: {str(e)}")
         return None
 
-def send_and_save_message(contact_id: int, platform_conversation_id: str, 
-                        sender_id: str, message_data: Dict[str, Any], 
-                        convo_manager) -> Tuple[int, Optional[Dict[str, Any]]]:
+def send_and_save_message(recipient_id: str, message_data: Dict[str, Any], 
+                        convo_manager, contact_id: int = None) -> Tuple[int, Optional[Dict[str, Any]]]:
     """
-    Send a message to Facebook and save it to our conversation system
+    Send a message to Facebook and save it to our conversation system.
+    Automatically creates contact if needed.
     
     Args:
-        contact_id: ID of the contact in our system
-        platform_conversation_id: Facebook's conversation ID
-        sender_id: Facebook user ID to send message to
+        recipient_id: Facebook user ID to send message to
         message_data: Message data to send (Facebook format)
         convo_manager: Instance of ConversationManager
+        contact_id: Optional ID of the contact (if already known)
         
     Returns:
         Tuple of (success_status, updated_conversation)
     """
+    # If contact_id is not provided, try to find or create the contact
+    if not contact_id:
+        contact = get_or_create_contact_by_facebook_id(recipient_id)
+        if not contact:
+            logger.error(f"Failed to get or create contact for Facebook user {recipient_id}")
+            return 0, None
+        contact_id = contact["id"]
+    
     # First send the message to Facebook
-    success = send_message(sender_id, message_data)
+    success = send_message(recipient_id, message_data)
     
     if success:
         # Create a message object for our database
         timestamp = datetime.utcnow().isoformat()
         message_obj = {
-            "id": f"fb_sent_{timestamp}",
+            "id": f"fb_sent_{timestamp}_{recipient_id}",
             "sender_id": "system",  # Or could be the actual user ID if available
             "sender_type": "system",
-            "recipient_id": sender_id,
+            "recipient_id": recipient_id,
             "content": message_data.get("text", str(message_data)),
             "content_type": "text" if "text" in message_data else "complex",
             "timestamp": timestamp,
             "platform": "facebook",
             "status": "sent",
             "metadata": {
-                "facebook": message_data
+                "facebook": message_data,
+                "is_echo": True
             }
         }
         
+        # Add attachments if present
+        if "attachment" in message_data:
+            attachment_data = message_data["attachment"]
+            attachment_type = attachment_data.get("type")
+            
+            # Add attachment array
+            message_obj["attachments"] = [{
+                "type": attachment_type,
+                "url": attachment_data.get("payload", {}).get("url", "")
+            }]
+            
+            # Set content type based on attachment
+            message_obj["content_type"] = attachment_type
+            
+            # Set content preview
+            if attachment_type == "image":
+                message_obj["content"] = "[Image sent]"
+            elif attachment_type == "video":
+                message_obj["content"] = "[Video sent]"
+            elif attachment_type == "audio":
+                message_obj["content"] = "[Audio sent]"
+            elif attachment_type == "file":
+                message_obj["content"] = "[File sent]"
+            elif attachment_type == "template":
+                message_obj["content"] = "[Template sent]"
+        
         # Save to conversation
+        logger.info(f"Saving outgoing message to conversation for contact {contact_id}")
         conversation = save_fb_message_to_conversation(
             contact_id=contact_id,
-            platform_conversation_id=platform_conversation_id,
+            platform_conversation_id=recipient_id,
             fb_message=message_obj,
             convo_manager=convo_manager
         )
@@ -279,88 +337,73 @@ def get_or_create_contact_by_facebook_id(sender_id: str) -> Optional[Dict[str, A
     
     # No contact found, create a new one
     try:
-        # Validated Facebook Graph API fields
-        # Reference: https://developers.facebook.com/docs/graph-api/reference/user/
-        fields = [
+        # First try a minimal request with just name and picture
+        minimal_fields = [
             "id",
             "first_name",
             "last_name", 
-            "picture.type(large)",  # Use picture.type(large) instead of profile_pic
-            "email", 
-            "gender", 
-            "locale", 
-            "timezone", 
-            "about", 
-            "birthday", 
-            "location", 
-            "website",
-            "education",  # Education history
-            "work"        # Work history
+            "picture.type(large)"
         ]
         
-        logger.info(f"Requesting Facebook data for user {sender_id} with fields: {', '.join(fields)}")
-        user_url = f"https://graph.facebook.com/v18.0/{sender_id}?fields={','.join(fields)}&access_token={PAGE_ACCESS_TOKEN}"
+        logger.info(f"Making minimal Facebook data request for user {sender_id}")
+        user_url = f"https://graph.facebook.com/v18.0/{sender_id}?fields={','.join(minimal_fields)}&access_token={PAGE_ACCESS_TOKEN}"
         user_response = requests.get(user_url)
         
-        # Log raw response for debugging
-        logger.info(f"Facebook API status code: {user_response.status_code}")
+        # Log response status
+        logger.info(f"Facebook API minimal request status: {user_response.status_code}")
         
-        # Check for error response
+        # If the minimal request fails, create a basic contact record
         if user_response.status_code != 200:
-            logger.error(f"Facebook API error: {user_response.text}")
-            raise Exception(f"Facebook API returned status {user_response.status_code}")
+            logger.warning(f"Facebook API minimal request failed: {user_response.text}")
+            # Create a basic contact with default values
+            contact_data = {
+                "type": "customer",
+                "first_name": "Facebook",
+                "last_name": "User",
+                "facebook_id": sender_id,
+                "created_at": datetime.utcnow().isoformat()
+            }
             
+            logger.info(f"Creating basic contact with data: {json.dumps(contact_data, indent=2)}")
+            contact_response = supabase.table("contacts").insert(contact_data).execute()
+            contact = contact_response.data[0] if contact_response.data else None
+            
+            if contact:
+                logger.info(f"Created basic contact with ID: {contact['id']}")
+                return contact
+            else:
+                logger.error("Failed to create basic contact")
+                return None
+        
+        # If minimal request was successful, extract the data
         user_data = user_response.json()
         
-        # Log sanitized response (removing access token)
-        sanitized_response = json.dumps(user_data, indent=2)
-        logger.info(f"Facebook user data received: {sanitized_response}")
-        
-        # Extract basic contact info
+        # Extract basic info
         first_name = user_data.get("first_name", "Facebook")
         last_name = user_data.get("last_name", "User")
         
-        # Get profile picture URL properly from Facebook
-        # The field picture.type(large) returns a nested object
+        # Get profile picture URL 
         profile_pic_url = None
         if "picture" in user_data and "data" in user_data["picture"]:
             profile_pic_url = user_data["picture"]["data"].get("url")
             logger.info(f"Found profile picture URL: {profile_pic_url}")
         
-        # Fallback to direct URL if not found
+        # Use direct URL as fallback
         if not profile_pic_url:
-            logger.info("No profile picture found in response, using direct URL")
-            profile_pic_url = f"https://graph.facebook.com/{sender_id}/picture?type=large&access_token={PAGE_ACCESS_TOKEN}"
+            profile_pic_url = f"https://graph.facebook.com/{sender_id}/picture?type=large"
         
-        # Get email if available (requires specific permissions)
-        email = user_data.get("email")
-        if email:
-            logger.info(f"Email found for user: {email}")
-        else:
-            logger.info("No email available for user")
-        
-        # Extract work and education
-        work_history = user_data.get("work", [])
-        education_history = user_data.get("education", [])
-        
-        if work_history:
-            logger.info(f"Work history found: {len(work_history)} entries")
-        
-        if education_history:
-            logger.info(f"Education history found: {len(education_history)} entries")
-        
-        # Create the contact
+        # Create contact with basic info
         contact_data = {
             "type": "customer",
             "first_name": first_name,
             "last_name": last_name,
-            "email": email,
             "facebook_id": sender_id,
             "profile_picture_url": profile_pic_url,
             "created_at": datetime.utcnow().isoformat()
         }
         
-        logger.info(f"Creating new contact with data: {json.dumps(contact_data, indent=2)}")
+        # Create the contact
+        logger.info(f"Creating contact with data: {json.dumps(contact_data, indent=2)}")
         contact_response = supabase.table("contacts").insert(contact_data).execute()
         contact = contact_response.data[0] if contact_response.data else None
         
@@ -370,136 +413,162 @@ def get_or_create_contact_by_facebook_id(sender_id: str) -> Optional[Dict[str, A
             
         logger.info(f"Successfully created contact with ID: {contact['id']}")
         
-        # If contact was created and profile info exists, create a profile with additional info
-        if contact and contact.get("id"):
-            # Collect additional profile data from Facebook
-            profile_summary_parts = []
-            if user_data.get("about"):
-                profile_summary_parts.append(user_data.get("about"))
-                
-            location_info = ""
-            if user_data.get("location") and user_data["location"].get("name"):
-                location_info = f" from {user_data['location'].get('name')}"
-            
-            if not profile_summary_parts:
-                # Create a default summary if none exists
-                profile_summary_parts.append(f"Facebook user {first_name} {last_name}{location_info}.")
-            
-            # Basic profile info as JSON
-            general_info = {}
-            if user_data.get("gender"):
-                general_info["gender"] = user_data.get("gender")
-            if user_data.get("locale"):
-                general_info["locale"] = user_data.get("locale")
-            if user_data.get("timezone"):
-                general_info["timezone"] = user_data.get("timezone")
-            if user_data.get("birthday"):
-                general_info["birthday"] = user_data.get("birthday")
-            if user_data.get("location") and user_data["location"].get("name"):
-                general_info["location"] = user_data["location"].get("name")
-            
-            # Process work history
-            work_info = []
-            for work_item in work_history:
-                work_entry = {}
-                if "employer" in work_item and "name" in work_item["employer"]:
-                    work_entry["employer"] = work_item["employer"]["name"]
-                if "position" in work_item and "name" in work_item["position"]:
-                    work_entry["position"] = work_item["position"]["name"]
-                if "start_date" in work_item:
-                    work_entry["start_date"] = work_item["start_date"]
-                if "end_date" in work_item:
-                    work_entry["end_date"] = work_item["end_date"]
-                if work_entry:
-                    work_info.append(work_entry)
-            
-            if work_info:
-                general_info["work_history"] = work_info
-                
-            # Process education history
-            education_info = []
-            for edu_item in education_history:
-                edu_entry = {}
-                if "school" in edu_item and "name" in edu_item["school"]:
-                    edu_entry["school"] = edu_item["school"]["name"]
-                if "type" in edu_item:
-                    edu_entry["type"] = edu_item["type"]
-                if "year" in edu_item and "name" in edu_item["year"]:
-                    edu_entry["year"] = edu_item["year"]["name"]
-                if "concentration" in edu_item:
-                    concentrations = []
-                    for concentration in edu_item["concentration"]:
-                        if "name" in concentration:
-                            concentrations.append(concentration["name"])
-                    if concentrations:
-                        edu_entry["concentration"] = concentrations
-                if edu_entry:
-                    education_info.append(edu_entry)
-            
-            if education_info:
-                general_info["education_history"] = education_info
-            
-            # Add Facebook as source
-            general_info["source"] = "Facebook Messenger"
-            
-            # Social media info
-            social_media_urls = []
-            if user_data.get("website"):
-                website_url = user_data.get("website")
-                # Ensure website URL is a string
-                if isinstance(website_url, str):
-                    social_media_urls.append({"platform": "website", "url": website_url})
-                elif isinstance(website_url, list) and website_url:
-                    # If it's a list (sometimes Facebook returns multiple websites)
-                    social_media_urls.append({"platform": "website", "url": website_url[0]})
-            
-            # Always add Facebook profile as a social media link
-            facebook_url = f"https://facebook.com/{sender_id}"
-            social_media_urls.append({
-                "platform": "facebook", 
-                "url": facebook_url
-            })
-            
-            # Log social media URLs for debugging
-            logger.info(f"Social media URLs: {json.dumps(social_media_urls)}")
-            
-            # Create some default personality traits based on available info
-            personality_traits = f"{first_name} is a Facebook Messenger user who initiated contact with our platform."
-            
-            # Add some default goals - this is placeholder content
-            # In a real system, these would be determined through conversation analysis
-            best_goals = [
-                {
-                    "goal": "Get information or assistance",
-                    "deadline": "Ongoing",
-                    "importance": "High"
-                }
+        # Try to get additional fields in a separate request (if it fails, we still have a basic contact)
+        try:
+            # Try to get more detailed user profile info
+            additional_fields = [
+                "email", 
+                "gender", 
+                "locale", 
+                "timezone", 
+                "about", 
+                "birthday", 
+                "location", 
+                "website",
+                "education",
+                "work"        
             ]
             
-            # Create profile in Supabase
-            try:
-                profile_data = {
-                    "contact_id": contact["id"],
-                    "profile_summary": "\n".join(profile_summary_parts),
-                    "general_info": json.dumps(general_info),
-                    "personality": personality_traits,
-                    "social_media_urls": social_media_urls,
-                    "best_goals": best_goals,
-                    "linkedin_url": None,
-                    "updated_at": datetime.utcnow().isoformat()
-                }
+            logger.info(f"Requesting additional Facebook data for user {sender_id}")
+            additional_url = f"https://graph.facebook.com/v18.0/{sender_id}?fields={','.join(additional_fields)}&access_token={PAGE_ACCESS_TOKEN}"
+            additional_response = requests.get(additional_url)
+            
+            # If additional request succeeds, enhance the profile
+            if additional_response.status_code == 200:
+                additional_data = additional_response.json()
                 
-                logger.info(f"Creating profile for contact {contact['id']} with data: {json.dumps(profile_data, indent=2)}")
-                profile_response = supabase.table("profiles").insert(profile_data).execute()
-                logger.info(f"✅ Created profile for Facebook user {sender_id}")
-            except Exception as profile_err:
-                logger.error(f"Error creating profile for Facebook user: {str(profile_err)}")
+                # Update the contact with email if available
+                email = additional_data.get("email")
+                if email:
+                    logger.info(f"Updating contact with email: {email}")
+                    supabase.table("contacts").update({"email": email}).eq("id", contact["id"]).execute()
+                
+                # Create profile with additional data if available
+                if contact.get("id"):
+                    # Create profile summary
+                    profile_summary_parts = []
+                    if additional_data.get("about"):
+                        profile_summary_parts.append(additional_data.get("about"))
+                    
+                    location_info = ""
+                    if additional_data.get("location") and additional_data["location"].get("name"):
+                        location_info = f" from {additional_data['location'].get('name')}"
+                    
+                    if not profile_summary_parts:
+                        profile_summary_parts.append(f"Facebook user {first_name} {last_name}{location_info}.")
+                    
+                    # Create general info
+                    general_info = {"source": "Facebook Messenger"}
+                    
+                    for field in ["gender", "locale", "timezone", "birthday"]:
+                        if additional_data.get(field):
+                            general_info[field] = additional_data.get(field)
+                    
+                    if additional_data.get("location") and additional_data["location"].get("name"):
+                        general_info["location"] = additional_data["location"].get("name")
+                    
+                    # Process work and education if available
+                    work_history = additional_data.get("work", [])
+                    education_history = additional_data.get("education", [])
+                    
+                    # Extract work history
+                    if work_history:
+                        work_info = []
+                        for work_item in work_history:
+                            work_entry = {}
+                            if "employer" in work_item and "name" in work_item["employer"]:
+                                work_entry["employer"] = work_item["employer"]["name"]
+                            if "position" in work_item and "name" in work_item["position"]:
+                                work_entry["position"] = work_item["position"]["name"]
+                            if work_entry:
+                                work_info.append(work_entry)
+                        
+                        if work_info:
+                            general_info["work_history"] = work_info
+                    
+                    # Extract education
+                    if education_history:
+                        education_info = []
+                        for edu_item in education_history:
+                            edu_entry = {}
+                            if "school" in edu_item and "name" in edu_item["school"]:
+                                edu_entry["school"] = edu_item["school"]["name"]
+                            if "type" in edu_item:
+                                edu_entry["type"] = edu_item["type"]
+                            if edu_entry:
+                                education_info.append(edu_entry)
+                        
+                        if education_info:
+                            general_info["education_history"] = education_info
+                    
+                    # Social media URLs
+                    social_media_urls = [{"platform": "facebook", "url": f"https://facebook.com/{sender_id}"}]
+                    
+                    if additional_data.get("website"):
+                        website_url = additional_data.get("website")
+                        if isinstance(website_url, str):
+                            social_media_urls.append({"platform": "website", "url": website_url})
+                    
+                    # Create profile
+                    profile_data = {
+                        "contact_id": contact["id"],
+                        "profile_summary": "\n".join(profile_summary_parts),
+                        "general_info": json.dumps(general_info),
+                        "personality": f"{first_name} is a Facebook Messenger user.",
+                        "social_media_urls": social_media_urls,
+                        "best_goals": [{"goal": "Get information or assistance", "importance": "High"}],
+                        "updated_at": datetime.utcnow().isoformat()
+                    }
+                    
+                    logger.info(f"Creating profile with additional data for contact {contact['id']}")
+                    supabase.table("profiles").insert(profile_data).execute()
+            else:
+                # Create a basic profile even if additional data request fails
+                create_basic_profile(contact, first_name, last_name)
+                
+        except Exception as profile_err:
+            logger.error(f"Error creating enhanced profile: {str(profile_err)}")
+            # Still create a basic profile
+            create_basic_profile(contact, first_name, last_name)
         
         return contact
         
     except Exception as e:
         logger.error(f"Error creating contact from Facebook: {str(e)}", exc_info=True)
         return None
+
+def create_basic_profile(contact: Dict[str, Any], first_name: str, last_name: str) -> bool:
+    """
+    Create a basic profile for a contact with minimal information.
+    
+    Args:
+        contact: The contact dictionary
+        first_name: Contact's first name
+        last_name: Contact's last name
+        
+    Returns:
+        Success status
+    """
+    try:
+        if not contact or not contact.get("id"):
+            return False
+            
+        profile_data = {
+            "contact_id": contact["id"],
+            "profile_summary": f"Facebook user {first_name} {last_name}.",
+            "general_info": json.dumps({"source": "Facebook Messenger"}),
+            "personality": f"{first_name} is a Facebook Messenger user.",
+            "social_media_urls": [{"platform": "facebook", "url": f"https://facebook.com/{contact['facebook_id']}"}],
+            "best_goals": [{"goal": "Get information or assistance", "importance": "High"}],
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        logger.info(f"Creating basic profile for contact {contact['id']}")
+        profile_response = supabase.table("profiles").insert(profile_data).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error creating basic profile: {str(e)}")
+        return False
 
 def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
     """
@@ -514,32 +583,113 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
         Success status as boolean
     """
     try:
-        # Get message data
-        message_data = get_sender_text(data)
-        sender_id = message_data["senderID"]
-        
-        # Parse the message into our standardized format
+        # Parse message into standardized format first
         fb_message = parse_fb_message(data)
         
-        # Get or create contact
-        contact = get_or_create_contact_by_facebook_id(sender_id)
+        # Check if this is an echo (message sent by our page)
+        is_echo = fb_message.get("metadata", {}).get("is_echo", False)
+        
+        # Get the original message data (for backward compatibility)
+        message_data = get_sender_text(data)
+        sender_id = message_data.get("senderID", "UNKNOWN")
+        
+        # For echo messages (sent by page):
+        # - recipient_id is the user who received the message
+        # - For non-echo messages, user_id is the sender (who sent message to page)
+        user_id = fb_message.get("recipient_id") if is_echo else sender_id
+        
+        logger.info(f"Processing {'echo' if is_echo else 'regular'} message for user ID: {user_id}")
+        
+        # Get or create contact - always do this, regardless of echo status
+        # For echo messages, this ensures we have a contact record for the recipient
+        contact = get_or_create_contact_by_facebook_id(user_id)
         
         if not contact:
-            print("❌ Could not process message: No contact found or created")
+            logger.error(f"Could not process message: No contact found or created for ID {user_id}")
             return False
         
         # Save the message to the conversation
+        # For both echo and non-echo messages, use user_id as the platform_conversation_id
+        # This ensures all messages with a user are in the same conversation thread
         conversation = save_fb_message_to_conversation(
             contact_id=contact["id"],
-            platform_conversation_id=sender_id,  # Using Facebook sender_id as conversation ID
+            platform_conversation_id=user_id,  # Always use user ID as conversation ID
             fb_message=fb_message,
             convo_manager=convo_manager
         )
         
-        print(f"✅ Saved Facebook message to conversation for contact {contact['id']}")
+        logger.info(f"✅ Saved Facebook {'echo' if is_echo else 'message'} to conversation for contact {contact['id']}")
         
         # Return success
         return True
     except Exception as e:
-        print(f"❌ Error processing Facebook webhook: {str(e)}")
+        logger.error(f"❌ Error processing Facebook webhook: {str(e)}", exc_info=True)
+        return False
+
+def send_text_to_facebook_user(user_id: str, text_message: str, convo_manager, contact_id: int = None) -> bool:
+    """
+    Simplified helper to send a text message to a Facebook user and save it in conversations.
+    
+    Args:
+        user_id: Facebook user ID to send to
+        text_message: Plain text message to send
+        convo_manager: ConversationManager instance
+        contact_id: Optional contact ID if already known
+    
+    Returns:
+        Boolean success status
+    """
+    try:
+        # Create Facebook message format
+        message_data = {"text": text_message}
+        
+        # Send the message
+        success, conversation = send_and_save_message(
+            recipient_id=user_id,
+            message_data=message_data,
+            convo_manager=convo_manager,
+            contact_id=contact_id
+        )
+        
+        return success == 1
+    except Exception as e:
+        logger.error(f"Error sending text to Facebook user {user_id}: {str(e)}")
+        return False
+
+def send_image_to_facebook_user(user_id: str, image_url: str, convo_manager, contact_id: int = None) -> bool:
+    """
+    Simplified helper to send an image to a Facebook user and save it in conversations.
+    
+    Args:
+        user_id: Facebook user ID to send to
+        image_url: URL of the image to send
+        convo_manager: ConversationManager instance
+        contact_id: Optional contact ID if already known
+    
+    Returns:
+        Boolean success status
+    """
+    try:
+        # Create Facebook message format for image
+        message_data = {
+            "attachment": {
+                "type": "image",
+                "payload": {
+                    "url": image_url,
+                    "is_reusable": True
+                }
+            }
+        }
+        
+        # Send the message
+        success, conversation = send_and_save_message(
+            recipient_id=user_id,
+            message_data=message_data,
+            convo_manager=convo_manager,
+            contact_id=contact_id
+        )
+        
+        return success == 1
+    except Exception as e:
+        logger.error(f"Error sending image to Facebook user {user_id}: {str(e)}")
         return False
