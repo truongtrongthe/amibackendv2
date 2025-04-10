@@ -16,7 +16,7 @@ from braindb import get_brains,get_brain_details,update_brain,create_brain,get_o
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
 from contact import ContactManager
-from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook
+from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user
 from contactconvo import ConversationManager
 
 app = Flask(__name__)
@@ -902,11 +902,10 @@ def handle_message():
                 message_text = message_data["messageText"]
                 
                 if message_text != "NO-DATA":
-                    # Here you can add your chatbot logic to generate responses
-                    # For example:
-                    # response_text = "Thank you for your message!"
-                    # send_text_to_facebook_user(sender_id, response_text, convo_mgr)
-                    pass
+                    # Send responses ONLY to the specific test user ID
+                    if sender_id == "29495554333369135":
+                        response_text = "Thank you for your message!"
+                        send_text_to_facebook_user(sender_id, response_text, convo_mgr)
             except Exception as e:
                 print(f"Error processing user message for response: {str(e)}")
     except Exception as e:

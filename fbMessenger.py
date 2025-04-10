@@ -53,7 +53,8 @@ def get_sender_text(body):
 def send_message(sender_id, message_data):
     """
     Send a message to Facebook Messenger.
-    Currently DISABLED - simulates successful sending without making actual API calls.
+    Only sends messages to test user ID 29495554333369135.
+    For all other users, just logs without sending.
     
     Args:
         sender_id: Facebook user ID to send message to
@@ -72,15 +73,24 @@ def send_message(sender_id, message_data):
     }
 
     try:
-        logger.info(f"[SENDING DISABLED] Would send message to Facebook user {sender_id}: {json.dumps(message_data, indent=2)}")
-        # Disabled actual API call:
-        # response = requests.post(url, json=payload, headers=headers)
-        
-        # Simulate successful response
-        logger.info(f"[SIMULATION] Message would be sent successfully to {sender_id}")
-        return 1
+        # Check if this is our test user ID
+        if sender_id == "29495554333369135":
+            logger.info(f"Sending message to Facebook user {sender_id}: {json.dumps(message_data, indent=2)}")
+            # Actually send the message to Facebook
+            response = requests.post(url, json=payload, headers=headers)
+            
+            if response.status_code == 200:
+                logger.info(f"Message sent successfully to {sender_id}")
+                return 1
+            else:
+                logger.error(f"Error sending Facebook message: {response.text}")
+                return 0
+        else:
+            # For all other users, log that we're skipping them in test mode
+            logger.info(f"[TEST MODE] Skipping message send to non-test user {sender_id}")
+            return 1  # Still return success so conversation history is maintained
     except Exception as e:
-        logger.error(f"Exception during Facebook message sending simulation: {str(e)}")
+        logger.error(f"Exception during Facebook message sending: {str(e)}")
         return 0
 
 
@@ -574,6 +584,7 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
     """
     Process an incoming Facebook webhook event - extract message data,
     find or create contact, and save the message to the database.
+    Skip echo messages that we already tracked from our outgoing messages.
     
     Args:
         data: The webhook event data
@@ -600,8 +611,12 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
         
         logger.info(f"Processing {'echo' if is_echo else 'regular'} message for user ID: {user_id}")
         
-        # Get or create contact - always do this, regardless of echo status
-        # For echo messages, this ensures we have a contact record for the recipient
+        # Skip echo messages - we already save outgoing messages when we send them
+        if is_echo:
+            logger.info(f"Skipping echo message as we already saved it when sending")
+            return True
+        
+        # Get or create contact
         contact = get_or_create_contact_by_facebook_id(user_id)
         
         if not contact:
@@ -609,16 +624,16 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
             return False
         
         # Save the message to the conversation
-        # For both echo and non-echo messages, use user_id as the platform_conversation_id
+        # Use user_id as the platform_conversation_id
         # This ensures all messages with a user are in the same conversation thread
         conversation = save_fb_message_to_conversation(
             contact_id=contact["id"],
-            platform_conversation_id=user_id,  # Always use user ID as conversation ID
+            platform_conversation_id=user_id,
             fb_message=fb_message,
             convo_manager=convo_manager
         )
         
-        logger.info(f"✅ Saved Facebook {'echo' if is_echo else 'message'} to conversation for contact {contact['id']}")
+        logger.info(f"✅ Saved Facebook message to conversation for contact {contact['id']}")
         
         # Return success
         return True
