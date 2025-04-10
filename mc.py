@@ -393,13 +393,16 @@ class MC:
         # Optional: Log or use the analysis
         logger.info(analysis)
 
+        # Detect language of the message to determine response language
+        is_vietnamese = any(word in message.lower() for word in ["tôi", "bạn", "không", "có", "là", "và", "em", "anh", "chị", "vâng", "đúng", "sai", "được"])
+        
         base_prompt = (
             f"AI: {self.name}\n"
             f"Context: {context}\n"
             f"Message: '{message}'\n"
             f"Customer Profile: {customer_profile}\n"
             f"Rules: {kwcontext}\n"
-            f"Task: Reply in Vietnamese in a casual and friendly tone. Keep answer short in 2-3 sentences. Avoid repeating greetings if one is already in Context.\n\n"
+            f"Task: Reply {'in Vietnamese' if is_vietnamese else 'in English'} in a casual and friendly tone. Keep answer short in 2-3 sentences. Avoid repeating greetings if one is already in Context.\n\n"
             f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages naturally where relevant.\n\n"
             f"2. Strictly follow the Customer Profile's next-step action as your sole guide, executing its full sequence ('acknowledge… then… proceed to…') exactly as written, aligning with the Rules' intent—do not skip or stop short of any step.\n\n"
             f"3. Use the exact phrasing and actions from the Rules that match the profile's current next-step; include testimonials or product offers only when the profile explicitly directs it ('proceed to the product pitch')—do not omit them if instructed.\n\n"
@@ -456,13 +459,20 @@ class MC:
         knowledge = await query_knowledge(message, bank_name=bank_name) or []
         kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
         
-        # Tightened prompt mirroring _handle_request structure
+        # Detect language of the message to determine response language
+        is_vietnamese = any(word in message.lower() for word in ["tôi", "bạn", "không", "có", "là", "và", "em", "anh", "chị", "vâng", "đúng", "sai", "được"])
+        
+        # Enhanced prompt for more natural conversations
         prompt = (
-                f"AI: {self.name} (smart, chill)\n"
+                f"AI: {self.name} (smart, chill, personal assistant)\n"
                 f"Context: {context}\n"
                 f"Message: '{message}'\n"
-                f"Task: Reply in Vietnamese in **2 short sentences**—casual, fun, and effortless. No formal greetings or repeated vibes from Context.\n\n"
-                f"Skim Context to catch the flow and reply naturally. Skip greetings if one already exists."
+                f"Task: Respond naturally and conversationally to the message. "
+                f"{'Reply in Vietnamese' if is_vietnamese else 'Reply in English'} with a friendly, casual tone. "
+                f"Maintain a natural flow with the conversation context. "
+                f"Keep your response concise (1-2 sentences) unless the question requires more detail. "
+                f"Avoid repeating information already mentioned in the context. "
+                f"Skip formal greetings if the conversation is already ongoing."
             )
 
         #logger.info(f"casual prompt={prompt}")
