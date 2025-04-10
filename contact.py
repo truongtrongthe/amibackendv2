@@ -18,7 +18,7 @@ class ContactManager:
         self.profile_versions_table = "profile_versions"
 
     # Create a new contact
-    def create_contact(self, type: str, first_name: str, last_name: str, email: str = None, phone: str = None) -> dict:
+    def create_contact(self, type: str, first_name: str, last_name: str, email: str = None, phone: str = None, facebook_id: str = None, profile_picture_url: str = None) -> dict:
         if type not in ["partner", "customer"]:
             raise ValueError("Type must be 'partner' or 'customer'")
         
@@ -28,6 +28,8 @@ class ContactManager:
             "last_name": last_name,
             "email": email,
             "phone": phone,
+            "facebook_id": facebook_id,
+            "profile_picture_url": profile_picture_url,
             "created_at": datetime.utcnow().isoformat()
         }
         response = supabase.table(self.contacts_table).insert(contact_data).execute()
@@ -35,7 +37,7 @@ class ContactManager:
 
     # Update an existing contact by id
     def update_contact(self, contact_id: int, **kwargs) -> dict:
-        allowed_fields = {"type", "first_name", "last_name", "email", "phone"}
+        allowed_fields = {"type", "first_name", "last_name", "email", "phone", "facebook_id", "profile_picture_url"}
         update_data = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if "type" in update_data and update_data["type"] not in ["partner", "customer"]:
             raise ValueError("Type must be 'partner' or 'customer'")
@@ -109,6 +111,11 @@ class ContactManager:
         response = supabase.table(self.contacts_table).select("*").eq("uuid", contact_uuid).execute()
         return response.data[0] if response.data else None
 
+    # Get contact by Facebook ID
+    def get_contact_by_facebook_id(self, facebook_id: str) -> dict:
+        response = supabase.table(self.contacts_table).select("*").eq("facebook_id", facebook_id).execute()
+        return response.data[0] if response.data else None
+
 # Example usage
 if __name__ == "__main__":
     cm = ContactManager()
@@ -155,3 +162,7 @@ if __name__ == "__main__":
     # Get contact by UUID
     contact_by_uuid = cm.get_contact_by_uuid(new_contact["uuid"])
     print("Contact by UUID:", contact_by_uuid)
+
+    # Get contact by Facebook ID
+    contact_by_facebook_id = cm.get_contact_by_facebook_id(new_contact["facebook_id"])
+    print("Contact by Facebook ID:", contact_by_facebook_id)

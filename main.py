@@ -3,6 +3,8 @@
 # Date: March 23, 2025 (Updated April 01, 2025)
 
 from flask import Flask, Response, request, jsonify
+import json
+
 from flask_cors import CORS
 from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
@@ -14,11 +16,17 @@ from braindb import get_brains,get_brain_details,update_brain,create_brain,get_o
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
 from contact import ContactManager
+from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook
+from contactconvo import ConversationManager
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+
+# Simple CORS configuration that was working before
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
 
 cm = ContactManager()
+convo_mgr = ConversationManager()
 # Single event loop for the app
 loop = asyncio.get_event_loop()
 
@@ -596,6 +604,8 @@ def contact_details():
             "last_name": contact["last_name"],
             "email": contact["email"],
             "phone": contact["phone"],
+            "facebook_id": contact.get("facebook_id"),
+            "profile_picture_url": contact.get("profile_picture_url"),
             "created_at": contact["created_at"],
             "profile": contact.get("profiles", None)  # Include profile if exists
         }
@@ -617,6 +627,8 @@ def update_contact_endpoint():
     last_name = data.get("last_name", "")
     email = data.get("email", None)
     phone = data.get("phone", None)
+    facebook_id = data.get("facebook_id", None)
+    profile_picture_url = data.get("profile_picture_url", None)
     
     if not contact_id:
         return jsonify({"error": "id is required"}), 400
@@ -633,6 +645,10 @@ def update_contact_endpoint():
             update_data["email"] = email
         if phone is not None:
             update_data["phone"] = phone
+        if facebook_id is not None:
+            update_data["facebook_id"] = facebook_id
+        if profile_picture_url is not None:
+            update_data["profile_picture_url"] = profile_picture_url
         
         updated_contact = cm.update_contact(int(contact_id), **update_data)
         if not updated_contact:
@@ -646,6 +662,8 @@ def update_contact_endpoint():
             "last_name": updated_contact["last_name"],
             "email": updated_contact["email"],
             "phone": updated_contact["phone"],
+            "facebook_id": updated_contact.get("facebook_id"),
+            "profile_picture_url": updated_contact.get("profile_picture_url"),
             "created_at": updated_contact["created_at"]
         }
         return jsonify({"message": "Contact updated successfully", "contact": contact_data}), 200
@@ -665,12 +683,14 @@ def create_contact_endpoint():
     last_name = data.get("last_name", "")
     email = data.get("email", None)
     phone = data.get("phone", None)
+    facebook_id = data.get("facebook_id", None)
+    profile_picture_url = data.get("profile_picture_url", None)
     
     if not type or not first_name or not last_name:
         return jsonify({"error": "type, first_name, and last_name are required"}), 400
     
     try:
-        new_contact = cm.create_contact(type, first_name, last_name, email, phone)
+        new_contact = cm.create_contact(type, first_name, last_name, email, phone, facebook_id, profile_picture_url)
         contact_data = {
             "id": new_contact["id"],
             "uuid": new_contact["uuid"],
@@ -679,6 +699,8 @@ def create_contact_endpoint():
             "last_name": new_contact["last_name"],
             "email": new_contact["email"],
             "phone": new_contact["phone"],
+            "facebook_id": new_contact.get("facebook_id"),
+            "profile_picture_url": new_contact.get("profile_picture_url"),
             "created_at": new_contact["created_at"]
         }
         return jsonify({"message": "Contact created successfully", "contact": contact_data}), 201
@@ -821,6 +843,58 @@ def create_profile_endpoint():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/contacts', methods=['GET', 'OPTIONS'])
+def get_all_contacts():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    try:
+        contacts = cm.get_contacts()
+        if not contacts:
+            return jsonify({"message": "No contacts found", "contacts": []}), 200
+        
+        return jsonify({"contacts": contacts}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+import os
+VERIFY_TOKEN = os.getenv("CALLBACK_V_TOKEN")
+
+@app.route("/webhook", methods=["GET"])
+def verify_webhook():
+    mode = request.args.get("hub.mode")
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        print("✅ Webhook verified by Facebook.")
+        return challenge, 200
+    else:
+        return "Forbidden", 403
+
+
+@app.route("/webhook", methods=["POST"])
+def handle_message():
+    data = request.json
+    
+    # Use the consolidated function to process the webhook
+    success = process_facebook_webhook(data, convo_mgr)
+    
+    # Process message content for chatbot responses if needed
+    try:
+        message_data = get_sender_text(data)
+        if message_data["messageText"] != "NO-DATA":
+            # Here you can add your existing chatbot logic 
+            # For example:
+            # response_text = "Thank you for your message!"
+            # send_message(message_data["senderID"], {"text": response_text})
+            pass
+    except Exception as e:
+        print(f"❌ Error processing message for response: {str(e)}")
+    
+    # Always return 200 to Facebook
+    return "", 200
+
 
 @app.route('/')
 def home():
@@ -829,6 +903,97 @@ def home():
 @app.route('/ping', methods=['POST'])
 def ping():
     return "Pong"
+
+@app.route('/contact-conversations', methods=['GET', 'OPTIONS'])
+def get_contact_conversations():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    try:
+        contact_id = request.args.get('contact_id')
+        if not contact_id:
+            return jsonify({"error": "contact_id parameter is required"}), 400
+        
+        # Add detailed logging
+        print(f"Fetching conversations for contact_id: {contact_id}")
+        
+        contact_id = int(contact_id)
+        
+        # First check if contact exists
+        contact = cm.get_contact_details(contact_id)
+        if not contact:
+            return jsonify({"error": f"No contact found with ID {contact_id}"}), 404
+            
+        # Get conversations
+        conversations = []
+        try:
+            # Get recent conversations with pagination if specified
+            if 'limit' in request.args:
+                limit = int(request.args.get('limit', 10))
+                offset = int(request.args.get('offset', 0))
+                print(f"Using pagination with limit={limit}, offset={offset}")
+                conversations = convo_mgr.get_recent_conversations(contact_id, limit, offset)
+            else:
+                conversations = convo_mgr.get_conversations_by_contact(contact_id)
+        except Exception as convo_err:
+            print(f"Error retrieving conversations: {str(convo_err)}")
+            # Return empty list instead of error
+            conversations = []
+        
+        print(f"Found {len(conversations)} conversations")
+        
+        # Ensure conversation_data is properly serialized JSON
+        for convo in conversations:
+            # Handle potential string JSON representation in conversation_data
+            if isinstance(convo.get("conversation_data"), str):
+                try:
+                    convo["conversation_data"] = json.loads(convo["conversation_data"])
+                except Exception as e:
+                    print(f"Error parsing conversation_data as JSON: {str(e)}")
+                    # Provide a default empty structure
+                    convo["conversation_data"] = {"messages": []}
+            
+            # Ensure we have a messages array
+            if isinstance(convo.get("conversation_data"), dict) and "messages" not in convo["conversation_data"]:
+                convo["conversation_data"]["messages"] = []
+        
+        return jsonify({"conversations": conversations}), 200
+    except ValueError as ve:
+        print(f"Value error in contact-conversations: {str(ve)}")
+        return jsonify({"error": "Invalid contact_id format"}), 400
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Server error in contact-conversations: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/conversation', methods=['GET', 'OPTIONS'])
+def get_conversation_details():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    conversation_id = request.args.get('conversation_id')
+    if not conversation_id:
+        return jsonify({"error": "conversation_id parameter is required"}), 400
+    
+    try:
+        conversation_id = int(conversation_id)
+        conversation = convo_mgr.get_conversation(conversation_id)
+        
+        if not conversation:
+            return jsonify({"error": f"No conversation found with ID {conversation_id}"}), 404
+        
+        # If read=true parameter is passed, mark conversation as read
+        if request.args.get('read', '').lower() == 'true':
+            convo_mgr.mark_conversation_as_read(conversation_id)
+            # Get updated conversation after marking as read
+            conversation = convo_mgr.get_conversation(conversation_id)
+        
+        return jsonify({"conversation": conversation}), 200
+    except ValueError:
+        return jsonify({"error": "Invalid conversation_id format"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     try:
