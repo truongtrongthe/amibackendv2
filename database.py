@@ -11,8 +11,13 @@ import uuid
 import asyncio
 import json
 import re
-
+from supabase import create_client, Client
 from typing import Dict, List
+
+# Initialize Supabase client
+spb_url = os.getenv("SUPABASE_URL")
+spb_key = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(spb_url, spb_key)
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 ami_index_name = os.getenv("PRESET")
@@ -54,7 +59,7 @@ async def infer_categories(input: str, context: str = "") -> Dict:
 
     Guidelines:
     - Favor 'description' for statements with explanatory intent (e.g., "X là Y", "X is Y") unless a directive explicitly targets AI behavior (e.g., "You should be X", "Always be X").
-    - Extract 'primary' dynamically from the input’s subject, not a fixed list.
+    - Extract 'primary' dynamically from the input's subject, not a fixed list.
     - Avoid assuming traits unless a directive is present.
 
     Examples to Follow Strictly:
@@ -585,4 +590,163 @@ def clean_text(raw: str) -> str:
         return raw
     except Exception:
         return raw  # Fallback to original if cleaning fails
+
+async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
+    """
+    Get the bank names for all brains in a version
+    
+    Args:
+        version_id: UUID of the graph version
+    
+    Returns:
+        List of dicts containing brain_id and bank_name
+    """
+    try:
+        # First get the brain IDs from the version
+        version_response = supabase.table("brain_graph_version")\
+            .select("brain_ids", "status")\
+            .eq("id", version_id)\
+            .execute()
+        
+        if not version_response.data:
+            logger.error(f"Version {version_id} not found")
+            return []
+            
+        version_data = version_response.data[0]
+        if version_data["status"] != "published":
+            logger.warning(f"Version {version_id} is not published")
+            return []
+            
+        brain_ids = version_data["brain_ids"]
+        if not brain_ids:
+            return []
+            
+        # Get bank names for all brains
+        brain_response = supabase.table("brain")\
+            .select("brain_id", "bank_name")\
+            .in_("brain_id", brain_ids)\
+            .execute()
+            
+        if not brain_response.data:
+            return []
+            
+        return [
+            {
+                "brain_id": brain["brain_id"],
+                "bank_name": brain["bank_name"]
+            }
+            for brain in brain_response.data
+        ]
+    except Exception as e:
+        logger.error(f"Error getting brain banks: {e}")
+        return []
+
+async def query_brain_knowledge_parallel(query: str, bank_name: str, top_k: int = 10) -> List[Dict]:
+    """
+    Query knowledge from a single brain's namespace
+    This is a helper function for parallel processing
+    """
+    try:
+        results = await query_knowledge(query, bank_name=bank_name, top_k=top_k)
+        return [{
+            "bank_name": bank_name,
+            **result
+        } for result in results]
+    except Exception as e:
+        logger.error(f"Error querying brain {bank_name}: {e}")
+        return []
+
+async def query_graph_knowledge(version_id: str, query: str, top_k: int = 10) -> List[Dict]:
+    """
+    Query knowledge across all brains in a graph version
+    
+    Args:
+        version_id: UUID of the graph version
+        query: The search query
+        top_k: Maximum number of results to return per brain
+    
+    Returns:
+        List of knowledge entries from all brains, sorted by relevance
+    """
+    try:
+        # Get all brain banks in this version
+        brain_banks = await get_version_brain_banks(version_id)
+        if not brain_banks:
+            logger.warning(f"No brain banks found for version {version_id}")
+            return []
+            
+        # Query all brains in parallel
+        tasks = [
+            query_brain_knowledge_parallel(query, brain["bank_name"], top_k)
+            for brain in brain_banks
+        ]
+        results = await asyncio.gather(*tasks)
+        
+        # Flatten and sort results
+        all_results = []
+        for brain_results in results:
+            all_results.extend(brain_results)
+            
+        # Sort by score and take top_k
+        sorted_results = sorted(
+            all_results,
+            key=lambda x: x["score"],
+            reverse=True
+        )[:top_k]
+        
+        # Enhance results with brain information
+        brain_bank_map = {b["bank_name"]: b["brain_id"] for b in brain_banks}
+        for result in sorted_results:
+            result["brain_id"] = brain_bank_map.get(result["bank_name"])
+            
+        logger.info(f"Found {len(sorted_results)} results across {len(brain_banks)} brains for version {version_id}")
+        return sorted_results
+        
+    except Exception as e:
+        logger.error(f"Error in graph knowledge query: {e}")
+        return []
+
+async def query_graph_knowledge_by_category(version_id: str, category: str, top_k: int = 10) -> List[Dict]:
+    """
+    Query knowledge by category across all brains in a graph version
+    
+    Args:
+        version_id: UUID of the graph version
+        category: The category to filter by
+        top_k: Maximum number of results to return per brain
+    
+    Returns:
+        List of knowledge entries from all brains with the specified category
+    """
+    try:
+        # Get all brain banks in this version
+        brain_banks = await get_version_brain_banks(version_id)
+        if not brain_banks:
+            return []
+            
+        all_results = []
+        for brain in brain_banks:
+            # Get raw data for the category from each brain
+            raw_data = await get_raw_data_by_category(
+                category,
+                top_k=top_k,
+                bank_name=brain["bank_name"]
+            )
+            
+            # Add brain information to each result
+            results = [{
+                "brain_id": brain["brain_id"],
+                "bank_name": brain["bank_name"],
+                "raw": text,
+                "category": category
+            } for text in raw_data]
+            
+            all_results.extend(results)
+            
+        logger.info(f"Found {len(all_results)} results for category '{category}' across {len(brain_banks)} brains")
+        return all_results[:top_k]
+        
+    except Exception as e:
+        logger.error(f"Error in graph category query: {e}")
+        return []
 

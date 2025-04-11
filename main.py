@@ -4,6 +4,8 @@
 
 from flask import Flask, Response, request, jsonify
 import json
+from uuid import UUID
+from datetime import datetime
 
 from flask_cors import CORS
 from ami import convo_stream  # Unified stream function from ami.py
@@ -12,12 +14,27 @@ from typing import List, Optional  # Added List and Optional imports
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
 from docuhandler import process_document,summarize_document
-from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization
+from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
 from contact import ContactManager
 from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user
 from contactconvo import ConversationManager
+from braingraph import (
+    create_brain_graph, get_brain_graph, create_brain_graph_version,
+    add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
+    update_brain_graph_version_status, BrainGraphVersion
+)
+from supabase import create_client, Client
+import os
+spb_url = os.getenv("SUPABASE_URL")
+spb_key = os.getenv("SUPABASE_KEY")
+
+supabase: Client = create_client(
+    spb_url,
+    spb_key
+)
+
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
@@ -84,13 +101,20 @@ def havefun():
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
-    bank_name = data.get("bank_name","")
     brain_uuid = data.get("brain_uuid","")
+    graph_version_id = data.get("graph_version_id", "")
 
     print("Headers:", request.headers)
     print("Fun API called!")
-    print("bankname=",bank_name)
-    gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name,brain_uuid=brain_uuid,mode="mc")
+    print("graph_version_id=", graph_version_id)
+    gen = convo_stream(
+        user_input=user_input, 
+        user_id=user_id, 
+        thread_id=thread_id,
+        brain_uuid=brain_uuid,
+        graph_version_id=graph_version_id,
+        mode="mc"
+    )
     return create_stream_response(gen)
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
@@ -101,8 +125,7 @@ def gopilot():
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
-    bank_name = data.get("bank_name","")
-
+    
     print("Headers:", request.headers)
     print("Fun API called!")
     async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
@@ -345,7 +368,14 @@ def get_org_detail(orgid):
             return jsonify({"error": f"No organization found with id {orgid}"}), 404
         
         org_data = {
-            "name": org.name
+            "id": org.id,
+            "org_id": org.org_id,
+            "name": org.name,
+            "description": org.description,
+            "email": org.email,
+            "phone": org.phone,
+            "address": org.address,
+            "created_date": org.created_date.isoformat()
         }
         return jsonify({"organization": org_data}), 200
     except Exception as e:
@@ -1011,6 +1041,422 @@ def get_conversation_details():
         return jsonify({"conversation": conversation}), 200
     except ValueError:
         return jsonify({"error": "Invalid conversation_id format"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-organization', methods=['POST', 'OPTIONS'])
+def create_organization_endpoint():
+    """
+    Create a new organization with optional contact information.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    name = data.get("name", "")
+    description = data.get("description")
+    email = data.get("email")
+    phone = data.get("phone")
+    address = data.get("address")
+    
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    
+    try:
+        new_org = create_organization(
+            name=name,
+            description=description,
+            email=email,
+            phone=phone,
+            address=address
+        )
+        
+        org_data = {
+            "id": new_org.id,
+            "org_id": new_org.org_id,
+            "name": new_org.name,
+            "description": new_org.description,
+            "email": new_org.email,
+            "phone": new_org.phone,
+            "address": new_org.address,
+            "created_date": new_org.created_date.isoformat()
+        }
+        
+        return jsonify({
+            "message": "Organization created successfully",
+            "organization": org_data
+        }), 201
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-organization', methods=['POST', 'OPTIONS'])
+def update_organization_endpoint():
+    """
+    Update an existing organization's information.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    org_id = data.get("id", "")
+    name = data.get("name", "")
+    description = data.get("description")
+    email = data.get("email")
+    phone = data.get("phone")
+    address = data.get("address")
+    
+    if not org_id or not name:
+        return jsonify({"error": "id and name are required"}), 400
+    
+    try:
+        updated_org = update_organization(
+            id=org_id,
+            name=name,
+            description=description,
+            email=email,
+            phone=phone,
+            address=address
+        )
+        
+        org_data = {
+            "id": updated_org.id,
+            "org_id": updated_org.org_id,
+            "name": updated_org.name,
+            "description": updated_org.description,
+            "email": updated_org.email,
+            "phone": updated_org.phone,
+            "address": updated_org.address,
+            "created_date": updated_org.created_date.isoformat()
+        }
+        
+        return jsonify({
+            "message": "Organization updated successfully",
+            "organization": org_data
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-brain-graph', methods=['POST', 'OPTIONS'])
+def create_brain_graph_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    org_id = data.get("org_id", "")
+    name = data.get("name", "")
+    description = data.get("description")
+    
+    if not org_id or not name:
+        return jsonify({"error": "org_id and name are required"}), 400
+    
+    try:
+        brain_graph = create_brain_graph(org_id, name, description)
+        return jsonify({
+            "message": "Brain graph created successfully",
+            "brain_graph": {
+                "id": brain_graph.id,
+                "org_id": brain_graph.org_id,
+                "name": brain_graph.name,
+                "description": brain_graph.description,
+                "created_date": brain_graph.created_date.isoformat()
+            }
+        }), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-org-brain-graph', methods=['GET', 'OPTIONS'])
+def get_org_brain_graph():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    org_id = request.args.get('org_id', '')
+    if not org_id:
+        return jsonify({"error": "org_id parameter is required"}), 400
+    
+    try:
+        # Validate UUID format
+        try:
+            UUID(org_id)
+        except ValueError:
+            return jsonify({"error": "Invalid org_id format - must be a valid UUID"}), 400
+            
+        # Get the brain graph ID for this org
+        response = supabase.table("brain_graph")\
+            .select("id")\
+            .eq("org_id", org_id)\
+            .execute()
+        
+        if not response.data:
+            return jsonify({"error": "No brain graph exists for this organization"}), 404
+        
+        graph_id = response.data[0]["id"]
+        brain_graph = get_brain_graph(graph_id)
+        
+        if not brain_graph:
+            return jsonify({"error": "Brain graph not found"}), 404
+        
+        # Get the latest version
+        versions = get_brain_graph_versions(graph_id)
+        latest_version = None
+        if versions:
+            latest_version = {
+                "id": versions[0].id,
+                "version_number": versions[0].version_number,
+                "brain_ids": versions[0].brain_ids,
+                "status": versions[0].status,
+                "released_date": versions[0].released_date.isoformat()
+            }
+        
+        return jsonify({
+            "brain_graph": {
+                "id": brain_graph.id,
+                "org_id": brain_graph.org_id,
+                "name": brain_graph.name,
+                "description": brain_graph.description,
+                "created_date": brain_graph.created_date.isoformat(),
+                "latest_version": latest_version
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-graph-version', methods=['POST', 'OPTIONS'])
+def create_graph_version():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    graph_id = data.get("graph_id", "")
+    brain_ids = data.get("brain_ids", [])
+    
+    # Validate UUID format
+    try:
+        UUID(graph_id)
+    except ValueError:
+        return jsonify({"error": "Invalid graph_id format - must be a valid UUID"}), 400
+        
+    # Validate brain_ids format
+    for brain_id in brain_ids:
+        try:
+            UUID(brain_id)
+        except ValueError:
+            return jsonify({"error": f"Invalid brain_id format - {brain_id} must be a valid UUID"}), 400
+    
+    try:
+        # Start a transaction
+        response = supabase.rpc('next_version_number', {'graph_uuid': graph_id}).execute()
+        if not response.data:
+            return jsonify({"error": "Failed to generate version number"}), 500
+            
+        version_number = response.data
+        
+        # Update the placeholder version with the actual brain_ids
+        update_response = supabase.table("brain_graph_version")\
+            .update({"brain_ids": brain_ids})\
+            .eq("graph_id", graph_id)\
+            .eq("version_number", version_number)\
+            .execute()
+            
+        if not update_response.data:
+            return jsonify({"error": "Failed to update version with brain IDs"}), 500
+            
+        version_data = update_response.data[0]
+        version = BrainGraphVersion(
+            id=version_data["id"],
+            graph_id=version_data["graph_id"],
+            version_number=version_data["version_number"],
+            brain_ids=version_data["brain_ids"],
+            released_date=datetime.fromisoformat(version_data["released_date"].replace("Z", "+00:00")),
+            status=version_data["status"]
+        )
+        
+        return jsonify({
+            "message": "Graph version created successfully",
+            "version": {
+                "id": version.id,
+                "graph_id": version.graph_id,
+                "version_number": version.version_number,
+                "brain_ids": version.brain_ids,
+                "status": version.status,
+                "released_date": version.released_date.isoformat()
+            }
+        }), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/release-graph-version', methods=['POST', 'OPTIONS'])
+def release_graph_version():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    version_id = data.get("version_id", "")
+    
+    if not version_id:
+        return jsonify({"error": "version_id is required"}), 400
+    
+    try:
+        # Validate UUID format
+        try:
+            UUID(version_id)
+        except ValueError:
+            return jsonify({"error": "Invalid version_id format - must be a valid UUID"}), 400
+            
+        version = update_brain_graph_version_status(version_id, "published")
+        return jsonify({
+            "message": "Graph version published successfully",
+            "version": {
+                "id": version.id,
+                "graph_id": version.graph_id,
+                "version_number": version.version_number,
+                "brain_ids": version.brain_ids,
+                "status": version.status,
+                "released_date": version.released_date.isoformat()
+            }
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/revoke-graph-version', methods=['POST', 'OPTIONS'])
+def revoke_graph_version():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    version_id = data.get("version_id", "")
+    
+    if not version_id:
+        return jsonify({"error": "version_id is required"}), 400
+    
+    try:
+        # Validate UUID format
+        try:
+            UUID(version_id)
+        except ValueError:
+            return jsonify({"error": "Invalid version_id format - must be a valid UUID"}), 400
+            
+        version = update_brain_graph_version_status(version_id, "training")
+        return jsonify({
+            "message": "Graph version de-published successfully",
+            "version": {
+                "id": version.id,
+                "graph_id": version.graph_id,
+                "version_number": version.version_number,
+                "brain_ids": version.brain_ids,
+                "status": version.status,
+                "revoked_date": version.released_date.isoformat()
+            }
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-graph-version-brains', methods=['POST', 'OPTIONS'])
+def update_graph_version_brains():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    version_id = data.get("version_id", "")
+    action = data.get("action", "")  # "add" or "remove"
+    brain_ids = data.get("brain_ids", [])
+    
+    if not version_id or not action or not brain_ids:
+        return jsonify({"error": "version_id, action, and brain_ids are required"}), 400
+    
+    if action not in ["add", "remove"]:
+        return jsonify({"error": "action must be either 'add' or 'remove'"}), 400
+    
+    try:
+        # Validate UUIDs
+        try:
+            UUID(version_id)
+            for brain_id in brain_ids:
+                UUID(brain_id)
+        except ValueError:
+            return jsonify({"error": "Invalid UUID format"}), 400
+            
+        # Check version status before attempting modification
+        response = supabase.table("brain_graph_version")\
+            .select("status")\
+            .eq("id", version_id)\
+            .execute()
+            
+        if not response.data:
+            return jsonify({"error": "Version not found"}), 404
+            
+        status = response.data[0].get("status")
+        if status == "published":
+            return jsonify({"error": "Cannot modify a published version"}), 400
+            
+        if action == "add":
+            version = add_brains_to_version(version_id, brain_ids)
+        else:
+            version = remove_brains_from_version(version_id, brain_ids)
+            
+        return jsonify({
+            "message": f"Brain IDs {action}ed successfully",
+            "version": {
+                "id": version.id,
+                "graph_id": version.graph_id,
+                "version_number": version.version_number,
+                "brain_ids": version.brain_ids,
+                "status": version.status,
+                "released_date": version.released_date.isoformat()
+            }
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-version-brains', methods=['GET', 'OPTIONS'])
+def get_version_brains():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    version_id = request.args.get('version_id', '')
+    if not version_id:
+        return jsonify({"error": "version_id parameter is required"}), 400
+    
+    try:
+        UUID(version_id)
+    except ValueError:
+        return jsonify({"error": "Invalid version_id format - must be a valid UUID"}), 400
+    
+    try:
+        response = supabase.table("brain_graph_version")\
+            .select("brain_ids")\
+            .eq("id", version_id)\
+            .execute()
+        
+        if not response.data:
+            return jsonify({"error": f"No version found with id {version_id}"}), 404
+        
+        brain_ids = response.data[0]["brain_ids"]
+        
+        # Get brain details for each UUID
+        brains = []
+        if brain_ids:
+            brain_response = supabase.table("brain")\
+                .select("*")\
+                .in_("id", brain_ids)\
+                .execute()
+            
+            if brain_response.data:
+                brains = brain_response.data
+        
+        return jsonify({
+            "version_id": version_id,
+            "brains": brains
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

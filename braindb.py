@@ -13,11 +13,16 @@ supabase: Client = create_client(
 )
 
 class Organization:
-    def __init__(self, id: str, org_id: int, name: str, description: Optional[str], created_date: datetime):
+    def __init__(self, id: str, org_id: int, name: str, description: Optional[str], 
+                 email: Optional[str], phone: Optional[str], address: Optional[str],
+                 created_date: datetime):
         self.id = id  # UUID
         self.org_id = org_id  # INT
         self.name = name
         self.description = description
+        self.email = email
+        self.phone = phone
+        self.address = address
         self.created_date = created_date
 
 class Brain:
@@ -32,13 +37,28 @@ class Brain:
         self.summary = summary
         self.created_date = created_date
 
-def create_organization(name: str, description: Optional[str] = None) -> Organization:
+def create_organization(name: str, description: Optional[str] = None, 
+                        email: Optional[str] = None, phone: Optional[str] = None, 
+                        address: Optional[str] = None) -> Organization:
     """
-    Create a new organization with created_date
+    Create a new organization with contact information and created_date
+    
+    Args:
+        name: Organization name
+        description: Optional description
+        email: Optional contact email
+        phone: Optional contact phone
+        address: Optional physical address
+    
+    Returns:
+        Organization object
     """
     data = {
         "name": name,
         "description": description,
+        "email": email,
+        "phone": phone,
+        "address": address,
         "created_date": datetime.now(UTC).isoformat()
     }
     
@@ -51,18 +71,42 @@ def create_organization(name: str, description: Optional[str] = None) -> Organiz
             org_id=org_data["org_id"],
             name=org_data["name"],
             description=org_data["description"],
+            email=org_data["email"],
+            phone=org_data["phone"],
+            address=org_data["address"],
             created_date=datetime.fromisoformat(org_data["created_date"].replace("Z", "+00:00"))
         )
     raise Exception("Failed to create organization")
 
-def update_organization(id: str, name: str, description: Optional[str] = None) -> Organization:
+def update_organization(id: str, name: str, description: Optional[str] = None,
+                        email: Optional[str] = None, phone: Optional[str] = None,
+                        address: Optional[str] = None) -> Organization:
     """
-    Update an organization's name and description
+    Update an organization's information
+    
+    Args:
+        id: UUID of the organization
+        name: Organization name
+        description: Optional description
+        email: Optional contact email
+        phone: Optional contact phone
+        address: Optional physical address
+    
+    Returns:
+        Updated Organization object
     """
     update_data = {
         "name": name,
         "description": description
     }
+    
+    # Only include fields in update if they're provided
+    if email is not None:
+        update_data["email"] = email
+    if phone is not None:
+        update_data["phone"] = phone
+    if address is not None:
+        update_data["address"] = address
     
     response = supabase.table("organization")\
         .update(update_data)\
@@ -76,6 +120,9 @@ def update_organization(id: str, name: str, description: Optional[str] = None) -
             org_id=org_data["org_id"],
             name=org_data["name"],
             description=org_data["description"],
+            email=org_data["email"],
+            phone=org_data["phone"],
+            address=org_data["address"],
             created_date=datetime.fromisoformat(org_data["created_date"].replace("Z", "+00:00"))
         )
     raise Exception("Failed to update organization or organization not found")
@@ -96,6 +143,9 @@ def get_organization(org_id: str) -> Optional[Organization]:
             org_id=org_data["org_id"],
             name=org_data["name"],
             description=org_data["description"],
+            email=org_data.get("email"),
+            phone=org_data.get("phone"),
+            address=org_data.get("address"),
             created_date=datetime.fromisoformat(org_data["created_date"].replace("Z", "+00:00"))
         )
     return None

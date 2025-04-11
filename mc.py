@@ -6,7 +6,7 @@ from langchain_core.messages import HumanMessage,AIMessage
 import json
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
-from database import query_knowledge
+from database import query_graph_knowledge
 from brainlog import create_brain_log
 import re
 from typing import Tuple
@@ -108,8 +108,8 @@ class MC:
             "convo_id": self.convo_id,
             "user_id": self.user_id,
             "prompt_str": "",
-            "bank_name":"",
-            "brain_uuid":""
+            "graph_version_id": "",
+            "brain_uuid": ""
         }
     async def initialize(self):
         if not self.instincts:
@@ -264,28 +264,28 @@ class MC:
             yield builder.build(separator="\n")
 
     # mc.py (in trigger)
-    async def trigger(self, state: Dict = None, user_id: str = None, bank_name: str = None, brain_uuid :str =None,config: Dict = None):
+    async def trigger(self, state: Dict = None, user_id: str = None, graph_version_id: str = None, brain_uuid: str = None, config: Dict = None):
         state = state or self.state.copy()
         user_id = user_id or self.user_id
         config = config or {}
-        bank_name = (
-            bank_name if bank_name is not None 
-            else state.get("bank_name", 
-                config.get("configurable", {}).get("bank_name", 
-                    self.bank_name if hasattr(self, 'bank_name') else ""))
+        graph_version_id = (
+            graph_version_id if graph_version_id is not None 
+            else state.get("graph_version_id", 
+                config.get("configurable", {}).get("graph_version_id", 
+                    self.graph_version_id if hasattr(self, 'graph_version_id') else ""))
         )
-        if not bank_name:
-            logger.warning(f"bank_name is empty! State: {state}, Config: {config}")
+        if not graph_version_id:
+            logger.warning(f"graph_version_id is empty! State: {state}, Config: {config}")
         
         brain_uuid = (
             brain_uuid if brain_uuid is not None 
             else state.get("brain_uuid", 
                 config.get("configurable", {}).get("brain_uuid", 
-                    self.bank_name if hasattr(self, 'brain_uuid') else ""))
+                    self.brain_uuid if hasattr(self, 'brain_uuid') else ""))
         )
         
         # Sync with mc.state
-        self.state["bank_name"] = bank_name
+        self.state["graph_version_id"] = graph_version_id
         self.state["brain_uuid"] = brain_uuid
         if "unresolved_requests" not in state:
             state["unresolved_requests"] = self.state.get("unresolved_requests", [])
@@ -294,7 +294,7 @@ class MC:
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
         context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-26:])
 
-        logger.info(f"Triggering - User: {user_id}, Bank: {bank_name}, latest_msg: {latest_msg_content}, context: {context}")
+        logger.info(f"Triggering - User: {user_id}, Graph Version: {graph_version_id}, latest_msg: {latest_msg_content}, context: {context}")
 
         if state["unresolved_requests"]:
             current_embedding = self.embedder.encode(latest_msg_content, convert_to_tensor=True)
@@ -315,12 +315,12 @@ class MC:
         
         logger.info(f"intent in trigger={intent}")
         if intent == "request":
-            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, bank_name=bank_name,brain_uuid=brain_uuid):
+            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, graph_version_id=graph_version_id, brain_uuid=brain_uuid):
                 state["prompt_str"] = response_chunk
                 logger.debug(f"Yielding from trigger: {state['prompt_str']}")
                 yield response_chunk
         else:
-            async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state, bank_name=bank_name):
+            async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state, graph_version_id=graph_version_id):
                 state["prompt_str"] = response_chunk
                 logger.debug(f"Yielding from trigger: {state['prompt_str']}")
                 yield response_chunk
@@ -336,13 +336,13 @@ class MC:
         yield {"state": state}
     
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", 
-                         feedback_type: str, state: Dict, intent: str, bank_name: str = "",brain_uuid: str =""):
+                         feedback_type: str, state: Dict, intent: str, graph_version_id: str = "", brain_uuid: str =""):
         related_request = await self.resolve_related_request(message, feedback_type, state, context)
-        logger.info(f"Handling request for user {user_id} with bank_name: {bank_name}")
+        logger.info(f"Handling request for user {user_id} with graph_version_id: {graph_version_id}")
         
         try:
             # Query knowledge with full context for broader product relevance
-            knowledge = await query_knowledge(context, bank_name=bank_name) or []
+            knowledge = await query_graph_knowledge(graph_version_id, context, top_k=5) or []
             kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
         except Exception as e:
             logger.error(f"Knowledge query failed: {e}")
@@ -438,7 +438,7 @@ class MC:
             state["unresolved_requests"].append({
                 "message": message, "turn": turn, "resolved": False, "response": response_text,
                 "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True,
-                "bank_name": bank_name
+                "graph_version_id": graph_version_id
             })
             await self._log_to_brain(brain_uuid, message, response_text, analysis)
         elif feedback_type in ["elaboration", "clarification"]:
@@ -452,11 +452,11 @@ class MC:
                 related_request["response"] = builder.build()
             await self._log_to_brain(brain_uuid, message, response_text, analysis)
         
-    async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, bank_name: str = ""):
-        logger.info(f"Handling CASUAL. Bank_name: {bank_name}")
+    async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = ""):
+        logger.info(f"Handling CASUAL. Graph_version_id: {graph_version_id}")
         
         # Fetch knowledge with fallback to empty list
-        knowledge = await query_knowledge(message, bank_name=bank_name) or []
+        knowledge = await query_graph_knowledge(graph_version_id, message, top_k=5) or []
         kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
         
         # Detect language of the message to determine response language
