@@ -378,14 +378,14 @@ class MC:
             conversation = [line.strip() for line in context.split("\n") if line.strip()]
             
             logger.info(f"Processing message: '{message}' from user_id: {user_id}")
-            logger.info(f"Context length: {len(conversation)} lines")
+            #logger.info(f"Context length: {len(conversation)} lines")
             
             # Determine conversation language preference
             conversation_language = await self.detect_conversation_language(conversation)
-            logger.info(f"Overall conversation language detected: {conversation_language or 'Insufficient data'}")
+            #logger.info(f"Overall conversation language detected: {conversation_language or 'Insufficient data'}")
             
             # Detect language of current message
-            logger.info(f"Detecting language for message: '{message}'")
+            #logger.info(f"Detecting language for message: '{message}'")
             lang_info = await self.detect_language_with_llm(message)
             
             # Override language confidence if conversation history establishes a pattern
@@ -395,18 +395,18 @@ class MC:
                 lang_info["confidence"] = 0.9  # High confidence based on conversation history
                 lang_info["responseGuidance"] = f"Respond in {conversation_language}, maintaining consistency with previous messages"
             
-            logger.info(f"Final language selection: {lang_info['language']} (confidence: {lang_info['confidence']})")
+            #logger.info(f"Final language selection: {lang_info['language']} (confidence: {lang_info['confidence']})")
             
             # STEP 1: Get profile building skills from knowledge base - the core functionality
             profile_query = "contact profile building information gathering customer understanding"
-            logger.info(f"Fetching profile building skills with query: '{profile_query}'")
+            #logger.info(f"Fetching profile building skills with query: '{profile_query}'")
             profile_entries = await query_graph_knowledge(graph_version_id, profile_query, top_k=5)
             profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
-            logger.info(f"Retrieved {len(profile_entries)} entries for profile building skills")
+            #logger.info(f"Retrieved {len(profile_entries)} entries for profile building skills")
             
             # STEP 2: Get personality instructions from knowledge base
             personality_query = "who am I how should I behave my identity character role"
-            logger.info(f"Fetching AI personality instructions with query: '{personality_query}'")
+            #logger.info(f"Fetching AI personality instructions with query: '{personality_query}'")
             personality_entries = await query_graph_knowledge(graph_version_id, personality_query, top_k=3)
             
             # Detect proper personality entries using structure indicators
@@ -434,7 +434,7 @@ class MC:
                 # If it has personality indicators, use it
                 if has_personality_indicators:
                     filtered_personality_entries.append(entry)
-                    logger.info(f"Found personality entry with ID {entry['id']} - has personality indicators")
+                    #logger.info(f"Found personality entry with ID {entry['id']} - has personality indicators")
                 else:
                     # Try to determine if an entry is about personality from its structure
                     sentences = re.split(r'[.!?]', entry["raw"])
@@ -446,13 +446,13 @@ class MC:
                     # If more than 25% of sentences contain personality terms, include it
                     if personality_sentence_count > 0 and len(sentences) > 0 and personality_sentence_count / len(sentences) >= 0.25:
                         filtered_personality_entries.append(entry)
-                        logger.info(f"Found personality entry with ID {entry['id']} - has personality structure")
+                       #logger.info(f"Found personality entry with ID {entry['id']} - has personality structure")
                     else:
                         logger.info(f"Filtered out entry with ID {entry['id']} - not personality content")
                 
             # If we didn't find enough specific personality entries, try with different queries
             if len(filtered_personality_entries) < 1:
-                logger.info("First personality query didn't yield specific personality vectors, trying backup queries")
+                #logger.info("First personality query didn't yield specific personality vectors, trying backup queries")
                 
                 # Try different queries with different semantic focuses
                 backup_queries = [
@@ -462,7 +462,7 @@ class MC:
                 ]
                 
                 for backup_query in backup_queries:
-                    logger.info(f"Trying backup personality query: '{backup_query}'")
+                    #logger.info(f"Trying backup personality query: '{backup_query}'")
                     backup_entries = await query_graph_knowledge(graph_version_id, backup_query, top_k=2)
                     
                     if backup_entries:
@@ -486,11 +486,11 @@ class MC:
                             
                             if has_personality_indicators or any(term in entry["raw"].lower() for term in ["personality", "character", "identity", "role", "tone"]):
                                 filtered_personality_entries.append(entry)
-                                logger.info(f"Found personality entry with ID {entry['id']} from backup query")
+                                #logger.info(f"Found personality entry with ID {entry['id']} from backup query")
                         
                     # If we found at least one good entry from backup queries, exit the loop
                     if len(filtered_personality_entries) > 0:
-                        logger.info(f"Found {len(filtered_personality_entries)} valid personality entries from backup queries")
+                        #logger.info(f"Found {len(filtered_personality_entries)} valid personality entries from backup queries")
                         break
                 
             # If we still have no entries, use a default personality instruction
@@ -509,13 +509,6 @@ class MC:
             personality_instructions = "\n\n".join(entry["raw"] for entry in filtered_personality_entries)
             logger.info(f"Final personality instructions: {len(personality_instructions)} characters")
             
-            # Simple logging of entries for debugging
-            logger.info("===== PERSONALITY VECTORS START =====")
-            for i, entry in enumerate(filtered_personality_entries):
-                logger.info(f"Personality #{i+1} - ID: {entry['id']}")
-                logger.info(f"  Full content: {entry['raw']}")
-            logger.info("===== PERSONALITY VECTORS END =====")
-            
             # Combine instructions
             process_instructions =  profile_instructions
             
@@ -527,7 +520,7 @@ class MC:
                 f"Analyze this conversation to determine context and next steps.\n\n"
                 
                 f"1. CONTACT ANALYSIS:\n"
-                f"   - Extract all relevant information provided by the contact\n"
+                f"   - Extract all relevant information provided by the contact in the entire conversation\n"
                 f"   - Identify any required information according to instructions that is missing\n"
                 f"   - Assess completeness of required information (0-100%)\n\n"
                 
@@ -551,9 +544,9 @@ class MC:
                 f"Be objective and factual. Only reference information explicitly present in either the conversation or knowledge base instructions."
             )
 
-            logger.info("Invoking LLM for context analysis")
+            #logger.info("Invoking LLM for context analysis")
             context_analysis = LLM.invoke(context_analysis_prompt).content
-            logger.info(f"Context analysis complete ({len(context_analysis)} characters)")
+            #logger.info(f"Context analysis complete ({len(context_analysis)} characters)")
             logger.info(f"Analysis summary: {context_analysis}")
             
             # Log analysis for requirements and completeness
