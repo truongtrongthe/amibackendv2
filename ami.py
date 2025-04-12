@@ -18,21 +18,16 @@ class State(TypedDict):
     prompt_str: str
     convo_id: str
     user_id: str
-    intent_history: List[str]
     preset_memory: str
     instinct: str
-    unresolved_requests: List[Dict]  # Corrected from List[str]
-    brain_uuid: str
     graph_version_id: str  # Added graph_version_id
 
 mc = MC(user_id="thefusionlab")
-
 graph_builder = StateGraph(State)
 
 async def mc_node(state: State, config=None):
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
-    brain_uuid = config.get("configurable", {}).get("brain_uuid", "") if config else ""
     graph_version_id = config.get("configurable", {}).get("graph_version_id", "") if config else ""
     
     logger.info(f"MC Node - User ID: {user_id}, Graph Version: {graph_version_id}")
@@ -42,7 +37,7 @@ async def mc_node(state: State, config=None):
     
     # Process the async generator output from trigger
     final_state = state  # Default to input state
-    async for output in mc.trigger(state=state, user_id=user_id, graph_version_id=graph_version_id, brain_uuid=brain_uuid, config=config):
+    async for output in mc.trigger(state=state, user_id=user_id, graph_version_id=graph_version_id, config=config):
         if isinstance(output, dict) and "state" in output:
             final_state = output["state"]  # Capture the final state
         else:
@@ -58,7 +53,7 @@ graph_builder.add_edge("mc", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, bank_name: str = "", brain_uuid: str = "", graph_version_id: str = "", mode: str = "mc"):
+def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, graph_version_id: str = "", mode: str = "mc"):
     start_time = time.time()
     thread_id = thread_id or f"mc_thread_{int(time.time())}"
     user_id = user_id or "thefusionlab"
@@ -71,12 +66,8 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
         "convo_id": thread_id,
         "last_response": "",
         "user_id": user_id,
-        "intent": "",
-        "intent_history": [],
         "preset_memory": "Be friendly",
         "instinct": "",
-        "unresolved_requests": [],
-        "brain_uuid": brain_uuid,
         "graph_version_id": graph_version_id
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
@@ -93,7 +84,6 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
             "configurable": {
                 "thread_id": thread_id,
                 "user_id": user_id,
-                "brain_uuid": brain_uuid,
                 "graph_version_id": graph_version_id
             }
         }

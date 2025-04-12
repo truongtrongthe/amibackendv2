@@ -25,6 +25,10 @@ from braingraph import (
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
     update_brain_graph_version_status, BrainGraphVersion
 )
+from org_integrations import (
+    create_integration, get_org_integrations, get_integration_by_id,
+    update_integration, delete_integration, toggle_integration, OrganizationIntegration
+)
 from supabase import create_client, Client
 import os
 spb_url = os.getenv("SUPABASE_URL")
@@ -101,7 +105,6 @@ def havefun():
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
-    brain_uuid = data.get("brain_uuid","")
     graph_version_id = data.get("graph_version_id", "")
 
     print("Headers:", request.headers)
@@ -111,7 +114,6 @@ def havefun():
         user_input=user_input, 
         user_id=user_id, 
         thread_id=thread_id,
-        brain_uuid=brain_uuid,
         graph_version_id=graph_version_id,
         mode="mc"
     )
@@ -1457,6 +1459,281 @@ def get_version_brains():
             "version_id": version_id,
             "brains": brains
         }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/organization-integrations', methods=['GET', 'OPTIONS'])
+def get_organization_integrations():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    org_id = request.args.get('org_id', '')
+    active_only = request.args.get('active_only', 'false').lower() == 'true'
+    
+    if not org_id:
+        return jsonify({"error": "org_id parameter is required"}), 400
+    
+    try:
+        integrations = get_org_integrations(org_id, active_only)
+        
+        # Convert to serializable format
+        integrations_data = []
+        for integration in integrations:
+            integration_dict = {
+                "id": str(integration.id),
+                "org_id": str(integration.org_id),
+                "integration_type": integration.integration_type,
+                "name": integration.name,
+                "is_active": integration.is_active,
+                "api_base_url": integration.api_base_url,
+                "webhook_url": integration.webhook_url,
+                # Do not include sensitive information in the list endpoint
+                "created_at": integration.created_at.isoformat() if integration.created_at else None,
+                "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+            }
+            integrations_data.append(integration_dict)
+        
+        return jsonify({
+            "integrations": integrations_data
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/organization-integration/<integration_id>', methods=['GET', 'OPTIONS'])
+def get_organization_integration(integration_id):
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    try:
+        integration = get_integration_by_id(integration_id)
+        
+        if not integration:
+            return jsonify({"error": f"Integration with ID {integration_id} not found"}), 404
+        
+        # Convert to serializable format, including sensitive information for admin view
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "api_base_url": integration.api_base_url,
+            "webhook_url": integration.webhook_url,
+            "api_key": integration.api_key,
+            "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
+            "access_token": "••••••" if integration.access_token else None,  # Mask token
+            "refresh_token": "••••••" if integration.refresh_token else None,  # Mask refresh token
+            "token_expires_at": integration.token_expires_at.isoformat() if integration.token_expires_at else None,
+            "config": integration.config,
+            "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        return jsonify({
+            "integration": integration_data
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-organization-integration', methods=['POST', 'OPTIONS'])
+def create_organization_integration():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    org_id = data.get("org_id", "")
+    integration_type = data.get("integration_type", "")
+    name = data.get("name", "")
+    api_base_url = data.get("api_base_url")
+    webhook_url = data.get("webhook_url")
+    api_key = data.get("api_key")
+    api_secret = data.get("api_secret")
+    access_token = data.get("access_token")
+    refresh_token = data.get("refresh_token")
+    config = data.get("config")
+    is_active = data.get("is_active", False)
+    
+    if not org_id or not integration_type or not name:
+        return jsonify({"error": "org_id, integration_type, and name are required"}), 400
+    
+    try:
+        # Parse dates if provided
+        token_expires_at = None
+        if data.get("token_expires_at"):
+            try:
+                token_expires_at = datetime.fromisoformat(data["token_expires_at"].replace("Z", "+00:00"))
+            except ValueError:
+                return jsonify({"error": "Invalid token_expires_at format. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.sssZ)"}), 400
+        
+        integration = create_integration(
+            org_id=org_id,
+            integration_type=integration_type,
+            name=name,
+            api_base_url=api_base_url,
+            webhook_url=webhook_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_expires_at=token_expires_at,
+            config=config,
+            is_active=is_active
+        )
+        
+        # Convert to serializable format
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "api_base_url": integration.api_base_url,
+            "webhook_url": integration.webhook_url,
+            "api_key": integration.api_key,
+            "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
+            "access_token": "••••••" if integration.access_token else None,  # Mask token
+            "refresh_token": "••••••" if integration.refresh_token else None,  # Mask refresh token
+            "token_expires_at": integration.token_expires_at.isoformat() if integration.token_expires_at else None,
+            "config": integration.config,
+            "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        return jsonify({
+            "message": "Integration created successfully",
+            "integration": integration_data
+        }), 201
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/update-organization-integration', methods=['POST', 'OPTIONS'])
+def update_organization_integration():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    integration_id = data.get("id", "")
+    
+    if not integration_id:
+        return jsonify({"error": "id is required"}), 400
+    
+    # Fields that can be updated
+    update_fields = {
+        "name": data.get("name"),
+        "api_base_url": data.get("api_base_url"),
+        "webhook_url": data.get("webhook_url"),
+        "api_key": data.get("api_key"),
+        "api_secret": data.get("api_secret"),
+        "access_token": data.get("access_token"),
+        "refresh_token": data.get("refresh_token"),
+        "config": data.get("config"),
+        "is_active": data.get("is_active")
+    }
+    
+    # Remove None values
+    update_fields = {k: v for k, v in update_fields.items() if v is not None}
+    
+    # Parse token_expires_at if provided
+    if data.get("token_expires_at"):
+        try:
+            update_fields["token_expires_at"] = datetime.fromisoformat(data["token_expires_at"].replace("Z", "+00:00"))
+        except ValueError:
+            return jsonify({"error": "Invalid token_expires_at format. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.sssZ)"}), 400
+    
+    try:
+        integration = update_integration(integration_id, **update_fields)
+        
+        if not integration:
+            return jsonify({"error": f"Integration with ID {integration_id} not found or update failed"}), 404
+        
+        # Convert to serializable format
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "api_base_url": integration.api_base_url,
+            "webhook_url": integration.webhook_url,
+            "api_key": integration.api_key,
+            "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
+            "access_token": "••••••" if integration.access_token else None,  # Mask token
+            "refresh_token": "••••••" if integration.refresh_token else None,  # Mask refresh token
+            "token_expires_at": integration.token_expires_at.isoformat() if integration.token_expires_at else None,
+            "config": integration.config,
+            "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        return jsonify({
+            "message": "Integration updated successfully",
+            "integration": integration_data
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/delete-organization-integration', methods=['POST', 'OPTIONS'])
+def delete_organization_integration():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    integration_id = data.get("id", "")
+    
+    if not integration_id:
+        return jsonify({"error": "id is required"}), 400
+    
+    try:
+        success = delete_integration(integration_id)
+        
+        if not success:
+            return jsonify({"error": f"Integration with ID {integration_id} not found or delete failed"}), 404
+        
+        return jsonify({
+            "message": "Integration deleted successfully"
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/toggle-organization-integration', methods=['POST', 'OPTIONS'])
+def toggle_organization_integration():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    integration_id = data.get("id", "")
+    active = data.get("active", False)
+    
+    if not integration_id:
+        return jsonify({"error": "id is required"}), 400
+    
+    try:
+        integration = toggle_integration(integration_id, active)
+        
+        if not integration:
+            return jsonify({"error": f"Integration with ID {integration_id} not found or update failed"}), 404
+        
+        # Convert to serializable format
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        status = "activated" if active else "deactivated"
+        return jsonify({
+            "message": f"Integration {status} successfully",
+            "integration": integration_data
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

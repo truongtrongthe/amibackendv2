@@ -9,68 +9,13 @@ import numpy as np
 from database import query_graph_knowledge
 from brainlog import create_brain_log
 import re
-from typing import Tuple
+from typing import Tuple, Dict, Any
 
 def add_messages(existing_messages, new_messages):
     return existing_messages + new_messages
 
 LLM = ChatOpenAI(model="gpt-4o", streaming=False)
 StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
-
-FEEDBACKTYPE = ["correction", "adjustment", "new", "confirmation", "clarification",
-                "rejection", "elaboration", "satisfaction", "confusion"]
-
-# Vietnamese examples for each feedback type
-FEEDBACK_EXAMPLES = {
-    "correction": [
-        "Không phải vậy đâu",
-        "Sai rồi, phải là...",
-        "Em hiểu nhầm rồi"
-    ],
-    "adjustment": [
-        "Cho em sửa lại một chút",
-        "Em muốn thay đổi...",
-        "Có thể điều chỉnh...",
-        "Không phải,..."
-    ],
-    "new": [
-        "Em muốn hỏi về...",
-        "Cho em hỏi...",
-        "Em cần tìm hiểu..."
-    ],
-    "confirmation": [
-        "Đúng rồi",
-        "Vâng, em hiểu rồi",
-        "Chính xác",
-        "Ok",
-        "OK em"
-    ],
-    "clarification": [
-        "Em chưa hiểu lắm",
-        "Có thể giải thích rõ hơn không?",
-        "Ý anh là..."
-    ],
-    "rejection": [
-        "Em không cần",
-        "Không phù hợp",
-        "Không đúng ý em"
-    ],
-    "elaboration": [
-        "Cụ thể là...",
-        "Chi tiết hơn thì...",
-        "Ngoài ra còn..."
-    ],
-    "satisfaction": [
-        "Tuyệt vời",
-        "Đúng ý em",
-        "Em rất hài lòng"
-    ],
-    "confusion": [
-        "Em không hiểu",
-        "Hơi khó hiểu",
-        "Mơ hồ quá"
-    ]
-}
 
 class ResponseBuilder:
     def __init__(self):
@@ -109,135 +54,11 @@ class MC:
             "user_id": self.user_id,
             "prompt_str": "",
             "graph_version_id": "",
-            "brain_uuid": ""
         }
     async def initialize(self):
         if not self.instincts:
             self.instincts = {"friendly": "Be nice"}
-
-    # mc.py (in detect_intent)
-    async def detect_intent(self, message: str, context: str = "") -> str:
-        prompt = (
-                f"Message: '{message}'\nContext: '{context}'\n"
-                "Classify intent as 'teaching', 'request', or 'casual'. "
-                "Return one word."
-            )
-        try:
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            intent = response.content.strip().lower()
-            return intent if intent in ["teaching", "request", "casual"] else "casual"
-        except Exception as e:
-            logger.info(f"Intent detection failed: {e}")
-            return "casual"
-    async def detect_feedback_type(self, message: str, context: str) -> str:
-        logger.info(f"detect feedback of: {message} with context:{context}")
-        
-        # Build examples string
-        examples_str = "\n".join([
-            f"- {ftype}: {', '.join(examples)}"
-            for ftype, examples in FEEDBACK_EXAMPLES.items()
-        ])
-        
-        prompt = (
-            f"Context: '{context}'\nMessage: '{message}'\n\n"
-            f"Phân loại phản hồi của người dùng thành một trong các loại sau:\n"
-            f"{examples_str}\n\n"
-            f"Lưu ý:\n"
-            f"1. Xem xét ngữ cảnh và cách diễn đạt tiếng Việt\n"
-            f"2. Chú ý các từ ngữ đặc trưng trong tiếng Việt\n"
-            f"3. Cân nhắc cả ý nghĩa trực tiếp và hàm ý\n"
-            f"4. Trả về một từ duy nhất trong danh sách: {', '.join(FEEDBACKTYPE)}"
-        )
-        
-        try:
-            response = await asyncio.to_thread(LLM.invoke, prompt)
-            feedback = response.content.strip().replace("'", "")
-            return feedback if feedback in FEEDBACKTYPE else "new"
-        except Exception as e:
-            logger.info(f"Feedback detection failed: {e}")
-            return "new"
-
-    async def resolve_related_request(self, message: str, feedback_type: str, state: Dict, context: str) -> Dict[str, any]:
-        unresolved = [r for r in state.get("unresolved_requests", []) if not r.get("resolved", False)]
-        if not unresolved:
-            logger.info("No unresolved requests found")
-            return None
-
-        if feedback_type in ["clarification", "elaboration", "confusion"]:
-            message_embedding = self.embedder.encode(message, convert_to_tensor=True)
-            
-            # Approach 1: Concatenation (request + response)
-            concat_texts = [f"{r['message']} {r.get('response', '')}" for r in unresolved]
-            concat_embeddings = self.embedder.encode(concat_texts, convert_to_tensor=True)
-            concat_similarities = util.cos_sim(message_embedding, concat_embeddings)[0]
-            
-            # Approach 2: Weighted Average (0.3 request + 0.7 response)
-            request_texts = [r["message"] for r in unresolved]
-            response_texts = [r.get("response", "") for r in unresolved]
-            request_embeddings = self.embedder.encode(request_texts, convert_to_tensor=True)
-            response_embeddings = self.embedder.encode(response_texts, convert_to_tensor=True)
-            weighted_similarities = 0.3 * util.cos_sim(message_embedding, request_embeddings)[0] + \
-                                0.7 * util.cos_sim(message_embedding, response_embeddings)[0]
-            
-            # Token boosts (applied to both)
-            message_tokens = set(message.lower().split())
-            concat_boosts = [len(message_tokens.intersection(set(t.lower().split()))) * 0.1 for t in concat_texts]
-            weighted_boosts = [len(message_tokens.intersection(set(r["message"].lower().split() + r.get("response", "").lower().split()))) * 0.1 for r in unresolved]
-            
-            # Adjusted similarities
-            concat_adjusted = concat_similarities + np.array(concat_boosts)
-            weighted_adjusted = weighted_similarities + np.array(weighted_boosts)
-            
-            # Pick an approach (toggle here or test both!)
-            # Using concatenation for now—swap to weighted_adjusted to try the other
-            adjusted_similarities = concat_adjusted
-            threshold = 0.3 if feedback_type in ["elaboration", "clarification"] else self.similarity_threshold
-            
-            # Log scores for debugging
-            logger.info(f"Concat similarities: {list(zip(concat_texts, concat_adjusted.tolist()))}")
-            logger.info(f"Weighted similarities: {list(zip(request_texts, weighted_adjusted.tolist()))}")
-            
-            max_similarity_idx = np.argmax(adjusted_similarities)
-            similarity_score = adjusted_similarities[max_similarity_idx].item()
-            latest_active = max(
-                [(i, r) for i, r in enumerate(unresolved) if r["active"]],
-                key=lambda x: len(state["messages"]) - x[1]["turn"],
-                default=(None, None)
-            )[1]
-
-            # Linking logic
-            if latest_active and adjusted_similarities[unresolved.index(latest_active)] >= threshold - 0.1:
-                related_request = latest_active
-                logger.info(f"Linked to latest active: {related_request['message']} (score: {adjusted_similarities[unresolved.index(latest_active)]:.2f})")
-            elif similarity_score >= threshold:
-                related_request = unresolved[max_similarity_idx]
-                logger.info(f"Linked to: {related_request['message']} (score: {similarity_score:.2f})")
-            else:
-                logger.info(f"No match: highest score {similarity_score:.2f} below threshold {threshold}")
-                return None
-            
-            # Update request based on feedback type
-            if feedback_type == "clarification":
-                related_request["status"] = "CLARIFIED"
-            elif feedback_type == "elaboration":
-                related_request["message"] = f"{related_request['message']} - {message}"
-                related_request["status"] = "ELABORATED"
-            elif feedback_type == "confusion":
-                related_request["status"] = "NEEDS_CLARIFICATION"
-            return related_request
-        
-        # Fallback for other feedback types (e.g., confirmation)
-        message_tokens = set(message.lower().split())
-        related_request = next(
-            (r for r in unresolved if len(message_tokens.intersection(set(r["message"].lower().split()))) >= 1),
-            None
-        )
-        if related_request and feedback_type in ["confirmation", "satisfaction"]:
-            related_request["resolved"] = True
-            related_request["satisfied"] = True
-            related_request["status"] = "RESOLVED"
-        return related_request
-
+    
     async def stream_response(self, prompt: str, builder: ResponseBuilder):
         if len(self.state["messages"]) > 20:
             prompt += "\nKeep it short and sweet."
@@ -264,7 +85,7 @@ class MC:
             yield builder.build(separator="\n")
 
     # mc.py (in trigger)
-    async def trigger(self, state: Dict = None, user_id: str = None, graph_version_id: str = None, brain_uuid: str = None, config: Dict = None):
+    async def trigger(self, state: Dict = None, user_id: str = None, graph_version_id: str = None, config: Dict = None):
         state = state or self.state.copy()
         user_id = user_id or self.user_id
         config = config or {}
@@ -277,53 +98,21 @@ class MC:
         if not graph_version_id:
             logger.warning(f"graph_version_id is empty! State: {state}, Config: {config}")
         
-        brain_uuid = (
-            brain_uuid if brain_uuid is not None 
-            else state.get("brain_uuid", 
-                config.get("configurable", {}).get("brain_uuid", 
-                    self.brain_uuid if hasattr(self, 'brain_uuid') else ""))
-        )
-        
         # Sync with mc.state
         self.state["graph_version_id"] = graph_version_id
-        self.state["brain_uuid"] = brain_uuid
-        if "unresolved_requests" not in state:
-            state["unresolved_requests"] = self.state.get("unresolved_requests", [])
 
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
-        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-26:])
+        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-100:])
 
         logger.info(f"Triggering - User: {user_id}, Graph Version: {graph_version_id}, latest_msg: {latest_msg_content}, context: {context}")
 
-        if state["unresolved_requests"]:
-            current_embedding = self.embedder.encode(latest_msg_content, convert_to_tensor=True)
-            unresolved_embeddings = self.embedder.encode([r["message"] for r in state["unresolved_requests"]], convert_to_tensor=True)
-            similarities = util.cos_sim(current_embedding, unresolved_embeddings)[0]
-            for i, req in enumerate(state["unresolved_requests"]):
-                req["score"] = similarities[i].item()
-                req["active"] = req["score"] > 0.3 or (len(state["messages"]) - req["turn"] < 10)
-
-        intent = await self.detect_intent(latest_msg_content, context)
-        feedback = await self.detect_feedback_type(latest_msg_content, context)
-        if feedback in ["correction", "adjustment", "clarification", "confusion", "elaboration", "rejection"]:
-            intent = "request"
-        
-        state["intent_history"].append(intent)
-        state["intent_history"] = state["intent_history"][-5:]
         builder = ResponseBuilder()
         
-        logger.info(f"intent in trigger={intent}")
-        if intent == "request":
-            async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, feedback, state, intent, graph_version_id=graph_version_id, brain_uuid=brain_uuid):
-                state["prompt_str"] = response_chunk
-                logger.debug(f"Yielding from trigger: {state['prompt_str']}")
-                yield response_chunk
-        else:
-            async for response_chunk in self._handle_casual(latest_msg_content, context, builder, state, graph_version_id=graph_version_id):
-                state["prompt_str"] = response_chunk
-                logger.debug(f"Yielding from trigger: {state['prompt_str']}")
-                yield response_chunk
+        async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, state, graph_version_id=graph_version_id):
+            state["prompt_str"] = response_chunk
+            logger.debug(f"Yielding from trigger: {state['prompt_str']}")
+            yield response_chunk
         
         # Wrap response as AIMessage and append using add_messages
         if state["prompt_str"]:
@@ -335,10 +124,69 @@ class MC:
         # Yield the final state as a special chunk
         yield {"state": state}
     
-    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", 
-                         feedback_type: str, state: Dict, intent: str, graph_version_id: str = "", brain_uuid: str =""):
-        related_request = await self.resolve_related_request(message, feedback_type, state, context)
-        logger.info(f"Handling request for user {user_id} with graph_version_id: {graph_version_id}")
+    async def detect_language_with_llm(self, text, llm=LLM):
+        """Use LLM to detect language and provide appropriate response guidance"""
+        # For very short inputs, give LLM more context
+        if len(text.strip()) < 10:
+            context_prompt = (
+                f"This is a very short text: '{text}'\n"
+                f"Based on this limited sample, identify the most likely language.\n"
+                f"Consider common greetings, questions, or expressions that might indicate the language.\n"
+                f"Return your answer in this JSON format:\n"
+                f"{{\n"
+                f"  \"language\": \"[language name in English]\",\n"
+                f"  \"code\": \"[ISO 639-1 two-letter code]\",\n"
+                f"  \"confidence\": [0-1 value],\n"
+                f"  \"responseGuidance\": \"[Brief guidance on responding appropriately in this language]\"\n"
+                f"}}"
+            )
+        else:
+            context_prompt = (
+                f"Identify the language of this text: '{text}'\n"
+                f"Analyze the text carefully, considering vocabulary, grammar, script, and cultural markers.\n"
+                f"Return your answer in this JSON format:\n"
+                f"{{\n"
+                f"  \"language\": \"[language name in English]\",\n"
+                f"  \"code\": \"[ISO 639-1 two-letter code]\",\n"
+                f"  \"confidence\": [0-1 value],\n"
+                f"  \"responseGuidance\": \"[Brief guidance on responding appropriately in this language]\"\n"
+                f"}}"
+            )
+        
+        try:
+            response = await llm.ainvoke(context_prompt) if asyncio.iscoroutinefunction(llm.invoke) else llm.invoke(context_prompt)
+            response_text = getattr(response, 'content', response).strip()
+            
+            # Extract JSON from response (handling cases where LLM adds extra text)
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                json_str = json_match.group(0)
+                lang_data = json.loads(json_str)
+                
+                # Validate required fields
+                if all(k in lang_data for k in ["language", "code", "confidence", "responseGuidance"]):
+                    return lang_data
+                
+            # If we get here, something went wrong with the JSON
+            logger.warning(f"Language detection returned invalid format: {response_text[:100]}...")
+            return {
+                "language": "English",
+                "code": "en",
+                "confidence": 0.5,
+                "responseGuidance": "Respond in a neutral, professional tone"
+            }
+            
+        except Exception as e:
+            logger.error(f"Language detection error: {str(e)}")
+            # Fallback to English on any error
+            return {
+                "language": "English",
+                "code": "en",
+                "confidence": 0.5,
+                "responseGuidance": "Respond in a neutral, professional tone"
+            }
+
+    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = ""):
         
         try:
             # Query knowledge with full context for broader product relevance
@@ -350,21 +198,10 @@ class MC:
             yield builder.build()
             return
         
-        """
-         TESTING PROMPT
-        """
+        # Detect language of user message
+        lang_info = await self.detect_language_with_llm(message)
+        logger.info(f"Language detected: {lang_info['language']} (confidence: {lang_info['confidence']})")
         
-        profile_prompt_good = (
-            f"Based on the conversation:\n{context}\n\n"
-            f"Follow these instructions to shape the profile and drive the next-step action:\n{kwcontext if kwcontext else 'No specific instructions available; infer from conversation context alone.'}\n\n"
-            f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to pinpoint what's driving them now, weaving in earlier patterns if they align with the instructions.\n\n"
-            f"Interests: What they're drawn to (e.g., practical solutions, quick results), guided by the instructions.\n"
-            f"Needs: What they're seeking (e.g., guidance, confidence), tied to the instructions' focus.\n"
-            f"Hidden desires: Subtle motivations (e.g., self-assurance, partner satisfaction), reflecting the instructions' insights.\n\n"
-            f"Add specific cues for sales: Product preferences (e.g., course features), pain points (e.g., embarrassment), and emotional triggers (e.g., loss of confidence) that match the instructions' suggested approach.\n\n"
-            f"If their focus shifts, note the trigger and adjust only if the instructions allow—otherwise, stay consistent with prior traits unless contradicted.\n\n"
-            f"Summarize in 1-2 sentences with a clear next-step action (e.g., 'Ask probing questions to uncover causes, then pitch course') that strictly follows the instructions' sequence and intent, defaulting to a context-based action if no instructions are provided."
-        )
         profile_prompt = (
             f"Based on the conversation:\n{context}\n\n"
             f"Use these instructions as your strict guide to analyze the situation and determine the next step, following their exact wording and sequence:\n{kwcontext if kwcontext else 'No specific instructions available; infer from conversation context alone.'}\n\n"
@@ -381,7 +218,6 @@ class MC:
         analysis = "\n".join(f"Customer Profile: {customer_profile}")
         logger.info(f"Customer profile built: {customer_profile}")
         
-        
         # Measure feasibility
         possibility, missing = await self._measure_feasibility(message, context, customer_profile, kwcontext)
         analysis = "\n".join([
@@ -393,64 +229,46 @@ class MC:
         # Optional: Log or use the analysis
         logger.info(analysis)
 
-        # Detect language of the message to determine response language
-        is_vietnamese = any(word in message.lower() for word in ["tôi", "bạn", "không", "có", "là", "và", "em", "anh", "chị", "vâng", "đúng", "sai", "được"])
-        
         base_prompt = (
             f"AI: {self.name}\n"
             f"Context: {context}\n"
             f"Message: '{message}'\n"
             f"Customer Profile: {customer_profile}\n"
             f"Rules: {kwcontext}\n"
-            f"Task: Reply {'in Vietnamese' if is_vietnamese else 'in English'} in a casual and friendly tone. Keep answer short in 2-3 sentences. Avoid repeating greetings if one is already in Context.\n\n"
-            f"1. Analyze the conversation flow holistically. Prioritize recent exchanges but reference past messages naturally where relevant.\n\n"
-            f"2. Strictly follow the Customer Profile's next-step action as your sole guide, executing its full sequence ('acknowledge… then… proceed to…') exactly as written, aligning with the Rules' intent—do not skip or stop short of any step.\n\n"
-            f"3. Use the exact phrasing and actions from the Rules that match the profile's current next-step; include testimonials or product offers only when the profile explicitly directs it ('proceed to the product pitch')—do not omit them if instructed.\n\n"
-            f"4. If hesitation appears in Context, address it with empathy from Rules only if the profile's next-step calls for it—otherwise, stay on the instructed action.\n\n"
-            f"5. Keep the tone conversational and tied to the profile's interests, needs, and cues, fully completing the current step in the sequence.\n\n"
-            f"6. **Debug Info**: Use the provided Customer Profile as-is; if missing, state 'Customer Profile incomplete, assuming curiosity-driven interest' and proceed."
+            f"Language Information:\n"
+            f"  - Detected: {lang_info['language']} ({lang_info['code']})\n"
+            f"  - Confidence: {lang_info['confidence']}\n"
+            f"  - Guidance: {lang_info['responseGuidance']}\n\n"
+            f"Task: Reply in {lang_info['language']} following these guidelines:\n"
+            f"  - Use the detected language with proper cultural norms and etiquette\n"
+            f"  - If confidence is below 0.7, include a brief apology in English at the start\n"
+            f"  - Keep answer concise (2-3 sentences) unless the sales process requires more\n"
+            f"  - Apply the specific guidance: {lang_info['responseGuidance']}\n\n"
+            
+            f"1. Analyze the conversation context to identify where the customer is in the sales process. Prioritize recent messages but consider overall patterns.\n\n"
+            
+            f"2. Use the Customer Profile's next-step action as your primary guide for moving the conversation forward. Focus on:\n"
+            f"   a) Current stage in the buying journey (awareness, consideration, decision)\n"
+            f"   b) Key barrier preventing progress\n"
+            f"   c) Next action to move them forward\n\n"
+            
+            f"3. Incorporate knowledge from Rules in this priority order:\n"
+            f"   a) Process instructions: Follow specific conversation flows exactly as specified\n"
+            f"   b) Product information: Reference features/pricing ONLY when directly relevant\n" 
+            f"   c) Conversational techniques that match the customer's current stage\n\n"
+            
+            f"4. If the customer shows hesitation or objections, address them with empathy using specific language from Rules if available.\n\n"
+            
+            f"5. When explicitly directed by the Profile's next-step, include testimonials or product offers using exact phrasing from Rules.\n\n"
+            
+            f"6. Keep the tone conversational while respecting cultural communication norms.\n\n"
+            
+            f"7. If you absolutely cannot respond in the detected language, respond in English but acknowledge the language barrier politely."
         )
-        if feedback_type in ["satisfaction", "confirmation"]:
-            if related_request:
-                related_request.update({"resolved": True, "satisfied": True, "status": "RESOLVED"})
-            prompt = base_prompt + " Customer seems happy—add a light push to close the deal with a product matching their profile."
-            async for chunk in self.stream_response(prompt, builder):
-                yield builder.build()
-            return
         
-        active_unresolved = [r for r in state["unresolved_requests"] if r["active"] and not r["resolved"]]
-        if len(active_unresolved) > self.max_active_requests:
-            oldest = min(active_unresolved, key=lambda r: r["turn"])
-            builder.add(f"Nhiều câu hỏi chưa xong, như '{oldest['message']}'. Chọn cái nào hoặc 'dọn' để xóa bớt?")
+        async for _ in self.stream_response(base_prompt, builder):
             yield builder.build()
-            if message.lower() in ["dọn", "bỏ"]:
-                state["unresolved_requests"] = [r for r in state["unresolved_requests"] if r["active"]]
-                builder.add("Đã dọn dẹp, tiếp tục nào!")
-                yield builder.build()
-            return
-        
-        
-        if feedback_type == "new" or not related_request:
-            async for chunk in self.stream_response(base_prompt, builder):
-                yield builder.build()
-            response_text = builder.build()
-            turn = sum(1 for msg in state["messages"] if isinstance(msg, HumanMessage))
-            state["unresolved_requests"].append({
-                "message": message, "turn": turn, "resolved": False, "response": response_text,
-                "status": "RECEIVED", "satisfied": False, "score": 0.0, "active": True,
-                "graph_version_id": graph_version_id
-            })
-            await self._log_to_brain(brain_uuid, message, response_text, analysis)
-        elif feedback_type in ["elaboration", "clarification"]:
-            logger.info("Jump to CLARIFICATION!")
-            action = "clarify" if feedback_type == "clarification" else "elaborate on"
-            prompt = base_prompt + f" {action.capitalize()} the prior response, using product info that fits the customer profile if it flows naturally."
-            async for chunk in self.stream_response(prompt, builder):
-                yield builder.build()
-            response_text = builder.build()
-            if related_request:
-                related_request["response"] = builder.build()
-            await self._log_to_brain(brain_uuid, message, response_text, analysis)
+            
         
     async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = ""):
         logger.info(f"Handling CASUAL. Graph_version_id: {graph_version_id}")
@@ -542,48 +360,3 @@ class MC:
             logger.error(f"Feasibility evaluation failed for '{message}': {str(e)}")
             return 0, [f"Lỗi hệ thống khi đánh giá: {str(e)}"]
     
-    async def _log_to_brain(self, brainid: str, request: str, response: str, gaps: str) -> str:
-        """
-        Log a conversation entry to the brain system and return the created entry ID.
-        
-        Args:
-            brainid (str): Unique identifier for the brain instance.
-            request (str): The user's input or request.
-            response (str): The AI's response to the request.
-            gaps (str): Information about missing data or gaps (e.g., from feasibility analysis).
-        
-        Returns:
-            str: The ID of the created log entry.
-        
-        Raises:
-            ValueError: If required inputs are empty or invalid.
-            Exception: If log creation fails.
-        """
-        # Validate inputs
-        if not all([brainid, request, response]):
-            raise ValueError("brainid, request, and response must not be empty")
-
-        # Log the brain UUID for tracking
-        logger.info(f"BrainUUID: {brainid}")
-
-        # Format the log entry
-        entry = f"Human: {request}. AI: {response}"
-        logger.debug(f"Logging entry: '{entry}' with gaps: '{gaps}'")
-
-        try:
-            # Assuming create_brain_log is an async function; adjust if it's sync
-            new_log = await create_brain_log(brainid, entry, gaps) if asyncio.iscoroutinefunction(create_brain_log) else create_brain_log(brainid, entry, gaps)
-            
-            # Verify the log was created and has an entry_id
-            if not hasattr(new_log, 'entry_id') or not new_log.entry_id:
-                raise ValueError("Created log missing entry_id")
-            
-            # Log and print success
-            logger.info(f"Created log entry: {new_log.entry_id}")
-            print(f"Created log: {new_log.entry_id}")
-            
-            return new_log.entry_id
-
-        except Exception as e:
-            logger.error(f"Failed to log to brain {brainid}: {str(e)}")
-            raise Exception(f"Log creation failed: {str(e)}") from e

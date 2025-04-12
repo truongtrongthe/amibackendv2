@@ -621,10 +621,10 @@ async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
         if not brain_ids:
             return []
             
-        # Get bank names for all brains
+        # Get bank names for all brains - querying by id (UUID) instead of brain_id (integer)
         brain_response = supabase.table("brain")\
-            .select("brain_id", "bank_name")\
-            .in_("brain_id", brain_ids)\
+            .select("id", "brain_id", "bank_name")\
+            .in_("id", brain_ids)\
             .execute()
             
         if not brain_response.data:
@@ -632,7 +632,8 @@ async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
             
         return [
             {
-                "brain_id": brain["brain_id"],
+                "id": brain["id"],               # UUID for reference
+                "brain_id": brain["brain_id"],   # Integer ID if needed elsewhere
                 "bank_name": brain["bank_name"]
             }
             for brain in brain_response.data
@@ -694,8 +695,8 @@ async def query_graph_knowledge(version_id: str, query: str, top_k: int = 10) ->
             reverse=True
         )[:top_k]
         
-        # Enhance results with brain information
-        brain_bank_map = {b["bank_name"]: b["brain_id"] for b in brain_banks}
+        # Enhance results with brain information (using UUID from updated get_version_brain_banks)
+        brain_bank_map = {b["bank_name"]: b["id"] for b in brain_banks}
         for result in sorted_results:
             result["brain_id"] = brain_bank_map.get(result["bank_name"])
             
@@ -735,7 +736,7 @@ async def query_graph_knowledge_by_category(version_id: str, category: str, top_
             
             # Add brain information to each result
             results = [{
-                "brain_id": brain["brain_id"],
+                "brain_id": brain["id"],  # Use UUID for brain identification
                 "bank_name": brain["bank_name"],
                 "raw": text,
                 "category": category
