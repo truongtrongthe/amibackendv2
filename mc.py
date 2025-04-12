@@ -102,7 +102,7 @@ class MC:
 
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
-        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-20:])
+        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-50:])
 
         logger.info(f"Triggering - User: {user_id}, Graph Version: {graph_version_id}, latest_msg: {latest_msg_content}, context: {context}")
 
@@ -520,7 +520,7 @@ class MC:
                 f"Analyze this conversation to determine context and next steps.\n\n"
                 
                 f"1. CONTACT ANALYSIS:\n"
-                f"   - Extract all relevant information provided by the contact in the entire conversation\n"
+                f"   - Extract all relevant information provided by the contact in the entire conversation:{context}\n"
                 f"   - Identify any required information according to instructions that is missing\n"
                 f"   - Assess completeness of required information (0-100%)\n\n"
                 
