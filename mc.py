@@ -4,10 +4,9 @@ from langchain_openai import ChatOpenAI
 from utilities import logger
 from langchain_core.messages import HumanMessage,AIMessage
 import json
-from sentence_transformers import SentenceTransformer, util
+#from sentence_transformers import SentenceTransformer, util
 import numpy as np
 from database import query_graph_knowledge
-from brainlog import create_brain_log
 import re
 from typing import Tuple, Dict, Any
 
@@ -35,7 +34,7 @@ class ResponseBuilder:
         return separator.join(part for part in self.parts if part)
 
 class MC:
-    embedder = SentenceTransformer('sentence-transformers/LaBSE')
+    #embedder = SentenceTransformer('sentence-transformers/LaBSE')
 
     def __init__(self, user_id: str = "thefusionlab", convo_id: str = None, 
                  similarity_threshold: float = 0.55, max_active_requests: int = 5):
@@ -103,7 +102,7 @@ class MC:
 
         latest_msg = state["messages"][-1] if state["messages"] else HumanMessage(content="")
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
-        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-100:])
+        context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-20:])
 
         logger.info(f"Triggering - User: {user_id}, Graph Version: {graph_version_id}, latest_msg: {latest_msg_content}, context: {context}")
 
@@ -185,178 +184,620 @@ class MC:
                 "confidence": 0.5,
                 "responseGuidance": "Respond in a neutral, professional tone"
             }
+    async def detect_conversation_language(self, conversation):
+        """Determine the primary language of the conversation based on history"""
+        # Count language occurrences in conversation
+        lang_counts = {}
+        
+        # Extract user messages
+        user_messages = []
+        for line in conversation:
+            if line.startswith("User:"):
+                user_message = line[5:].strip()
+                if user_message:
+                    user_messages.append(user_message)
+        
+        # If conversation is too short, return None to indicate insufficient data
+        if len(user_messages) < 2:
+            return None
+        
+        # Detect language for each message
+        for message in user_messages[-3:]:  # Use last 3 messages for efficiency
+            try:
+                lang_info = await self.detect_language_with_llm(message)
+                lang = lang_info.get("language", "Unknown")
+                confidence = lang_info.get("confidence", 0)
+                
+                # Only count if confidence is reasonable
+                if confidence > 0.6:
+                    lang_counts[lang] = lang_counts.get(lang, 0) + 1
+            except Exception:
+                continue
+        
+        # Find most common language
+        if lang_counts:
+            primary_lang = max(lang_counts.items(), key=lambda x: x[1])[0]
+            return primary_lang
+        
+        return "English"  # Default to English if no clear determination
+        
+    async def assess_knowledge_coverage(self, query_results, context_analysis, message):
+        """
+        Assess whether the retrieved knowledge adequately covers the user's query or context
+        
+        Args:
+            query_results: Dictionary mapping queries to result counts
+            context_analysis: The analyzed conversation context
+            message: The user's message
+            
+        Returns:
+            tuple: (coverage_score, missing_aspects, requires_feedback)
+        """
+        # Start with a neutral score
+        coverage_score = 0.5
+        
+        # Check if we have any results at all
+        total_results = sum(query_results.values())
+        if total_results == 0:
+            logger.warning(f"No knowledge results found for any query")
+            return 0.1, ["complete information"], True
+            
+        # Extract key aspects from the context_analysis
+        aspects = []
+        
+        # Look for specific sections in the analysis
+        next_actions = re.search(r'NEXT ACTIONS?[:\s]*(.*?)(?:\n\n|\Z)', context_analysis, re.IGNORECASE | re.DOTALL)
+        if next_actions:
+            aspects.append(("next_actions", next_actions.group(1).strip()))
+            
+        requirements = re.search(r'REQUIREMENTS?[:\s]*(.*?)(?:\n\n|\Z)', context_analysis, re.IGNORECASE | re.DOTALL)
+        if requirements:
+            aspects.append(("requirements", requirements.group(1).strip()))
+            
+        # Look for rejection indicators in the message
+        rejection_patterns = [
+            r'\b(?:no|nope|incorrect|wrong|not right|not correct|disagree|rejected|refuse|won\'t)\b',
+            r'\bdon\'t\s+(?:agree|think|believe|want|like)\b',
+            r'\bthat\'s not\b',
+            r'\b(?:bull|nonsense|ridiculous|crazy)\b'
+        ]
+        
+        has_rejection = any(re.search(pattern, message.lower()) for pattern in rejection_patterns)
+        
+        # Check knowledge relevance for each aspect
+        missing_aspects = []
+        
+        # If rejection detected, check if we have knowledge about handling objections
+        if has_rejection:
+            objection_keywords = ["objection", "rejection", "disagreement", "negative feedback"]
+            has_objection_knowledge = False
+            
+            for query, count in query_results.items():
+                if any(keyword in query.lower() for keyword in objection_keywords) and count > 0:
+                    has_objection_knowledge = True
+                    break
+                    
+            if not has_objection_knowledge:
+                missing_aspects.append("handling rejection or objection")
+                coverage_score -= 0.2
+        
+        # Generic knowledge gap assessment
+        if total_results < 3:
+            coverage_score -= 0.2
+            
+        # Check for knowledge confidence indicators in analysis
+        uncertain_patterns = [
+            r'\buncertain\b', r'\bunclear\b', r'\bunknown\b', r'\bmay(?:be)?\b',
+            r'\bpossibly\b', r'\bperhaps\b', r'\bnot (?:sure|certain|clear)\b',
+            r'\b(?:insufficient|inadequate|limited) (?:information|data|details)\b',
+            r'\bcannot (?:determine|establish|ascertain)\b'
+        ]
+        
+        uncertainty_count = 0
+        for pattern in uncertain_patterns:
+            matches = re.findall(pattern, context_analysis.lower())
+            uncertainty_count += len(matches)
+            
+        if uncertainty_count > 3:
+            coverage_score -= 0.15
+            missing_aspects.append("clear information")
+        
+        # Determine if feedback is required
+        requires_feedback = coverage_score < 0.3 or (has_rejection and not missing_aspects)
+        
+        # If we can't identify specific missing aspects but coverage is low
+        if requires_feedback and not missing_aspects:
+            missing_aspects.append("relevant information")
+            
+        return coverage_score, missing_aspects, requires_feedback
+    
+    async def generate_feedback_request(self, missing_aspects, message, context):
+        """
+        Generate a natural request for more information based on missing knowledge aspects
+        
+        Args:
+            missing_aspects: List of missing knowledge aspects
+            message: The user's message
+            context: Conversation context
+            
+        Returns:
+            str: A natural language request for clarification
+        """
+        # Map aspect types to question templates
+        aspect_questions = {
+            "handling rejection or objection": [
+                "Could you tell me more about what specifically doesn't work for you?",
+                "I'd like to understand better what you disagree with. Could you elaborate?",
+                "What part of that didn't address your needs?",
+                "To better help you, could you share what aspect you're rejecting?"
+            ],
+            "clear information": [
+                "I'm not sure I have enough information. Could you provide more details?",
+                "To give you the best response, could you clarify what you're looking for?",
+                "I'd like to help, but need a bit more context. Could you elaborate?",
+                "I'm missing some details to properly assist you. What specifically are you interested in?"
+            ],
+            "relevant information": [
+                "I don't seem to have the specific information you need. Could you rephrase or clarify?",
+                "I want to make sure I address your question properly. Could you provide more details?",
+                "I'd like to help with that, but I need a bit more context. Could you elaborate?",
+                "To give you the best answer, could you share more about what you're looking for?"
+            ],
+            "complete information": [
+                "I don't have enough information about that topic. Could you share what specific aspects you're interested in?",
+                "I'd like to help with that, but it seems I need more information. What exactly would you like to know?",
+                "I don't have complete details on that. Could you clarify what you're looking for?",
+                "I want to make sure I understand correctly. Could you provide more details about your question?"
+            ]
+        }
+        
+        # Build a response
+        if not missing_aspects:
+            missing_aspects = ["relevant information"]
+            
+        # Select the first missing aspect as the primary one
+        primary_aspect = missing_aspects[0]
+        
+        # Get question templates for this aspect
+        templates = aspect_questions.get(primary_aspect, aspect_questions["relevant information"])
+        
+        # Select a template based on a hash of the message (for variety)
+        template_index = hash(message) % len(templates)
+        question = templates[template_index]
+        
+        # If the message is very short, add encouragement for more details
+        if len(message.strip()) < 10:
+            follow_up = "Even a few more details would help me provide a better response."
+            question = f"{question} {follow_up}"
+            
+        return question
 
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = ""):
-        
         try:
-            # Query knowledge with full context for broader product relevance
-            knowledge = await query_graph_knowledge(graph_version_id, context, top_k=5) or []
-            kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
-        except Exception as e:
-            logger.error(f"Knowledge query failed: {e}")
-            builder.add("Oops, có lỗi khi tìm thông tin, thử lại nhé!")
-            yield builder.build()
-            return
-        
-        # Detect language of user message
-        lang_info = await self.detect_language_with_llm(message)
-        logger.info(f"Language detected: {lang_info['language']} (confidence: {lang_info['confidence']})")
-        
-        profile_prompt = (
-            f"Based on the conversation:\n{context}\n\n"
-            f"Use these instructions as your strict guide to analyze the situation and determine the next step, following their exact wording and sequence:\n{kwcontext if kwcontext else 'No specific instructions available; infer from conversation context alone.'}\n\n"
-            f"Create a concise customer profile capturing their core interests, needs, and hidden desires to guide an AI sales response. Focus on the most recent messages to pinpoint what's driving them now, weaving in earlier patterns if they align with the instructions.\n\n"
-            f"Interests: What they're drawn to (e.g., practical solutions, quick results), guided by the instructions.\n"
-            f"Needs: What they're seeking (e.g., guidance, confidence), tied to the instructions' focus.\n"
-            f"Hidden desires: Subtle motivations (e.g., self-assurance, partner satisfaction), reflecting the instructions' insights.\n\n"
-            f"Add specific cues for sales: Product preferences (e.g., course features), pain points (e.g., embarrassment), and emotional triggers (e.g., loss of confidence) that match the instructions' suggested approach.\n\n"
-            f"If their focus shifts, note the trigger and adjust only if the instructions allow—otherwise, stay consistent with prior traits unless contradicted.\n\n"
-            f"Summarize in 1-2 sentences with a clear next-step action: analyze the current conversation state (e.g., what the customer has said, how much they've revealed, their apparent intent); then, strictly follow the instructions' sequence—start by asking the exact open-ended questions provided (e.g., 'Anh gặp trường hợp này từ lúc mới bắt đầu quan hệ, hay gần đây mới bị anh nhỉ?') if no responses yet; after they respond, proceed to analyze their answers against the listed causes (psychological, physiological, habits), then offer empathy and motivation using the instructed phrasing (e.g., 'Em hiểu cảm giác này...'); only pitch the product combo ('1 year for 399K or 2 years for 599K + 3 free eBooks') if they show explicit buying intent (e.g., 'send it,' 'I want it') after earlier steps; otherwise, continue probing or building trust with the next instructed step, defaulting to a context-based open-ended question if instructions are unclear."
+            # Break conversation into lines
+            conversation = [line.strip() for line in context.split("\n") if line.strip()]
+            
+            logger.info(f"Processing message: '{message}' from user_id: {user_id}")
+            logger.info(f"Context length: {len(conversation)} lines")
+            
+            # Determine conversation language preference
+            conversation_language = await self.detect_conversation_language(conversation)
+            logger.info(f"Overall conversation language detected: {conversation_language or 'Insufficient data'}")
+            
+            # Detect language of current message
+            logger.info(f"Detecting language for message: '{message}'")
+            lang_info = await self.detect_language_with_llm(message)
+            
+            # Override language confidence if conversation history establishes a pattern
+            if conversation_language and conversation_language != lang_info["language"] and len(conversation) > 5:
+                logger.info(f"Overriding detected language ({lang_info['language']}) with conversation language ({conversation_language})")
+                lang_info["language"] = conversation_language
+                lang_info["confidence"] = 0.9  # High confidence based on conversation history
+                lang_info["responseGuidance"] = f"Respond in {conversation_language}, maintaining consistency with previous messages"
+            
+            logger.info(f"Final language selection: {lang_info['language']} (confidence: {lang_info['confidence']})")
+            
+            # STEP 1: Get profile building skills from knowledge base - the core functionality
+            profile_query = "audience profile building information gathering customer understanding"
+            logger.info(f"Fetching profile building skills with query: '{profile_query}'")
+            profile_entries = await query_graph_knowledge(graph_version_id, profile_query, top_k=5)
+            profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
+            logger.info(f"Retrieved {len(profile_entries)} entries for profile building skills")
+            
+            # STEP 2: Get personality instructions from knowledge base
+            personality_query = "who am I how should I behave my identity character role"
+            logger.info(f"Fetching AI personality instructions with query: '{personality_query}'")
+            personality_entries = await query_graph_knowledge(graph_version_id, personality_query, top_k=3)
+            
+            # Detect proper personality entries using structure indicators
+            filtered_personality_entries = []
+            for entry in personality_entries:
+                # Look for positive structural indicators of personality content
+                has_personality_indicators = any([
+                    "bạn là" in entry["raw"].lower(),
+                    "tên là" in entry["raw"].lower(),
+                    "trong khi giao tiếp" in entry["raw"].lower(),
+                    "ai personality" in entry["raw"].lower(),
+                    "role:" in entry["raw"].lower(),
+                    "identity:" in entry["raw"].lower(),
+                    "tone:" in entry["raw"].lower(),
+                    "voice:" in entry["raw"].lower(),
+                    "communication style:" in entry["raw"].lower(),
+                    "positioning:" in entry["raw"].lower(),
+                    "how i should" in entry["raw"].lower(),
+                    "who am i" in entry["raw"].lower(),
+                    "my identity" in entry["raw"].lower(),
+                    "my role" in entry["raw"].lower(),
+                    "my character" in entry["raw"].lower()
+                ])
+                
+                # If it has personality indicators, use it
+                if has_personality_indicators:
+                    filtered_personality_entries.append(entry)
+                    logger.info(f"Found personality entry with ID {entry['id']} - has personality indicators")
+                else:
+                    # Try to determine if an entry is about personality from its structure
+                    sentences = re.split(r'[.!?]', entry["raw"])
+                    personality_sentence_count = 0
+                    for sentence in sentences:
+                        if any(term in sentence.lower() for term in ["personality", "character", "identity", "role", "tone", "voice", "style", "communicate"]):
+                            personality_sentence_count += 1
+                    
+                    # If more than 25% of sentences contain personality terms, include it
+                    if personality_sentence_count > 0 and len(sentences) > 0 and personality_sentence_count / len(sentences) >= 0.25:
+                        filtered_personality_entries.append(entry)
+                        logger.info(f"Found personality entry with ID {entry['id']} - has personality structure")
+                    else:
+                        logger.info(f"Filtered out entry with ID {entry['id']} - not personality content")
+                
+            # If we didn't find enough specific personality entries, try with different queries
+            if len(filtered_personality_entries) < 1:
+                logger.info("First personality query didn't yield specific personality vectors, trying backup queries")
+                
+                # Try different queries with different semantic focuses
+                backup_queries = [
+                    "how should I speak communicate with people",
+                    "my character identity who am I",
+                    "how to behave tone and approach"
+                ]
+                
+                for backup_query in backup_queries:
+                    logger.info(f"Trying backup personality query: '{backup_query}'")
+                    backup_entries = await query_graph_knowledge(graph_version_id, backup_query, top_k=2)
+                    
+                    if backup_entries:
+                        # Apply the same personality detection logic
+                        for entry in backup_entries:
+                            has_personality_indicators = any([
+                                "bạn là" in entry["raw"].lower(),
+                                "tên là" in entry["raw"].lower(),
+                                "trong khi giao tiếp" in entry["raw"].lower(),
+                                "ai personality" in entry["raw"].lower(),
+                                "role:" in entry["raw"].lower(),
+                                "identity:" in entry["raw"].lower(),
+                                "tone:" in entry["raw"].lower(),
+                                "voice:" in entry["raw"].lower(),
+                                "how i should" in entry["raw"].lower(),
+                                "who am i" in entry["raw"].lower(),
+                                "my identity" in entry["raw"].lower(),
+                                "my role" in entry["raw"].lower(),
+                                "my character" in entry["raw"].lower()
+                            ])
+                            
+                            if has_personality_indicators or any(term in entry["raw"].lower() for term in ["personality", "character", "identity", "role", "tone"]):
+                                filtered_personality_entries.append(entry)
+                                logger.info(f"Found personality entry with ID {entry['id']} from backup query")
+                        
+                    # If we found at least one good entry from backup queries, exit the loop
+                    if len(filtered_personality_entries) > 0:
+                        logger.info(f"Found {len(filtered_personality_entries)} valid personality entries from backup queries")
+                        break
+                
+            # If we still have no entries, use a default personality instruction
+            if not filtered_personality_entries:
+                logger.warning("No personality entries found, using default personality")
+                default_personality = {
+                    "raw": "AI Personality Guidelines:\n" +
+                           "- Maintain a helpful, friendly tone\n" +
+                           "- Be respectful and professional\n" +
+                           "- Show expertise in relevant topics\n" +
+                           "- Keep responses clear and concise",
+                    "id": "default_personality"
+                }
+                filtered_personality_entries = [default_personality]
+                
+            personality_instructions = "\n\n".join(entry["raw"] for entry in filtered_personality_entries)
+            logger.info(f"Final personality instructions: {len(personality_instructions)} characters")
+            
+            # Simple logging of entries for debugging
+            logger.info("===== PERSONALITY VECTORS START =====")
+            for i, entry in enumerate(filtered_personality_entries):
+                logger.info(f"Personality #{i+1} - ID: {entry['id']}")
+                logger.info(f"  Full content: {entry['raw']}")
+            logger.info("===== PERSONALITY VECTORS END =====")
+            
+            # Combine instructions
+            process_instructions = personality_instructions + "\n\n" + profile_instructions
+            
+            # STEP 3: Analyze conversation context based on knowledge
+            logger.info("Building context analysis prompt")
+            context_analysis_prompt = (
+                f"Based on the conversation:\n{context}\n\n"
+                f"KNOWLEDGE BASE INSTRUCTIONS:\n{process_instructions}\n\n"
+                f"Analyze this conversation to determine context and next steps.\n\n"
+                
+                f"1. CONTACT ANALYSIS:\n"
+                f"   - Extract all relevant information provided by the contact\n"
+                f"   - Identify any required information according to instructions that is missing\n"
+                f"   - Assess completeness of required information (0-100%)\n\n"
+                
+                f"2. CONVERSATION CONTEXT:\n"
+                f"   - What is the current topic or focus?\n"
+                f"   - What stage is this conversation in? (initial contact, information gathering, etc.)\n"
+                f"   - What signals about intent or needs has the contact provided?\n"
+                f"   - Are there any strong reactions (agreement, disagreement, etc.)?\n\n"
+                
+                f"3. REQUIREMENTS ASSESSMENT:\n"
+                f"   - What specific information requirements are in the knowledge base instructions?\n"
+                f"   - Which requirements have been met and which are still missing?\n"
+                f"   - What is the priority order for gathering missing information?\n\n"
+                
+                f"4. NEXT ACTIONS:\n"
+                f"   - Based purely on the knowledge base instructions, what is the next appropriate action?\n"
+                f"   - If information gathering is needed, what specific questions should be asked?\n"
+                f"   - If information is complete, what should be the focus of the response?\n"
+                f"   - If the user has expressed rejection/disagreement, how should you respond?\n\n"
+                
+                f"Be objective and factual. Only reference information explicitly present in either the conversation or knowledge base instructions."
             )
 
-        customer_profile = LLM.invoke(profile_prompt).content  # Sync call, full response
-        analysis = "\n".join(f"Customer Profile: {customer_profile}")
-        logger.info(f"Customer profile built: {customer_profile}")
-        
-        # Measure feasibility
-        possibility, missing = await self._measure_feasibility(message, context, customer_profile, kwcontext)
-        analysis = "\n".join([
-            f"Customer Profile Feasibility:",
-            f"  - Possibility: {possibility}%",
-            f"  - Missing Information: {', '.join(missing) if missing else 'Không thiếu thông tin nào'}"
-        ])
-
-        # Optional: Log or use the analysis
-        logger.info(analysis)
-
-        base_prompt = (
-            f"AI: {self.name}\n"
-            f"Context: {context}\n"
-            f"Message: '{message}'\n"
-            f"Customer Profile: {customer_profile}\n"
-            f"Rules: {kwcontext}\n"
-            f"Language Information:\n"
-            f"  - Detected: {lang_info['language']} ({lang_info['code']})\n"
-            f"  - Confidence: {lang_info['confidence']}\n"
-            f"  - Guidance: {lang_info['responseGuidance']}\n\n"
-            f"Task: Reply in {lang_info['language']} following these guidelines:\n"
-            f"  - Use the detected language with proper cultural norms and etiquette\n"
-            f"  - If confidence is below 0.7, include a brief apology in English at the start\n"
-            f"  - Keep answer concise (2-3 sentences) unless the sales process requires more\n"
-            f"  - Apply the specific guidance: {lang_info['responseGuidance']}\n\n"
+            logger.info("Invoking LLM for context analysis")
+            context_analysis = LLM.invoke(context_analysis_prompt).content
+            logger.info(f"Context analysis complete ({len(context_analysis)} characters)")
+            logger.info(f"Analysis summary: {context_analysis}")
             
-            f"1. Analyze the conversation context to identify where the customer is in the sales process. Prioritize recent messages but consider overall patterns.\n\n"
+            # Log analysis for requirements and completeness
+            completeness_match = re.search(r'completeness[\s\:]*([\d]+)%', context_analysis.lower())
+            if completeness_match:
+                completeness = completeness_match.group(1)
+                logger.info(f"Detected information completeness: {completeness}%")
             
-            f"2. Use the Customer Profile's next-step action as your primary guide for moving the conversation forward. Focus on:\n"
-            f"   a) Current stage in the buying journey (awareness, consideration, decision)\n"
-            f"   b) Key barrier preventing progress\n"
-            f"   c) Next action to move them forward\n\n"
+            missing_info = "missing" in context_analysis.lower() or "incomplete" in context_analysis.lower()
+            logger.info(f"Missing information detected: {missing_info}")
             
-            f"3. Incorporate knowledge from Rules in this priority order:\n"
-            f"   a) Process instructions: Follow specific conversation flows exactly as specified\n"
-            f"   b) Product information: Reference features/pricing ONLY when directly relevant\n" 
-            f"   c) Conversational techniques that match the customer's current stage\n\n"
+            # STEP 4: Extract relevant search terms to find appropriate knowledge
+            logger.info("Building entity extraction prompt")
+            entity_extraction_prompt = (
+                f"Based on the conversation and analysis:\n\n"
+                f"CONVERSATION:\n{context}\n\n"
+                f"ANALYSIS:\n{context_analysis}\n\n"
+                f"Extract all relevant search terms that would help find information in a knowledge base:\n\n"
+                f"1. CONTACT INFORMATION: Information about the person (demographics, preferences, etc.)\n"
+                f"2. TOPICS: Main topics, product categories, or services mentioned\n"
+                f"3. QUESTIONS: Specific questions or information requests\n"
+                f"4. STAGE INDICATORS: Terms that indicate where in a process the conversation is\n"
+                f"5. REACTIONS: Terms indicating agreement, disagreement, satisfaction, frustration\n\n"
+                
+                f"Format your response as a JSON object with these categories and 1-3 specific search terms for each that would help retrieve relevant knowledge."
+            )
             
-            f"4. If the customer shows hesitation or objections, address them with empathy using specific language from Rules if available.\n\n"
+            logger.info("Invoking LLM for entity extraction")
+            entity_response = LLM.invoke(entity_extraction_prompt).content
+            logger.info(f"Entity extraction complete ({len(entity_response)} characters)")
             
-            f"5. When explicitly directed by the Profile's next-step, include testimonials or product offers using exact phrasing from Rules.\n\n"
+            # Extract JSON from the response
+            entity_match = re.search(r'\{[\s\S]*\}', entity_response)
+            if entity_match:
+                try:
+                    entity_json = json.loads(entity_match.group(0))
+                    logger.info(f"Successfully parsed entity JSON with {len(entity_json.keys())} categories")
+                    # Flatten all entities into search terms
+                    search_terms = []
+                    for category, terms in entity_json.items():
+                        if isinstance(terms, list):
+                            search_terms.extend(terms)
+                            logger.info(f"Category {category}: {len(terms)} terms - {', '.join(terms)}")
+                        elif isinstance(terms, str):
+                            search_terms.append(terms)
+                            logger.info(f"Category {category}: single term - {terms}")
+                except Exception as json_error:
+                    logger.error(f"Failed to parse entity JSON: {str(json_error)}")
+                    logger.error(f"Raw match: {entity_match.group(0)[:100]}...")
+                    search_terms = [message]  # Fallback to original message
+                    logger.info(f"Using fallback search term: {message}")
+            else:
+                logger.warning("No JSON pattern found in entity extraction response")
+                search_terms = [message]  # Fallback to original message
+                logger.info(f"Using fallback search term: {message}")
             
-            f"6. Keep the tone conversational while respecting cultural communication norms.\n\n"
+            # Create targeted queries based on context analysis and extracted entities
+            targeted_queries = []
             
-            f"7. If you absolutely cannot respond in the detected language, respond in English but acknowledge the language barrier politely."
-        )
-        
-        async for _ in self.stream_response(base_prompt, builder):
-            yield builder.build()
+            # Add priority query based on analysis
+            if missing_info:
+                priority_query = "profile information gathering techniques"
+                targeted_queries.append(priority_query)
+                logger.info(f"Added priority query due to missing information: '{priority_query}'")
             
-        
-    async def _handle_casual(self, message: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = ""):
-        logger.info(f"Handling CASUAL. Graph_version_id: {graph_version_id}")
-        
-        # Fetch knowledge with fallback to empty list
-        knowledge = await query_graph_knowledge(graph_version_id, message, top_k=5) or []
-        kwcontext = "\n\n".join(entry["raw"] for entry in knowledge)
-        
-        # Detect language of the message to determine response language
-        is_vietnamese = any(word in message.lower() for word in ["tôi", "bạn", "không", "có", "là", "và", "em", "anh", "chị", "vâng", "đúng", "sai", "được"])
-        
-        # Enhanced prompt for more natural conversations
-        prompt = (
-                f"AI: {self.name} (smart, chill, personal assistant)\n"
+            # Check for rejection patterns in the message
+            rejection_patterns = [
+                r'\b(?:no|nope|incorrect|wrong|not right|not correct|disagree|rejected|refuse|won\'t)\b',
+                r'\bdon\'t\s+(?:agree|think|believe|want|like)\b',
+                r'\bthat\'s not\b',
+                r'\b(?:bull|nonsense|ridiculous|crazy)\b'
+            ]
+            
+            has_rejection = any(re.search(pattern, message.lower()) for pattern in rejection_patterns)
+            if has_rejection:
+                rejection_query = "handling objection disagreement rejection conversation"
+                targeted_queries.append(rejection_query)
+                logger.info(f"Added rejection handling query: '{rejection_query}'")
+            
+            # Add entity-based queries
+            entity_queries_count = 0
+            for term in search_terms:
+                if term and len(term.strip()) > 2:  # Avoid very short terms
+                    targeted_queries.append(term)
+                    entity_queries_count += 1
+            
+            logger.info(f"Added {entity_queries_count} entity-based queries")
+            
+            # Add message context query
+            targeted_queries.append(message)
+            logger.info(f"Added message as final query: '{message}'")
+            
+            # Add language preference to ensure appropriate content
+            language_code = lang_info.get("code", "en").lower()
+            lang_query = f"content in {language_code} {' '.join(search_terms[:2])}"
+            targeted_queries.append(lang_query)
+            logger.info(f"Added language preference query: '{lang_query}'")
+            
+            # Remove duplicates while preserving order
+            unique_queries = []
+            for query in targeted_queries:
+                if query not in unique_queries:
+                    unique_queries.append(query)
+            
+            logger.info(f"Final unique queries: {len(unique_queries)} queries")
+            for i, query in enumerate(unique_queries[:7]):
+                logger.info(f"Query {i+1}: '{query}'")
+            
+            # Retrieve knowledge for each unique query
+            logger.info("Starting knowledge retrieval for queries")
+            all_knowledge = []
+            query_results = {}
+            
+            for query in unique_queries:  # Process all unique queries
+                try:
+                    logger.info(f"Retrieving knowledge for query: '{query}'")
+                    results = await query_graph_knowledge(graph_version_id, query, top_k=3)
+                    if results:
+                        query_results[query] = len(results)
+                        all_knowledge.extend(results)
+                        logger.info(f"Retrieved {len(results)} results for query '{query}'")
+                    else:
+                        logger.info(f"No results for query '{query}'")
+                        query_results[query] = 0
+                except Exception as e:
+                    logger.error(f"Error retrieving knowledge for query '{query}': {e}")
+                    query_results[query] = 0
+            
+            logger.info(f"Knowledge retrieval complete: {len(all_knowledge)} total entries before deduplication")
+            logger.info(f"Results by query: {json.dumps(query_results)}")
+            
+            # Remove duplicate knowledge entries
+            unique_knowledge = []
+            seen_ids = set()
+            for entry in all_knowledge:
+                if entry['id'] not in seen_ids:
+                    seen_ids.add(entry['id'])
+                    unique_knowledge.append(entry)
+            
+            # Create knowledge context from unique entries
+            knowledge_context = "\n\n".join(entry["raw"] for entry in unique_knowledge)
+            logger.info(f"Retrieved {len(unique_knowledge)} unique knowledge entries from {len(unique_queries)} queries")
+            logger.info(f"Knowledge context: {len(knowledge_context)} characters")
+            
+            # Extract recent topics to avoid repeating
+            recent_topics = []
+            if len(conversation) > 2:
+                # Extract last 2-3 AI messages to check for repeated content
+                ai_messages = [msg[4:] for msg in conversation if msg.startswith("AI:")][-3:]
+                # Use simple keyword extraction to identify repeated phrases
+                for msg in ai_messages:
+                    words = re.findall(r'\b\w{4,}\b', msg.lower())
+                    for word in words:
+                        if words.count(word) > 1 and word not in recent_topics and len(word) > 4:
+                            recent_topics.append(word)
+            
+            logger.info(f"Identified potential repetitive topics: {recent_topics}")
+            
+            # Assess knowledge coverage and determine if feedback is needed
+            coverage_score, missing_aspects, requires_feedback = await self.assess_knowledge_coverage(
+                query_results, context_analysis, message
+            )
+            
+            logger.info(f"Knowledge coverage assessment: score={coverage_score}, missing_aspects={missing_aspects}, requires_feedback={requires_feedback}")
+            
+            # If feedback is required, generate a specific request for more information
+            if requires_feedback:
+                feedback_request = await self.generate_feedback_request(missing_aspects, message, context)
+                logger.info(f"Generated feedback request: {feedback_request}")
+                
+                # Simplified response prompt for feedback requests
+                feedback_prompt = (
+                    f"AI: {self.name}\n"
+                    f"Context: {context}\n"
+                    f"Message: '{message}'\n"
+                    f"Language: {lang_info['language']}\n"
+                    f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{personality_instructions}\n\n"
+                    
+                    f"Instructions:\n"
+                    f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
+                    f"2. The system has determined that you need more information to properly respond.\n"
+                    f"3. Craft a response that genuinely seeks clarification, in a friendly and conversational way.\n\n"
+                    
+                    f"Here is the specific feedback request: \"{feedback_request}\"\n\n"
+                    
+                    f"Your response should:\n"
+                    f"1. Acknowledge the user's message briefly\n"
+                    f"2. Express that you want to help but need more specific information\n"
+                    f"3. Include the feedback request, making it sound natural and aligned with your personality\n"
+                    f"4. Be concise and friendly\n\n"
+                    
+                    f"Always respond in {lang_info['language']}."
+                )
+                
+                logger.info("Starting feedback request response generation")
+                async for _ in self.stream_response(feedback_prompt, builder):
+                    yield builder.build()
+                
+                logger.info("Feedback request response complete")
+                return
+            
+            # STEP 4: Generate response based on context analysis and knowledge
+            logger.info("Building response prompt")
+            response_prompt = (
+                f"AI: {self.name}\n"
                 f"Context: {context}\n"
                 f"Message: '{message}'\n"
-                f"Task: Respond naturally and conversationally to the message. "
-                f"{'Reply in Vietnamese' if is_vietnamese else 'Reply in English'} with a friendly, casual tone. "
-                f"Maintain a natural flow with the conversation context. "
-                f"Keep your response concise (1-2 sentences) unless the question requires more detail. "
-                f"Avoid repeating information already mentioned in the context. "
-                f"Skip formal greetings if the conversation is already ongoing."
+                f"Context Analysis: {context_analysis}\n"
+                f"Knowledge: {knowledge_context}\n"
+                f"Language: {lang_info['language']} (confidence: {lang_info['confidence']})\n\n"
+                
+                f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{personality_instructions}\n\n"
+                
+                f"Instructions:\n"
+                f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
+                f"2. Your primary guidance comes from the knowledge base. Follow the NEXT ACTIONS from the Context Analysis.\n"
+                f"3. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
+                f"4. Keep responses concise and conversational.\n" 
+                f"5. Always acknowledge the message first.\n"
+                f"6. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
+                f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n\n"
+                
+                f"Response Structure:\n"
+                f"1. ACKNOWLEDGE the message briefly\n"
+                f"2. ADDRESS the current context appropriately:\n"
+                f"   a) If gathering information is needed, ask specific questions (but not ones already asked)\n"
+                f"   b) If providing information is needed, present relevant details in a fresh way\n"
+                f"   c) If addressing concerns, provide targeted responses\n"
+                f"3. PROGRESS the conversation with something new that hasn't been discussed yet\n\n"
+                
+                f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n\n"
+                
+                + (f"AVOID these repetitive topics/phrasings that have appeared multiple times: {', '.join(recent_topics)}\n\n" if recent_topics else "")
+                
+                + f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."
             )
-
-        #logger.info(f"casual prompt={prompt}")
-        
-        async for chunk in self.stream_response(prompt, builder):
-            yield chunk
-    
-    async def _measure_feasibility(self, message: str, context: str, customer_profile: str, kwcontext: str) -> Tuple[int, list[str]]:
-        """
-        Evaluate the feasibility of resolving the user's request based on available information and the customer profile's next-step action.
-        """
-        possibility_prompt = (
-            f"AI: {self.name}\n"
-            f"Context: {context if context else 'No conversation context provided; assume a generic customer interaction.'}\n"
-            f"Message: '{message if message else 'User request is unspecified; infer intent from context or profile.'}'\n"
-            f"Customer Profile: {customer_profile if customer_profile else 'No profile generated yet; assume a blank slate.'}\n"
-            f"Rules: {kwcontext if kwcontext else 'No specific instructions available; use general reasoning based on context and profile.'}\n"
-            f"Task: Assess whether the AI can successfully execute the next-step action outlined in the Customer Profile (treating any step as valid), given the provided context, message, and rules.\n"
-            f"Output: Return a valid JSON object with:\n"
-            f"- 'possibility': Integer (0-100) representing the percentage chance of success.\n"
-            f"- 'missing': List of specific missing information or resources (in Vietnamese) needed to increase the possibility, or an empty list if none.\n"
-            f"Consider: Availability of data (context, message, rules), clarity of the next-step action, and the AI's capability to act on it.\n"
-        )
-        try:
-            # Handle both sync and async LLM.invoke
-            if asyncio.iscoroutinefunction(LLM.invoke):
-                response = await LLM.invoke(possibility_prompt)
-            else:
-                response = LLM.invoke(possibility_prompt)
-
-            # Extract content from response (assuming AIMessage or similar)
-            raw_response = getattr(response, 'content', response).strip()
-            logger.debug(f"Preliminary reasoning raw response: '{raw_response}'")
-
-            if not raw_response:
-                logger.warning("LLM returned an empty response")
-                return 0, ["Không có phản hồi từ LLM để đánh giá"]
-
-            # Parse JSON
-            try:
-                prelim_result = json.loads(raw_response)
-            except json.JSONDecodeError:
-                json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
-                if json_match:
-                    prelim_result = json.loads(json_match.group(0))
-                else:
-                    logger.error(f"Invalid JSON in response: '{raw_response}'")
-                    return 0, ["Phản hồi từ LLM không chứa JSON hợp lệ"]
-
-            # Validate fields
-            required_fields = {"possibility", "missing"}
-            if not required_fields.issubset(prelim_result.keys()):
-                missing_fields = required_fields - set(prelim_result.keys())
-                return 0, [f"Thiếu trường dữ liệu cần thiết: {', '.join(missing_fields)}"]
-
-            possibility = prelim_result["possibility"]
-            if not isinstance(possibility, (int, float)) or not 0 <= possibility <= 100:
-                return 0, [f"Giá trị 'possibility' không hợp lệ: {possibility}"]
-
-            missing = prelim_result["missing"]
-            if not isinstance(missing, list) or not all(isinstance(item, str) for item in missing):
-                return 0, [f"Danh sách 'missing' không hợp lệ: {missing}"]
-
-            return int(possibility), missing
-
+            
+            logger.info("Starting response generation")
+            async for _ in self.stream_response(response_prompt, builder):
+                yield builder.build()
+            
+            logger.info("Response generation complete")
+                
         except Exception as e:
-            logger.error(f"Feasibility evaluation failed for '{message}': {str(e)}")
-            return 0, [f"Lỗi hệ thống khi đánh giá: {str(e)}"]
-    
+            logger.error(f"Error handling request: {str(e)}", exc_info=True)
+            builder.add("Oops, có lỗi khi tìm thông tin, thử lại nhé!")
+            yield builder.build()
