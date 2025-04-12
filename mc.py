@@ -398,7 +398,7 @@ class MC:
             logger.info(f"Final language selection: {lang_info['language']} (confidence: {lang_info['confidence']})")
             
             # STEP 1: Get profile building skills from knowledge base - the core functionality
-            profile_query = "audience profile building information gathering customer understanding"
+            profile_query = "contact profile building information gathering customer understanding"
             logger.info(f"Fetching profile building skills with query: '{profile_query}'")
             profile_entries = await query_graph_knowledge(graph_version_id, profile_query, top_k=5)
             profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
@@ -517,7 +517,7 @@ class MC:
             logger.info("===== PERSONALITY VECTORS END =====")
             
             # Combine instructions
-            process_instructions = personality_instructions + "\n\n" + profile_instructions
+            process_instructions =  profile_instructions
             
             # STEP 3: Analyze conversation context based on knowledge
             logger.info("Building context analysis prompt")
