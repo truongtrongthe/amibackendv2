@@ -2,6 +2,7 @@ import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -10,6 +11,8 @@ load_dotenv()
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
+
+logger = logging.getLogger(__name__)
 
 class ContactManager:
     def __init__(self):
@@ -47,8 +50,25 @@ class ContactManager:
 
     # Get all contacts
     def get_contacts(self) -> list:
-        response = supabase.table(self.contacts_table).select("*").execute()
-        return response.data
+        """
+        Fetch all contacts from the database
+        """
+        try:
+            logger.info("Fetching all contacts")
+            
+            # Execute the query with error handling
+            response = supabase.table(self.contacts_table).select("*").execute()
+            
+            if not response.data:
+                logger.info("No contacts found in database")
+                return []
+                
+            logger.info(f"Successfully fetched {len(response.data)} contacts")
+            return response.data
+            
+        except Exception as e:
+            logger.error(f"Error in get_contacts: {str(e)}")
+            raise
 
     # Get contact details (including profile) by id
     def get_contact_details(self, contact_id: int) -> dict:

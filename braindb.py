@@ -3,6 +3,8 @@ from typing import List, Dict, Optional
 import os
 from datetime import datetime, UTC
 from utilities import logger
+from uuid import UUID
+
 # Initialize Supabase client
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
@@ -202,25 +204,52 @@ def get_brains(org_id: str) -> List[Brain]:
     """
     Fetch all brains for a given organization using UUID org_id
     """
-    response = supabase.table("brain")\
-        .select("*")\
-        .eq("org_id", org_id)\
-        .execute()
-    
-    brains = []
-    if response.data:
-        for brain_data in response.data:
-            brains.append(Brain(
-                id=brain_data["id"],
-                brain_id=brain_data["brain_id"],
-                org_id=brain_data["org_id"],
-                name=brain_data["name"],
-                status=brain_data["status"],
-                bank_name=brain_data["bank_name"],
-                summary=brain_data["summary"],
-                created_date=datetime.fromisoformat(brain_data["created_date"].replace("Z", "+00:00"))
-            ))
-    return brains
+    try:
+        logger.info(f"Fetching brains for org_id: {org_id}")
+        
+        # Validate org_id format
+        try:
+            UUID(org_id)
+        except ValueError:
+            logger.error(f"Invalid org_id format: {org_id}")
+            raise ValueError("Invalid org_id format - must be a valid UUID")
+        
+        # Set a timeout for the query
+        response = supabase.table("brain")\
+            .select("*")\
+            .eq("org_id", org_id)\
+            .execute()
+        
+        brains = []
+        if response.data:
+            for brain_data in response.data:
+                try:
+                    # Ensure all required fields are present
+                    required_fields = ["id", "brain_id", "org_id", "name", "status", "bank_name"]
+                    if not all(field in brain_data for field in required_fields):
+                        logger.warning(f"Missing required fields in brain data: {brain_data}")
+                        continue
+                        
+                    brains.append(Brain(
+                        id=brain_data["id"],
+                        brain_id=brain_data["brain_id"],
+                        org_id=brain_data["org_id"],
+                        name=brain_data["name"],
+                        status=brain_data["status"],
+                        bank_name=brain_data["bank_name"],
+                        summary=brain_data.get("summary"),  # Optional field
+                        created_date=datetime.fromisoformat(brain_data.get("created_date", "").replace("Z", "+00:00"))
+                    ))
+                except Exception as e:
+                    logger.error(f"Error processing brain data: {e}")
+                    continue
+        
+        logger.info(f"Successfully fetched {len(brains)} brains")
+        return brains
+        
+    except Exception as e:
+        logger.error(f"Error in get_brains: {str(e)}")
+        raise
 
 def get_brain_details(brain_id: int) -> Optional[Brain]:
     """
