@@ -21,3 +21,5 @@ fasttext
 fuzzywuzzy
 unidecode
 pdfplumber
+eventlet 
+flask-socketio

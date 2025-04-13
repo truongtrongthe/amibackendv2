@@ -1,16 +1,21 @@
+#!/usr/bin/env python
 # main.py
 # Purpose: Flask app with /pilot, /training, /havefun, /labels, and /label-details endpoints
 # Date: March 23, 2025 (Updated April 01, 2025)
 
+# Apply eventlet monkey patch before any other imports
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, Response, request, jsonify
 import json
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime
 
 from flask_cors import CORS
 from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
-from typing import List, Optional  # Added List and Optional imports
+from typing import List, Optional, Dict, Any  # Added List and Optional imports
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
 from docuhandler import process_document,summarize_document
@@ -31,6 +36,10 @@ from org_integrations import (
 )
 from supabase import create_client, Client
 import os
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from threading import Lock
+from utilities import logger
+
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
 
@@ -42,14 +51,23 @@ supabase: Client = create_client(
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'ami_secret_key')
 
 # Simple CORS configuration that was working before
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
 
+# Initialize SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# Store active WebSocket sessions
+ws_sessions = {}
+session_lock = Lock()
+
 cm = ContactManager()
 convo_mgr = ConversationManager()
-# Single event loop for the app
-loop = asyncio.get_event_loop()
+# Create a new event loop for the app
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 
 def handle_options():
@@ -69,6 +87,63 @@ def create_stream_response(gen):
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
+
+# WebSocket events and handlers
+@socketio.on('connect')
+def handle_connect():
+    """Handle new WebSocket connections"""
+    session_id = request.sid
+    logger.info(f"New WebSocket connection: {session_id}")
+    emit('connected', {'status': 'connected', 'session_id': session_id})
+
+@socketio.on('register_session')
+def handle_register(data):
+    """Register a client session with conversation details"""
+    session_id = request.sid
+    thread_id = data.get('thread_id')
+    user_id = data.get('user_id', 'thefusionlab')
+    
+    if not thread_id:
+        thread_id = f"thread_{uuid4()}"
+        
+    # Register this session
+    with session_lock:
+        ws_sessions[session_id] = {
+            'thread_id': thread_id,
+            'user_id': user_id,
+            'status': 'ready'
+        }
+    
+    # Join a room based on thread_id for targeted messages
+    join_room(thread_id)
+    logger.info(f"Registered session {session_id} for thread {thread_id}, user {user_id}")
+    
+    # Let client know registration was successful
+    emit('session_registered', {
+        'status': 'ready',
+        'thread_id': thread_id,
+        'session_id': session_id
+    })
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle client disconnection"""
+    session_id = request.sid
+    
+    # Clean up session data
+    with session_lock:
+        if session_id in ws_sessions:
+            thread_id = ws_sessions[session_id].get('thread_id')
+            if thread_id:
+                leave_room(thread_id)
+            del ws_sessions[session_id]
+            logger.info(f"Session {session_id} disconnected and removed")
+
+# Function to emit analysis events to specific thread
+def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
+    """Emit an analysis event to all clients in a thread room"""
+    logger.debug(f"Emitting analysis event to thread {thread_id}: {data.get('content', '')[:50]}...")
+    socketio.emit('analysis_update', data, room=thread_id)
 
 # Existing endpoints (pilot, training, havefun) remain unchanged
 @app.route('/pilot', methods=['POST', 'OPTIONS'])
@@ -106,17 +181,34 @@ def havefun():
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
     graph_version_id = data.get("graph_version_id", "")
+    use_websocket = data.get("use_websocket", False)  # New flag to enable WebSocket
 
     print("Headers:", request.headers)
     print("Fun API called!")
-    print("graph_version_id=", graph_version_id)
-    gen = convo_stream(
-        user_input=user_input, 
-        user_id=user_id, 
-        thread_id=thread_id,
-        graph_version_id=graph_version_id,
-        mode="mc"
-    )
+    print(f"graph_version_id={graph_version_id}, use_websocket={use_websocket}")
+    
+    # If using WebSockets, configure the MC generator differently
+    if use_websocket:
+        # Pass thread_id directly for analysis
+        gen = convo_stream(
+            user_input=user_input, 
+            user_id=user_id, 
+            thread_id=thread_id,
+            graph_version_id=graph_version_id,
+            mode="mc",
+            use_websocket=True,  # Signal to use WebSocket
+            thread_id_for_analysis=thread_id  # Pass thread_id for analysis
+        )
+    else:
+        # Original behavior without WebSockets
+        gen = convo_stream(
+            user_input=user_input, 
+            user_id=user_id, 
+            thread_id=thread_id,
+            graph_version_id=graph_version_id,
+            mode="mc"
+        )
+    
     return create_stream_response(gen)
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
@@ -1737,12 +1829,16 @@ def toggle_organization_integration():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Run the server when executed directly
 if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=5001, threaded=True)
-    finally:
-        if not loop.is_closed():
-            pending = asyncio.all_tasks(loop)
-            if pending:
-                loop.run_until_complete(asyncio.gather(*pending))
-            loop.close()
+    # Get port from environment or use default
+    port = int(os.environ.get('PORT', 5001))
+    host = os.environ.get('HOST', '0.0.0.0')
+    
+    print(f"Starting SocketIO server on {host}:{port}")
+    socketio.run(app, host=host, port=port, debug=True)
+else:
+    # For production WSGI servers
+    # Make sure to use eventlet workers with gunicorn
+    # e.g.: gunicorn -k eventlet -w 1 main:app
+    print("Running as imported module - SocketIO needs eventlet worker")

@@ -83,6 +83,75 @@ class MC:
             builder.add("Có lỗi nhỏ, thử lại nhé!")
             yield builder.build(separator="\n")
 
+    async def stream_analysis(self, prompt: str, thread_id_for_analysis=None, use_websocket=False):
+        """
+        Stream the context analysis from the LLM
+        
+        Args:
+            prompt: The prompt to analyze
+            thread_id_for_analysis: Thread ID to use for WebSocket analysis events
+            use_websocket: Whether to use WebSocket for streaming
+        """
+        analysis_buffer = ""
+        try:
+            async for chunk in StreamLLM.astream(prompt):
+                chunk_content = chunk.content
+                analysis_buffer += chunk_content
+                
+                # Create analysis event
+                analysis_event = {
+                    "type": "analysis", 
+                    "content": chunk_content, 
+                    "complete": False
+                }
+                
+                # If using WebSocket and thread ID is provided, emit to that room
+                if use_websocket and thread_id_for_analysis:
+                    from main import emit_analysis_event
+                    emit_analysis_event(thread_id_for_analysis, analysis_event)
+                    logger.info(f"Sent analysis chunk via WebSocket to room {thread_id_for_analysis}, length: {len(chunk_content)}")
+                
+                # Always yield for the standard flow too
+                yield {"type": "analysis", "content": chunk_content, "complete": False}
+            
+            # Send a final complete message with the full analysis
+            logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
+            
+            # Final complete event
+            complete_event = {
+                "type": "analysis", 
+                "content": analysis_buffer, 
+                "complete": True
+            }
+            
+            # Send via WebSocket if configured
+            if use_websocket and thread_id_for_analysis:
+                from main import emit_analysis_event
+                emit_analysis_event(thread_id_for_analysis, complete_event)
+                logger.info(f"Sent complete analysis via WebSocket to room {thread_id_for_analysis}")
+            
+            # Always yield for standard flow
+            yield {"type": "analysis", "content": analysis_buffer, "complete": True}
+            
+        except Exception as e:
+            logger.error(f"Analysis streaming failed: {e}")
+            # Error event
+            error_event = {
+                "type": "analysis", 
+                "content": "Error in analysis process", 
+                "complete": True, 
+                "error": True
+            }
+            
+            # Send via WebSocket if configured
+            if use_websocket and thread_id_for_analysis:
+                from main import emit_analysis_event
+                emit_analysis_event(thread_id_for_analysis, error_event)
+                logger.error(f"Sent error event via WebSocket to room {thread_id_for_analysis}")
+            
+            # Always yield for standard flow
+            yield {"type": "analysis", "content": "Error in analysis process", "complete": True, "error": True}
+
     # mc.py (in trigger)
     async def trigger(self, state: Dict = None, user_id: str = None, graph_version_id: str = None, config: Dict = None):
         state = state or self.state.copy()
@@ -94,6 +163,11 @@ class MC:
                 config.get("configurable", {}).get("graph_version_id", 
                     self.graph_version_id if hasattr(self, 'graph_version_id') else ""))
         )
+        
+        # Get WebSocket configuration
+        use_websocket = state.get("use_websocket", False) or config.get("configurable", {}).get("use_websocket", False)
+        thread_id_for_analysis = state.get("thread_id_for_analysis") or config.get("configurable", {}).get("thread_id_for_analysis")
+        
         if not graph_version_id:
             logger.warning(f"graph_version_id is empty! State: {state}, Config: {config}")
         
@@ -104,14 +178,30 @@ class MC:
         latest_msg_content = latest_msg.content.strip() if isinstance(latest_msg, HumanMessage) else latest_msg.strip()
         context = "\n".join(f"User: {msg.content}" if isinstance(msg, HumanMessage) else f"AI: {msg.content}" for msg in state["messages"][-50:])
 
-        logger.info(f"Triggering - User: {user_id}, Graph Version: {graph_version_id}, latest_msg: {latest_msg_content}, context: {context}")
+        logger.info(f"Triggering - User: {user_id}, Graph Version: {graph_version_id}, latest_msg: {latest_msg_content}, WebSocket: {use_websocket}")
 
         builder = ResponseBuilder()
         
-        async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, state, graph_version_id=graph_version_id):
-            state["prompt_str"] = response_chunk
-            logger.debug(f"Yielding from trigger: {state['prompt_str']}")
-            yield response_chunk
+        analysis_events_sent = 0
+        
+        async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, state, 
+                                                       graph_version_id=graph_version_id,
+                                                       use_websocket=use_websocket,
+                                                       thread_id_for_analysis=thread_id_for_analysis):
+            # Check if this is a special analysis chunk type
+            if isinstance(response_chunk, dict) and response_chunk.get("type") == "analysis":
+                # For analysis chunks, pass them through directly
+                analysis_events_sent += 1
+                logger.info(f"Yielding analysis chunk #{analysis_events_sent} from trigger: {response_chunk.get('content', '')[:50]}...")
+                
+                # When using WebSockets, we don't need to yield the analysis chunks through the regular flow
+                # They're already sent via WebSocket, but we still yield them for proper counting and state management
+                yield response_chunk
+            else:
+                # For regular response chunks, update the state's prompt_str
+                state["prompt_str"] = response_chunk
+                logger.debug(f"Yielding from trigger: {state['prompt_str']}")
+                yield response_chunk
         
         # Wrap response as AIMessage and append using add_messages
         if state["prompt_str"]:
@@ -119,6 +209,7 @@ class MC:
         
         self.state.update(state)
         logger.info(f"Final response: {state['prompt_str']}")
+        logger.info(f"Total analysis events sent from trigger: {analysis_events_sent}")
         
         # Yield the final state as a special chunk
         yield {"state": state}
@@ -372,7 +463,7 @@ class MC:
             
         return question
 
-    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = ""):
+    async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = "", use_websocket=False, thread_id_for_analysis=None):
         try:
             # Break conversation into lines
             conversation = [line.strip() for line in context.split("\n") if line.strip()]
@@ -543,11 +634,24 @@ class MC:
                 
                 f"Be objective and factual. Only reference information explicitly present in either the conversation or knowledge base instructions."
             )
-
-            #logger.info("Invoking LLM for context analysis")
-            context_analysis = LLM.invoke(context_analysis_prompt).content
-            #logger.info(f"Context analysis complete ({len(context_analysis)} characters)")
-            logger.info(f"Analysis summary: {context_analysis}")
+            # Use streaming for context analysis
+            logger.info("Streaming LLM for context analysis")
+            context_analysis = ""
+            full_analysis = None  # Track the complete analysis
+            
+            async for analysis_chunk in self.stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket):
+                # Pass the analysis chunks through to the caller
+                yield analysis_chunk
+                
+                # If this is the complete analysis, store it for further processing
+                if analysis_chunk.get("complete", False):
+                    logger.info(f"Received complete analysis chunk, storing for processing")
+                    full_analysis = analysis_chunk.get("content", "")
+            
+            # Use the full analysis if available, otherwise use an empty string
+            context_analysis = full_analysis or ""
+            logger.info(f"Final context_analysis length: {len(context_analysis)}")
+            logger.info(f"Analysis summary: {context_analysis[:500]}...")
             
             # Log analysis for requirements and completeness
             completeness_match = re.search(r'completeness[\s\:]*([\d]+)%', context_analysis.lower())
