@@ -520,7 +520,7 @@ class MC:
                 f"Analyze this conversation to determine context and next steps.\n\n"
                 
                 f"1. CONTACT ANALYSIS:\n"
-                f"   - Extract all relevant information provided by the contact in the entire conversation:{context}\n"
+                f"   - Extract all relevant information provided by the contact in the entire conversation\n"
                 f"   - Identify any required information according to instructions that is missing\n"
                 f"   - Assess completeness of required information (0-100%)\n\n"
                 
