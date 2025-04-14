@@ -50,7 +50,7 @@ def get_sender_text(body):
     return message_data
 
 
-def send_message(sender_id, message_data):
+def send_message(sender_id, message_data, access_token=None):
     """
     Send a message to Facebook Messenger.
     Only sends messages to test user ID 29495554333369135.
@@ -59,11 +59,18 @@ def send_message(sender_id, message_data):
     Args:
         sender_id: Facebook user ID to send message to
         message_data: Message data to send in Facebook format
+        access_token: Facebook page access token (optional - falls back to env var)
         
     Returns:
         1 for success, 0 for failure
     """
-    url = f"https://graph.facebook.com/v22.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    # Use provided access token or fall back to environment variable
+    token = access_token or PAGE_ACCESS_TOKEN
+    if not token:
+        logger.error("No Facebook access token provided and FBAPP_TOKEN environment variable not set")
+        return 0
+        
+    url = f"https://graph.facebook.com/v22.0/me/messages?access_token={token}"
     headers = {"Content-Type": "application/json"}
 
     payload = {
@@ -243,8 +250,97 @@ def save_fb_message_to_conversation(contact_id: int, platform_conversation_id: s
         print(f"❌ Error saving Facebook message to conversation: {str(e)}")
         return None
 
+def get_facebook_integration_for_org(org_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get the active Facebook integration for an organization
+    
+    Args:
+        org_id: Organization ID to look up
+        
+    Returns:
+        Dictionary with integration details or None if not found
+    """
+    try:
+        response = supabase.table("organization_integrations")\
+            .select("*")\
+            .eq("org_id", org_id)\
+            .eq("integration_type", "facebook")\
+            .eq("is_active", True)\
+            .execute()
+            
+        if not response.data:
+            logger.warning(f"No active Facebook integration found for organization {org_id}")
+            return None
+            
+        integration = response.data[0]
+        
+        # Parse config if it's stored as a string
+        if "config" in integration and isinstance(integration["config"], str):
+            try:
+                integration["config"] = json.loads(integration["config"])
+            except json.JSONDecodeError:
+                integration["config"] = {}
+                
+        return integration
+    except Exception as e:
+        logger.error(f"Error getting Facebook integration for org {org_id}: {str(e)}")
+        return None
+
+def verify_webhook_token(token: str, org_id: str = None) -> bool:
+    """
+    Verify if the provided token matches the webhook verification token for the organization.
+    
+    Args:
+        token: Token sent by Facebook in the verification request
+        org_id: Organization ID to find the matching integration
+        
+    Returns:
+        True if token is valid, False otherwise
+    """
+    # If org_id is provided, check the organization's webhook_verify_token
+    if org_id:
+        integration = get_facebook_integration_for_org(org_id)
+        if integration:
+            if integration.get("webhook_verify_token") and integration.get("webhook_verify_token") == token:
+                logger.info(f"Verified webhook using organization ({org_id}) webhook_verify_token")
+                return True
+    
+    # Default fallback to environment variable
+    if token == VERIFY_TOKEN:
+        logger.info("Verified webhook using default VERIFY_TOKEN environment variable")
+        return True
+        
+    logger.warning(f"Webhook verification failed for token: {token}")
+    return False
+
+def get_page_access_token(org_id: str = None) -> Optional[str]:
+    """
+    Get the Facebook page access token for an organization.
+    
+    Args:
+        org_id: Organization ID to find the matching integration
+        
+    Returns:
+        Page access token or None if not found
+    """
+    # If org_id is provided, get the organization's access token
+    if org_id:
+        integration = get_facebook_integration_for_org(org_id)
+        if integration and integration.get("access_token"):
+            token = integration.get("access_token")
+            logger.info(f"Using organization-specific Facebook access token for org {org_id}")
+            return token
+    
+    # Default fallback to environment variable
+    if PAGE_ACCESS_TOKEN:
+        logger.info("Using default PAGE_ACCESS_TOKEN environment variable")
+        return PAGE_ACCESS_TOKEN
+        
+    logger.error("No Facebook access token found for the organization or in environment variables")
+    return None
+
 def send_and_save_message(recipient_id: str, message_data: Dict[str, Any], 
-                        convo_manager, contact_id: int = None) -> Tuple[int, Optional[Dict[str, Any]]]:
+                        convo_manager, contact_id: int = None, org_id: str = None) -> Tuple[int, Optional[Dict[str, Any]]]:
     """
     Send a message to Facebook and save it to our conversation system.
     Automatically creates contact if needed.
@@ -254,6 +350,7 @@ def send_and_save_message(recipient_id: str, message_data: Dict[str, Any],
         message_data: Message data to send (Facebook format)
         convo_manager: Instance of ConversationManager
         contact_id: Optional ID of the contact (if already known)
+        org_id: Optional organization ID to find the appropriate Facebook integration
         
     Returns:
         Tuple of (success_status, updated_conversation)
@@ -266,8 +363,11 @@ def send_and_save_message(recipient_id: str, message_data: Dict[str, Any],
             return 0, None
         contact_id = contact["id"]
     
+    # Get the appropriate access token if org_id is provided
+    access_token = get_page_access_token(org_id)
+    
     # First send the message to Facebook
-    success = send_message(recipient_id, message_data)
+    success = send_message(recipient_id, message_data, access_token)
     
     if success:
         # Create a message object for our database
@@ -580,7 +680,7 @@ def create_basic_profile(contact: Dict[str, Any], first_name: str, last_name: st
         logger.error(f"Error creating basic profile: {str(e)}")
         return False
 
-def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
+def process_facebook_webhook(data: Dict[str, Any], convo_manager, org_id: str = None) -> bool:
     """
     Process an incoming Facebook webhook event - extract message data,
     find or create contact, and save the message to the database.
@@ -589,6 +689,7 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
     Args:
         data: The webhook event data
         convo_manager: Instance of ConversationManager
+        org_id: Optional organization ID for determining which integration to use
         
     Returns:
         Success status as boolean
@@ -641,7 +742,7 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager) -> bool:
         logger.error(f"❌ Error processing Facebook webhook: {str(e)}", exc_info=True)
         return False
 
-def send_text_to_facebook_user(user_id: str, text_message: str, convo_manager, contact_id: int = None) -> bool:
+def send_text_to_facebook_user(user_id: str, text_message: str, convo_manager, contact_id: int = None, org_id: str = None) -> bool:
     """
     Simplified helper to send a text message to a Facebook user and save it in conversations.
     
@@ -650,6 +751,7 @@ def send_text_to_facebook_user(user_id: str, text_message: str, convo_manager, c
         text_message: Plain text message to send
         convo_manager: ConversationManager instance
         contact_id: Optional contact ID if already known
+        org_id: Optional organization ID for determining which integration to use
     
     Returns:
         Boolean success status
@@ -663,7 +765,8 @@ def send_text_to_facebook_user(user_id: str, text_message: str, convo_manager, c
             recipient_id=user_id,
             message_data=message_data,
             convo_manager=convo_manager,
-            contact_id=contact_id
+            contact_id=contact_id,
+            org_id=org_id
         )
         
         return success == 1
@@ -671,7 +774,7 @@ def send_text_to_facebook_user(user_id: str, text_message: str, convo_manager, c
         logger.error(f"Error sending text to Facebook user {user_id}: {str(e)}")
         return False
 
-def send_image_to_facebook_user(user_id: str, image_url: str, convo_manager, contact_id: int = None) -> bool:
+def send_image_to_facebook_user(user_id: str, image_url: str, convo_manager, contact_id: int = None, org_id: str = None) -> bool:
     """
     Simplified helper to send an image to a Facebook user and save it in conversations.
     
@@ -680,6 +783,7 @@ def send_image_to_facebook_user(user_id: str, image_url: str, convo_manager, con
         image_url: URL of the image to send
         convo_manager: ConversationManager instance
         contact_id: Optional contact ID if already known
+        org_id: Optional organization ID for determining which integration to use
     
     Returns:
         Boolean success status
@@ -701,7 +805,8 @@ def send_image_to_facebook_user(user_id: str, image_url: str, convo_manager, con
             recipient_id=user_id,
             message_data=message_data,
             convo_manager=convo_manager,
-            contact_id=contact_id
+            contact_id=contact_id,
+            org_id=org_id
         )
         
         return success == 1

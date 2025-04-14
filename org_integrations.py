@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from supabase import create_client, Client
 import os
 import json
+import secrets
+import uuid
 
 # Initialize Supabase client
 spb_url = os.getenv("SUPABASE_URL")
@@ -20,6 +22,7 @@ class OrganizationIntegration:
     is_active: bool
     api_base_url: Optional[str] = None
     webhook_url: Optional[str] = None
+    webhook_verify_token: Optional[str] = None
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
     access_token: Optional[str] = None
@@ -35,13 +38,15 @@ def create_integration(
     name: str,
     api_base_url: str = None,
     webhook_url: str = None,
+    webhook_verify_token: str = None,
     api_key: str = None,
     api_secret: str = None,
     access_token: str = None,
     refresh_token: str = None,
     token_expires_at: datetime = None,
     config: Dict[str, Any] = None,
-    is_active: bool = False
+    is_active: bool = False,
+    base_domain: str = None  # Added for generating webhook URLs
 ) -> OrganizationIntegration:
     """
     Create a new integration for an organization
@@ -52,6 +57,7 @@ def create_integration(
         name: Display name for the integration
         api_base_url: Base URL for API calls
         webhook_url: URL for receiving webhooks
+        webhook_verify_token: Token for verifying webhook requests (especially for Facebook)
         api_key: API key for authentication
         api_secret: API secret for authentication
         access_token: OAuth access token
@@ -59,6 +65,7 @@ def create_integration(
         token_expires_at: Expiration time for access token
         config: Additional configuration as JSON
         is_active: Whether the integration is active
+        base_domain: Base domain for generating webhook URLs (e.g., "https://yourdomain.com")
         
     Returns:
         OrganizationIntegration object with the created integration
@@ -75,6 +82,30 @@ def create_integration(
     if integration_type not in valid_types:
         raise ValueError(f"integration_type must be one of {', '.join(valid_types)}")
     
+    # Auto-generate webhook URL and verification token for Facebook integrations
+    if integration_type == "facebook":
+        # If no webhook_verify_token provided, generate a secure one
+        if not webhook_verify_token:
+            webhook_verify_token = secrets.token_urlsafe(32)  # Generate a secure 32-byte token
+            print(f"Generated secure webhook verification token for Facebook integration")
+        
+        # Generate webhook URL if base_domain is provided
+        if base_domain and not webhook_url:
+            webhook_base = base_domain.rstrip('/')  # Remove trailing slash if present
+            webhook_url = f"{webhook_base}/webhook?org_id={org_id}"
+            print(f"Generated webhook URL: {webhook_url}")
+        
+        # Initialize config if needed
+        if not config:
+            config = {}
+        elif isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except:
+                config = {}
+        
+        # No warning about missing page_id - it's now optional
+    
     # Prepare data for insertion
     integration_data = {
         "org_id": org_id,
@@ -88,6 +119,8 @@ def create_integration(
         integration_data["api_base_url"] = api_base_url
     if webhook_url:
         integration_data["webhook_url"] = webhook_url
+    if webhook_verify_token:
+        integration_data["webhook_verify_token"] = webhook_verify_token
     if api_key:
         integration_data["api_key"] = api_key
     if api_secret:
@@ -129,6 +162,7 @@ def create_integration(
             is_active=integration_data["is_active"],
             api_base_url=integration_data.get("api_base_url"),
             webhook_url=integration_data.get("webhook_url"),
+            webhook_verify_token=integration_data.get("webhook_verify_token"),
             api_key=integration_data.get("api_key"),
             api_secret=integration_data.get("api_secret"),
             access_token=integration_data.get("access_token"),
@@ -183,6 +217,7 @@ def get_org_integrations(org_id: str, active_only: bool = False) -> List[Organiz
                 is_active=item["is_active"],
                 api_base_url=item.get("api_base_url"),
                 webhook_url=item.get("webhook_url"),
+                webhook_verify_token=item.get("webhook_verify_token"),
                 api_key=item.get("api_key"),
                 api_secret=item.get("api_secret"),
                 access_token=item.get("access_token"),
@@ -235,6 +270,7 @@ def get_integration_by_id(integration_id: str) -> Optional[OrganizationIntegrati
             is_active=item["is_active"],
             api_base_url=item.get("api_base_url"),
             webhook_url=item.get("webhook_url"),
+            webhook_verify_token=item.get("webhook_verify_token"),
             api_key=item.get("api_key"),
             api_secret=item.get("api_secret"),
             access_token=item.get("access_token"),
@@ -253,6 +289,7 @@ def update_integration(
     name: str = None,
     api_base_url: str = None,
     webhook_url: str = None,
+    webhook_verify_token: str = None,
     api_key: str = None,
     api_secret: str = None,
     access_token: str = None,
@@ -269,6 +306,7 @@ def update_integration(
         name: New display name
         api_base_url: New base URL
         webhook_url: New webhook URL
+        webhook_verify_token: New webhook verification token
         api_key: New API key
         api_secret: New API secret
         access_token: New access token
@@ -292,6 +330,8 @@ def update_integration(
         update_data["api_base_url"] = api_base_url
     if webhook_url is not None:
         update_data["webhook_url"] = webhook_url
+    if webhook_verify_token is not None:
+        update_data["webhook_verify_token"] = webhook_verify_token
     if api_key is not None:
         update_data["api_key"] = api_key
     if api_secret is not None:
@@ -337,6 +377,7 @@ def update_integration(
             is_active=item["is_active"],
             api_base_url=item.get("api_base_url"),
             webhook_url=item.get("webhook_url"),
+            webhook_verify_token=item.get("webhook_verify_token"),
             api_key=item.get("api_key"),
             api_secret=item.get("api_secret"),
             access_token=item.get("access_token"),

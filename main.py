@@ -24,7 +24,7 @@ from braindb import get_brains,get_brain_details,update_brain,create_brain,get_o
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
 from contact import ContactManager
-from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user
+from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user, verify_webhook_token
 from contactconvo import ConversationManager
 from braingraph import (
     create_brain_graph, get_brain_graph, create_brain_graph_version,
@@ -1159,10 +1159,16 @@ def verify_webhook():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("✅ Webhook verified by Facebook.")
+    # When configuring in Facebook, you can add org_id as query parameter
+    # to the callback URL. E.g., /webhook?org_id=123
+    org_id = request.args.get("org_id")
+    
+    # Use the verification function
+    if mode == "subscribe" and verify_webhook_token(token, org_id):
+        print(f"✅ Webhook verified by Facebook for organization: {org_id or 'default'}")
         return challenge, 200
     else:
+        print(f"❌ Webhook verification failed. Token: {token}, org_id: {org_id}")
         return "Forbidden", 403
 
 
@@ -1171,6 +1177,61 @@ def handle_message():
     data = request.json
     
     try:
+        # First check if org_id is in query parameters (preferred approach)
+        org_id = request.args.get("org_id")
+        
+        # If not in query params, try to determine it from the page ID in the webhook payload
+        if not org_id:
+            # Get the page/recipient ID from the webhook data
+            page_id = None
+            if data and "entry" in data and len(data["entry"]) > 0:
+                if "messaging" in data["entry"][0] and len(data["entry"][0]["messaging"]) > 0:
+                    # For message events
+                    page_id = data["entry"][0]["messaging"][0].get("recipient", {}).get("id")
+                elif "id" in data["entry"][0]:
+                    # Some events provide page ID directly
+                    page_id = data["entry"][0]["id"]
+            
+            if page_id:
+                print(f"Looking up organization for page ID: {page_id}")
+                # Look up the organization by page ID in integrations
+                try:
+                    # Query our integrations to find the org that owns this page
+                    response = supabase.table("organization_integrations")\
+                        .select("org_id, config")\
+                        .eq("integration_type", "facebook")\
+                        .eq("is_active", True)\
+                        .execute()
+                    
+                    if response.data:
+                        for integration in response.data:
+                            # Parse config if it's a string
+                            config = integration.get("config", {})
+                            if isinstance(config, str):
+                                try:
+                                    config = json.loads(config)
+                                except:
+                                    config = {}
+                            
+                            # Check if this integration's page ID matches
+                            if config.get("page_id") == page_id:
+                                org_id = integration.get("org_id")
+                                print(f"Found matching organization {org_id} for page {page_id}")
+                                break
+                    
+                    if not org_id:
+                        print(f"No organization found for page ID {page_id}")
+                except Exception as lookup_err:
+                    print(f"Error looking up organization for page ID {page_id}: {str(lookup_err)}")
+            else:
+                print("Could not extract page ID from webhook data")
+            
+        # Log the organization context
+        if org_id:
+            print(f"Processing Facebook webhook for organization: {org_id}")
+        else:
+            print("Processing Facebook webhook without organization context - using default credentials")
+            
         # Check if this is a "message echo" event (messages sent by our page)
         entry = data.get("entry", [{}])[0]
         messaging = entry.get("messaging", [{}])[0]
@@ -1182,7 +1243,7 @@ def handle_message():
             print(f"Received message from user")
             
         # Always process the webhook to track messages in our database
-        success = process_facebook_webhook(data, convo_mgr)
+        success = process_facebook_webhook(data, convo_mgr, org_id)
         
         if not success:
             print("Warning: Failed to process Facebook webhook")
@@ -1198,7 +1259,7 @@ def handle_message():
                     # Send responses ONLY to the specific test user ID
                     if sender_id == "29495554333369135":
                         response_text = "Thank you for your message!"
-                        send_text_to_facebook_user(sender_id, response_text, convo_mgr)
+                        send_text_to_facebook_user(sender_id, response_text, convo_mgr, org_id=org_id)
             except Exception as e:
                 print(f"Error processing user message for response: {str(e)}")
     except Exception as e:
@@ -1807,6 +1868,7 @@ def create_organization_integration():
     name = data.get("name", "")
     api_base_url = data.get("api_base_url")
     webhook_url = data.get("webhook_url")
+    webhook_verify_token = data.get("webhook_verify_token")
     api_key = data.get("api_key")
     api_secret = data.get("api_secret")
     access_token = data.get("access_token")
@@ -1826,19 +1888,33 @@ def create_organization_integration():
             except ValueError:
                 return jsonify({"error": "Invalid token_expires_at format. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.sssZ)"}), 400
         
+        # Get the base domain for webhook URL generation
+        base_domain = os.getenv("API_BASE_URL")
+        if not base_domain:
+            # Try to derive from request
+            host = request.headers.get('Host')
+            scheme = request.headers.get('X-Forwarded-Proto', 'http')
+            if host:
+                base_domain = f"{scheme}://{host}"
+            else:
+                # Default fallback
+                base_domain = "https://api.yourdomain.com"
+        
         integration = create_integration(
             org_id=org_id,
             integration_type=integration_type,
             name=name,
             api_base_url=api_base_url,
             webhook_url=webhook_url,
+            webhook_verify_token=webhook_verify_token,
             api_key=api_key,
             api_secret=api_secret,
             access_token=access_token,
             refresh_token=refresh_token,
             token_expires_at=token_expires_at,
             config=config,
-            is_active=is_active
+            is_active=is_active,
+            base_domain=base_domain  # Pass the base domain for webhook URL generation
         )
         
         # Convert to serializable format
@@ -1850,6 +1926,7 @@ def create_organization_integration():
             "is_active": integration.is_active,
             "api_base_url": integration.api_base_url,
             "webhook_url": integration.webhook_url,
+            "webhook_verify_token": integration.webhook_verify_token,  # Include verify token for setup
             "api_key": integration.api_key,
             "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
             "access_token": "••••••" if integration.access_token else None,  # Mask token
