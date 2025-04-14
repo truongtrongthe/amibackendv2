@@ -6,6 +6,7 @@ from utilities import logger
 from uuid import UUID
 
 # Initialize Supabase client
+# Initialize Supabase client
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
 
@@ -13,6 +14,7 @@ supabase: Client = create_client(
     spb_url,
     spb_key
 )
+
 
 class Organization:
     def __init__(self, id: str, org_id: int, name: str, description: Optional[str], 

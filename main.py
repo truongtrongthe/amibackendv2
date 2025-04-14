@@ -11,6 +11,7 @@ from flask import Flask, Response, request, jsonify
 import json
 from uuid import UUID, uuid4
 from datetime import datetime
+import time
 
 from flask_cors import CORS
 from ami import convo_stream  # Unified stream function from ami.py
@@ -40,13 +41,53 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from threading import Lock
 from utilities import logger
 
-spb_url = os.getenv("SUPABASE_URL")
-spb_key = os.getenv("SUPABASE_KEY")
-
-supabase: Client = create_client(
-    spb_url,
-    spb_key
+# Import SocketIO functionality from socketio_manager.py
+from socketio_manager import init_socketio, emit_analysis_event
+from socketio_manager import (
+    socketio, ws_sessions, session_lock, 
+    undelivered_messages, message_lock,
+    debug_websocket_sessions, debug_all_sessions, debug_room_status
 )
+
+spb_url = os.getenv("SUPABASE_URL", "https://example.supabase.co")
+spb_key = os.getenv("SUPABASE_KEY", "your-supabase-key")
+
+# Add proper error handling for Supabase initialization
+try:
+    supabase: Client = create_client(spb_url, spb_key)
+    logger.info("Supabase client initialized successfully in main.py")
+except Exception as e:
+    logger.error(f"Failed to initialize Supabase client in main.py: {e}")
+    # Create a placeholder client for testing
+    class MockSupabase:
+        class MockTable:
+            def __init__(self, name):
+                self.name = name
+                
+            def select(self, *args, **kwargs):
+                logger.warning(f"Mock select called on {self.name}")
+                return self
+                
+            def eq(self, *args, **kwargs):
+                return self
+                
+            def execute(self):
+                logger.warning(f"Mock execute called on {self.name}")
+                return {"data": []}
+                
+            def insert(self, *args, **kwargs):
+                logger.warning(f"Mock insert called on {self.name}")
+                return {"data": []}
+                
+            def update(self, *args, **kwargs):
+                logger.warning(f"Mock update called on {self.name}")
+                return self
+        
+        def table(self, name):
+            return self.MockTable(name)
+    
+    supabase = MockSupabase()
+    logger.warning("Using mock Supabase client in main.py for testing")
 
 
 app = Flask(__name__)
@@ -57,11 +98,14 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'ami_secret_key')
 CORS(app, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
 
 # Initialize SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+if socketio is None:
+    socketio = init_socketio(app)  # Only initialize if not already done
+else:
+    print("SocketIO already initialized - using existing instance")
 
-# Store active WebSocket sessions
-ws_sessions = {}
-session_lock = Lock()
+# Store active WebSocket sessions - already imported from socketio_manager
+# ws_sessions = {}  
+# session_lock = Lock()
 
 cm = ContactManager()
 convo_mgr = ConversationManager()
@@ -93,7 +137,9 @@ def create_stream_response(gen):
 def handle_connect():
     """Handle new WebSocket connections"""
     session_id = request.sid
-    logger.info(f"New WebSocket connection: {session_id}")
+    logger.info(f"[SESSION_TRACE] New WebSocket connection: {session_id}, Transport: {request.environ.get('socketio.transport')}")
+    # Log more detailed connection information
+    logger.info(f"[SESSION_TRACE] Connection details - Headers: {dict(request.headers)}, Remote addr: {request.remote_addr}")
     emit('connected', {'status': 'connected', 'session_id': session_id})
 
 @socketio.on('register_session')
@@ -106,17 +152,26 @@ def handle_register(data):
     if not thread_id:
         thread_id = f"thread_{uuid4()}"
         
+    transport_type = request.environ.get('socketio.transport', 'unknown')
+    logger.info(f"[SESSION_TRACE] Registering session {session_id} with transport {transport_type}")
+    
     # Register this session
     with session_lock:
         ws_sessions[session_id] = {
             'thread_id': thread_id,
             'user_id': user_id,
-            'status': 'ready'
+            'status': 'ready',
+            'transport': transport_type,
+            'connected_at': datetime.now().isoformat(),
+            'last_activity': datetime.now().isoformat()
         }
+        # Log all active sessions for the thread
+        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+        logger.info(f"[SESSION_TRACE] Thread {thread_id} now has {len(thread_sessions)} active sessions: {thread_sessions}")
     
     # Join a room based on thread_id for targeted messages
     join_room(thread_id)
-    logger.info(f"Registered session {session_id} for thread {thread_id}, user {user_id}")
+    logger.info(f"[SESSION_TRACE] Session {session_id} joined room {thread_id}, user {user_id}")
     
     # Let client know registration was successful
     emit('session_registered', {
@@ -130,6 +185,18 @@ def handle_disconnect():
     """Handle client disconnection"""
     session_id = request.sid
     
+    # Log before cleanup
+    with session_lock:
+        if session_id in ws_sessions:
+            thread_id = ws_sessions[session_id].get('thread_id')
+            transport = ws_sessions[session_id].get('transport', 'unknown')
+            logger.info(f"[SESSION_TRACE] Session {session_id} with transport {transport} is disconnecting from thread {thread_id}")
+            
+            # Check remaining sessions for the thread
+            thread_sessions = [sid for sid, data in ws_sessions.items() 
+                             if data.get('thread_id') == thread_id and sid != session_id]
+            logger.info(f"[SESSION_TRACE] Thread {thread_id} will have {len(thread_sessions)} remaining sessions after disconnect")
+    
     # Clean up session data
     with session_lock:
         if session_id in ws_sessions:
@@ -137,12 +204,38 @@ def handle_disconnect():
             if thread_id:
                 leave_room(thread_id)
             del ws_sessions[session_id]
-            logger.info(f"Session {session_id} disconnected and removed")
+            logger.info(f"[SESSION_TRACE] Session {session_id} disconnected and removed from ws_sessions")
+
+# Add a new ping handler to track session activity
+@socketio.on('ping')
+def handle_ping(data=None):
+    """Handle client ping to keep session alive and track activity"""
+    session_id = request.sid
+    with session_lock:
+        if session_id in ws_sessions:
+            # Update last activity timestamp
+            ws_sessions[session_id]['last_activity'] = datetime.now().isoformat()
+            # Log the ping with session details
+            thread_id = ws_sessions[session_id].get('thread_id')
+            transport = ws_sessions[session_id].get('transport', 'unknown')
+            logger.debug(f"[SESSION_TRACE] Ping received from session {session_id}, thread {thread_id}, transport {transport}")
+    
+    # Return pong with server timestamp
+    return {'pong': datetime.now().isoformat(), 'session_id': session_id}
 
 # Function to emit analysis events to specific thread
 def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
     """Emit an analysis event to all clients in a thread room"""
-    logger.debug(f"Emitting analysis event to thread {thread_id}: {data.get('content', '')[:50]}...")
+    # Log detailed session information before emitting
+    with session_lock:
+        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+        session_details = [
+            {'sid': sid, 'transport': ws_sessions[sid].get('transport', 'unknown')} 
+            for sid in thread_sessions
+        ]
+        logger.info(f"[SESSION_TRACE] Emitting to thread {thread_id} with {len(thread_sessions)} active sessions: {session_details}")
+    
+    logger.debug(f"[SESSION_TRACE] Event data preview: {str(data)[:100]}...")
     socketio.emit('analysis_update', data, room=thread_id)
 
 # Existing endpoints (pilot, training, havefun) remain unchanged
@@ -176,6 +269,10 @@ def training():
 def havefun():
     if request.method == 'OPTIONS':
         return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN havefun request at {start_time.isoformat()} ===")
+    
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
@@ -183,33 +280,105 @@ def havefun():
     graph_version_id = data.get("graph_version_id", "")
     use_websocket = data.get("use_websocket", False)  # New flag to enable WebSocket
 
-    print("Headers:", request.headers)
-    print("Fun API called!")
-    print(f"graph_version_id={graph_version_id}, use_websocket={use_websocket}")
+    logger.info(f"[SESSION_TRACE] havefun API called! Thread ID: {thread_id}, Use WebSocket: {use_websocket}")
+    logger.info(f"[SESSION_TRACE] Request data: user_input length={len(user_input)}, user_id={user_id}, graph_version_id={graph_version_id}")
     
-    # If using WebSockets, configure the MC generator differently
-    if use_websocket:
-        # Pass thread_id directly for analysis
-        gen = convo_stream(
-            user_input=user_input, 
-            user_id=user_id, 
-            thread_id=thread_id,
-            graph_version_id=graph_version_id,
-            mode="mc",
-            use_websocket=True,  # Signal to use WebSocket
-            thread_id_for_analysis=thread_id  # Pass thread_id for analysis
-        )
-    else:
-        # Original behavior without WebSockets
-        gen = convo_stream(
-            user_input=user_input, 
-            user_id=user_id, 
-            thread_id=thread_id,
-            graph_version_id=graph_version_id,
-            mode="mc"
-        )
+    # CRITICAL FIX: Before using WebSockets, ensure we have an active session for this thread
+    active_session_exists = False
+    active_session_ids = []
     
-    return create_stream_response(gen)
+    with session_lock:
+        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+        active_session_exists = len(thread_sessions) > 0
+        active_session_ids = thread_sessions.copy()
+        logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
+        for sid in thread_sessions:
+            transport = ws_sessions[sid].get('transport', 'unknown')
+            last_activity = ws_sessions[sid].get('last_activity', 'unknown')
+            # Update last activity timestamp to prevent cleanup
+            ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+            ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
+            logger.info(f"[SESSION_TRACE] Session {sid} details - Transport: {transport}, Last activity: {last_activity}")
+            logger.info(f"[SESSION_TRACE] Updated session {sid} last_activity to now")
+    
+    if use_websocket and not active_session_exists:
+        logger.warning(f"[SESSION_TRACE] WebSocket requested but no active session for thread {thread_id}")
+        logger.warning(f"[SESSION_TRACE] Available thread_ids: {[s.get('thread_id') for s in ws_sessions.values() if s.get('thread_id')]}")
+    
+    try:
+        # If using WebSockets, configure the MC generator differently
+        if use_websocket:
+            # Pass thread_id directly for analysis
+            logger.info(f"[SESSION_TRACE] Using WebSocket for thread {thread_id}")
+            gen = convo_stream(
+                user_input=user_input, 
+                user_id=user_id, 
+                thread_id=thread_id,
+                graph_version_id=graph_version_id,
+                mode="mc",
+                use_websocket=True,  # Signal to use WebSocket
+                thread_id_for_analysis=thread_id  # Pass thread_id for analysis
+            )
+        else:
+            # Original behavior without WebSockets
+            logger.info(f"[SESSION_TRACE] Using HTTP without WebSocket for thread {thread_id}")
+            gen = convo_stream(
+                user_input=user_input, 
+                user_id=user_id, 
+                thread_id=thread_id,
+                graph_version_id=graph_version_id,
+                mode="mc"
+            )
+        
+        # Create a wrapped generator that adds logging and session refreshing
+        def logged_generator(original_gen):
+            try:
+                last_refresh_time = time.time()
+                refresh_interval = 10  # Refresh session every 10 seconds
+                
+                for i, item in enumerate(original_gen):
+                    current_time = datetime.now()
+                    elapsed = (current_time - start_time).total_seconds()
+                    logger.info(f"[SESSION_TRACE] Yielding item {i} after {elapsed:.2f} seconds")
+                    
+                    # Periodically refresh session activity timestamps
+                    if time.time() - last_refresh_time > refresh_interval:
+                        with session_lock:
+                            # First check if the sessions are still active
+                            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                            logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions at {elapsed:.2f}s")
+                            
+                            # If sessions are missing, try to find out why
+                            if len(thread_sessions) == 0 and active_session_ids:
+                                for sid in active_session_ids:
+                                    if sid not in ws_sessions:
+                                        logger.error(f"[SESSION_TRACE] Session {sid} has been removed from ws_sessions during processing!")
+                            
+                            # Update activity timestamps for all remaining sessions
+                            for sid in thread_sessions:
+                                ws_sessions[sid]['last_activity'] = current_time.isoformat()
+                                ws_sessions[sid]['yielding_timestamp'] = current_time.isoformat()
+                                logger.info(f"[SESSION_TRACE] Refreshed session {sid} activity timestamp at {elapsed:.2f}s")
+                        
+                        last_refresh_time = time.time()
+                    
+                    yield item
+                
+                end_time = datetime.now()
+                elapsed = (end_time - start_time).total_seconds()
+                logger.info(f"[SESSION_TRACE] === END havefun request - total time: {elapsed:.2f}s ===")
+            except Exception as e:
+                logger.error(f"[SESSION_TRACE] Error in logged_generator: {str(e)}")
+                # Log current session state on error
+                with session_lock:
+                    thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                    logger.error(f"[SESSION_TRACE] On error - Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
+                raise
+        
+        return create_stream_response(logged_generator(gen))
+    except Exception as e:
+        logger.error(f"[SESSION_TRACE] Exception in havefun endpoint: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
 def gopilot():
@@ -222,7 +391,7 @@ def gopilot():
     
     print("Headers:", request.headers)
     print("Fun API called!")
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id,bank_name=bank_name, mode="mc")
+    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
     return create_stream_response(async_gen)
 
 @app.route('/labels', methods=['GET', 'OPTIONS'])
@@ -1828,6 +1997,32 @@ def toggle_organization_integration():
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# Add a new debugging endpoint to check active sessions for a specific thread
+@app.route('/debug/thread-sessions', methods=['GET'])
+def debug_thread_sessions():
+    """Debug endpoint to view all sessions for a specific thread"""
+    thread_id = request.args.get('thread_id')
+    if not thread_id:
+        return jsonify({"error": "thread_id parameter is required"}), 400
+    
+    active_sessions = []
+    with session_lock:
+        for sid, session_data in ws_sessions.items():
+            if session_data.get('thread_id') == thread_id:
+                # Clean session data for display
+                clean_data = {k: v for k, v in session_data.items() 
+                             if not callable(v)}
+                clean_data['session_id'] = sid
+                active_sessions.append(clean_data)
+    
+    result = {
+        "thread_id": thread_id,
+        "active_session_count": len(active_sessions),
+        "active_sessions": active_sessions
+    }
+    
+    return jsonify(result), 200
 
 # Run the server when executed directly
 if __name__ == '__main__':

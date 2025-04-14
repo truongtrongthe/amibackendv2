@@ -107,9 +107,17 @@ class MC:
                 
                 # If using WebSocket and thread ID is provided, emit to that room
                 if use_websocket and thread_id_for_analysis:
-                    from main import emit_analysis_event
-                    emit_analysis_event(thread_id_for_analysis, analysis_event)
-                    logger.info(f"Sent analysis chunk via WebSocket to room {thread_id_for_analysis}, length: {len(chunk_content)}")
+                    try:
+                        # Import from socketio_manager module instead of socket
+                        from socketio_manager import emit_analysis_event
+                        was_delivered = emit_analysis_event(thread_id_for_analysis, analysis_event)
+                        if was_delivered:
+                            logger.info(f"Sent analysis chunk via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)}")
+                        else:
+                            logger.warning(f"Analysis chunk NOT DELIVERED via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)} - No active sessions")
+                    except Exception as e:
+                        logger.error(f"Error in socketio_manager websocket delivery: {str(e)}")
+                        was_delivered = False
                 
                 # Always yield for the standard flow too
                 yield {"type": "analysis", "content": chunk_content, "complete": False}
@@ -126,9 +134,17 @@ class MC:
             
             # Send via WebSocket if configured
             if use_websocket and thread_id_for_analysis:
-                from main import emit_analysis_event
-                emit_analysis_event(thread_id_for_analysis, complete_event)
-                logger.info(f"Sent complete analysis via WebSocket to room {thread_id_for_analysis}")
+                try:
+                    # Import from socketio_manager module instead of socket
+                    from socketio_manager import emit_analysis_event
+                    was_delivered = emit_analysis_event(thread_id_for_analysis, complete_event)
+                    if was_delivered:
+                        logger.info(f"Sent complete analysis via socketio_manager to room {thread_id_for_analysis}")
+                    else:
+                        logger.warning(f"Complete analysis NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
+                except Exception as e:
+                    logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
+                    was_delivered = False
             
             # Always yield for standard flow
             yield {"type": "analysis", "content": analysis_buffer, "complete": True}
@@ -145,9 +161,22 @@ class MC:
             
             # Send via WebSocket if configured
             if use_websocket and thread_id_for_analysis:
-                from main import emit_analysis_event
-                emit_analysis_event(thread_id_for_analysis, error_event)
-                logger.error(f"Sent error event via WebSocket to room {thread_id_for_analysis}")
+                try:
+                    # Import from socketio_manager module instead of socket
+                    from socketio_manager import emit_analysis_event
+                    was_delivered = emit_analysis_event(thread_id_for_analysis, error_event)
+                    if was_delivered:
+                        logger.info(f"Sent error event via socketio_manager to room {thread_id_for_analysis}")
+                    else:
+                        logger.warning(f"Error event NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
+                except Exception as e:
+                    logger.error(f"Error in socketio_manager delivery of error event: {str(e)}")
+                    was_delivered = False
+
+                if was_delivered:
+                    logger.info(f"Sent error event via WebSocket to room {thread_id_for_analysis}")
+                else:
+                    logger.warning(f"Error event NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
             
             # Always yield for standard flow
             yield {"type": "analysis", "content": "Error in analysis process", "complete": True, "error": True}
