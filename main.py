@@ -17,6 +17,11 @@ from flask_cors import CORS
 from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
 from typing import List, Optional, Dict, Any  # Added List and Optional imports
+from collections import deque
+
+# Keep track of recent webhook requests to detect duplicates
+recent_requests = deque(maxlen=100)
+
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
 from docuhandler import process_document,summarize_document
@@ -26,6 +31,7 @@ from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming 
 from contact import ContactManager
 from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user, verify_webhook_token
 from contactconvo import ConversationManager
+from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created
 from braingraph import (
     create_brain_graph, get_brain_graph, create_brain_graph_version,
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
@@ -1268,6 +1274,38 @@ def handle_message():
     # Always return 200 to Facebook
     return "", 200
 
+@app.route('/webhook/chatwoot', methods=['POST', 'OPTIONS'])
+def chatwoot_webhook():
+    if request.method == 'OPTIONS':
+        return handle_options()
+        
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
+            
+        event = data.get('event')
+        request_id = f"{event}_{data.get('id', '')}_{datetime.now().timestamp()}"
+        
+        # Check for duplicates
+        if request_id in recent_requests:
+            return jsonify({"status": "success", "message": "Duplicate request ignored"})
+        
+        recent_requests.append(request_id)
+        
+        # Handle events
+        if event == "message_created":
+            handle_message_created(data)
+        elif event == "message_updated":
+            handle_message_updated(data)
+        elif event == "conversation_created":
+            handle_conversation_created(data)
+        
+        return jsonify({"status": "success"})
+    
+    except Exception as e:
+        print(f"Error processing webhook: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/')
 def home():

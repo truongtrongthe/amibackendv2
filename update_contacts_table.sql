@@ -6,6 +6,10 @@ ADD COLUMN IF NOT EXISTS facebook_id VARCHAR(255);
 ALTER TABLE contacts 
 ADD COLUMN IF NOT EXISTS profile_picture_url VARCHAR(512);
 
+-- Add unique constraint on facebook_id
+ALTER TABLE contacts 
+ADD CONSTRAINT unique_facebook_id UNIQUE (facebook_id);
+
 -- Add index for efficient facebook_id lookups
 CREATE INDEX IF NOT EXISTS idx_contacts_facebook_id 
 ON contacts(facebook_id);
