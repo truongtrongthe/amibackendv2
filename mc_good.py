@@ -53,10 +53,6 @@ class MC:
             "user_id": self.user_id,
             "prompt_str": "",
             "graph_version_id": "",
-            "analysis": {
-                "english": "",
-                "vietnamese": ""
-            }
         }
     async def initialize(self):
         if not self.instincts:
@@ -641,9 +637,8 @@ class MC:
             context_analysis_prompt = (
                 f"Based on the conversation:\n{context}\n\n"
                 f"KNOWLEDGE BASE INSTRUCTIONS:\n{process_instructions}\n\n"
-                f"Analyze this conversation to determine context and next steps. Provide your analysis in BOTH English and Vietnamese.\n\n"
+                f"Analyze this conversation to determine context and next steps.\n\n"
                 
-                f"ENGLISH ANALYSIS:\n"
                 f"1. CONTACT ANALYSIS:\n"
                 f"   - Extract all relevant information provided by the contact in the entire conversation\n"
                 f"   - Identify any required information according to instructions that is missing\n"
@@ -666,29 +661,6 @@ class MC:
                 f"   - If information is complete, what should be the focus of the response?\n"
                 f"   - If the user has expressed rejection/disagreement, how should you respond?\n\n"
                 
-                f"VIETNAMESE ANALYSIS:\n"
-                f"1. PHÂN TÍCH THÔNG TIN LIÊN HỆ:\n"
-                f"   - Trích xuất tất cả thông tin liên quan từ người dùng trong toàn bộ cuộc trò chuyện\n"
-                f"   - Xác định thông tin bắt buộc còn thiếu theo hướng dẫn\n"
-                f"   - Đánh giá mức độ hoàn thiện của thông tin bắt buộc (0-100%)\n\n"
-                
-                f"2. NGỮ CẢNH CUỘC TRÒ CHUYỆN:\n"
-                f"   - Chủ đề hoặc trọng tâm hiện tại là gì?\n"
-                f"   - Cuộc trò chuyện đang ở giai đoạn nào? (tiếp xúc ban đầu, thu thập thông tin, v.v.)\n"
-                f"   - Người dùng đã cung cấp những tín hiệu nào về ý định hoặc nhu cầu?\n"
-                f"   - Có phản ứng mạnh nào không (đồng ý, không đồng ý, v.v.)?\n\n"
-                
-                f"3. ĐÁNH GIÁ YÊU CẦU:\n"
-                f"   - Yêu cầu thông tin cụ thể trong hướng dẫn cơ sở kiến thức là gì?\n"
-                f"   - Yêu cầu nào đã được đáp ứng và yêu cầu nào còn thiếu?\n"
-                f"   - Thứ tự ưu tiên thu thập thông tin còn thiếu là gì?\n\n"
-                
-                f"4. HÀNH ĐỘNG TIẾP THEO:\n"
-                f"   - Dựa trên hướng dẫn cơ sở kiến thức, hành động tiếp theo phù hợp là gì?\n"
-                f"   - Nếu cần thu thập thông tin, nên hỏi những câu hỏi cụ thể nào?\n"
-                f"   - Nếu thông tin đã đầy đủ, trọng tâm của phản hồi nên là gì?\n"
-                f"   - Nếu người dùng bày tỏ sự từ chối/không đồng ý, nên phản hồi như thế nào?\n\n"
-                
                 f"Be objective and factual. Only reference information explicitly present in either the conversation or knowledge base instructions."
             )
             # Use streaming for context analysis
@@ -705,42 +677,8 @@ class MC:
                     logger.info(f"Received complete analysis chunk, storing for processing")
                     full_analysis = analysis_chunk.get("content", "")
             
-            # Process the analysis
-            try:
-                # Split the analysis into English and Vietnamese parts
-                sections = full_analysis.split("VIETNAMESE ANALYSIS:")
-                if len(sections) == 2:
-                    english_analysis = sections[0].strip()
-                    vietnamese_analysis = sections[1].strip()
-                else:
-                    # Fallback to original behavior if split fails
-                    english_analysis = full_analysis
-                    vietnamese_analysis = ""
-                
-                # Use English analysis as context_analysis for backward compatibility
-                context_analysis = english_analysis
-                
-                # Store both versions in state
-                if "analysis" not in state:
-                    state["analysis"] = {}
-                state["analysis"]["english"] = english_analysis
-                state["analysis"]["vietnamese"] = vietnamese_analysis
-                
-                # Also store the complete analysis for backward compatibility
-                state["context_analysis"] = context_analysis
-                
-            except Exception as e:
-                logger.error(f"Error processing analysis: {str(e)}")
-                # Fallback to original behavior
-                context_analysis = full_analysis
-                state["context_analysis"] = context_analysis
-                state["analysis"] = {
-                    "english": context_analysis,
-                    "vietnamese": ""
-                }
-            
             # Use the full analysis if available, otherwise use an empty string
-            context_analysis = context_analysis or ""
+            context_analysis = full_analysis or ""
             logger.info(f"Final context_analysis length: {len(context_analysis)}")
             logger.info(f"Analysis summary: {context_analysis[:500]}...")
             
