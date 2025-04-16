@@ -22,9 +22,10 @@ class PersonalityManager:
         self.loaded_graph_version_id = None
         self.instincts = {"friendly": "Be nice"}  # Add instincts attribute
         self.personality_indicators = [
-            # Vietnamese indicators
+            # Vietnamese indicators (enhanced)
             "tên em là", "em là", "tôi là", "trong quá trình giao tiếp", "khi giao tiếp", 
             "nhiệm vụ của", "vai trò của", "tính cách của", "phong cách của", "giọng điệu của",
+            "xưng tên", "gọi là", "chỉ xưng tên", "xưng là", "gọi là", "KHÁNH HẢI",
             
             # English indicators
             "bạn là", "tên là", "trong khi giao tiếp", "ai personality",
@@ -129,18 +130,33 @@ class PersonalityManager:
             "AI identity and persona description"
         ]
         
+        # Add Vietnamese specific queries
+        vietnamese_queries = [
+            "tên tôi là ai xưng tên nhân vật",
+            "nhân vật vai trò tính cách",
+            "cách giao tiếp phong cách trả lời"
+        ]
+        
+        # Combine all queries
+        all_queries = semantic_queries + vietnamese_queries
+        
         # Retrieve entries for each query
         all_entries = []
         seen_ids = set()
         
-        for query in semantic_queries:
+        for query in all_queries:
             entries = await query_graph_knowledge(graph_version_id, query, top_k=5)
             
             # Add unique entries to the result set
             for entry in entries:
                 if entry["id"] not in seen_ids:
                     seen_ids.add(entry["id"])
+                    # Try to extract name immediately to increase chances of finding it
+                    self._check_for_vietnamese_name(entry)
                     all_entries.append(entry)
+        
+        # Log any name found during initial retrieval
+        logger.info(f"[PERSONALITY] After initial retrieval, current AI name: {self.name}")
         
         return all_entries
     
@@ -156,6 +172,13 @@ class PersonalityManager:
         """
         # Initialize scored entries
         scored_entries = []
+        
+        # First, try to extract names from all entries before filtering
+        for entry in entries:
+            # Check for explicit Vietnamese name patterns first
+            self._check_for_vietnamese_name(entry)
+            # Then try the standard name extraction
+            self._extract_name_from_entry(entry)
         
         for entry in entries:
             # Initialize score
@@ -189,9 +212,31 @@ class PersonalityManager:
                 score += 0.25  
                 reasons.append("identity_patterns")
                 logger.info(f"[PERSONALITY] Entry {entry['id']} has identity description patterns")
+                
+            # NEW: Special checks for Vietnamese content
+            if is_non_english:
+                # Check for Vietnamese name patterns
+                has_name_indicator = re.search(r'(?:tên|xưng|gọi)\s+(?:là|tên)\s+\w+', entry["raw"].lower())
+                if has_name_indicator:
+                    score += 0.3
+                    reasons.append("vietnamese_name_indicator")
+                    logger.info(f"[PERSONALITY] Entry {entry['id']} has explicit Vietnamese name indicator")
+                
+                # Check for all caps names which might be emphasized
+                has_caps_name = re.search(r'[A-ZÀ-Ỹ\s]{2,}', entry["raw"])
+                if has_caps_name:
+                    score += 0.2
+                    reasons.append("caps_name")
+                    logger.info(f"[PERSONALITY] Entry {entry['id']} has ALL CAPS name")
+                    
+                # Check for Vietnamese personality structure
+                if self._has_vietnamese_personality_structure(entry):
+                    score += 0.4
+                    reasons.append("vietnamese_structure")
+                    logger.info(f"[PERSONALITY] Entry {entry['id']} has Vietnamese personality structure")
             
-            # Apply lower threshold for non-English content
-            threshold = 0.15 if is_non_english else 0.25
+            # Apply much lower threshold for non-English content
+            threshold = 0.05 if is_non_english else 0.25
             logger.info(f"[PERSONALITY] Entry {entry['id']} is {'non-English' if is_non_english else 'English'}, using threshold {threshold}")
             
             # Add entry with score if it meets threshold
@@ -202,8 +247,6 @@ class PersonalityManager:
                     "reasons": reasons
                 })
                 logger.info(f"[PERSONALITY] Entry {entry['id']} scored {score} for reasons: {reasons}")
-                # Extract name if present
-                self._extract_name_from_entry(entry)
         
         # Sort entries by score and extract the original entry
         scored_entries.sort(key=lambda x: x["score"], reverse=True)
@@ -556,18 +599,56 @@ NAME USAGE GUIDANCE:
         Args:
             entry: The entry to extract name from
         """
-        # Enhanced pattern to catch both English and Vietnamese name patterns
-        name_match = re.search(r'(?:bạn là|tên là|i am|my name is|tên em là|em là|tôi là)\s+([^,.!?]+)', entry["raw"].lower())
-        if name_match:
-            extracted_name = name_match.group(1).strip()
-            logger.info(f"[PERSONALITY] Found name match: '{extracted_name}'")
-            if extracted_name and len(extracted_name) > 2:  # Basic validation
+        # Store original text before lowercasing for name extraction
+        original_text = entry["raw"]
+        lower_text = original_text.lower()
+        
+        # Look for specific name declarations in Vietnamese (case insensitive for detection)
+        vietnamese_patterns = [
+            r'(?:tên em là|em là|tôi là|mình là|xưng tên|gọi là)\s+([A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:[,\.\?!;:]|$)',
+            r'(?:xưng|gọi|tên)\s+(?:là|tên)\s+([A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:[,\.\?!;:]|$)',
+            r'chỉ xưng tên\s+([A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:[,\.\?!;:]|$)'
+        ]
+        
+        # Look for all caps names which might be emphasized
+        caps_pattern = r'(?:TÊN|XƯng|GỌI)\s+(?:LÀ)?\s+([A-ZÀ-Ỹ\s]+)(?:[,\.\?!;:]|$)'
+        
+        # Check Vietnamese patterns
+        for pattern in vietnamese_patterns:
+            name_match = re.search(pattern, lower_text)
+            if name_match:
+                # Extract from original text using the match positions
+                start, end = name_match.span(1)
+                extracted_name = original_text[start:end].strip()
+                logger.info(f"[PERSONALITY] Found Vietnamese name match: '{extracted_name}'")
+                if extracted_name and len(extracted_name) > 1:
+                    self.name = extracted_name
+                    logger.info(f"[PERSONALITY] Updated name to: {self.name}")
+                    return
+        
+        # Check for ALL CAPS names separately
+        caps_match = re.search(caps_pattern, original_text)
+        if caps_match:
+            extracted_name = caps_match.group(1).strip()
+            logger.info(f"[PERSONALITY] Found ALL CAPS name: '{extracted_name}'")
+            if extracted_name and len(extracted_name) > 1:
                 self.name = extracted_name
                 logger.info(f"[PERSONALITY] Updated name to: {self.name}")
-            else:
-                logger.info(f"[PERSONALITY] Extracted name too short or invalid: '{extracted_name}'")
-        else:
-            logger.info(f"[PERSONALITY] No name found in entry {entry['id']}")
+                return
+        
+        # English patterns as fallback
+        english_match = re.search(r'(?:i am|my name is|name is|called)\s+([A-Za-z\s]+?)(?:[,\.\?!;:]|$)', lower_text)
+        if english_match:
+            # Extract from original text
+            start, end = english_match.span(1)
+            extracted_name = original_text[start:end].strip()
+            logger.info(f"[PERSONALITY] Found English name match: '{extracted_name}'")
+            if extracted_name and len(extracted_name) > 1:
+                self.name = extracted_name
+                logger.info(f"[PERSONALITY] Updated name to: {self.name}")
+                return
+        
+        logger.info(f"[PERSONALITY] No name found in entry {entry['id']}")
 
     async def _try_backup_queries(self, graph_version_id: str) -> List[Dict]:
         """
@@ -603,4 +684,50 @@ NAME USAGE GUIDANCE:
                 logger.info(f"[PERSONALITY] Found {len(filtered_entries)} valid personality entries from backup queries")
                 break
         
-        return filtered_entries 
+        return filtered_entries
+
+    def _has_vietnamese_personality_structure(self, entry: Dict) -> bool:
+        """
+        Check if the entry has Vietnamese personality structure patterns.
+        
+        Args:
+            entry: The entry to check
+            
+        Returns:
+            bool: True if the entry has Vietnamese personality structure
+        """
+        text = entry["raw"].lower()
+        
+        # Common Vietnamese personality-related patterns
+        patterns = [
+            r'xưng tên',
+            r'gọi là',
+            r'tên là',
+            r'(?:trả lời|phản hồi|giao tiếp) với',
+            r'nhiệm vụ của',
+            r'vai trò của',
+            r'(?:trong|khi) (?:trò chuyện|giao tiếp|trao đổi)'
+        ]
+        
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    def _check_for_vietnamese_name(self, entry: Dict) -> bool:
+        """
+        Special check for Vietnamese name declarations like 'xưng tên KHÁNH HẢI'
+        
+        Args:
+            entry: The entry to check
+            
+        Returns:
+            bool: True if a Vietnamese name was found and set
+        """
+        # This specifically looks for the pattern from your logs
+        name_match = re.search(r'(?:xưng tên|chỉ xưng tên)\s+([A-ZÀ-Ỹ\s]+)', entry["raw"], re.IGNORECASE)
+        if name_match:
+            name = name_match.group(1).strip()
+            logger.info(f"[PERSONALITY] Found Vietnamese name declaration: '{name}'")
+            if name and len(name) > 1:
+                self.name = name
+                logger.info(f"[PERSONALITY] Set name from Vietnamese declaration: {self.name}")
+                return True
+        return False 
