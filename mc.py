@@ -9,6 +9,8 @@ import numpy as np
 from database import query_graph_knowledge
 import re
 from typing import Tuple, Dict, Any
+from analysis import stream_analysis, build_context_analysis_prompt, process_analysis_result
+from personality import PersonalityManager
 
 def add_messages(existing_messages, new_messages):
     return existing_messages + new_messages
@@ -40,10 +42,9 @@ class MC:
                  similarity_threshold: float = 0.55, max_active_requests: int = 5):
         self.user_id = user_id
         self.convo_id = convo_id or "default_thread"
-        self.name = "Ami"
-        self.instincts = {"friendly": "Be nice"}
         self.similarity_threshold = similarity_threshold
         self.max_active_requests = max_active_requests
+        self.personality_manager = PersonalityManager()
         self.state = {
             "messages": [],
             "intent_history": [],
@@ -58,9 +59,23 @@ class MC:
                 "vietnamese": ""
             }
         }
+
+    @property
+    def name(self):
+        return self.personality_manager.name
+
+    @property
+    def personality_instructions(self):
+        return self.personality_manager.personality_instructions
+
+    @property
+    def instincts(self):
+        return self.personality_manager.instincts
+
     async def initialize(self):
-        if not self.instincts:
-            self.instincts = {"friendly": "Be nice"}
+        if not hasattr(self, 'personality_manager'):
+            self.personality_manager = PersonalityManager()
+        # No longer load personality here, will be loaded on first request
     
     async def stream_response(self, prompt: str, builder: ResponseBuilder):
         if len(self.state["messages"]) > 20:
@@ -149,6 +164,11 @@ class MC:
                 except Exception as e:
                     logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
                     was_delivered = False
+
+                if was_delivered:
+                    logger.info(f"Sent complete analysis via WebSocket to room {thread_id_for_analysis}")
+                else:
+                    logger.warning(f"Complete analysis NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
             
             # Always yield for standard flow
             yield {"type": "analysis", "content": analysis_buffer, "complete": True}
@@ -498,18 +518,24 @@ class MC:
 
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = "", use_websocket=False, thread_id_for_analysis=None):
         try:
+            # Load personality if not already loaded or if graph_version_id changed
+            if not hasattr(self, 'personality_instructions') or self.state.get("graph_version_id") != graph_version_id:
+                logger.info(f"[PERSONALITY] Loading personality instructions for graph_version_id: {graph_version_id}")
+                logger.info(f"[PERSONALITY] Current name before loading: {self.name}")
+                await self.load_personality_instructions(graph_version_id)
+                logger.info(f"[PERSONALITY] Name after loading: {self.name}")
+                logger.info(f"[PERSONALITY] Personality instructions length: {len(self.personality_instructions)}")
+                self.state["graph_version_id"] = graph_version_id
+            
             # Break conversation into lines
             conversation = [line.strip() for line in context.split("\n") if line.strip()]
             
             logger.info(f"Processing message: '{message}' from user_id: {user_id}")
-            #logger.info(f"Context length: {len(conversation)} lines")
             
             # Determine conversation language preference
             conversation_language = await self.detect_conversation_language(conversation)
-            #logger.info(f"Overall conversation language detected: {conversation_language or 'Insufficient data'}")
             
             # Detect language of current message
-            #logger.info(f"Detecting language for message: '{message}'")
             lang_info = await self.detect_language_with_llm(message)
             
             # Override language confidence if conversation history establishes a pattern
@@ -519,184 +545,24 @@ class MC:
                 lang_info["confidence"] = 0.9  # High confidence based on conversation history
                 lang_info["responseGuidance"] = f"Respond in {conversation_language}, maintaining consistency with previous messages"
             
-            #logger.info(f"Final language selection: {lang_info['language']} (confidence: {lang_info['confidence']})")
-            
             # STEP 1: Get profile building skills from knowledge base - the core functionality
             profile_query = "contact profile building information gathering customer understanding"
-            #logger.info(f"Fetching profile building skills with query: '{profile_query}'")
             profile_entries = await query_graph_knowledge(graph_version_id, profile_query, top_k=5)
             profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
-            #logger.info(f"Retrieved {len(profile_entries)} entries for profile building skills")
-            
-            # STEP 2: Get personality instructions from knowledge base
-            personality_query = "who am I how should I behave my identity character role"
-            #logger.info(f"Fetching AI personality instructions with query: '{personality_query}'")
-            personality_entries = await query_graph_knowledge(graph_version_id, personality_query, top_k=3)
-            
-            # Detect proper personality entries using structure indicators
-            filtered_personality_entries = []
-            for entry in personality_entries:
-                # Look for positive structural indicators of personality content
-                has_personality_indicators = any([
-                    "bạn là" in entry["raw"].lower(),
-                    "tên là" in entry["raw"].lower(),
-                    "trong khi giao tiếp" in entry["raw"].lower(),
-                    "ai personality" in entry["raw"].lower(),
-                    "role:" in entry["raw"].lower(),
-                    "identity:" in entry["raw"].lower(),
-                    "tone:" in entry["raw"].lower(),
-                    "voice:" in entry["raw"].lower(),
-                    "communication style:" in entry["raw"].lower(),
-                    "positioning:" in entry["raw"].lower(),
-                    "how i should" in entry["raw"].lower(),
-                    "who am i" in entry["raw"].lower(),
-                    "my identity" in entry["raw"].lower(),
-                    "my role" in entry["raw"].lower(),
-                    "my character" in entry["raw"].lower()
-                ])
-                
-                # If it has personality indicators, use it
-                if has_personality_indicators:
-                    filtered_personality_entries.append(entry)
-                    #logger.info(f"Found personality entry with ID {entry['id']} - has personality indicators")
-                else:
-                    # Try to determine if an entry is about personality from its structure
-                    sentences = re.split(r'[.!?]', entry["raw"])
-                    personality_sentence_count = 0
-                    for sentence in sentences:
-                        if any(term in sentence.lower() for term in ["personality", "character", "identity", "role", "tone", "voice", "style", "communicate"]):
-                            personality_sentence_count += 1
-                    
-                    # If more than 25% of sentences contain personality terms, include it
-                    if personality_sentence_count > 0 and len(sentences) > 0 and personality_sentence_count / len(sentences) >= 0.25:
-                        filtered_personality_entries.append(entry)
-                       #logger.info(f"Found personality entry with ID {entry['id']} - has personality structure")
-                    else:
-                        logger.info(f"Filtered out entry with ID {entry['id']} - not personality content")
-                
-            # If we didn't find enough specific personality entries, try with different queries
-            if len(filtered_personality_entries) < 1:
-                #logger.info("First personality query didn't yield specific personality vectors, trying backup queries")
-                
-                # Try different queries with different semantic focuses
-                backup_queries = [
-                    "how should I speak communicate with people",
-                    "my character identity who am I",
-                    "how to behave tone and approach"
-                ]
-                
-                for backup_query in backup_queries:
-                    #logger.info(f"Trying backup personality query: '{backup_query}'")
-                    backup_entries = await query_graph_knowledge(graph_version_id, backup_query, top_k=2)
-                    
-                    if backup_entries:
-                        # Apply the same personality detection logic
-                        for entry in backup_entries:
-                            has_personality_indicators = any([
-                                "bạn là" in entry["raw"].lower(),
-                                "tên là" in entry["raw"].lower(),
-                                "trong khi giao tiếp" in entry["raw"].lower(),
-                                "ai personality" in entry["raw"].lower(),
-                                "role:" in entry["raw"].lower(),
-                                "identity:" in entry["raw"].lower(),
-                                "tone:" in entry["raw"].lower(),
-                                "voice:" in entry["raw"].lower(),
-                                "how i should" in entry["raw"].lower(),
-                                "who am i" in entry["raw"].lower(),
-                                "my identity" in entry["raw"].lower(),
-                                "my role" in entry["raw"].lower(),
-                                "my character" in entry["raw"].lower()
-                            ])
-                            
-                            if has_personality_indicators or any(term in entry["raw"].lower() for term in ["personality", "character", "identity", "role", "tone"]):
-                                filtered_personality_entries.append(entry)
-                                #logger.info(f"Found personality entry with ID {entry['id']} from backup query")
-                        
-                    # If we found at least one good entry from backup queries, exit the loop
-                    if len(filtered_personality_entries) > 0:
-                        #logger.info(f"Found {len(filtered_personality_entries)} valid personality entries from backup queries")
-                        break
-                
-            # If we still have no entries, use a default personality instruction
-            if not filtered_personality_entries:
-                logger.warning("No personality entries found, using default personality")
-                default_personality = {
-                    "raw": "AI Personality Guidelines:\n" +
-                           "- Maintain a helpful, friendly tone\n" +
-                           "- Be respectful and professional\n" +
-                           "- Show expertise in relevant topics\n" +
-                           "- Keep responses clear and concise",
-                    "id": "default_personality"
-                }
-                filtered_personality_entries = [default_personality]
-                
-            personality_instructions = "\n\n".join(entry["raw"] for entry in filtered_personality_entries)
-            logger.info(f"Final personality instructions: {len(personality_instructions)} characters")
             
             # Combine instructions
-            process_instructions =  profile_instructions
+            process_instructions = profile_instructions
             
-            # STEP 3: Analyze conversation context based on knowledge
+            # STEP 2: Analyze conversation context based on knowledge
             logger.info("Building context analysis prompt")
-            context_analysis_prompt = (
-                f"Based on the conversation:\n{context}\n\n"
-                f"KNOWLEDGE BASE INSTRUCTIONS:\n{process_instructions}\n\n"
-                f"Analyze this conversation to determine context and next steps. Provide your analysis in BOTH English and Vietnamese.\n\n"
-                
-                f"ENGLISH ANALYSIS:\n"
-                f"1. CONTACT ANALYSIS:\n"
-                f"   - Extract all relevant information provided by the contact in the entire conversation\n"
-                f"   - Identify any required information according to instructions that is missing\n"
-                f"   - Assess completeness of required information (0-100%)\n\n"
-                
-                f"2. CONVERSATION CONTEXT:\n"
-                f"   - What is the current topic or focus?\n"
-                f"   - What stage is this conversation in? (initial contact, information gathering, etc.)\n"
-                f"   - What signals about intent or needs has the contact provided?\n"
-                f"   - Are there any strong reactions (agreement, disagreement, etc.)?\n\n"
-                
-                f"3. REQUIREMENTS ASSESSMENT:\n"
-                f"   - What specific information requirements are in the knowledge base instructions?\n"
-                f"   - Which requirements have been met and which are still missing?\n"
-                f"   - What is the priority order for gathering missing information?\n\n"
-                
-                f"4. NEXT ACTIONS:\n"
-                f"   - Based purely on the knowledge base instructions, what is the next appropriate action?\n"
-                f"   - If information gathering is needed, what specific questions should be asked?\n"
-                f"   - If information is complete, what should be the focus of the response?\n"
-                f"   - If the user has expressed rejection/disagreement, how should you respond?\n\n"
-                
-                f"VIETNAMESE ANALYSIS:\n"
-                f"1. PHÂN TÍCH THÔNG TIN LIÊN HỆ:\n"
-                f"   - Trích xuất tất cả thông tin liên quan từ người dùng trong toàn bộ cuộc trò chuyện\n"
-                f"   - Xác định thông tin bắt buộc còn thiếu theo hướng dẫn\n"
-                f"   - Đánh giá mức độ hoàn thiện của thông tin bắt buộc (0-100%)\n\n"
-                
-                f"2. NGỮ CẢNH CUỘC TRÒ CHUYỆN:\n"
-                f"   - Chủ đề hoặc trọng tâm hiện tại là gì?\n"
-                f"   - Cuộc trò chuyện đang ở giai đoạn nào? (tiếp xúc ban đầu, thu thập thông tin, v.v.)\n"
-                f"   - Người dùng đã cung cấp những tín hiệu nào về ý định hoặc nhu cầu?\n"
-                f"   - Có phản ứng mạnh nào không (đồng ý, không đồng ý, v.v.)?\n\n"
-                
-                f"3. ĐÁNH GIÁ YÊU CẦU:\n"
-                f"   - Yêu cầu thông tin cụ thể trong hướng dẫn cơ sở kiến thức là gì?\n"
-                f"   - Yêu cầu nào đã được đáp ứng và yêu cầu nào còn thiếu?\n"
-                f"   - Thứ tự ưu tiên thu thập thông tin còn thiếu là gì?\n\n"
-                
-                f"4. HÀNH ĐỘNG TIẾP THEO:\n"
-                f"   - Dựa trên hướng dẫn cơ sở kiến thức, hành động tiếp theo phù hợp là gì?\n"
-                f"   - Nếu cần thu thập thông tin, nên hỏi những câu hỏi cụ thể nào?\n"
-                f"   - Nếu thông tin đã đầy đủ, trọng tâm của phản hồi nên là gì?\n"
-                f"   - Nếu người dùng bày tỏ sự từ chối/không đồng ý, nên phản hồi như thế nào?\n\n"
-                
-                f"Be objective and factual. Only reference information explicitly present in either the conversation or knowledge base instructions."
-            )
+            context_analysis_prompt = build_context_analysis_prompt(context, process_instructions)
+            
             # Use streaming for context analysis
             logger.info("Streaming LLM for context analysis")
             context_analysis = ""
             full_analysis = None  # Track the complete analysis
             
-            async for analysis_chunk in self.stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket):
+            async for analysis_chunk in stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket):
                 # Pass the analysis chunks through to the caller
                 yield analysis_chunk
                 
@@ -707,15 +573,10 @@ class MC:
             
             # Process the analysis
             try:
-                # Split the analysis into English and Vietnamese parts
-                sections = full_analysis.split("VIETNAMESE ANALYSIS:")
-                if len(sections) == 2:
-                    english_analysis = sections[0].strip()
-                    vietnamese_analysis = sections[1].strip()
-                else:
-                    # Fallback to original behavior if split fails
-                    english_analysis = full_analysis
-                    vietnamese_analysis = ""
+                # Process the analysis result to get English and Vietnamese parts
+                analysis_parts = process_analysis_result(full_analysis)
+                english_analysis = analysis_parts["english"]
+                vietnamese_analysis = analysis_parts["vietnamese"]
                 
                 # Use English analysis as context_analysis for backward compatibility
                 context_analysis = english_analysis
@@ -753,7 +614,7 @@ class MC:
             missing_info = "missing" in context_analysis.lower() or "incomplete" in context_analysis.lower()
             logger.info(f"Missing information detected: {missing_info}")
             
-            # STEP 4: Extract relevant search terms to find appropriate knowledge
+            # STEP 3: Extract relevant search terms to find appropriate knowledge
             logger.info("Building entity extraction prompt")
             entity_extraction_prompt = (
                 f"Based on the conversation and analysis:\n\n"
@@ -918,7 +779,7 @@ class MC:
                     f"Context: {context}\n"
                     f"Message: '{message}'\n"
                     f"Language: {lang_info['language']}\n"
-                    f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{personality_instructions}\n\n"
+                    f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
                     
                     f"Instructions:\n"
                     f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
@@ -944,6 +805,8 @@ class MC:
                 return
             
             # STEP 4: Generate response based on context analysis and knowledge
+            logger.info(f"Responder name: {self.name}")
+            logger.info(f"Responder personality instructions: {self.personality_instructions}")
             logger.info("Building response prompt")
             response_prompt = (
                 f"AI: {self.name}\n"
@@ -953,19 +816,21 @@ class MC:
                 f"Knowledge: {knowledge_context}\n"
                 f"Language: {lang_info['language']} (confidence: {lang_info['confidence']})\n\n"
                 
-                f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{personality_instructions}\n\n"
+                f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
                 
                 f"Instructions:\n"
                 f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
                 f"2. Your primary guidance comes from the knowledge base. Follow the NEXT ACTIONS from the Context Analysis.\n"
                 f"3. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
                 f"4. Keep responses concise and conversational.\n" 
-                f"5. Always acknowledge the message first.\n"
+                f"5. GREETING GUIDELINES:\n"
+                f"   - For first message only: Use a natural greeting appropriate to the time and context\n"
+                f"   - For all subsequent messages: Skip greetings entirely and respond directly to the content\n"
                 f"6. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
                 f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n\n"
                 
                 f"Response Structure:\n"
-                f"1. ACKNOWLEDGE the message briefly\n"
+                f"1. If first message: Natural greeting, otherwise respond directly to content\n"
                 f"2. ADDRESS the current context appropriately:\n"
                 f"   a) If gathering information is needed, ask specific questions (but not ones already asked)\n"
                 f"   b) If providing information is needed, present relevant details in a fresh way\n"
@@ -989,3 +854,9 @@ class MC:
             logger.error(f"Error handling request: {str(e)}", exc_info=True)
             builder.add("Oops, có lỗi khi tìm thông tin, thử lại nhé!")
             yield builder.build()
+
+    async def load_personality_instructions(self, graph_version_id: str = ""):
+        """
+        Load personality instructions using the PersonalityManager.
+        """
+        return await self.personality_manager.load_personality_instructions(graph_version_id)
