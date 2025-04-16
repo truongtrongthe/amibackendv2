@@ -31,7 +31,7 @@ from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming 
 from contact import ContactManager
 from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user, verify_webhook_token
 from contactconvo import ConversationManager
-from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created
+from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created, generate_ai_response
 from braingraph import (
     create_brain_graph, get_brain_graph, create_brain_graph_version,
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
@@ -53,6 +53,23 @@ from socketio_manager import (
     socketio, ws_sessions, session_lock, 
     undelivered_messages, message_lock,
 )
+
+# Load inbox mapping for Chatwoot
+INBOX_MAPPING = {}
+try:
+    with open('inbox_mapping.json', 'r') as f:
+        mapping_data = json.load(f)
+        # Create a lookup dictionary by inbox_id
+        for inbox in mapping_data.get('inboxes', []):
+            INBOX_MAPPING[inbox['inbox_id']] = {
+                'organization_id': inbox['organization_id'],
+                'facebook_page_id': inbox['facebook_page_id'],
+                'page_name': inbox['page_name']
+            }
+    logger.info(f"Loaded {len(INBOX_MAPPING)} inbox mappings")
+except Exception as e:
+    logger.error(f"Failed to load inbox_mapping.json: {e}")
+    logger.warning("Chatwoot webhook will operate without inbox validation")
 
 spb_url = os.getenv("SUPABASE_URL", "https://example.supabase.co")
 spb_key = os.getenv("SUPABASE_KEY", "your-supabase-key")
@@ -216,7 +233,7 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
 
 # Existing endpoints (pilot, training, havefun) remain unchanged
 @app.route('/pilot', methods=['POST', 'OPTIONS'])
-def pilot():
+async def pilot():
     if request.method == 'OPTIONS':
         return handle_options()
     data = request.get_json() or {}
@@ -225,11 +242,11 @@ def pilot():
     thread_id = data.get("thread_id", "pilot_thread")
     print("Headers:", request.headers)
     print("Pilot API called!")
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="pilot")
+    async_gen = await convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="pilot")
     return create_stream_response(async_gen)
 
 @app.route('/training', methods=['POST', 'OPTIONS'])
-def training():
+async def training():
     if request.method == 'OPTIONS':
         return handle_options()
     data = request.get_json() or {}
@@ -238,11 +255,11 @@ def training():
     thread_id = data.get("thread_id", "training_thread")
     print("Headers:", request.headers)
     print("Training API called!")
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="training")
+    async_gen = await convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="training")
     return create_stream_response(async_gen)
 
 @app.route('/havefun', methods=['POST', 'OPTIONS'])
-def havefun():
+async def havefun():
     if request.method == 'OPTIONS':
         return handle_options()
     
@@ -286,7 +303,7 @@ def havefun():
         if use_websocket:
             # Pass thread_id directly for analysis
             logger.info(f"[SESSION_TRACE] Using WebSocket for thread {thread_id}")
-            gen = convo_stream(
+            gen = await convo_stream(
                 user_input=user_input, 
                 user_id=user_id, 
                 thread_id=thread_id,
@@ -298,7 +315,7 @@ def havefun():
         else:
             # Original behavior without WebSockets
             logger.info(f"[SESSION_TRACE] Using HTTP without WebSocket for thread {thread_id}")
-            gen = convo_stream(
+            gen = await convo_stream(
                 user_input=user_input, 
                 user_id=user_id, 
                 thread_id=thread_id,
@@ -307,15 +324,15 @@ def havefun():
             )
         
         # Create a wrapped generator that adds logging and session refreshing
-        def logged_generator(original_gen):
+        async def logged_generator(original_gen):
             try:
                 last_refresh_time = time.time()
                 refresh_interval = 10  # Refresh session every 10 seconds
                 
-                for i, item in enumerate(original_gen):
+                async for item in original_gen:
                     current_time = datetime.now()
                     elapsed = (current_time - start_time).total_seconds()
-                    logger.info(f"[SESSION_TRACE] Yielding item {i} after {elapsed:.2f} seconds")
+                    logger.info(f"[SESSION_TRACE] Yielding item after {elapsed:.2f} seconds")
                     
                     # Periodically refresh session activity timestamps
                     if time.time() - last_refresh_time > refresh_interval:
@@ -357,7 +374,7 @@ def havefun():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
-def gopilot():
+async def gopilot():
     if request.method == 'OPTIONS':
         return handle_options()
     data = request.get_json() or {}
@@ -367,7 +384,7 @@ def gopilot():
     
     print("Headers:", request.headers)
     print("Fun API called!")
-    async_gen = convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
+    async_gen = await convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
     return create_stream_response(async_gen)
 
 @app.route('/labels', methods=['GET', 'OPTIONS'])
@@ -857,17 +874,20 @@ def contact_details():
         return handle_options()
     
     contact_id = request.args.get('contact_id', '')
+    organization_id = request.args.get('organization_id', None)
+    
     if not contact_id:
         return jsonify({"error": "contact_id parameter is required"}), 400
     
     try:
-        contact = cm.get_contact_details(int(contact_id))  # Convert to int since id is an integer
+        contact = cm.get_contact_details(int(contact_id), organization_id)  # Pass organization_id
         if not contact:
             return jsonify({"error": f"No contact found with contact_id {contact_id}"}), 404
         
         contact_data = {
             "id": contact["id"],
             "uuid": contact["uuid"],
+            "organization_id": contact.get("organization_id"),
             "type": contact["type"],
             "first_name": contact["first_name"],
             "last_name": contact["last_name"],
@@ -891,6 +911,7 @@ def update_contact_endpoint():
     
     data = request.get_json() or {}
     contact_id = data.get("id", "")
+    organization_id = data.get("organization_id", None)
     type = data.get("type", "")
     first_name = data.get("first_name", "")
     last_name = data.get("last_name", "")
@@ -919,13 +940,14 @@ def update_contact_endpoint():
         if profile_picture_url is not None:
             update_data["profile_picture_url"] = profile_picture_url
         
-        updated_contact = cm.update_contact(int(contact_id), **update_data)
+        updated_contact = cm.update_contact(int(contact_id), organization_id, **update_data)
         if not updated_contact:
             return jsonify({"error": f"No contact found with id {contact_id}"}), 404
         
         contact_data = {
             "id": updated_contact["id"],
             "uuid": updated_contact["uuid"],
+            "organization_id": updated_contact.get("organization_id"),
             "type": updated_contact["type"],
             "first_name": updated_contact["first_name"],
             "last_name": updated_contact["last_name"],
@@ -947,6 +969,7 @@ def create_contact_endpoint():
         return handle_options()
     
     data = request.get_json() or {}
+    organization_id = data.get("organization_id", "")
     type = data.get("type", "")
     first_name = data.get("first_name", "")
     last_name = data.get("last_name", "")
@@ -955,14 +978,27 @@ def create_contact_endpoint():
     facebook_id = data.get("facebook_id", None)
     profile_picture_url = data.get("profile_picture_url", None)
     
+    if not organization_id:
+        return jsonify({"error": "organization_id is required"}), 400
+    
     if not type or not first_name or not last_name:
         return jsonify({"error": "type, first_name, and last_name are required"}), 400
     
     try:
-        new_contact = cm.create_contact(type, first_name, last_name, email, phone, facebook_id, profile_picture_url)
+        new_contact = cm.create_contact(
+            organization_id,
+            type, 
+            first_name, 
+            last_name, 
+            email, 
+            phone, 
+            facebook_id, 
+            profile_picture_url
+        )
         contact_data = {
             "id": new_contact["id"],
             "uuid": new_contact["uuid"],
+            "organization_id": new_contact.get("organization_id"),
             "type": new_contact["type"],
             "first_name": new_contact["first_name"],
             "last_name": new_contact["last_name"],
@@ -984,11 +1020,13 @@ def profile_details():
         return handle_options()
     
     contact_id = request.args.get('contact_id', '')
+    organization_id = request.args.get('organization_id', None)
+    
     if not contact_id:
         return jsonify({"error": "contact_id parameter is required"}), 400
     
     try:
-        contact = cm.get_contact_details(int(contact_id))
+        contact = cm.get_contact_details(int(contact_id), organization_id)
         if not contact or not contact.get("profiles"):
             return jsonify({"error": f"No profile found for contact_id {contact_id}"}), 404
         
@@ -1019,6 +1057,7 @@ def update_profile_endpoint():
     
     data = request.get_json() or {}
     contact_id = data.get("contact_id", "")
+    organization_id = data.get("organization_id", None)
     profile_summary = data.get("profile_summary", None)
     general_info = data.get("general_info", None)
     personality = data.get("personality", None)
@@ -1031,6 +1070,12 @@ def update_profile_endpoint():
         return jsonify({"error": "contact_id is required"}), 400
     
     try:
+        # First verify the contact exists and belongs to the organization
+        if organization_id:
+            contact = cm.get_contact_details(int(contact_id), organization_id)
+            if not contact:
+                return jsonify({"error": f"No contact found with id {contact_id} in this organization"}), 404
+                
         update_data = {}
         if profile_summary is not None:
             update_data["profile_summary"] = profile_summary
@@ -1077,6 +1122,7 @@ def create_profile_endpoint():
     
     data = request.get_json() or {}
     contact_id = data.get("contact_id", "")
+    organization_id = data.get("organization_id", None)
     profile_summary = data.get("profile_summary", None)
     general_info = data.get("general_info", None)
     personality = data.get("personality", None)
@@ -1089,6 +1135,12 @@ def create_profile_endpoint():
         return jsonify({"error": "contact_id is required"}), 400
     
     try:
+        # First verify the contact exists and belongs to the organization
+        if organization_id:
+            contact = cm.get_contact_details(int(contact_id), organization_id)
+            if not contact:
+                return jsonify({"error": f"No contact found with id {contact_id} in this organization"}), 404
+                
         new_profile = cm.create_contact_profile(
             int(contact_id), profile_summary, general_info, personality,
             hidden_desires, linkedin_url, social_media_urls, best_goals
@@ -1117,8 +1169,10 @@ def get_all_contacts():
     if request.method == 'OPTIONS':
         return handle_options()
     
+    organization_id = request.args.get('organization_id', None)
+    
     try:
-        contacts = cm.get_contacts()
+        contacts = cm.get_contacts(organization_id)
         if not contacts:
             return jsonify({"message": "No contacts found", "contacts": []}), 200
         
@@ -1246,35 +1300,103 @@ def handle_message():
 
 @app.route('/webhook/chatwoot', methods=['POST', 'OPTIONS'])
 def chatwoot_webhook():
+    """
+    Handle Chatwoot webhook events and route based on inbox_id and organization_id
+    """
     if request.method == 'OPTIONS':
         return handle_options()
         
     try:
         data = request.get_json()
         if not data:
+            logger.error("No JSON data received in webhook")
             return jsonify({"status": "error", "message": "No JSON data received"}), 400
             
         event = data.get('event')
-        request_id = f"{event}_{data.get('id', '')}_{datetime.now().timestamp()}"
+        
+        # Get organization_id from query parameters or headers
+        organization_id = request.args.get('organization_id')
+        if not organization_id:
+            organization_id = request.headers.get('X-Organization-Id')
+        
+        # Extract inbox information
+        inbox = data.get('inbox', {})
+        inbox_id = str(inbox.get('id', ''))
+        facebook_page_id = inbox.get('channel', {}).get('facebook_page_id', 'N/A')
+        
+        # Create a unique ID for this webhook to detect duplicates
+        request_id = f"{event}_{data.get('id', '')}_{inbox_id}_{datetime.now().timestamp()}"
         
         # Check for duplicates
         if request_id in recent_requests:
-            return jsonify({"status": "success", "message": "Duplicate request ignored"})
+            logger.info(f"Duplicate webhook detected! Ignoring: {request_id}")
+            return jsonify({"status": "success", "message": "Duplicate request ignored"}), 200
         
         recent_requests.append(request_id)
         
-        # Handle events
-        if event == "message_created":
-            handle_message_created(data)
-        elif event == "message_updated":
-            handle_message_updated(data)
-        elif event == "conversation_created":
-            handle_conversation_created(data)
+        # Log basic information
+        logger.info(
+            f"Chatwoot Webhook - Event: {event}, Inbox: {inbox_id}, "
+            f"Page: {facebook_page_id}, Organization: {organization_id or 'Not provided'}"
+        )
         
-        return jsonify({"status": "success"})
+        # Validate against inbox mapping if available
+        if INBOX_MAPPING and inbox_id:
+            inbox_config = INBOX_MAPPING.get(inbox_id)
+            if inbox_config:
+                expected_organization_id = inbox_config['organization_id']
+                expected_facebook_page_id = inbox_config['facebook_page_id']
+                
+                # If organization_id was not provided, use the one from mapping
+                if not organization_id:
+                    organization_id = expected_organization_id
+                    logger.info(f"Using organization_id {organization_id} from inbox mapping")
+                
+                # If provided, validate that it matches what's expected
+                elif organization_id != expected_organization_id:
+                    logger.warning(
+                        f"Organization mismatch: provided={organization_id}, "
+                        f"expected={expected_organization_id} for inbox {inbox_id}"
+                    )
+                    return jsonify({
+                        "status": "error",
+                        "message": "Organization ID does not match inbox configuration"
+                    }), 400
+                
+                # Validate Facebook page ID if available
+                if facebook_page_id != 'N/A' and facebook_page_id != expected_facebook_page_id:
+                    logger.warning(
+                        f"Facebook page mismatch: actual={facebook_page_id}, "
+                        f"expected={expected_facebook_page_id} for inbox {inbox_id}"
+                    )
+            else:
+                logger.warning(f"No mapping found for inbox_id: {inbox_id}")
+                # Continue processing even without mapping, using provided organization_id
+        
+        # Handle different event types
+        if event == "message_created":
+            logger.info(f"Processing message_created event for organization: {organization_id or 'None'}")
+            handle_message_created(data, organization_id)
+        elif event == "message_updated":
+            logger.info(f"Processing message_updated event for organization: {organization_id or 'None'}")
+            handle_message_updated(data, organization_id)
+        elif event == "conversation_created":
+            logger.info(f"Processing conversation_created event for organization: {organization_id or 'None'}")
+            handle_conversation_created(data, organization_id)
+        else:
+            logger.info(f"Unhandled event type: {event}")
+        
+        return jsonify({
+            "status": "success", 
+            "message": f"Processed {event} event", 
+            "organization_id": organization_id,
+            "inbox_id": inbox_id
+        }), 200
     
     except Exception as e:
-        print(f"Error processing webhook: {str(e)}")
+        logger.error(f"Error processing webhook: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/')

@@ -110,7 +110,7 @@ graph_builder.add_edge("mc", END)
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
 
-def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, 
+async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, 
               graph_version_id: str = "", mode: str = "mc", 
               use_websocket: bool = False, thread_id_for_analysis: str = None):
     """
@@ -167,7 +167,7 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
         }
     }
     
-    # Process the state using an async function but run it synchronously
+    # Process the state asynchronously
     async def process_state():
         # Invoke the graph with the state
         updated_state = await convo_graph.ainvoke(state, config)
@@ -175,12 +175,8 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
         await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="mc")
         return updated_state
     
-    # Run the async function synchronously to get the updated state
-    loop = asyncio.new_event_loop()
-    try:
-        updated_state = loop.run_until_complete(process_state())
-    finally:
-        loop.close()
+    # Use await directly
+    updated_state = await process_state()
     
     logger.debug(f"convo_stream processing took {time.time() - start_time:.2f}s")
     
@@ -204,7 +200,7 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
                     # Send analysis chunk in real-time
                     yield f"data: {analysis_json}\n\n"
                     # Small delay to let frontend process event
-                    time.sleep(0.05)
+                    await asyncio.sleep(0.05)
         else:
             logger.warning("No stream_events found in updated state")
             
@@ -225,6 +221,6 @@ def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = N
     for line in response_lines:
         if line.strip():
             yield f"data: {json.dumps({'message': line.strip()})}\n\n"
-            time.sleep(0.05)
+            await asyncio.sleep(0.05)
     
     logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")

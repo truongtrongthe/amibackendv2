@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime, timezone
 from collections import deque
 import requests
@@ -8,6 +8,16 @@ import os
 from dotenv import load_dotenv
 from contact import ContactManager
 from contactconvo import ConversationManager
+from ami import convo_stream
+import time
+import multiprocessing
+import tempfile
+import pickle
+import queue
+import threading
+
+# Add multiprocessing freeze support
+from multiprocessing import freeze_support
 
 # Load environment variables
 load_dotenv()
@@ -23,18 +33,53 @@ CHATWOOT_API_TOKEN = os.getenv('CHATWOOT_API_TOKEN')
 CHATWOOT_BASE_URL = os.getenv('CHATWOOT_BASE_URL', 'https://app.chatwoot.com')
 CHATWOOT_ACCOUNT_ID = os.getenv('CHATWOOT_ACCOUNT_ID')
 
-# Keep track of recent webhook requests to detect duplicates
-# Store the last 100 request IDs
-recent_requests = deque(maxlen=100)
+# AI response configuration
+ENABLE_AI_RESPONSES = os.getenv('ENABLE_AI_RESPONSES', 'false').lower() == 'true'
+AI_RESPONSE_BLOCKLIST = os.getenv('AI_RESPONSE_BLOCKLIST', '').split(',')  # Comma-separated list of conversation IDs to exclude
+AI_IGNORE_PREFIX = os.getenv('AI_IGNORE_PREFIX', '!').strip()  # Messages starting with this prefix won't trigger AI
+AI_RESPONSE_DELAY = float(os.getenv('AI_RESPONSE_DELAY', '1.0'))  # Delay in seconds before sending response
+DEFAULT_GRAPH_VERSION_ID = os.getenv('DEFAULT_GRAPH_VERSION_ID', '')  # Default graph version ID for knowledge retrieval
 
-def send_message(conversation_id: int, message: str, attachment_url: str = None):
+# Keep track of recent webhook requests to detect duplicates
+recent_requests = deque(maxlen=100)
+# Keep track of messages we've already responded to
+processed_messages = deque(maxlen=200)
+
+# Create global shared resources for the persistent AI process
+ai_process = None
+request_queue = None
+response_queue = None
+ai_process_running = False
+process_lock = threading.Lock()
+
+def send_message(conversation_id: int, message: str, attachment_url: str = None) -> bool:
     """
-    Send a message to a conversation in Chatwoot
+    Send a message to a conversation in Chatwoot.
+    
+    Args:
+        conversation_id: The ID of the conversation to send to
+        message: The message text to send
+        attachment_url: Optional URL of an attachment to include
+        
+    Returns:
+        bool: True if successful, False if failed
     """
-    print(f"\n=== Sending Message ===")
-    print(f"Conversation ID: {conversation_id}")
+    if not conversation_id:
+        print("❌ Error: Missing conversation ID")
+        return False
+        
+    if not message or not message.strip():
+        print("❌ Error: Empty message")
+        return False
+        
+    if not CHATWOOT_API_TOKEN or not CHATWOOT_BASE_URL or not CHATWOOT_ACCOUNT_ID:
+        print("❌ Error: Chatwoot API configuration is incomplete")
+        return False
+    
+    print(f"\n📤 Sending message to conversation {conversation_id}")
     print(f"Message: {message}")
-    print(f"Attachment URL: {attachment_url}")
+    if attachment_url:
+        print(f"Attachment: {attachment_url}")
     
     headers = {
         'api_access_token': CHATWOOT_API_TOKEN,
@@ -49,70 +94,135 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
         'content_attributes': {}
     }
     
-    if attachment_url:
-        print("Downloading attachment...")
-        try:
-            # Download the image
-            response = requests.get(attachment_url)
-            if response.status_code != 200:
-                print(f"Failed to download image: {response.status_code}")
+    start_time = time.time()
+    
+    try:
+        if attachment_url:
+            print("📥 Downloading attachment...")
+            try:
+                # Download the image with timeout
+                response = requests.get(attachment_url, timeout=10)
+                if response.status_code != 200:
+                    print(f"❌ Failed to download attachment: Status code {response.status_code}")
+                    return False
+                    
+                # Save the image temporarily with a unique name
+                temp_filename = f'temp_attachment_{int(time.time())}.dat'
+                content_type = response.headers.get('Content-Type', 'application/octet-stream')
+                extension = get_file_extension(content_type)
+                
+                if extension:
+                    temp_filename = f'temp_attachment_{int(time.time())}.{extension}'
+                
+                with open(temp_filename, 'wb') as f:
+                    f.write(response.content)
+                
+                print(f"📋 Preparing multipart form data with attachment ({len(response.content)} bytes)")
+                # Prepare multipart form data
+                files = {
+                    'attachments[]': (os.path.basename(temp_filename), open(temp_filename, 'rb'), content_type)
+                }
+                
+                # Add content type based on attachment
+                if content_type.startswith('image/'):
+                    data['content_type'] = 'image'
+                elif content_type.startswith('video/'):
+                    data['content_type'] = 'video'
+                elif content_type.startswith('audio/'):
+                    data['content_type'] = 'audio'
+                else:
+                    data['content_type'] = 'file'
+                
+                # Send the request with multipart form data
+                url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+                print(f"🔄 Sending request to: {url}")
+                
+                response = requests.post(
+                    url,
+                    headers={'api_access_token': CHATWOOT_API_TOKEN},  # Content-Type is set automatically with files
+                    data=data,
+                    files=files,
+                    timeout=15
+                )
+                
+                # Clean up the temporary file
+                try:
+                    os.remove(temp_filename)
+                    print(f"🗑️ Deleted temporary file {temp_filename}")
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to delete temporary file: {str(e)}")
+                
+            except requests.RequestException as e:
+                print(f"❌ Error handling attachment: {str(e)}")
+                return False
+            except Exception as e:
+                print(f"❌ Error processing attachment: {str(e)}")
                 return False
                 
-            # Save the image temporarily
-            temp_file = 'temp_image.jpg'
-            with open(temp_file, 'wb') as f:
-                f.write(response.content)
-            
-            print("Preparing multipart form data...")
-            # Prepare multipart form data
-            files = {
-                'attachments[]': ('image.jpg', open(temp_file, 'rb'), 'image/jpeg')
-            }
-            data['content_type'] = 'image'
-            
-            # Send the request with multipart form data
+        else:
+            # Send regular text message
             url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
-            print(f"Sending request to: {url}")
+            print(f"🔄 Sending request to: {url}")
             
             response = requests.post(
                 url,
-                headers={'api_access_token': CHATWOOT_API_TOKEN},
-                data={'content': message},
-                files=files
+                headers=headers,
+                json=data,
+                timeout=10
             )
-            
-            # Clean up the temporary file
-            os.remove(temp_file)
-            
-        except Exception as e:
-            print(f"Error handling attachment: {str(e)}")
+        
+        elapsed_time = time.time() - start_time
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            print(f"✅ Message sent successfully in {elapsed_time:.2f}s")
+            print(f"Message ID: {response_data.get('id')}")
+            return True
+        else:
+            print(f"❌ Failed to send message. Status: {response.status_code}")
+            print(f"Response: {response.text}")
             return False
             
-    else:
-        # Send regular text message
-        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
-        print(f"Sending request to: {url}")
-        print(f"Request data: {json.dumps(data, indent=2)}")
-        
-        response = requests.post(
-            url,
-            headers=headers,
-            json=data
-        )
-    
-    print(f"Response Status: {response.status_code}")
-    print(f"Response Text: {response.text}")
-    
-    if response.status_code == 200:
-        response_data = response.json()
-        print(f"Message sent successfully. Message ID: {response_data.get('id')}")
-        print("=== End Message Sending ===\n")
-        return True
-    else:
-        print(f"Failed to send message. Status: {response.status_code}")
-        print(f"Response: {response.text}")
-        print("=== End Message Sending ===\n")
+    except requests.RequestException as e:
+        print(f"❌ Network error sending message: {str(e)}")
         return False
+    except Exception as e:
+        print(f"❌ Unexpected error sending message: {str(e)}")
+        return False
+
+def get_file_extension(content_type: str) -> str:
+    """
+    Get file extension from content type.
+    
+    Args:
+        content_type: MIME type of the content
+        
+    Returns:
+        String extension or empty string if unknown
+    """
+    type_map = {
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/png': 'png',
+        'image/gif': 'gif',
+        'image/webp': 'webp',
+        'image/svg+xml': 'svg',
+        'video/mp4': 'mp4',
+        'video/mpeg': 'mpeg',
+        'video/quicktime': 'mov',
+        'audio/mpeg': 'mp3',
+        'audio/mp4': 'mp4',
+        'audio/wav': 'wav',
+        'application/pdf': 'pdf',
+        'application/msword': 'doc',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+        'application/vnd.ms-excel': 'xls',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+        'text/plain': 'txt',
+        'text/csv': 'csv'
+    }
+    
+    return type_map.get(content_type.lower(), '')
 
 def log_raw_data(data: Dict[str, Any], event_type: str):
     """
@@ -178,12 +288,13 @@ def handle_conversation_event(data: Dict[str, Any]) -> Dict[str, Any]:
         'contact_name': contact_name
     }
 
-def handle_contact_creation(data: Dict[str, Any]) -> Dict[str, Any]:
+def handle_contact_creation(data: Dict[str, Any], organization_id: str = None) -> Dict[str, Any]:
     """
-    Handle contact creation or update based on webhook data.
+    Create a contact record from webhook data if it doesn't exist.
     
     Args:
         data: The webhook event data
+        organization_id: The organization ID to associate the contact with
         
     Returns:
         Dictionary containing contact information
@@ -197,7 +308,7 @@ def handle_contact_creation(data: Dict[str, Any]) -> Dict[str, Any]:
     
     try:
         # First try to get contact by Facebook ID
-        existing_contact = contact_manager.get_contact_by_facebook_id(facebook_id)
+        existing_contact = contact_manager.get_contact_by_facebook_id(facebook_id, organization_id)
         if existing_contact:
             print(f"Found existing contact with Facebook ID {facebook_id}")
             return existing_contact
@@ -220,6 +331,7 @@ def handle_contact_creation(data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Create new contact
         new_contact = contact_manager.create_contact(
+            organization_id=organization_id,
             type='customer',
             first_name=first_name,
             last_name=last_name,
@@ -242,7 +354,7 @@ def handle_contact_creation(data: Dict[str, Any]) -> Dict[str, Any]:
         print(f"Error in contact management: {str(e)}")
         # Try one more time to get the contact in case it was created by another process
         try:
-            existing_contact = contact_manager.get_contact_by_facebook_id(facebook_id)
+            existing_contact = contact_manager.get_contact_by_facebook_id(facebook_id, organization_id)
             if existing_contact:
                 print(f"Found existing contact after error: {facebook_id}")
                 return existing_contact
@@ -291,18 +403,355 @@ def handle_conversation_management(data: Dict[str, Any], contact_id: int) -> Dic
     
     return conversation_data
 
-def handle_message_created(data: Dict[str, Any]):
+def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
     """
-    Handle message created event within conversation context
+    Split text into smaller chunks for more natural conversation flow.
+    Handles languages like Vietnamese where sentence boundaries might not have spaces.
+    
+    Args:
+        text: The text to split
+        max_sentences: Maximum number of sentences per chunk
+        
+    Returns:
+        List of text chunks
+    """
+    import re
+    
+    # First, split by paragraphs (empty lines)
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    result = []
+    for paragraph in paragraphs:
+        if not paragraph.strip():
+            continue
+            
+        # Enhanced sentence detection - handle periods followed by capital letters or spaces
+        # This works for English and many other languages including Vietnamese
+        sentence_pattern = r'(?<=[.!?])(?=\s*[A-ZÀ-Ỹ0-9]|\s|$)'
+        sentences = re.split(sentence_pattern, paragraph.strip())
+        
+        # Clean up any empty sentences
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        # Log what we found
+        if sentences:
+            print(f"Split paragraph into {len(sentences)} sentences")
+            if len(sentences) > 3:
+                print(f"First 3 sentences: {sentences[:3]}")
+        
+        # Group sentences into chunks of max_sentences
+        for i in range(0, len(sentences), max_sentences):
+            chunk = sentences[i:i+max_sentences]
+            result.append(' '.join(chunk))
+    
+    # If we ended up with nothing, use fallback chunking
+    if not result:
+        print("No sentences detected, using fallback chunking")
+        # Split into chunks of about 150 characters, breaking at spaces
+        chunks = []
+        current_pos = 0
+        text_length = len(text)
+        
+        while current_pos < text_length:
+            end_pos = min(current_pos + 150, text_length)
+            
+            # Try to find a space to break at
+            if end_pos < text_length:
+                space_pos = text.rfind(' ', current_pos, end_pos + 20)  # Look up to 20 chars ahead
+                if space_pos > current_pos:
+                    end_pos = space_pos + 1
+            
+            chunks.append(text[current_pos:end_pos].strip())
+            current_pos = end_pos
+        
+        return chunks
+        
+    print(f"Created {len(result)} message chunks")
+    return result
+
+# Function to run in the separate process - moved outside to make it picklable
+def ai_process_function(request_queue, response_queue):
+    """
+    Long-running function that handles AI requests in a separate process.
+    This way we only initialize the AI system once.
+    
+    Args:
+        request_queue: Queue to receive requests from the main process
+        response_queue: Queue to send responses back to the main process
     """
     try:
+        # Import here to ensure clean environment in subprocess
+        from ami import convo_stream
+        import json
+        import time
+        import os
+        
+        print("🚀 Starting persistent AI process")
+        
+        # IMPORTANT: Pre-set environment flags to optimize personality loading
+        os.environ['SKIP_PERSONALITY_LOAD'] = 'true'
+        os.environ['USE_DEFAULT_PERSONALITY'] = 'true'
+        
+        print("✅ AI process initialized and ready to handle requests")
+        
+        # Process requests until shutdown
+        while True:
+            try:
+                # Get request from queue with timeout
+                request = request_queue.get(timeout=300)  # 5-minute timeout
+                
+                # Check for shutdown signal
+                if request == "SHUTDOWN":
+                    print("🛑 Received shutdown signal, closing AI process")
+                    break
+                
+                # Process the request
+                message, user_id, thread_id, graph_version_id = request
+                print(f"📩 Processing request: message='{message[:50]}...', user={user_id}, thread={thread_id}")
+                
+                start_time = time.time()
+                
+                # Process the request
+                response_chunks = []
+                for chunk in convo_stream(
+                    user_input=message,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    graph_version_id=graph_version_id,
+                    mode="mc"
+                ):
+                    # Process the chunk
+                    if chunk.startswith('data: '):
+                        try:
+                            data_json = json.loads(chunk[6:])
+                            if 'message' in data_json:
+                                response_chunks.append(data_json['message'])
+                        except Exception as e:
+                            print(f"Error processing chunk: {str(e)}")
+                
+                # Combine into a single response
+                full_response = ' '.join(response_chunks)
+                processing_time = time.time() - start_time
+                
+                print(f"✅ Request processed in {processing_time:.2f}s, response length: {len(full_response)} chars")
+                
+                # Send response back
+                response_queue.put(full_response)
+                
+            except queue.Empty:
+                print("⏰ AI process timeout - no requests received in 5 minutes")
+                break
+            except Exception as e:
+                print(f"❌ Error in AI process: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                # Send error response
+                response_queue.put(f"Error: {str(e)}")
+        
+        print("🏁 AI process shutting down")
+    except Exception as e:
+        print(f"💥 Critical error in AI process: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+def start_ai_process():
+    """
+    Start the persistent AI process if it's not already running.
+    """
+    global ai_process, request_queue, response_queue, ai_process_running, process_lock
+    
+    with process_lock:
+        if not ai_process_running:
+            # Create the queues
+            request_queue = multiprocessing.Queue()
+            response_queue = multiprocessing.Queue()
+            
+            # Create and start the process
+            ai_process = multiprocessing.Process(
+                target=ai_process_function,
+                args=(request_queue, response_queue)
+            )
+            ai_process.daemon = True  # Process will terminate when main process exits
+            ai_process.start()
+            
+            ai_process_running = True
+            print(f"🚀 Started persistent AI process with PID: {ai_process.pid}")
+            
+            # Give the process time to initialize
+            time.sleep(1)
+        else:
+            print("🔄 AI process already running")
+
+def stop_ai_process():
+    """
+    Stop the persistent AI process.
+    """
+    global ai_process, request_queue, response_queue, ai_process_running, process_lock
+    
+    with process_lock:
+        if ai_process_running:
+            # Send shutdown signal
+            try:
+                request_queue.put("SHUTDOWN")
+                ai_process.join(timeout=5)
+            except:
+                pass
+            
+            # Force terminate if still running
+            if ai_process.is_alive():
+                ai_process.terminate()
+                ai_process.join()
+            
+            ai_process_running = False
+            print("🛑 Stopped persistent AI process")
+
+def generate_ai_response(message_text: str, user_id: str = None, thread_id: str = None, conversation_history: str = "", graph_version_id: str = None):
+    """
+    Helper function to generate an AI response without needing Chatwoot integration.
+    Uses direct processing to avoid startup overhead.
+    
+    Args:
+        message_text: The user's message to respond to
+        user_id: Optional user ID for the conversation
+        thread_id: Optional thread ID for the conversation
+        conversation_history: The conversation history to provide context for the AI
+        graph_version_id: Optional graph version ID for knowledge retrieval
+        
+    Returns:
+        A list of message chunks for a more natural conversation flow
+    """
+    if not user_id:
+        user_id = f"test_user_{int(datetime.now().timestamp())}"
+    
+    if not thread_id:
+        thread_id = f"test_thread_{int(datetime.now().timestamp())}"
+    
+    # Prepare enhanced message with conversation history
+    enhanced_message = message_text
+    if conversation_history:
+        history_lines = conversation_history.strip().split('\n')
+        print(f"\n📚 Adding conversation history: {len(history_lines)} lines")
+        enhanced_message = f"{conversation_history}\n\nCurrent message: {message_text}"
+        
+        # Log how the message has been enhanced
+        print(f"📝 Original message: \"{message_text}\"")
+        print(f"📝 Enhanced message preview (first 200 chars): \"{enhanced_message[:200]}{'...' if len(enhanced_message) > 200 else ''}\"")
+        print(f"📝 Total input length: {len(enhanced_message)} characters")
+    else:
+        print(f"📝 No conversation history provided, using original message: \"{message_text}\"")
+    
+    try:
+        print(f"\n🔄 Starting AI response generation with thread_id: {thread_id}")
+        
+        try:
+            from ami import convo_stream
+            import asyncio
+            
+            # Create an event loop for async execution
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Function to process the async generator
+            async def process_response():
+                response_chunks = []
+                try:
+                    async for chunk in convo_stream(
+                        user_input=enhanced_message,
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        graph_version_id=graph_version_id,
+                        mode="mc"
+                    ):
+                        # Process the chunk
+                        if chunk.startswith('data: '):
+                            try:
+                                import json
+                                data_json = json.loads(chunk[6:])
+                                if 'message' in data_json:
+                                    message_content = data_json['message']
+                                    response_chunks.append(message_content)
+                                    print(f"Received chunk: {message_content[:50]}...")
+                            except json.JSONDecodeError:
+                                print(f"Error parsing chunk: {chunk}")
+                except Exception as e:
+                    print(f"Error processing chunks: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                return response_chunks
+            
+            # Run the async function and get results
+            response_chunks = loop.run_until_complete(process_response())
+            loop.close()
+            
+            # Combine all response chunks into a single text
+            full_response = ' '.join(response_chunks)
+            print(f"✅ AI response generation complete. Response length: {len(full_response)} characters")
+            
+            if not full_response.strip():
+                print("Warning: Generated response is empty!")
+                return ["I'm sorry, I couldn't generate a proper response. Could you try asking in a different way?"]
+            
+            # Split the full response into smaller message chunks
+            message_chunks = split_into_messages(full_response, max_sentences=2)
+            print(f"✂️ Split response into {len(message_chunks)} message chunks")
+            
+            return message_chunks
+            
+        except ImportError as e:
+            print(f"Error importing necessary modules: {str(e)}")
+            return ["I'm sorry, I'm having trouble accessing my AI capabilities right now."]
+        except Exception as e:
+            print(f"Error in AI processing: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return ["I'm sorry, I encountered an error while processing your request. The team has been notified."]
+        
+    except Exception as e:
+        print(f"❌ Critical error generating AI response: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return ["I'm sorry, I encountered an error while processing your request. The team has been notified."]
+
+def handle_message_created(data: Dict[str, Any], organization_id: str = None):
+    """
+    Handle message created event within conversation context.
+    Processes incoming messages and generates AI responses when appropriate.
+    
+    Args:
+        data: The webhook event data
+        organization_id: Optional organization ID for multi-tenant setups
+    """
+    start_time = time.time()
+    try:
+        # Extract message ID for duplicate detection
+        message_id = data.get('id')
+        
+        # Skip if we've already processed this message
+        if message_id and message_id in processed_messages:
+            print(f"⏭️ Skipping duplicate message with ID: {message_id}")
+            return
+            
+        # Add to processed messages
+        if message_id:
+            processed_messages.append(message_id)
+        
         # Get conversation context
         context = handle_conversation_event(data)
-        contact_data = handle_contact_creation(data)
+        if not context or not context.get('conversation_id'):
+            print("❌ Invalid conversation context, skipping message")
+            return
+            
+        # Handle contact data
+        contact_data = handle_contact_creation(data, organization_id)
         if not contact_data:
+            print("❌ Could not create or retrieve contact, skipping message")
             return
         
+        # Handle conversation data
         conversation_data = handle_conversation_management(data, contact_data['id'])
+        if not conversation_data:
+            print("❌ Could not create or retrieve conversation, skipping message")
+            return
         
         # Get message details
         content = data.get('content', '')
@@ -310,22 +759,24 @@ def handle_message_created(data: Dict[str, Any]):
         is_incoming = message_type == 'incoming'
         status = 'received' if is_incoming else 'sent'
         
+        # Skip empty messages
+        if not content or not content.strip():
+            print("⏭️ Skipping empty message")
+            return
+        
         # Log initial message
-        print(f"\n📨 New Message:")
-        print(f"{'From' if is_incoming else 'To'}: {context['contact_name']}")
+        print(f"\n📨 {'Incoming' if is_incoming else 'Outgoing'} Message from {context['contact_name']}:")
         print(f"Content: {content}")
-        print(f"Type: {'Incoming' if is_incoming else 'Outgoing'}")
-        print(f"Status: {status}")
         print(f"Conversation ID: {context['conversation_id']}")
-        if context['last_activity_at']:
+        if context.get('last_activity_at'):
             print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
         # Add message to conversation
         message = {
             'sender_type': 'agent' if message_type == 'outgoing' else 'contact',
             'content': content,
-            'platform': 'ami',
-            'platform_message_id': data.get('id'),
+            'platform': 'chatwoot',
+            'platform_message_id': message_id,
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'direction': 'incoming' if is_incoming else 'outgoing',
             'status': status
@@ -333,20 +784,182 @@ def handle_message_created(data: Dict[str, Any]):
         
         if is_incoming:
             message.update({
-                'source': 'facebook',
+                'source': context.get('channel', 'facebook'),
                 'raw_data': {
-                    'facebook_id': context['facebook_id'],
-                    'contact_name': context['contact_name']
+                    'facebook_id': context.get('facebook_id'),
+                    'contact_name': context.get('contact_name')
                 }
             })
         
         conversation_manager.add_message(conversation_data['id'], message)
+        
+        # If this is an incoming message from a customer, check if we should generate an AI response
+        if is_incoming and ENABLE_AI_RESPONSES:
+            # Skip if conversation is in blocklist
+            conv_id_str = str(context['conversation_id'])
+            if conv_id_str in AI_RESPONSE_BLOCKLIST:
+                print(f"⏭️ Skipping AI response for blocklisted conversation ID: {conv_id_str}")
+                return
+                
+            # Skip if message starts with ignore prefix
+            if AI_IGNORE_PREFIX and content.strip().startswith(AI_IGNORE_PREFIX):
+                print(f"⏭️ Skipping AI response for message with ignore prefix: {AI_IGNORE_PREFIX}")
+                return
+                
+            print(f"\n🤖 Generating AI response for message: '{content}'")
+            
+            # Create a more stable thread_id using the database conversation ID
+            # This ensures continuity across sessions
+            db_conversation_id = conversation_data['id']
+            thread_id = f"chatwoot_{db_conversation_id}"
+            user_id = f"chatwoot_{contact_data['id']}"
+            
+            print(f"Using database conversation ID {db_conversation_id} for thread_id: {thread_id}")
+            
+            try:
+                # Add a delay to make the response seem more natural
+                if AI_RESPONSE_DELAY > 0:
+                    delay_seconds = min(AI_RESPONSE_DELAY, 3.0)  # Cap at 3 seconds
+                    print(f"⏱️ Waiting {delay_seconds} seconds before responding...")
+                    time.sleep(delay_seconds)
+                
+                # Retrieve conversation history to provide context for the AI
+                conversation_history = get_conversation_history(db_conversation_id, max_messages=5)
+                
+                # Try to find a graph version ID to use for knowledge retrieval
+                # This helps the AI access the right knowledge sources
+                graph_version_id = get_graph_version_id(organization_id) or DEFAULT_GRAPH_VERSION_ID
+                print(f"Using graph_version_id: {graph_version_id if graph_version_id else 'None'}")
+                
+                # Generate and send AI response
+                response_time_start = time.time()
+                message_chunks = generate_ai_response(
+                    content, 
+                    user_id, 
+                    thread_id, 
+                    conversation_history,
+                    graph_version_id
+                )
+                response_time = time.time() - response_time_start
+                print(f"⏱️ AI response generated in {response_time:.2f} seconds")
+                
+                if message_chunks:
+                    send_message_chunks(message_chunks, context, conversation_data)
+                else:
+                    print("❌ No AI response generated")
+            
+            except Exception as ai_error:
+                print(f"❌ Error generating AI response: {str(ai_error)}")
+                import traceback
+                traceback.print_exc()
+                # Log the error but don't raise so we can continue processing
+                
+        elif is_incoming and not ENABLE_AI_RESPONSES:
+            print("ℹ️ AI responses are disabled. Set ENABLE_AI_RESPONSES=true to enable.")
+            
+        print(f"✅ Message processing completed in {time.time() - start_time:.2f} seconds")
     
     except Exception as e:
-        print(f"Error in handle_message_created: {str(e)}")
-        raise
+        print(f"❌ Error in handle_message_created: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
-def handle_message_updated(data: Dict[str, Any]):
+def get_conversation_history(conversation_id: int, max_messages: int = 5) -> str:
+    """
+    Retrieve and format recent conversation history for AI context.
+    
+    Args:
+        conversation_id: The conversation ID
+        max_messages: Maximum number of recent messages to include
+        
+    Returns:
+        Formatted conversation history string
+    """
+    conversation_history = ""
+    
+    try:
+        conversation = conversation_manager.get_conversation(conversation_id)
+        if conversation and "messages" in conversation.get("conversation_data", {}):
+            # Get last N messages for context (or fewer if there aren't enough)
+            messages = conversation["conversation_data"]["messages"]
+            recent_messages = messages[-max_messages:] if len(messages) > max_messages else messages
+            
+            # Format as readable conversation history
+            if recent_messages:
+                conversation_history = "Previous conversation:\n"
+                for msg in recent_messages:
+                    sender = "User" if msg.get("sender_type") == "contact" else "Assistant"
+                    conversation_history += f"{sender}: {msg.get('content', '')}\n"
+                
+                print(f"📚 Added {len(recent_messages)} messages of conversation history for context")
+            else:
+                print("📝 No recent messages found in conversation data")
+        else:
+            print("📝 No messages found in conversation data")
+    except Exception as e:
+        print(f"❌ Error retrieving conversation history: {str(e)}")
+        
+    return conversation_history
+
+def get_graph_version_id(organization_id: str = None) -> str:
+    """
+    Get the appropriate graph version ID for the organization.
+    
+    Args:
+        organization_id: The organization ID
+        
+    Returns:
+        Graph version ID string or empty string if not found
+    """
+    # This is a placeholder - implement logic to retrieve the correct graph version
+    # based on organization settings or defaults
+    return DEFAULT_GRAPH_VERSION_ID
+
+def send_message_chunks(message_chunks: List[str], context: Dict[str, Any], conversation_data: Dict[str, Any]):
+    """
+    Send message chunks with appropriate delays between them.
+    
+    Args:
+        message_chunks: List of message chunks to send
+        context: Conversation context
+        conversation_data: Conversation data for persistence
+    """
+    # Configure delay between messages
+    chunk_delay = AI_RESPONSE_DELAY / 2 if AI_RESPONSE_DELAY > 0 else 0.5
+    chunk_delay = min(chunk_delay, 1.5)  # Cap at 1.5 seconds
+    print(f"📤 Sending {len(message_chunks)} message chunks with {chunk_delay:.1f}s delay between them")
+    
+    # Send each chunk as a separate message with a small delay
+    for i, chunk in enumerate(message_chunks):
+        print(f"📤 Sending chunk {i+1}/{len(message_chunks)}: {chunk}")
+        
+        # Send the message via Chatwoot
+        success = send_message(context['conversation_id'], chunk)
+        
+        if success:
+            # Add the AI response to our conversation record
+            ai_message = {
+                'sender_type': 'agent',
+                'content': chunk,
+                'platform': 'ami',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'direction': 'outgoing',
+                'status': 'sent',
+                'chunk_index': i,
+                'total_chunks': len(message_chunks)
+            }
+            conversation_manager.add_message(conversation_data['id'], ai_message)
+        else:
+            print(f"❌ Failed to send message chunk {i+1}")
+        
+        # Add delay between messages (except for the last one)
+        if i < len(message_chunks) - 1:
+            print(f"⏱️ Waiting {chunk_delay:.1f}s before sending next chunk...")
+            time.sleep(chunk_delay)
+    
+    print(f"✅ Sent all {len(message_chunks)} message chunks")
+
+def handle_message_updated(data: Dict[str, Any], organization_id: str = None):
     """
     Handle message updated event within conversation context
     """
@@ -359,108 +972,326 @@ def handle_message_updated(data: Dict[str, Any]):
         if not facebook_id:
             return
             
-        contact_data = contact_manager.get_contact_by_facebook_id(facebook_id)
+        contact_data = contact_manager.get_contact_by_facebook_id(facebook_id, organization_id)
         if not contact_data:
+            print(f"Contact not found for Facebook ID: {facebook_id}")
             return
-        
-        conversation_data = handle_conversation_management(data, contact_data['id'])
-        
-        # Get message details
-        content = data.get('content', '')
-        message_type = data.get('message_type')
-        is_incoming = message_type == 'incoming'
-        status = data.get('status', 'received' if is_incoming else 'sent')
-        
-        # Only log status changes
-        if status != 'sent':
-            print(f"\n📨 Message Update:")
-            print(f"{'From' if is_incoming else 'To'}: {context['contact_name']}")
-            print(f"Content: {content}")
-            print(f"Type: {'Incoming' if is_incoming else 'Outgoing'}")
-            print(f"New Status: {status}")
-            print(f"Conversation ID: {context['conversation_id']}")
-            if context['last_activity_at']:
-                print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
             
-            # Show changes if any
-            changed_attributes = data.get('changed_attributes', [])
-            if changed_attributes:
-                print("Changes:")
-                for change in changed_attributes:
-                    for attr, values in change.items():
-                        print(f"  - {attr}: {values.get('previous_value')} -> {values.get('current_value')}")
+        # Get message details
+        message_id = data.get('id')
+        content = data.get('content')
+        
+        # Log update
+        print(f"📝 Message updated:")
+        print(f"Message ID: {message_id}")
+        print(f"Content: {content}")
+        
+        # Find the conversation by platform message ID if available
+        conversation_id = None
+        conversations = conversation_manager.get_conversations_by_contact(contact_data['id'])
+        
+        for convo in conversations:
+            if "messages" in convo.get("conversation_data", {}):
+                for msg in convo["conversation_data"]["messages"]:
+                    if msg.get("platform_message_id") == message_id:
+                        conversation_id = convo["id"]
+                        break
+                if conversation_id:
+                    break
+        
+        if conversation_id:
+            # Update the message in conversation record
+            try:
+                # Method 1: Direct database update (preferred for efficiency)
+                conversation = conversation_manager.get_conversation(conversation_id)
+                if conversation and "messages" in conversation.get("conversation_data", {}):
+                    # Find the specific message
+                    messages = conversation["conversation_data"]["messages"]
+                    updated = False
+                    
+                    for i, msg in enumerate(messages):
+                        if msg.get("platform_message_id") == message_id:
+                            # Update the content
+                            messages[i]["content"] = content
+                            updated = True
+                            break
+                            
+                    if updated:
+                        try:
+                            # Try to import and use direct database connection
+                            import json
+                            from utilities import get_db_connection
+                            
+                            db = get_db_connection()
+                            conversations_table = db.table("conversations")
+                            
+                            # Update the conversation data with the modified messages
+                            conversation_data = conversation.get("conversation_data", {})
+                            conversation_data["messages"] = messages
+                            
+                            # Update the conversation_data as JSON
+                            conversations_table.update(
+                                {"conversation_data": json.dumps(conversation_data)},
+                                ["id", "==", conversation_id]
+                            ).execute()
+                            
+                            print(f"✅ Updated message content in conversation {conversation_id} via direct DB access")
+                            return
+                        except ImportError:
+                            print("⚠️ Could not import database utilities, trying alternate method")
+                        except Exception as db_error:
+                            print(f"⚠️ Database update failed: {str(db_error)}, trying alternate method")
+                
+                # Method 2: Fallback - re-add the message with updated content
+                print("Using fallback method to update message")
+                
+                # Get conversation information if we don't already have it
+                if not conversation:
+                    conversation = conversation_manager.get_conversation(conversation_id)
+                
+                if conversation:
+                    # Create updated message record
+                    updated_message = {
+                        'sender_type': data.get('sender_type', 'unknown'),
+                        'content': content,
+                        'platform': 'chatwoot',
+                        'platform_message_id': message_id,
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'direction': data.get('message_type', 'incoming'),
+                        'status': 'updated',
+                        'is_updated': True,
+                        'original_id': message_id
+                    }
+                    
+                    # Add a new message record with updated content
+                    conversation_manager.add_message(conversation_id, updated_message)
+                    print(f"✅ Added updated message to conversation {conversation_id}")
+                else:
+                    print(f"⚠️ Could not find conversation with ID {conversation_id}")
+            except Exception as e:
+                print(f"❌ Error updating message: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"⚠️ Could not find conversation with message ID {message_id}")
+        
     except Exception as e:
-        print(f"Error in handle_message_updated: {str(e)}")
-        raise
+        print(f"❌ Error in handle_message_updated: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
-def handle_conversation_created(data: Dict[str, Any]):
+def handle_conversation_created(data: Dict[str, Any], organization_id: str = None):
     """
     Handle conversation created event
     """
-    log_raw_data(data, "Conversation Created")
-    
-    print("\n=== Conversation Created ===")
-    conversation = data.get('conversation', {})
-    print(f"Conversation ID: {conversation.get('id')}")
-    print(f"Status: {conversation.get('status')}")
-    
-    contact = data.get('contact', {})
-    print(f"Contact: {contact.get('name')} (ID: {contact.get('id')})")
-    print(f"Email: {contact.get('email')}")
-    print(f"Phone: {contact.get('phone_number')}")
-    
-    # Get Facebook ID from additional_attributes
-    additional_attrs = contact.get('additional_attributes', {})
-    facebook_id = additional_attrs.get('id')
-    if facebook_id:
-        print(f"Facebook ID: {facebook_id}")
-        # Send a message with contact's profile picture
-        profile_pic = contact.get('avatar_url')
-        if profile_pic:
-            send_message(
-                conversation.get('id'),
+    try:
+        # Get conversation context
+        context = handle_conversation_event(data)
+        
+        # Get or create contact
+        contact_data = handle_contact_creation(data, organization_id)
+        if not contact_data:
+            return
+            
+        # Create a conversation
+        conversation_data = handle_conversation_management(data, contact_data['id'])
+        
+        facebook_id = context.get('facebook_id')
+        if facebook_id:
+            print(
                 f"New conversation started with Facebook ID: {facebook_id}",
-                profile_pic
+                f"Contact ID: {contact_data['id']}",
+                f"Conversation ID: {conversation_data['id']}" if conversation_data else ""
             )
-    print("=====================\n")
+        
+    except Exception as e:
+        print(f"Error handling conversation created: {str(e)}")
+        raise
+
+def create_chatwoot_webhook(inbox_id, webhook_url, subscriptions=None):
+    """
+    Create a webhook in Chatwoot for the given inbox_id and webhook_url.
+    Checks for existing webhooks to avoid duplicates.
+    
+    Args:
+        inbox_id (str): Chatwoot inbox ID
+        webhook_url (str): Webhook URL with organization_id
+        subscriptions (list): List of event subscriptions (default: conversation/message events)
+        
+    Returns: 
+        Dict with webhook details or None if failed
+    """
+    if subscriptions is None:
+        subscriptions = [
+            "conversation_created",
+            "message_created",
+            "message_updated"
+        ]
+
+    # Validate inputs
+    if not webhook_url or not webhook_url.startswith('http'):
+        print(f"Error: Invalid webhook URL: {webhook_url}")
+        return None
+        
+    if not CHATWOOT_API_TOKEN:
+        print("Error: CHATWOOT_API_TOKEN is not configured")
+        return None
+        
+    # Get or generate a webhook secret
+    webhook_secret = os.getenv('WEBHOOK_SECRET')
+    if not webhook_secret:
+        import secrets
+        webhook_secret = secrets.token_hex(16)
+        print(f"Generated new webhook secret (consider saving this in your .env file)")
+
+    headers = {
+        "Content-Type": "application/json",
+        "api_access_token": CHATWOOT_API_TOKEN
+    }
+
+    # Check for existing webhooks
+    try:
+        print(f"Checking for existing webhooks matching URL: {webhook_url}")
+        response = requests.get(f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/integrations/hooks", headers=headers)
+        response.raise_for_status()
+        
+        existing_webhooks = response.json()
+        print(f"Found {len(existing_webhooks)} existing webhooks")
+        
+        for webhook in existing_webhooks:
+            if webhook.get('url') == webhook_url:
+                print(f"Webhook already exists for URL: {webhook_url} (ID: {webhook.get('id')})")
+                return {"url": webhook_url, "id": webhook.get('id'), "status": "exists"}
+                
+    except requests.exceptions.HTTPError as e:
+        print(f"Failed to check existing webhooks: {str(e)}")
+        if hasattr(response, 'text'):
+            print(f"Response: {response.text}")
+        print("Proceeding with webhook creation anyway")
+    except Exception as e:
+        print(f"Error checking existing webhooks: {str(e)}")
+        print("Proceeding with webhook creation anyway")
+
+    # Create webhook
+    payload = {
+        "url": webhook_url,
+        "subscriptions": subscriptions,
+        "secret": webhook_secret
+    }
+
+    try:
+        print(f"Creating webhook for URL: {webhook_url} with events: {subscriptions}")
+        response = requests.post(
+            f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/integrations/hooks",
+            json=payload,
+            headers=headers
+        )
+        response.raise_for_status()
+        
+        webhook_data = response.json()
+        print(f"✅ Webhook created successfully - ID: {webhook_data.get('id')}")
+        print(f"✅ Webhook will receive events: {', '.join(subscriptions)}")
+        print(f"✅ Webhook secret: {webhook_secret}")
+        return webhook_data
+
+    except requests.exceptions.HTTPError as e:
+        print(f"Failed to create webhook for inbox_id: {inbox_id}")
+        print(f"Error: {str(e)}")
+        print(f"Response: {response.text if hasattr(response, 'text') else 'No response text'}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error creating webhook for inbox_id {inbox_id}: {str(e)}")
+        return None
+
+def verify_webhook_signature(request):
+    """
+    Verify the webhook signature from Chatwoot.
+    
+    Args:
+        request: The Flask request object
+        
+    Returns:
+        bool: True if signature is valid or checking is disabled, False otherwise
+    """
+    # Get the secret from environment
+    webhook_secret = os.getenv('WEBHOOK_SECRET')
+    
+    # If no secret is set, we can't verify (but we'll allow for development)
+    if not webhook_secret:
+        print("⚠️ Warning: No WEBHOOK_SECRET set, skipping signature verification")
+        return True
+        
+    # Get the signature from headers
+    signature = request.headers.get('X-Hub-Signature-256')
+    if not signature:
+        print("❌ No signature found in webhook request")
+        return False
+        
+    # Compute the expected signature
+    import hmac
+    import hashlib
+    
+    # Get the raw request body
+    payload = request.get_data()
+    
+    # Compute HMAC
+    expected_signature = 'sha256=' + hmac.new(
+        webhook_secret.encode('utf-8'),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Secure comparison
+    if not hmac.compare_digest(signature, expected_signature):
+        print("❌ Invalid webhook signature")
+        return False
+        
+    return True
 
 @app.route('/webhook/chatwoot', methods=['POST'])
 def chatwoot_webhook():
     """
-    Handle incoming webhooks from Chatwoot
+    Handle Chatwoot webhook events 
     """
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"status": "error", "message": "No JSON data received"}), 400
+        # Verify webhook signature (optional but recommended)
+        if not verify_webhook_signature(request):
+            print("❌ Webhook signature verification failed")
+            return jsonify({"success": False, "error": "Invalid signature"}), 401
             
-        event = data.get('event')
-        request_id = f"{event}_{data.get('id', '')}_{datetime.now().timestamp()}"
+        data = request.json or {}
+        event_type = data.get('event')
         
-        # Check for duplicates
-        if request_id in recent_requests:
-            return jsonify({"status": "success", "message": "Duplicate request ignored"})
+        # Get organization_id from query parameters or headers
+        organization_id = request.args.get('organization_id')
+        if not organization_id:
+            organization_id = request.headers.get('X-Organization-Id')
+            
+        # Log the webhook event
+        print(f"\n📩 Chatwoot Webhook - Event Type: {event_type} (Organization ID: {organization_id or 'None'})")
         
-        recent_requests.append(request_id)
+        # Detailed logging to debug
+        log_raw_data(data, event_type)
         
-        # Handle events
-        if event == "message_created":
-            handle_message_created(data)
-        elif event == "message_updated":
-            handle_message_updated(data)
-        elif event == "conversation_created":
-            handle_conversation_created(data)
-        
-        return jsonify({"status": "success"})
-    
+        # Handle different event types
+        if event_type == 'message_created':
+            handle_message_created(data, organization_id)
+            return jsonify({"success": True, "message": "Message created event processed"}), 200
+            
+        elif event_type == 'message_updated':
+            handle_message_updated(data, organization_id)
+            return jsonify({"success": True, "message": "Message updated event processed"}), 200
+            
+        elif event_type == 'conversation_created':
+            handle_conversation_created(data, organization_id)
+            return jsonify({"success": True, "message": "Conversation created event processed"}), 200
+            
+        else:
+            print(f"Unhandled event type: {event_type}")
+            return jsonify({"success": True, "message": f"Event type {event_type} not processed"}), 200
+            
     except Exception as e:
-        print(f"Error processing webhook: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# Suppress Flask access logs
-import logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True) 
+        import traceback
+        traceback.print_exc()
+        print(f"Error processing Chatwoot webhook: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500

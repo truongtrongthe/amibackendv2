@@ -429,7 +429,7 @@ async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> L
                 filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
             )
             matches = results.get("matches", [])
-            logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
+            #logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
             knowledge.extend([
                 {
                     "id": match["id"],

@@ -357,7 +357,7 @@ def send_and_save_message(recipient_id: str, message_data: Dict[str, Any],
     """
     # If contact_id is not provided, try to find or create the contact
     if not contact_id:
-        contact = get_or_create_contact_by_facebook_id(recipient_id)
+        contact = get_or_create_contact_by_facebook_id(recipient_id, org_id)
         if not contact:
             logger.error(f"Failed to get or create contact for Facebook user {recipient_id}")
             return 0, None
@@ -427,18 +427,25 @@ def send_and_save_message(recipient_id: str, message_data: Dict[str, Any],
     
     return success, None
 
-def get_or_create_contact_by_facebook_id(sender_id: str) -> Optional[Dict[str, Any]]:
+def get_or_create_contact_by_facebook_id(sender_id: str, organization_id: str = None) -> Optional[Dict[str, Any]]:
     """
     Get a contact by Facebook ID or create a new one if not found.
     
     Args:
         sender_id: Facebook user ID
+        organization_id: Organization ID to associate the contact with
         
     Returns:
         Contact dict or None if creation failed
     """
     # Try to find existing contact
-    contact_response = supabase.table("contacts").select("*").eq("facebook_id", sender_id).execute()
+    query = supabase.table("contacts").select("*").eq("facebook_id", sender_id)
+    
+    # Add organization filter if provided
+    if organization_id:
+        query = query.eq("organization_id", organization_id)
+        
+    contact_response = query.execute()
     contact = contact_response.data[0] if contact_response.data else None
     
     if contact:
@@ -467,6 +474,7 @@ def get_or_create_contact_by_facebook_id(sender_id: str) -> Optional[Dict[str, A
             logger.warning(f"Facebook API minimal request failed: {user_response.text}")
             # Create a basic contact with default values
             contact_data = {
+                "organization_id": organization_id,
                 "type": "customer",
                 "first_name": "Facebook",
                 "last_name": "User",
@@ -504,6 +512,7 @@ def get_or_create_contact_by_facebook_id(sender_id: str) -> Optional[Dict[str, A
         
         # Create contact with basic info
         contact_data = {
+            "organization_id": organization_id,
             "type": "customer",
             "first_name": first_name,
             "last_name": last_name,
@@ -718,7 +727,7 @@ def process_facebook_webhook(data: Dict[str, Any], convo_manager, org_id: str = 
             return True
         
         # Get or create contact
-        contact = get_or_create_contact_by_facebook_id(user_id)
+        contact = get_or_create_contact_by_facebook_id(user_id, org_id)
         
         if not contact:
             logger.error(f"Could not process message: No contact found or created for ID {user_id}")

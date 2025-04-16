@@ -21,11 +21,12 @@ class ContactManager:
         self.profile_versions_table = "profile_versions"
 
     # Create a new contact
-    def create_contact(self, type: str, first_name: str, last_name: str, email: str = None, phone: str = None, facebook_id: str = None, profile_picture_url: str = None) -> dict:
+    def create_contact(self, organization_id: str, type: str, first_name: str, last_name: str, email: str = None, phone: str = None, facebook_id: str = None, profile_picture_url: str = None) -> dict:
         if type not in ["partner", "customer"]:
             raise ValueError("Type must be 'partner' or 'customer'")
         
         contact_data = {
+            "organization_id": organization_id,
             "type": type,
             "first_name": first_name,
             "last_name": last_name,
@@ -39,28 +40,40 @@ class ContactManager:
         return response.data[0] if response.data else None
 
     # Update an existing contact by id
-    def update_contact(self, contact_id: int, **kwargs) -> dict:
-        allowed_fields = {"type", "first_name", "last_name", "email", "phone", "facebook_id", "profile_picture_url"}
+    def update_contact(self, contact_id: int, organization_id: str = None, **kwargs) -> dict:
+        allowed_fields = {"type", "first_name", "last_name", "email", "phone", "facebook_id", "profile_picture_url", "organization_id"}
         update_data = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if "type" in update_data and update_data["type"] not in ["partner", "customer"]:
             raise ValueError("Type must be 'partner' or 'customer'")
         
-        response = supabase.table(self.contacts_table).update(update_data).eq("id", contact_id).execute()
+        query = supabase.table(self.contacts_table).update(update_data).eq("id", contact_id)
+        
+        # If organization_id is provided, also filter by it
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+            
+        response = query.execute()
         return response.data[0] if response.data else None
 
     # Get all contacts
-    def get_contacts(self) -> list:
+    def get_contacts(self, organization_id: str = None) -> list:
         """
-        Fetch all contacts from the database
+        Fetch all contacts from the database, optionally filtered by organization_id
         """
         try:
-            logger.info("Fetching all contacts")
+            logger.info(f"Fetching contacts for organization_id: {organization_id or 'all'}")
             
             # Execute the query with error handling
-            response = supabase.table(self.contacts_table).select("*").execute()
+            query = supabase.table(self.contacts_table).select("*")
+            
+            # Filter by organization_id if provided
+            if organization_id:
+                query = query.eq("organization_id", organization_id)
+                
+            response = query.execute()
             
             if not response.data:
-                logger.info("No contacts found in database")
+                logger.info(f"No contacts found for organization_id: {organization_id or 'all'}")
                 return []
                 
             logger.info(f"Successfully fetched {len(response.data)} contacts")
@@ -71,8 +84,14 @@ class ContactManager:
             raise
 
     # Get contact details (including profile) by id
-    def get_contact_details(self, contact_id: int) -> dict:
-        response = supabase.table(self.contacts_table).select("*, profiles(*)").eq("id", contact_id).execute()
+    def get_contact_details(self, contact_id: int, organization_id: str = None) -> dict:
+        query = supabase.table(self.contacts_table).select("*, profiles(*)").eq("id", contact_id)
+        
+        # Filter by organization_id if provided
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+            
+        response = query.execute()
         return response.data[0] if response.data else None
 
     # Create a contact profile
@@ -127,13 +146,25 @@ class ContactManager:
         return versions_response.data
 
     # Optional: Get contact by UUID
-    def get_contact_by_uuid(self, contact_uuid: str) -> dict:
-        response = supabase.table(self.contacts_table).select("*").eq("uuid", contact_uuid).execute()
+    def get_contact_by_uuid(self, contact_uuid: str, organization_id: str = None) -> dict:
+        query = supabase.table(self.contacts_table).select("*").eq("uuid", contact_uuid)
+        
+        # Filter by organization_id if provided
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+            
+        response = query.execute()
         return response.data[0] if response.data else None
 
     # Get contact by Facebook ID
-    def get_contact_by_facebook_id(self, facebook_id: str) -> dict:
-        response = supabase.table(self.contacts_table).select("*").eq("facebook_id", facebook_id).execute()
+    def get_contact_by_facebook_id(self, facebook_id: str, organization_id: str = None) -> dict:
+        query = supabase.table(self.contacts_table).select("*").eq("facebook_id", facebook_id)
+        
+        # Filter by organization_id if provided
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+            
+        response = query.execute()
         return response.data[0] if response.data else None
 
 # Example usage
@@ -141,7 +172,7 @@ if __name__ == "__main__":
     cm = ContactManager()
 
     # Create a contact
-    new_contact = cm.create_contact("customer", "Jane", "Smith", "jane@example.com", "555-5678")
+    new_contact = cm.create_contact("org123", "customer", "Jane", "Smith", "jane@example.com", "555-5678")
     print("Created Contact:", new_contact)
 
     # Update contact
@@ -149,7 +180,7 @@ if __name__ == "__main__":
     print("Updated Contact:", updated_contact)
 
     # Get all contacts
-    all_contacts = cm.get_contacts()
+    all_contacts = cm.get_contacts("org123")
     print("All Contacts:", all_contacts)
 
     # Create a profile
@@ -168,7 +199,7 @@ if __name__ == "__main__":
     print("Updated Profile:", updated_profile)
 
     # Get contact details
-    details = cm.get_contact_details(new_contact["id"])
+    details = cm.get_contact_details(new_contact["id"], "org123")
     print("Contact Details:", details)
 
     # Get profile summary
@@ -180,9 +211,9 @@ if __name__ == "__main__":
     print("Summary Versions:", versions)
 
     # Get contact by UUID
-    contact_by_uuid = cm.get_contact_by_uuid(new_contact["uuid"])
+    contact_by_uuid = cm.get_contact_by_uuid(new_contact["uuid"], "org123")
     print("Contact by UUID:", contact_by_uuid)
 
     # Get contact by Facebook ID
-    contact_by_facebook_id = cm.get_contact_by_facebook_id(new_contact["facebook_id"])
+    contact_by_facebook_id = cm.get_contact_by_facebook_id(new_contact["facebook_id"], "org123")
     print("Contact by Facebook ID:", contact_by_facebook_id)
