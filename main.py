@@ -146,9 +146,82 @@ def handle_options():
     return response, 200
 
 def create_stream_response(gen):
-    """Common response creator for streaming endpoints."""
+    """
+    Common response creator for streaming endpoints.
+    Works with both regular generators and async generators.
+    """
+    # For async generators, we need a special handler that preserves Flask context
+    if hasattr(gen, '__aiter__'):
+        from flask import copy_current_request_context, current_app
+        import asyncio
+        
+        # Get the current app and request context outside the wrapper
+        app = current_app._get_current_object()
+        
+        # Define a wrapper that will consume the async generator while preserving Flask context
+        @copy_current_request_context
+        def async_generator_handler():
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # This function will run in the current thread and consume the async generator
+            def run_async_generator():
+                async def consume_async_generator():
+                    try:
+                        async for item in gen:
+                            yield item
+                    except Exception as e:
+                        logger.error(f"Error consuming async generator: {str(e)}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
+                # Create a list to store all generated items
+                all_items = []
+                
+                # Run the async generator to completion and collect all items
+                try:
+                    coro = consume_async_generator().__aiter__().__anext__()
+                    while True:
+                        try:
+                            item = loop.run_until_complete(coro)
+                            all_items.append(item)
+                            coro = consume_async_generator().__aiter__().__anext__()
+                        except StopAsyncIteration:
+                            break
+                except Exception as e:
+                    logger.error(f"Error in async generator execution: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                finally:
+                    loop.close()
+                
+                # Return all collected items
+                return all_items
+            
+            # Collect all items first
+            try:
+                items = run_async_generator()
+                
+                # Now yield them one by one in the Flask context
+                for item in items:
+                    yield item
+            except Exception as e:
+                logger.error(f"Error in async generator handler: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        # Use the context-preserving wrapper
+        wrapped_gen = async_generator_handler()
+    else:
+        # Regular generator can be used directly
+        wrapped_gen = gen
     
-    response = Response(gen, mimetype='text/event-stream')
+    # Use Flask's stream_with_context to ensure request context is maintained
+    from flask import stream_with_context
+    
+    # Create the response
+    response = Response(stream_with_context(wrapped_gen), mimetype='text/event-stream')
     response.headers['X-Accel-Buffering'] = 'no'
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -236,30 +309,67 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
 async def pilot():
     if request.method == 'OPTIONS':
         return handle_options()
+    
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "pilot_thread")
+    
     print("Headers:", request.headers)
     print("Pilot API called!")
-    async_gen = await convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="pilot")
-    return create_stream_response(async_gen)
+    
+    try:
+        # Import fresh
+        from ami import convo_stream
+        
+        # Create the generator without awaiting it
+        async_gen = convo_stream(
+            user_input=user_input, 
+            user_id=user_id, 
+            thread_id=thread_id, 
+            mode="pilot"
+        )
+        
+        return create_stream_response(async_gen)
+    except Exception as e:
+        logger.error(f"Exception in pilot endpoint: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/training', methods=['POST', 'OPTIONS'])
 async def training():
     if request.method == 'OPTIONS':
         return handle_options()
+    
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "training_thread")
+    
     print("Headers:", request.headers)
     print("Training API called!")
-    async_gen = await convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="training")
-    return create_stream_response(async_gen)
+    
+    try:
+        # Import fresh
+        from ami import convo_stream
+        
+        # Create the generator without awaiting it
+        async_gen = convo_stream(
+            user_input=user_input, 
+            user_id=user_id, 
+            thread_id=thread_id, 
+            mode="training"
+        )
+        
+        return create_stream_response(async_gen)
+    except Exception as e:
+        logger.error(f"Exception in training endpoint: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/havefun', methods=['POST', 'OPTIONS'])
-async def havefun():
+def havefun():
+    """
+    Handle havefun requests using a synchronous approach to avoid Flask async context issues.
+    """
     if request.method == 'OPTIONS':
         return handle_options()
     
@@ -276,116 +386,127 @@ async def havefun():
     logger.info(f"[SESSION_TRACE] havefun API called! Thread ID: {thread_id}, Use WebSocket: {use_websocket}")
     logger.info(f"[SESSION_TRACE] Request data: user_input length={len(user_input)}, user_id={user_id}, graph_version_id={graph_version_id}")
     
-    # CRITICAL FIX: Before using WebSockets, ensure we have an active session for this thread
-    active_session_exists = False
-    active_session_ids = []
-    
-    with session_lock:
-        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-        active_session_exists = len(thread_sessions) > 0
-        active_session_ids = thread_sessions.copy()
-        logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
-        for sid in thread_sessions:
-            transport = ws_sessions[sid].get('transport', 'unknown')
-            last_activity = ws_sessions[sid].get('last_activity', 'unknown')
-            # Update last activity timestamp to prevent cleanup
-            ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
-            ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
-            logger.info(f"[SESSION_TRACE] Session {sid} details - Transport: {transport}, Last activity: {last_activity}")
-            logger.info(f"[SESSION_TRACE] Updated session {sid} last_activity to now")
-    
-    if use_websocket and not active_session_exists:
-        logger.warning(f"[SESSION_TRACE] WebSocket requested but no active session for thread {thread_id}")
-        logger.warning(f"[SESSION_TRACE] Available thread_ids: {[s.get('thread_id') for s in ws_sessions.values() if s.get('thread_id')]}")
-    
-    try:
-        # If using WebSockets, configure the MC generator differently
-        if use_websocket:
-            # Pass thread_id directly for analysis
-            logger.info(f"[SESSION_TRACE] Using WebSocket for thread {thread_id}")
-            gen = await convo_stream(
-                user_input=user_input, 
-                user_id=user_id, 
-                thread_id=thread_id,
-                graph_version_id=graph_version_id,
-                mode="mc",
-                use_websocket=True,  # Signal to use WebSocket
-                thread_id_for_analysis=thread_id  # Pass thread_id for analysis
-            )
-        else:
-            # Original behavior without WebSockets
-            logger.info(f"[SESSION_TRACE] Using HTTP without WebSocket for thread {thread_id}")
-            gen = await convo_stream(
-                user_input=user_input, 
-                user_id=user_id, 
-                thread_id=thread_id,
-                graph_version_id=graph_version_id,
-                mode="mc"
-            )
+    # Update session info if using WebSockets
+    if use_websocket:
+        active_session_exists = False
         
-        # Create a wrapped generator that adds logging and session refreshing
-        async def logged_generator(original_gen):
-            try:
-                last_refresh_time = time.time()
-                refresh_interval = 10  # Refresh session every 10 seconds
+        with session_lock:
+            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+            active_session_exists = len(thread_sessions) > 0
+            
+            if active_session_exists:
+                logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
+                for sid in thread_sessions:
+                    ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                    ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
+            else:
+                logger.warning(f"[SESSION_TRACE] WebSocket requested but no active session for thread {thread_id}")
+    
+    # Create a synchronous response streaming solution
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Import directly here to ensure fresh imports
+            import asyncio
+            from ami import convo_stream
+            
+            # Set up response parameters
+            stream_params = {
+                "user_input": user_input,
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "graph_version_id": graph_version_id,
+                "mode": "mc"
+            }
+            
+            if use_websocket:
+                stream_params["use_websocket"] = True
+                stream_params["thread_id_for_analysis"] = thread_id
                 
-                async for item in original_gen:
-                    current_time = datetime.now()
-                    elapsed = (current_time - start_time).total_seconds()
-                    logger.info(f"[SESSION_TRACE] Yielding item after {elapsed:.2f} seconds")
+            # Create a new event loop for this request
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Process the convo_stream in the event loop
+            async def process_stream():
+                """Process the stream and return all items."""
+                outputs = []
+                try:
+                    # Get the stream
+                    stream = convo_stream(**stream_params)
                     
-                    # Periodically refresh session activity timestamps
-                    if time.time() - last_refresh_time > refresh_interval:
-                        with session_lock:
-                            # First check if the sessions are still active
-                            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-                            logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions at {elapsed:.2f}s")
-                            
-                            # If sessions are missing, try to find out why
-                            if len(thread_sessions) == 0 and active_session_ids:
-                                for sid in active_session_ids:
-                                    if sid not in ws_sessions:
-                                        logger.error(f"[SESSION_TRACE] Session {sid} has been removed from ws_sessions during processing!")
-                            
-                            # Update activity timestamps for all remaining sessions
-                            for sid in thread_sessions:
-                                ws_sessions[sid]['last_activity'] = current_time.isoformat()
-                                ws_sessions[sid]['yielding_timestamp'] = current_time.isoformat()
-                                logger.info(f"[SESSION_TRACE] Refreshed session {sid} activity timestamp at {elapsed:.2f}s")
-                        
-                        last_refresh_time = time.time()
-                    
-                    yield item
+                    # Process all the output
+                    async for item in stream:
+                        outputs.append(item)
+                except Exception as e:
+                    error_msg = f"Error processing stream: {str(e)}"
+                    logger.error(error_msg)
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
                 
-                end_time = datetime.now()
-                elapsed = (end_time - start_time).total_seconds()
-                logger.info(f"[SESSION_TRACE] === END havefun request - total time: {elapsed:.2f}s ===")
-            except Exception as e:
-                logger.error(f"[SESSION_TRACE] Error in logged_generator: {str(e)}")
-                # Log current session state on error
-                with session_lock:
-                    thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-                    logger.error(f"[SESSION_TRACE] On error - Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
-                raise
-        
-        return create_stream_response(logged_generator(gen))
-    except Exception as e:
-        logger.error(f"[SESSION_TRACE] Exception in havefun endpoint: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+                return outputs
+            
+            # Run the processor and get all outputs
+            outputs = loop.run_until_complete(process_stream())
+            
+            # Clean up the event loop
+            loop.close()
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+            
+            # Log completion
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            logger.info(f"[SESSION_TRACE] === END havefun request - total time: {elapsed:.2f}s ===")
+            
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
+    
+    # Create a streaming response with our generator
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
 async def gopilot():
     if request.method == 'OPTIONS':
         return handle_options()
+    
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
     
     print("Headers:", request.headers)
-    print("Fun API called!")
-    async_gen = await convo_stream(user_input=user_input, user_id=user_id, thread_id=thread_id, mode="mc")
-    return create_stream_response(async_gen)
+    print("Autopilot API called!")
+    
+    try:
+        # Import here to ensure it's fresh
+        from ami import convo_stream
+        
+        # Create the generator without awaiting it
+        async_gen = convo_stream(
+            user_input=user_input, 
+            user_id=user_id, 
+            thread_id=thread_id, 
+            mode="mc"
+        )
+        
+        return create_stream_response(async_gen)
+    except Exception as e:
+        logger.error(f"Exception in autopilot endpoint: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/labels', methods=['GET', 'OPTIONS'])
 async def get_labels():
