@@ -52,7 +52,6 @@ from socketio_manager import init_socketio, emit_analysis_event
 from socketio_manager import (
     socketio, ws_sessions, session_lock, 
     undelivered_messages, message_lock,
-    debug_websocket_sessions, debug_all_sessions, debug_room_status
 )
 
 spb_url = os.getenv("SUPABASE_URL", "https://example.supabase.co")
@@ -145,7 +144,7 @@ def handle_connect():
     session_id = request.sid
     logger.info(f"[SESSION_TRACE] New WebSocket connection: {session_id}, Transport: {request.environ.get('socketio.transport')}")
     # Log more detailed connection information
-    logger.info(f"[SESSION_TRACE] Connection details - Headers: {dict(request.headers)}, Remote addr: {request.remote_addr}")
+    #logger.info(f"[SESSION_TRACE] Connection details - Headers: {dict(request.headers)}, Remote addr: {request.remote_addr}")
     emit('connected', {'status': 'connected', 'session_id': session_id})
 
 @socketio.on('register_session')
@@ -190,19 +189,6 @@ def handle_register(data):
 def handle_disconnect():
     """Handle client disconnection"""
     session_id = request.sid
-    
-    # Log before cleanup
-    with session_lock:
-        if session_id in ws_sessions:
-            thread_id = ws_sessions[session_id].get('thread_id')
-            transport = ws_sessions[session_id].get('transport', 'unknown')
-            logger.info(f"[SESSION_TRACE] Session {session_id} with transport {transport} is disconnecting from thread {thread_id}")
-            
-            # Check remaining sessions for the thread
-            thread_sessions = [sid for sid, data in ws_sessions.items() 
-                             if data.get('thread_id') == thread_id and sid != session_id]
-            logger.info(f"[SESSION_TRACE] Thread {thread_id} will have {len(thread_sessions)} remaining sessions after disconnect")
-    
     # Clean up session data
     with session_lock:
         if session_id in ws_sessions:
@@ -210,38 +196,22 @@ def handle_disconnect():
             if thread_id:
                 leave_room(thread_id)
             del ws_sessions[session_id]
-            logger.info(f"[SESSION_TRACE] Session {session_id} disconnected and removed from ws_sessions")
+            #logger.info(f"[SESSION_TRACE] Session {session_id} disconnected and removed from ws_sessions")
 
 # Add a new ping handler to track session activity
 @socketio.on('ping')
 def handle_ping(data=None):
     """Handle client ping to keep session alive and track activity"""
     session_id = request.sid
-    with session_lock:
-        if session_id in ws_sessions:
-            # Update last activity timestamp
-            ws_sessions[session_id]['last_activity'] = datetime.now().isoformat()
-            # Log the ping with session details
-            thread_id = ws_sessions[session_id].get('thread_id')
-            transport = ws_sessions[session_id].get('transport', 'unknown')
-            logger.debug(f"[SESSION_TRACE] Ping received from session {session_id}, thread {thread_id}, transport {transport}")
-    
+    #logger.debug(f"[SESSION_TRACE] Ping received from session {session_id}")
     # Return pong with server timestamp
     return {'pong': datetime.now().isoformat(), 'session_id': session_id}
 
 # Function to emit analysis events to specific thread
 def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
     """Emit an analysis event to all clients in a thread room"""
-    # Log detailed session information before emitting
-    with session_lock:
-        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-        session_details = [
-            {'sid': sid, 'transport': ws_sessions[sid].get('transport', 'unknown')} 
-            for sid in thread_sessions
-        ]
-        logger.info(f"[SESSION_TRACE] Emitting to thread {thread_id} with {len(thread_sessions)} active sessions: {session_details}")
     
-    logger.debug(f"[SESSION_TRACE] Event data preview: {str(data)[:100]}...")
+    #logger.debug(f"[SESSION_TRACE] Event data preview: {str(data)[:100]}...")
     socketio.emit('analysis_update', data, room=thread_id)
 
 # Existing endpoints (pilot, training, havefun) remain unchanged

@@ -17,6 +17,10 @@ import traceback  # Add this import
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('socket')
 
+# Suppress Socket.IO event emission logs
+logging.getLogger('socketio').setLevel(logging.WARNING)
+logging.getLogger('engineio').setLevel(logging.WARNING)
+
 # Create a new SocketIO instance - will be initialized in init_socketio
 socketio = None
 
@@ -52,17 +56,17 @@ def log_session_state(operation, session_id=None, thread_id=None):
             }
     
     # Log the operation and state
-    logger.info(f"[SESSION_TRACE] [{session_modification_counter}] {operation} - {session_count} sessions active")
+    logger.debug(f"[SESSION_TRACE] [{session_modification_counter}] {operation} - {session_count} sessions active")
     if session_id:
-        logger.info(f"[SESSION_TRACE] [{session_modification_counter}] Session ID: {session_id}")
+        logger.debug(f"[SESSION_TRACE] [{session_modification_counter}] Session ID: {session_id}")
     if thread_id:
-        logger.info(f"[SESSION_TRACE] [{session_modification_counter}] Thread ID: {thread_id}")
+        logger.debug(f"[SESSION_TRACE] [{session_modification_counter}] Thread ID: {thread_id}")
     
     # Log a few session entries if available
     if session_data:
         sample = list(session_data.items())[:3]
         for sid, data in sample:
-            logger.info(f"[SESSION_TRACE] [{session_modification_counter}] Sample - ID: {sid}, Thread: {data['thread_id']}, Last: {data['last_activity']}")
+            logger.debug(f"[SESSION_TRACE] [{session_modification_counter}] Sample - ID: {sid}, Thread: {data['thread_id']}, Last: {data['last_activity']}")
     
     # Get the call stack
     stack = traceback.format_stack()
@@ -85,7 +89,7 @@ def init_socketio(app):
         return socketio
     
     logger.info(f"[SESSION_TRACE] Initializing SocketIO for the first time. Init count: {init_count}")
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=True, engineio_logger=True)
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', logger=False, engineio_logger=False)
     
     # Register event handlers
     register_handlers(socketio)
@@ -488,22 +492,22 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
     Returns:
         bool: True if message was delivered to active sessions, False otherwise
     """
-    log_session_state(f"Beginning emit_analysis_event for thread {thread_id}", thread_id=thread_id)
+    #log_session_state(f"Beginning emit_analysis_event for thread {thread_id}", thread_id=thread_id)
     
     # CRITICAL DEBUGGING: Print all sessions and the target thread
-    logger.info(f"\n[SESSION_TRACE] === BEGIN emit_analysis_event for thread {thread_id} ===")
-    logger.info(f"[SESSION_TRACE] Target thread_id: {thread_id}")
+    #logger.debug(f"\n[SESSION_TRACE] === BEGIN emit_analysis_event for thread {thread_id} ===")
+    #logger.debug(f"[SESSION_TRACE] Target thread_id: {thread_id}")
     
     session_details = []
     with session_lock:
-        logger.info(f"[SESSION_TRACE] Total active sessions: {len(ws_sessions)}")
+        #logger.debug(f"[SESSION_TRACE] Total active sessions: {len(ws_sessions)}")
         
         # Print each session's details
         for sid, s_data in ws_sessions.items():
             s_thread = s_data.get('thread_id', 'NONE')
             transport = s_data.get('transport', 'unknown')
             last_activity = s_data.get('last_activity', 'unknown')
-            logger.info(f"[SESSION_TRACE] Session {sid}: thread_id={s_thread}, transport={transport}, last_activity={last_activity}")
+            #logger.debug(f"[SESSION_TRACE] Session {sid}: thread_id={s_thread}, transport={transport}, last_activity={last_activity}")
             session_details.append({
                 'sid': sid, 
                 'thread_id': s_thread,
@@ -513,10 +517,10 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
             })
             
         all_thread_ids = [s_data.get('thread_id') for s_data in ws_sessions.values()]
-        logger.info(f"[SESSION_TRACE] All thread_ids in sessions: {all_thread_ids}")
+        #logger.debug(f"[SESSION_TRACE] All thread_ids in sessions: {all_thread_ids}")
     
-    logger.debug(f"[SESSION_TRACE] Session details: {json.dumps(session_details, default=str)}")
-    logger.info(f"[SESSION_TRACE] Exact thread match needed: '{thread_id}'")
+    #logger.debug(f"[SESSION_TRACE] Session details: {json.dumps(session_details, default=str)}")
+    #logger.debug(f"[SESSION_TRACE] Exact thread match needed: '{thread_id}'")
     
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
@@ -529,39 +533,42 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
             
             # Debug the thread_id comparison
             if stored_thread_id == thread_id:
-                logger.info(f"[SESSION_TRACE] MATCH: Session {session_id} has thread_id {stored_thread_id} matching {thread_id}")
+                #logger.debug(f"[SESSION_TRACE] MATCH: Session {session_id} has thread_id {stored_thread_id} matching {thread_id}")
                 active_sessions_count += 1
                 active_session_ids.append(session_id)
                 transport = session_data.get('transport', 'unknown')
                 session_transports.append(transport)
                 # Update last activity timestamp to mark session as active
                 session_data['last_activity'] = datetime.now().isoformat()
-                logger.info(f"[SESSION_TRACE] Updated last_activity for session {session_id}")
+                #logger.debug(f"[SESSION_TRACE] Updated last_activity for session {session_id}")
             elif stored_thread_id:
-                logger.debug(f"[SESSION_TRACE] NO MATCH: Session {session_id} has thread_id {stored_thread_id} NOT matching {thread_id}")
+                #logger.debug(f"[SESSION_TRACE] NO MATCH: Session {session_id} has thread_id {stored_thread_id} NOT matching {thread_id}")
+                pass
     
-    logger.info(f"[SESSION_TRACE] Found {active_sessions_count} active sessions for thread {thread_id}: {active_session_ids}")
+    #logger.debug(f"[SESSION_TRACE] Found {active_sessions_count} active sessions for thread {thread_id}: {active_session_ids}")
     
     if active_sessions_count > 0:
-        logger.info(f"[SESSION_TRACE] Emitting analysis event to thread {thread_id}: "
-                   f"({active_sessions_count} active sessions: {active_session_ids}, transports: {session_transports})")
+        #logger.debug(f"[SESSION_TRACE] Emitting analysis event to thread {thread_id}: "
+        #           f"({active_sessions_count} active sessions: {active_session_ids}, transports: {session_transports})")
         
         # First try to emit to the room
         try:
             socketio.emit('analysis_update', data, room=thread_id)
-            logger.info(f"[SESSION_TRACE] Successfully emitted to room {thread_id}")
+            #logger.debug(f"[SESSION_TRACE] Successfully emitted to room {thread_id}")
         except Exception as e:
-            logger.error(f"[SESSION_TRACE] Error emitting to room {thread_id}: {str(e)}")
+            #logger.error(f"[SESSION_TRACE] Error emitting to room {thread_id}: {str(e)}")
+            pass
         
         # Also send directly to each session as a backup
         success = False
         for session_id in active_session_ids:
             try:
                 socketio.emit('analysis_update', data, room=session_id)
-                logger.info(f"[SESSION_TRACE] Sent direct message to session {session_id}")
+                #logger.debug(f"[SESSION_TRACE] Sent direct message to session {session_id}")
                 success = True
             except Exception as e:
-                logger.error(f"[SESSION_TRACE] Failed direct delivery to session {session_id}: {str(e)}")
+                #logger.error(f"[SESSION_TRACE] Failed direct delivery to session {session_id}: {str(e)}")
+                pass
         
         # Store message in case not all deliveries were successful
         if not success:
@@ -569,14 +576,14 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
                 if thread_id not in undelivered_messages:
                     undelivered_messages[thread_id] = []
                 undelivered_messages[thread_id] = (undelivered_messages[thread_id] + [data])[-50:]
-                logger.info(f"[SESSION_TRACE] Stored undelivered message due to delivery failure")
+                #logger.debug(f"[SESSION_TRACE] Stored undelivered message due to delivery failure")
         
         log_session_state(f"After successful emit_analysis_event for thread {thread_id}", thread_id=thread_id)
         
-        logger.info(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
+        #logger.debug(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
         return True
     else:
-        logger.warning(f"[SESSION_TRACE] NO ACTIVE SESSIONS found for thread {thread_id}, analysis event NOT DELIVERED.")
+        #logger.warning(f"[SESSION_TRACE] NO ACTIVE SESSIONS found for thread {thread_id}, analysis event NOT DELIVERED.")
         
         # Store undelivered message for later retrieval
         with message_lock:
@@ -584,11 +591,11 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
                 undelivered_messages[thread_id] = []
             # Only keep the last 50 messages per thread
             undelivered_messages[thread_id] = (undelivered_messages[thread_id] + [data])[-50:]
-            logger.info(f"[SESSION_TRACE] Stored undelivered message for thread {thread_id}, total queued: {len(undelivered_messages[thread_id])}")
+            #logger.debug(f"[SESSION_TRACE] Stored undelivered message for thread {thread_id}, total queued: {len(undelivered_messages[thread_id])}")
         
         log_session_state(f"After failed emit_analysis_event for thread {thread_id}", thread_id=thread_id)
         
-        logger.info(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
+        #logger.debug(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
         return False
 
 
@@ -599,18 +606,18 @@ def start_session_cleanup():
             time.sleep(60)  # Check every 60 seconds
             try:
                 now = datetime.now()
-                logger.info(f"[SESSION_TRACE] Running session cleanup check at {now.isoformat()}")
+                #logger.info(f"[SESSION_TRACE] Running session cleanup check at {now.isoformat()}")
                 
                 # Log current session count before cleanup
                 with session_lock:
-                    logger.info(f"[SESSION_TRACE] Current active sessions before cleanup: {len(ws_sessions)}")
+                    #logger.info(f"[SESSION_TRACE] Current active sessions before cleanup: {len(ws_sessions)}")
                     if ws_sessions:
                         # Log the first few sessions
                         sessions_sample = list(ws_sessions.items())[:3]
                         for sid, session_data in sessions_sample:
                             thread_id = session_data.get('thread_id', 'none')
                             last_activity = session_data.get('last_activity', 'unknown')
-                            logger.info(f"[SESSION_TRACE] Session sample - ID: {sid}, Thread: {thread_id}, Last activity: {last_activity}")
+                            #logger.info(f"[SESSION_TRACE] Session sample - ID: {sid}, Thread: {thread_id}, Last activity: {last_activity}")
                 
                 # Track sessions that need attention
                 stale_sessions = []
@@ -684,92 +691,3 @@ def start_session_cleanup():
     cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
     cleanup_thread.start()
     logger.info("Started session cleanup background thread")
-
-
-# Utility endpoints for debugging socket state
-def debug_websocket_sessions(api_key=None):
-    """Debug endpoint to view all WebSocket sessions"""
-    if api_key != 'debug_websocket_key':
-        return {"error": "Unauthorized"}, 401
-    
-    debug_info = {
-        'total_sessions': len(ws_sessions),
-        'sessions': []
-    }
-    
-    with session_lock:
-        for session_id, session_data in ws_sessions.items():
-            # Ensure datetime objects are serialized
-            session_info = {}
-            for key, value in session_data.items():
-                if isinstance(value, datetime):
-                    session_info[key] = value.isoformat()
-                else:
-                    session_info[key] = value
-            
-            session_info['session_id'] = session_id
-            debug_info['sessions'].append(session_info)
-    
-    return debug_info, 200
-
-
-def debug_all_sessions():
-    """Debug endpoint to view all sessions and messages"""
-    debug_info = {
-        'socketio_sessions': {
-            'total': len(ws_sessions),
-            'active_threads': list(set(s.get('thread_id') for s in ws_sessions.values() if s.get('thread_id')))
-        },
-        'undelivered_messages': {
-            'total_threads': len(undelivered_messages),
-            'threads': list(undelivered_messages.keys()),
-            'counts': {thread_id: len(msgs) for thread_id, msgs in undelivered_messages.items()}
-        }
-    }
-    
-    return debug_info, 200
-
-
-def debug_room_status(api_key=None, thread_id=None):
-    """Debug endpoint to check room memberships"""
-    if api_key != 'debug_websocket_key':
-        return {'error': 'Unauthorized'}, 401
-    
-    # Get all sessions in the thread room if provided
-    thread_sessions = []
-    if thread_id:
-        with session_lock:
-            thread_sessions = [
-                {
-                    'session_id': sid,
-                    'transport': session.get('transport', 'unknown'),
-                    'thread_id': session.get('thread_id'),
-                    'is_in_room': session.get('is_in_room', False),
-                    'connected_at': session.get('connected_at')
-                }
-                for sid, session in ws_sessions.items()
-                if session.get('thread_id') == thread_id
-            ]
-    
-    # Get all unique thread_ids
-    all_threads = []
-    with session_lock:
-        all_threads = list(set(s.get('thread_id') for s in ws_sessions.values() if s.get('thread_id')))
-    
-    # Count sessions per thread
-    thread_counts = {}
-    with session_lock:
-        for t_id in all_threads:
-            thread_counts[t_id] = sum(1 for s in ws_sessions.values() if s.get('thread_id') == t_id)
-    
-    result = {
-        'total_sessions': len(ws_sessions),
-        'all_thread_ids': all_threads,
-        'thread_counts': thread_counts
-    }
-    
-    if thread_id:
-        result['thread_id'] = thread_id
-        result['sessions_in_thread'] = thread_sessions
-    
-    return result

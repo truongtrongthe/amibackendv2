@@ -130,10 +130,10 @@ class MC:
                         # Import from socketio_manager module instead of socket
                         from socketio_manager import emit_analysis_event
                         was_delivered = emit_analysis_event(thread_id_for_analysis, analysis_event)
-                        if was_delivered:
-                            logger.info(f"Sent analysis chunk via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)}")
-                        else:
-                            logger.warning(f"Analysis chunk NOT DELIVERED via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)} - No active sessions")
+                        #if was_delivered:
+                        #    logger.info(f"Sent analysis chunk via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)}")
+                        #else:
+                        #    logger.warning(f"Analysis chunk NOT DELIVERED via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)} - No active sessions")
                     except Exception as e:
                         logger.error(f"Error in socketio_manager websocket delivery: {str(e)}")
                         was_delivered = False
@@ -142,7 +142,7 @@ class MC:
                 yield {"type": "analysis", "content": chunk_content, "complete": False}
             
             # Send a final complete message with the full analysis
-            logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
+            #logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
             
             # Final complete event
             complete_event = {
@@ -157,18 +157,18 @@ class MC:
                     # Import from socketio_manager module instead of socket
                     from socketio_manager import emit_analysis_event
                     was_delivered = emit_analysis_event(thread_id_for_analysis, complete_event)
-                    if was_delivered:
-                        logger.info(f"Sent complete analysis via socketio_manager to room {thread_id_for_analysis}")
-                    else:
-                        logger.warning(f"Complete analysis NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
+                    #if was_delivered:
+                    #    logger.info(f"Sent complete analysis via socketio_manager to room {thread_id_for_analysis}")
+                    #else:
+                    #    logger.warning(f"Complete analysis NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
                 except Exception as e:
                     logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
                     was_delivered = False
 
-                if was_delivered:
-                    logger.info(f"Sent complete analysis via WebSocket to room {thread_id_for_analysis}")
-                else:
-                    logger.warning(f"Complete analysis NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
+                #if was_delivered:
+                #    logger.info(f"Sent complete analysis via WebSocket to room {thread_id_for_analysis}")
+                #else:
+                #    logger.warning(f"Complete analysis NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
             
             # Always yield for standard flow
             yield {"type": "analysis", "content": analysis_buffer, "complete": True}
@@ -188,19 +188,20 @@ class MC:
                 try:
                     # Import from socketio_manager module instead of socket
                     from socketio_manager import emit_analysis_event
-                    was_delivered = emit_analysis_event(thread_id_for_analysis, error_event)
-                    if was_delivered:
-                        logger.info(f"Sent error event via socketio_manager to room {thread_id_for_analysis}")
-                    else:
-                        logger.warning(f"Error event NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
+                    emit_analysis_event(thread_id_for_analysis, error_event)
+                    #was_delivered = emit_analysis_event(thread_id_for_analysis, error_event)
+                    #if was_delivered:
+                    #    logger.info(f"Sent error event via socketio_manager to room {thread_id_for_analysis}")
+                    #else:
+                    #    logger.warning(f"Error event NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
                 except Exception as e:
                     logger.error(f"Error in socketio_manager delivery of error event: {str(e)}")
-                    was_delivered = False
+                    #was_delivered = False
 
-                if was_delivered:
-                    logger.info(f"Sent error event via WebSocket to room {thread_id_for_analysis}")
-                else:
-                    logger.warning(f"Error event NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
+                #if was_delivered:
+                #    logger.info(f"Sent error event via WebSocket to room {thread_id_for_analysis}")
+                #else:
+                #    logger.warning(f"Error event NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
             
             # Always yield for standard flow
             yield {"type": "analysis", "content": "Error in analysis process", "complete": True, "error": True}
@@ -245,7 +246,7 @@ class MC:
             if isinstance(response_chunk, dict) and response_chunk.get("type") == "analysis":
                 # For analysis chunks, pass them through directly
                 analysis_events_sent += 1
-                logger.info(f"Yielding analysis chunk #{analysis_events_sent} from trigger: {response_chunk.get('content', '')[:50]}...")
+                #logger.info(f"Yielding analysis chunk #{analysis_events_sent} from trigger: {response_chunk.get('content', '')[:50]}...")
                 
                 # When using WebSockets, we don't need to yield the analysis chunks through the regular flow
                 # They're already sent via WebSocket, but we still yield them for proper counting and state management
@@ -518,260 +519,178 @@ class MC:
 
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = "", use_websocket=False, thread_id_for_analysis=None):
         try:
+            # Initialize cache if not exists
+            if not hasattr(self, '_cache'):
+                self._cache = {
+                    'personality': {},
+                    'language': {},
+                    'knowledge': {},
+                    'analysis': {},
+                    'query_embeddings': {}  # Add cache for query embeddings
+                }
+
             # Load personality if not already loaded or if graph_version_id changed
             if not hasattr(self, 'personality_instructions') or self.state.get("graph_version_id") != graph_version_id:
                 logger.info(f"[PERSONALITY] Loading personality instructions for graph_version_id: {graph_version_id}")
-                logger.info(f"[PERSONALITY] Current name before loading: {self.name}")
                 await self.load_personality_instructions(graph_version_id)
-                logger.info(f"[PERSONALITY] Name after loading: {self.name}")
-                logger.info(f"[PERSONALITY] Personality instructions length: {len(self.personality_instructions)}")
                 self.state["graph_version_id"] = graph_version_id
-            
+            else:
+                logger.info(f"[PERSONALITY] Personality instructions already loaded for graph_version_id: {graph_version_id}")
+
             # Break conversation into lines
             conversation = [line.strip() for line in context.split("\n") if line.strip()]
             
             logger.info(f"Processing message: '{message}' from user_id: {user_id}")
             
-            # Determine conversation language preference
-            conversation_language = await self.detect_conversation_language(conversation)
+            # Run language detection and context analysis in parallel
+            language_task = self.detect_language_with_llm(message)
+            conversation_language_task = self.detect_conversation_language(conversation)
             
-            # Detect language of current message
-            lang_info = await self.detect_language_with_llm(message)
+            # Get profile building skills from knowledge base in parallel
+            profile_query = "contact profile building information gathering customer understanding"
+            profile_task = query_graph_knowledge(graph_version_id, profile_query, top_k=5)
+            
+            # Wait for all parallel tasks
+            lang_info, conversation_language, profile_entries = await asyncio.gather(
+                language_task,
+                conversation_language_task,
+                profile_task
+            )
             
             # Override language confidence if conversation history establishes a pattern
             if conversation_language and conversation_language != lang_info["language"] and len(conversation) > 5:
                 logger.info(f"Overriding detected language ({lang_info['language']}) with conversation language ({conversation_language})")
                 lang_info["language"] = conversation_language
-                lang_info["confidence"] = 0.9  # High confidence based on conversation history
+                lang_info["confidence"] = 0.9
                 lang_info["responseGuidance"] = f"Respond in {conversation_language}, maintaining consistency with previous messages"
             
-            # STEP 1: Get profile building skills from knowledge base - the core functionality
-            profile_query = "contact profile building information gathering customer understanding"
-            profile_entries = await query_graph_knowledge(graph_version_id, profile_query, top_k=5)
+            # Process profile instructions
             profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
-            
-            # Combine instructions
             process_instructions = profile_instructions
             
-            # STEP 2: Analyze conversation context based on knowledge
-            logger.info("Building context analysis prompt")
+            # Build and process context analysis in parallel with entity extraction
             context_analysis_prompt = build_context_analysis_prompt(context, process_instructions)
-            
-            # Use streaming for context analysis
-            logger.info("Streaming LLM for context analysis")
-            context_analysis = ""
-            full_analysis = None  # Track the complete analysis
-            
-            async for analysis_chunk in stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket):
-                # Pass the analysis chunks through to the caller
-                yield analysis_chunk
-                
-                # If this is the complete analysis, store it for further processing
-                if analysis_chunk.get("complete", False):
-                    logger.info(f"Received complete analysis chunk, storing for processing")
-                    full_analysis = analysis_chunk.get("content", "")
-            
-            # Process the analysis
-            try:
-                # Process the analysis result to get English and Vietnamese parts
-                analysis_parts = process_analysis_result(full_analysis)
-                english_analysis = analysis_parts["english"]
-                vietnamese_analysis = analysis_parts["vietnamese"]
-                
-                # Use English analysis as context_analysis for backward compatibility
-                context_analysis = english_analysis
-                
-                # Store both versions in state
-                if "analysis" not in state:
-                    state["analysis"] = {}
-                state["analysis"]["english"] = english_analysis
-                state["analysis"]["vietnamese"] = vietnamese_analysis
-                
-                # Also store the complete analysis for backward compatibility
-                state["context_analysis"] = context_analysis
-                
-            except Exception as e:
-                logger.error(f"Error processing analysis: {str(e)}")
-                # Fallback to original behavior
-                context_analysis = full_analysis
-                state["context_analysis"] = context_analysis
-                state["analysis"] = {
-                    "english": context_analysis,
-                    "vietnamese": ""
-                }
-            
-            # Use the full analysis if available, otherwise use an empty string
-            context_analysis = context_analysis or ""
-            logger.info(f"Final context_analysis length: {len(context_analysis)}")
-            logger.info(f"Analysis summary: {context_analysis[:500]}...")
-            
-            # Log analysis for requirements and completeness
-            completeness_match = re.search(r'completeness[\s\:]*([\d]+)%', context_analysis.lower())
-            if completeness_match:
-                completeness = completeness_match.group(1)
-                logger.info(f"Detected information completeness: {completeness}%")
-            
-            missing_info = "missing" in context_analysis.lower() or "incomplete" in context_analysis.lower()
-            logger.info(f"Missing information detected: {missing_info}")
-            
-            # STEP 3: Extract relevant search terms to find appropriate knowledge
-            logger.info("Building entity extraction prompt")
             entity_extraction_prompt = (
                 f"Based on the conversation and analysis:\n\n"
                 f"CONVERSATION:\n{context}\n\n"
-                f"ANALYSIS:\n{context_analysis}\n\n"
                 f"Extract all relevant search terms that would help find information in a knowledge base:\n\n"
                 f"1. CONTACT INFORMATION: Information about the person (demographics, preferences, etc.)\n"
                 f"2. TOPICS: Main topics, product categories, or services mentioned\n"
                 f"3. QUESTIONS: Specific questions or information requests\n"
                 f"4. STAGE INDICATORS: Terms that indicate where in a process the conversation is\n"
                 f"5. REACTIONS: Terms indicating agreement, disagreement, satisfaction, frustration\n\n"
-                
                 f"Format your response as a JSON object with these categories and 1-3 specific search terms for each that would help retrieve relevant knowledge."
             )
             
-            logger.info("Invoking LLM for entity extraction")
-            entity_response = LLM.invoke(entity_extraction_prompt).content
-            logger.info(f"Entity extraction complete ({len(entity_response)} characters)")
+            # Run analysis and entity extraction in parallel
+            analysis_task = stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket)
+            entity_task = LLM.ainvoke(entity_extraction_prompt)
             
-            # Extract JSON from the response
-            entity_match = re.search(r'\{[\s\S]*\}', entity_response)
-            if entity_match:
-                try:
-                    entity_json = json.loads(entity_match.group(0))
-                    logger.info(f"Successfully parsed entity JSON with {len(entity_json.keys())} categories")
-                    # Flatten all entities into search terms
-                    search_terms = []
-                    for category, terms in entity_json.items():
-                        if isinstance(terms, list):
-                            search_terms.extend(terms)
-                            logger.info(f"Category {category}: {len(terms)} terms - {', '.join(terms)}")
-                        elif isinstance(terms, str):
-                            search_terms.append(terms)
-                            logger.info(f"Category {category}: single term - {terms}")
-                except Exception as json_error:
-                    logger.error(f"Failed to parse entity JSON: {str(json_error)}")
-                    logger.error(f"Raw match: {entity_match.group(0)[:100]}...")
-                    search_terms = [message]  # Fallback to original message
-                    logger.info(f"Using fallback search term: {message}")
-            else:
-                logger.warning("No JSON pattern found in entity extraction response")
-                search_terms = [message]  # Fallback to original message
-                logger.info(f"Using fallback search term: {message}")
+            # Process analysis results
+            context_analysis = ""
+            full_analysis = None
+            async for analysis_chunk in analysis_task:
+                yield analysis_chunk
+                if analysis_chunk.get("complete", False):
+                    full_analysis = analysis_chunk.get("content", "")
             
-            # Create targeted queries based on context analysis and extracted entities
-            targeted_queries = []
+            # Process entity extraction results
+            entity_response = await entity_task
+            entity_json = json.loads(re.search(r'\{[\s\S]*\}', entity_response.content).group(0))
             
-            # Add priority query based on analysis
-            if missing_info:
-                priority_query = "profile information gathering techniques"
-                targeted_queries.append(priority_query)
-                logger.info(f"Added priority query due to missing information: '{priority_query}'")
+            # Create targeted queries with caching and optimization
+            search_terms = []
+            seen_terms = set()  # For deduplication
             
-            # Check for rejection patterns in the message
-            rejection_patterns = [
-                r'\b(?:no|nope|incorrect|wrong|not right|not correct|disagree|rejected|refuse|won\'t)\b',
-                r'\bdon\'t\s+(?:agree|think|believe|want|like)\b',
-                r'\bthat\'s not\b',
-                r'\b(?:bull|nonsense|ridiculous|crazy)\b'
-            ]
-            
-            has_rejection = any(re.search(pattern, message.lower()) for pattern in rejection_patterns)
-            if has_rejection:
-                rejection_query = "handling objection disagreement rejection conversation"
-                targeted_queries.append(rejection_query)
-                logger.info(f"Added rejection handling query: '{rejection_query}'")
-            
-            # Add entity-based queries
-            entity_queries_count = 0
+            # Extract and deduplicate search terms
+            for category, terms in entity_json.items():
+                if isinstance(terms, list):
+                    for term in terms:
+                        # Normalize and deduplicate terms
+                        normalized_term = term.lower().strip()
+                        if normalized_term and normalized_term not in seen_terms:
+                            seen_terms.add(normalized_term)
+                            search_terms.append(normalized_term)
+                elif isinstance(terms, str):
+                    normalized_term = terms.lower().strip()
+                    if normalized_term and normalized_term not in seen_terms:
+                        seen_terms.add(normalized_term)
+                        search_terms.append(normalized_term)
+
+            # Pre-filter queries based on relevance
+            filtered_queries = []
             for term in search_terms:
-                if term and len(term.strip()) > 2:  # Avoid very short terms
-                    targeted_queries.append(term)
-                    entity_queries_count += 1
-            
-            logger.info(f"Added {entity_queries_count} entity-based queries")
-            
-            # Add message context query
-            targeted_queries.append(message)
-            logger.info(f"Added message as final query: '{message}'")
-            
-            # Add language preference to ensure appropriate content
-            language_code = lang_info.get("code", "en").lower()
-            lang_query = f"content in {language_code} {' '.join(search_terms[:2])}"
-            targeted_queries.append(lang_query)
-            logger.info(f"Added language preference query: '{lang_query}'")
-            
-            # Remove duplicates while preserving order
+                # Skip very short or common terms
+                if len(term) < 3 or term in ['the', 'and', 'or', 'but', 'for', 'with', 'that']:
+                    continue
+                filtered_queries.append(term)
+
+            # Batch process queries with vector search
             unique_queries = []
-            for query in targeted_queries:
-                if query not in unique_queries:
-                    unique_queries.append(query)
-            
-            logger.info(f"Final unique queries: {len(unique_queries)} queries")
-            for i, query in enumerate(unique_queries[:7]):
-                logger.info(f"Query {i+1}: '{query}'")
-            
-            # Retrieve knowledge for each unique query
-            logger.info("Starting knowledge retrieval for queries")
+            cache_hits = 0
+            batch_size = 5  # Process queries in batches
+
+            # Check cache for each query
+            for query in filtered_queries:
+                cache_key = f"{graph_version_id}:{query}"
+                if cache_key in self._cache['knowledge']:
+                    cache_hits += 1
+                    continue
+                unique_queries.append(query)
+
+            # Process queries in batches
             all_knowledge = []
-            query_results = {}
-            
-            for query in unique_queries:  # Process all unique queries
+            for i in range(0, len(unique_queries), batch_size):
+                batch = unique_queries[i:i + batch_size]
+                
+                # Use vector search for batch processing
                 try:
-                    logger.info(f"Retrieving knowledge for query: '{query}'")
-                    results = await query_graph_knowledge(graph_version_id, query, top_k=3)
-                    if results:
-                        query_results[query] = len(results)
+                    batch_results = await self._batch_query_knowledge(graph_version_id, batch)
+                    
+                    # Update cache with new results
+                    for query, results in zip(batch, batch_results):
+                        cache_key = f"{graph_version_id}:{query}"
+                        self._cache['knowledge'][cache_key] = results
                         all_knowledge.extend(results)
-                        logger.info(f"Retrieved {len(results)} results for query '{query}'")
-                    else:
-                        logger.info(f"No results for query '{query}'")
-                        query_results[query] = 0
                 except Exception as e:
-                    logger.error(f"Error retrieving knowledge for query '{query}': {e}")
-                    query_results[query] = 0
-            
-            logger.info(f"Knowledge retrieval complete: {len(all_knowledge)} total entries before deduplication")
-            logger.info(f"Results by query: {json.dumps(query_results)}")
-            
-            # Remove duplicate knowledge entries
+                    logger.error(f"Error in batch processing: {str(e)}")
+                    # Fallback to individual queries
+                    for query in batch:
+                        try:
+                            results = await query_graph_knowledge(graph_version_id, query, top_k=3)
+                            cache_key = f"{graph_version_id}:{query}"
+                            self._cache['knowledge'][cache_key] = results
+                            all_knowledge.extend(results)
+                        except Exception as e:
+                            logger.error(f"Error processing query '{query}': {str(e)}")
+
+            # Combine cached and new results
+            for query in filtered_queries:
+                cache_key = f"{graph_version_id}:{query}"
+                if cache_key in self._cache['knowledge']:
+                    all_knowledge.extend(self._cache['knowledge'][cache_key])
+
+            # Remove duplicates using a more efficient method
             unique_knowledge = []
             seen_ids = set()
             for entry in all_knowledge:
                 if entry['id'] not in seen_ids:
                     seen_ids.add(entry['id'])
                     unique_knowledge.append(entry)
-            
-            # Create knowledge context from unique entries
+
+            # Create knowledge context
             knowledge_context = "\n\n".join(entry["raw"] for entry in unique_knowledge)
-            logger.info(f"Retrieved {len(unique_knowledge)} unique knowledge entries from {len(unique_queries)} queries")
-            logger.info(f"Knowledge context: {len(knowledge_context)} characters")
-            
-            # Extract recent topics to avoid repeating
-            recent_topics = []
-            if len(conversation) > 2:
-                # Extract last 2-3 AI messages to check for repeated content
-                ai_messages = [msg[4:] for msg in conversation if msg.startswith("AI:")][-3:]
-                # Use simple keyword extraction to identify repeated phrases
-                for msg in ai_messages:
-                    words = re.findall(r'\b\w{4,}\b', msg.lower())
-                    for word in words:
-                        if words.count(word) > 1 and word not in recent_topics and len(word) > 4:
-                            recent_topics.append(word)
-            
-            logger.info(f"Identified potential repetitive topics: {recent_topics}")
             
             # Assess knowledge coverage and determine if feedback is needed
             coverage_score, missing_aspects, requires_feedback = await self.assess_knowledge_coverage(
-                query_results, context_analysis, message
+                {query: len(self._cache['knowledge'].get(f"{graph_version_id}:{query}", [])) for query in search_terms},
+                context_analysis,
+                message
             )
-            
-            logger.info(f"Knowledge coverage assessment: score={coverage_score}, missing_aspects={missing_aspects}, requires_feedback={requires_feedback}")
             
             # If feedback is required, generate a specific request for more information
             if requires_feedback:
                 feedback_request = await self.generate_feedback_request(missing_aspects, message, context)
-                logger.info(f"Generated feedback request: {feedback_request}")
                 
                 # Simplified response prompt for feedback requests
                 feedback_prompt = (
@@ -797,17 +716,11 @@ class MC:
                     f"Always respond in {lang_info['language']}."
                 )
                 
-                logger.info("Starting feedback request response generation")
                 async for _ in self.stream_response(feedback_prompt, builder):
                     yield builder.build()
-                
-                logger.info("Feedback request response complete")
                 return
             
-            # STEP 4: Generate response based on context analysis and knowledge
-            logger.info(f"Responder name: {self.name}")
-            logger.info(f"Responder personality instructions: {self.personality_instructions}")
-            logger.info("Building response prompt")
+            # Generate response
             response_prompt = (
                 f"AI: {self.name}\n"
                 f"Context: {context}\n"
@@ -815,40 +728,30 @@ class MC:
                 f"Context Analysis: {context_analysis}\n"
                 f"Knowledge: {knowledge_context}\n"
                 f"Language: {lang_info['language']} (confidence: {lang_info['confidence']})\n\n"
-                
                 f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
-                
                 f"Instructions:\n"
                 f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
                 f"2. Your primary guidance comes from the knowledge base. Follow the NEXT ACTIONS from the Context Analysis.\n"
                 f"3. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
-                f"4. Keep responses concise and conversational.\n" 
-                f"5. GREETING GUIDELINES:\n"
-                f"   - For first message only: Use a natural greeting appropriate to the time and context\n"
-                f"   - For all subsequent messages: Skip greetings entirely and respond directly to the content\n"
+                f"4. Keep responses concise and conversational.\n"
+                f"5. GREETING RULES:\n"
+                f"   - If this is the first message in the conversation (no previous messages), use a natural greeting appropriate to the time and context\n"
+                f"   - If there are previous messages, DO NOT use any greeting - respond directly to the content\n"
                 f"6. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
                 f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n\n"
-                
                 f"Response Structure:\n"
-                f"1. If first message: Natural greeting, otherwise respond directly to content\n"
+                f"1. Follow the GREETING RULES above\n"
                 f"2. ADDRESS the current context appropriately:\n"
                 f"   a) If gathering information is needed, ask specific questions (but not ones already asked)\n"
                 f"   b) If providing information is needed, present relevant details in a fresh way\n"
                 f"   c) If addressing concerns, provide targeted responses\n"
                 f"3. PROGRESS the conversation with something new that hasn't been discussed yet\n\n"
-                
-                f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n\n"
-                
-                + (f"AVOID these repetitive topics/phrasings that have appeared multiple times: {', '.join(recent_topics)}\n\n" if recent_topics else "")
-                
-                + f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."
+                f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n"
+                f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."
             )
             
-            logger.info("Starting response generation")
             async for _ in self.stream_response(response_prompt, builder):
                 yield builder.build()
-            
-            logger.info("Response generation complete")
                 
         except Exception as e:
             logger.error(f"Error handling request: {str(e)}", exc_info=True)
@@ -860,3 +763,43 @@ class MC:
         Load personality instructions using the PersonalityManager.
         """
         return await self.personality_manager.load_personality_instructions(graph_version_id)
+
+    async def _batch_query_knowledge(self, graph_version_id: str, queries: List[str], top_k: int = 3) -> List[List[Dict]]:
+        """
+        Batch process multiple queries using vector search for efficiency.
+        
+        Args:
+            graph_version_id: The version ID of the knowledge graph
+            queries: List of queries to process
+            top_k: Number of results to return per query
+            
+        Returns:
+            List of results for each query
+        """
+        try:
+            # Combine queries for batch processing
+            combined_query = " ".join(queries)
+            
+            # Get embeddings for the combined query
+            if combined_query not in self._cache['query_embeddings']:
+                # Use your embedding model here
+                # self._cache['query_embeddings'][combined_query] = await get_embeddings(combined_query)
+                pass
+            
+            # Use vector search to get results for all queries at once
+            # This is a placeholder - implement your vector search logic here
+            # results = await vector_search(graph_version_id, self._cache['query_embeddings'][combined_query], top_k * len(queries))
+            
+            # For now, fallback to individual queries
+            return await asyncio.gather(*[
+                query_graph_knowledge(graph_version_id, query, top_k)
+                for query in queries
+            ])
+            
+        except Exception as e:
+            logger.error(f"Error in batch query processing: {str(e)}")
+            # Fallback to individual queries
+            return await asyncio.gather(*[
+                query_graph_knowledge(graph_version_id, query, top_k)
+                for query in queries
+            ])
