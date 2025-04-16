@@ -6,40 +6,6 @@ import re
 class PersonalityManager:
     def __init__(self):
         self.name = "Ami"  # Default name
-        self.personality_instructions = None
-        self.instincts = {"friendly": "Be nice"}  # Add instincts attribute
-        self.personality_indicators = [
-            "bạn là",
-            "tên là",
-            "trong khi giao tiếp",
-            "ai personality",
-            "role:",
-            "identity:",
-            "tone:",
-            "voice:",
-            "communication style:",
-            "positioning:",
-            "how i should",
-            "who am i",
-            "my identity",
-            "my role",
-            "my character"
-        ]
-        self.personality_terms = [
-            "personality",
-            "character",
-            "identity",
-            "role",
-            "tone",
-            "voice",
-            "style",
-            "communicate"
-        ]
-        self.backup_queries = [
-            "how should I speak communicate with people",
-            "my character identity who am I",
-            "how to behave tone and approach"
-        ]
         self.default_personality = {
             "raw": "AI Personality Guidelines:\n" +
                    "- Maintain a helpful, friendly tone\n" +
@@ -48,10 +14,43 @@ class PersonalityManager:
                    "- Keep responses clear and concise",
             "id": "default_personality"
         }
+        # Initialize with default personality to ensure it's never None
+        self.personality_instructions = self.default_personality["raw"]
+        # Track whether personality was loaded from knowledge base
+        self.is_loaded_from_knowledge = False
+        # Track which graph_version_id was used for loading
+        self.loaded_graph_version_id = None
+        self.instincts = {"friendly": "Be nice"}  # Add instincts attribute
+        self.personality_indicators = [
+            # Vietnamese indicators
+            "tên em là", "em là", "tôi là", "trong quá trình giao tiếp", "khi giao tiếp", 
+            "nhiệm vụ của", "vai trò của", "tính cách của", "phong cách của", "giọng điệu của",
+            
+            # English indicators
+            "bạn là", "tên là", "trong khi giao tiếp", "ai personality",
+            "role:", "identity:", "tone:", "voice:", "communication style:",
+            "positioning:", "how i should", "who am i", "my identity",
+            "my role", "my character"
+        ]
+        self.personality_terms = [
+            # Vietnamese terms
+            "tính cách", "nhân vật", "định danh", "vai trò", "giọng điệu",
+            "phong cách", "giao tiếp", "trợ lý", "hỗ trợ", 
+            
+            # English terms
+            "personality", "character", "identity", "role", "tone",
+            "voice", "style", "communicate"
+        ]
+        self.backup_queries = [
+            "how should I speak communicate with people",
+            "my character identity who am I",
+            "how to behave tone and approach"
+        ]
 
     async def load_personality_instructions(self, graph_version_id: str = "") -> str:
         """
-        Load personality instructions from the knowledge base and extract identity information.
+        Load personality instructions from the knowledge base using enhanced semantic retrieval
+        and multi-level classification.
         
         Args:
             graph_version_id: The graph version ID to query
@@ -61,28 +60,42 @@ class PersonalityManager:
         """
         try:
             logger.info(f"[PERSONALITY] Starting personality load for graph_version_id: {graph_version_id}")
-            # Get personality instructions from knowledge base
-            personality_query = "who am I how should I behave my identity character role"
-            personality_entries = await query_graph_knowledge(graph_version_id, personality_query, top_k=3)
-            logger.info(f"[PERSONALITY] Found {len(personality_entries)} initial entries")
             
-            # Detect proper personality entries using structure indicators
-            filtered_personality_entries = self._filter_personality_entries(personality_entries)
+            # STAGE 1: Semantic Retrieval - Cast a wider net with semantic search
+            personality_entries = await self._semantic_personality_retrieval(graph_version_id)
+            logger.info(f"[PERSONALITY] Found {len(personality_entries)} initial entries from semantic retrieval")
             
-            # If we didn't find enough specific personality entries, try with different queries
-            if len(filtered_personality_entries) < 1:
-                filtered_personality_entries = await self._try_backup_queries(graph_version_id)
+            # STAGE 2: Multi-level Classification - Apply progressively more specific filters
+            filtered_personality_entries = await self._classify_personality_entries(personality_entries)
+            logger.info(f"[PERSONALITY] After classification, {len(filtered_personality_entries)} entries remain")
+            
+            # STAGE 3: Verification and Fallback - Ensure sufficient quality and coverage
+            if not self._verify_quality(filtered_personality_entries):
+                logger.info("[PERSONALITY] Quality verification failed, attempting targeted retrieval")
+                filtered_personality_entries = await self._targeted_retrieval(graph_version_id)
             
             # If we still have no entries, use a default personality instruction
             if not filtered_personality_entries:
                 logger.warning("[PERSONALITY] No personality entries found, using default personality")
                 filtered_personality_entries = [self.default_personality]
+                logger.info(f"[PERSONALITY] Raw default personality content: {self.default_personality['raw']}")
+                # Mark that we tried but ended up using default
+                self.is_loaded_from_knowledge = False
+                logger.info("[PERSONALITY] Using default personality, is_loaded_from_knowledge=False")
+            else:
+                # Mark that we successfully loaded from knowledge
+                self.is_loaded_from_knowledge = True
+                logger.info("[PERSONALITY] Successfully loaded personality from knowledge base, is_loaded_from_knowledge=True")
             
-            # Store the personality instructions
-            self.personality_instructions = "\n\n".join(entry["raw"] for entry in filtered_personality_entries)
+            # Compile final personality instructions
+            self.personality_instructions = self._compile_personality_instructions(filtered_personality_entries)
             logger.info(f"[PERSONALITY] Final personality instructions length: {len(self.personality_instructions)}")
             logger.info(f"[PERSONALITY] Final AI name: {self.name}")
-            logger.info(f"[PERSONALITY] Personality loading complete")
+            logger.info(f"[PERSONALITY] Final compiled personality: {self.personality_instructions[:500]}...")
+            logger.info(f"[PERSONALITY] Personality loading complete, loaded_graph_version_id: {graph_version_id}")
+            
+            # Update tracking variables
+            self.loaded_graph_version_id = graph_version_id
             
             return self.personality_instructions
             
@@ -90,7 +103,398 @@ class PersonalityManager:
             logger.error(f"[PERSONALITY] Error loading personality instructions: {str(e)}")
             # Fallback to default personality
             self.personality_instructions = self.default_personality["raw"]
+            logger.info(f"[PERSONALITY] Using fallback default personality due to error: {self.default_personality['raw']}")
+            # Mark that we failed to load
+            self.is_loaded_from_knowledge = False
+            self.loaded_graph_version_id = graph_version_id
+            logger.info(f"[PERSONALITY] Failed to load from knowledge base, using default. is_loaded_from_knowledge=False, loaded_graph_version_id={graph_version_id}")
             return self.personality_instructions
+
+    async def _semantic_personality_retrieval(self, graph_version_id: str) -> List[Dict]:
+        """
+        Retrieve potential personality entries using semantic search with multiple queries.
+        
+        Args:
+            graph_version_id: The graph version ID to query
+            
+        Returns:
+            List[Dict]: Retrieved potential personality entries
+        """
+        # Define semantic queries covering different aspects of personality
+        semantic_queries = [
+            "who am I how should I behave my identity character role", # Existing query
+            "AI personality tone voice communication style",
+            "how AI should respond to users communication guidelines",
+            "AI character traits behavior instructions",
+            "AI identity and persona description"
+        ]
+        
+        # Retrieve entries for each query
+        all_entries = []
+        seen_ids = set()
+        
+        for query in semantic_queries:
+            entries = await query_graph_knowledge(graph_version_id, query, top_k=5)
+            
+            # Add unique entries to the result set
+            for entry in entries:
+                if entry["id"] not in seen_ids:
+                    seen_ids.add(entry["id"])
+                    all_entries.append(entry)
+        
+        return all_entries
+    
+    async def _classify_personality_entries(self, entries: List[Dict]) -> List[Dict]:
+        """
+        Apply multi-level classification to identify personality entries.
+        
+        Args:
+            entries: List of candidate entries
+            
+        Returns:
+            List[Dict]: Filtered and scored personality entries
+        """
+        # Initialize scored entries
+        scored_entries = []
+        
+        for entry in entries:
+            # Initialize score
+            score = 0.0
+            reasons = []
+            
+            # Check if entry is likely non-English
+            is_non_english = self._is_likely_non_english(entry["raw"])
+            
+            # LEVEL 1: Check explicit personality indicators (highest confidence)
+            has_indicators = any(indicator in entry["raw"].lower() for indicator in self.personality_indicators)
+            if has_indicators:
+                score += 0.6
+                reasons.append("explicit_indicators")
+                logger.info(f"[PERSONALITY] Entry {entry['id']} has explicit personality indicators")
+            
+            # LEVEL 2: Check personality structure
+            if self._has_personality_structure(entry):
+                score += 0.3
+                reasons.append("personality_structure")
+                logger.info(f"[PERSONALITY] Entry {entry['id']} has personality term structure")
+            
+            # LEVEL 3: Check for behavioral instruction patterns
+            if self._has_behavioral_patterns(entry):
+                score += 0.25
+                reasons.append("behavioral_patterns")
+                logger.info(f"[PERSONALITY] Entry {entry['id']} has behavioral instruction patterns")
+            
+            # LEVEL 4: Check for identity description patterns
+            if self._has_identity_patterns(entry):
+                score += 0.25  
+                reasons.append("identity_patterns")
+                logger.info(f"[PERSONALITY] Entry {entry['id']} has identity description patterns")
+            
+            # Apply lower threshold for non-English content
+            threshold = 0.15 if is_non_english else 0.25
+            logger.info(f"[PERSONALITY] Entry {entry['id']} is {'non-English' if is_non_english else 'English'}, using threshold {threshold}")
+            
+            # Add entry with score if it meets threshold
+            if score >= threshold:
+                scored_entries.append({
+                    "entry": entry,
+                    "score": score,
+                    "reasons": reasons
+                })
+                logger.info(f"[PERSONALITY] Entry {entry['id']} scored {score} for reasons: {reasons}")
+                # Extract name if present
+                self._extract_name_from_entry(entry)
+        
+        # Sort entries by score and extract the original entry
+        scored_entries.sort(key=lambda x: x["score"], reverse=True)
+        filtered_entries = [item["entry"] for item in scored_entries]
+        
+        return filtered_entries
+    
+    def _is_likely_non_english(self, text: str) -> bool:
+        """
+        Detect if text is likely non-English based on character patterns.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            bool: True if likely non-English
+        """
+        # Check for Vietnamese-specific characters
+        vietnamese_chars = ['ă', 'â', 'đ', 'ê', 'ô', 'ơ', 'ư', 'ỳ', 'ỷ', 'ỹ', 'ỵ', 
+                            'á', 'à', 'ả', 'ã', 'ạ', 'ắ', 'ằ', 'ẳ', 'ẵ', 'ặ',
+                            'ấ', 'ầ', 'ẩ', 'ẫ', 'ậ', 'é', 'è', 'ẻ', 'ẽ', 'ẹ',
+                            'ế', 'ề', 'ể', 'ễ', 'ệ', 'í', 'ì', 'ỉ', 'ĩ', 'ị',
+                            'ó', 'ò', 'ỏ', 'õ', 'ọ', 'ố', 'ồ', 'ổ', 'ỗ', 'ộ',
+                            'ớ', 'ờ', 'ở', 'ỡ', 'ợ', 'ú', 'ù', 'ủ', 'ũ', 'ụ',
+                            'ứ', 'ừ', 'ử', 'ữ', 'ự']
+        
+        # Basic check for presence of Vietnamese characters
+        if any(char in text.lower() for char in vietnamese_chars):
+            return True
+        
+        # Common Vietnamese words check
+        vietnamese_words = ['của', 'và', 'các', 'có', 'trong', 'không', 'với', 'là', 'để',
+                            'người', 'những', 'được', 'trên', 'phải', 'nhiều']
+        
+        if any(f" {word} " in f" {text.lower()} " for word in vietnamese_words):
+            return True
+            
+        return False
+
+    def _has_behavioral_patterns(self, entry: Dict) -> bool:
+        """
+        Check if the entry contains behavioral instruction patterns.
+        
+        Args:
+            entry: The entry to check
+            
+        Returns:
+            bool: True if the entry has behavioral instruction patterns
+        """
+        text = entry["raw"].lower()
+        
+        # Patterns for behavioral instructions (English)
+        english_patterns = [
+            r'(?:should|must|will|can) (?:be|act|behave|respond|talk|speak|answer)',
+            r'(?:when|if) (?:user|customer|person).*?(?:then|should|will).*?(?:respond|reply|say)',
+            r'(?:always|never) (?:be|sound|act|respond)',
+            r'in (?:conversations|interactions|exchanges)',
+            r'(?:approach|handle|engage with) (?:users|customers|people)'
+        ]
+        
+        # Patterns for behavioral instructions (Vietnamese)
+        vietnamese_patterns = [
+            r'(?:nên|phải|sẽ|có thể) (?:là|hành động|cư xử|trả lời|nói|trò chuyện)',
+            r'(?:khi|nếu) (?:người dùng|khách hàng|người).*?(?:thì|nên|sẽ).*?(?:trả lời|phản hồi|nói)',
+            r'(?:luôn luôn|không bao giờ) (?:là|có|trả lời|hành động)',
+            r'trong (?:cuộc trò chuyện|tương tác|giao tiếp)',
+            r'(?:tiếp cận|xử lý|tương tác với) (?:người dùng|khách hàng|mọi người)',
+            r'quá trình giao tiếp',  # Specific Vietnamese phrase seen in example
+            r'khi giao tiếp'         # Another common Vietnamese phrase
+        ]
+        
+        patterns = english_patterns + vietnamese_patterns
+        
+        return any(re.search(pattern, text) for pattern in patterns)
+    
+    def _has_identity_patterns(self, entry: Dict) -> bool:
+        """
+        Check if the entry contains identity description patterns.
+        
+        Args:
+            entry: The entry to check
+            
+        Returns:
+            bool: True if the entry has identity description patterns
+        """
+        text = entry["raw"].lower()
+        
+        # Patterns for identity descriptions (English)
+        english_patterns = [
+            r'(?:i am|you are|is an?) (?:\w+ ){0,3}(?:assistant|ai|helper|guide|advisor|bot)',
+            r'(?:name is|called) (?:\w+)',
+            r'(?:positioned|presented|introduced) as',
+            r'(?:background|story|character) (?:includes|involves|is)',
+            r'(?:expertise|specialization|specialty) (?:in|on|with)'
+        ]
+        
+        # Patterns for identity descriptions (Vietnamese)
+        vietnamese_patterns = [
+            r'(?:tôi là|em là|bạn là|là một) (?:\w+ ){0,3}(?:trợ lý|ai|người giúp đỡ|hướng dẫn viên|cố vấn|bot)',
+            r'(?:tên là|tên em là|gọi là) (?:\w+)',
+            r'(?:được giới thiệu|được giới thiệu|được xem) như',
+            r'(?:nền tảng|câu chuyện|tính cách|nhân vật) (?:bao gồm|liên quan|là)',
+            r'(?:chuyên môn|chuyên ngành|sở trường) (?:về|trên|với)'
+        ]
+        
+        patterns = english_patterns + vietnamese_patterns
+        
+        return any(re.search(pattern, text) for pattern in patterns)
+    
+    def _verify_quality(self, entries: List[Dict]) -> bool:
+        """
+        Verify the quality and coverage of personality entries.
+        
+        Args:
+            entries: List of personality entries
+            
+        Returns:
+            bool: True if entries meet quality standards
+        """
+        # If we have no entries, quality check fails
+        if not entries:
+            return False
+            
+        # If we have multiple high-quality entries, that's good
+        if len(entries) >= 2:
+            return True
+            
+        # For a single entry, check for minimum comprehensiveness
+        if len(entries) == 1:
+            text = entries[0]["raw"].lower()
+            
+            # Check if the entry covers multiple aspects of personality
+            aspects = [
+                "identity", "tone", "communication", "behavior",
+                "response", "character", "expertise"
+            ]
+            
+            covered_aspects = sum(1 for aspect in aspects if aspect in text)
+            
+            # If the entry covers at least 3 aspects, consider it good enough
+            return covered_aspects >= 3
+        
+        return False
+    
+    async def _targeted_retrieval(self, graph_version_id: str) -> List[Dict]:
+        """
+        Perform targeted retrieval for specific personality aspects.
+        
+        Args:
+            graph_version_id: The graph version ID to query
+            
+        Returns:
+            List[Dict]: Retrieved personality entries
+        """
+        # Define targeted aspect queries
+        aspect_queries = [
+            {"aspect": "identity", "query": "AI identity name background story who am I"},
+            {"aspect": "tone", "query": "AI tone voice communication style formal casual professional"},
+            {"aspect": "behavior", "query": "AI behavior response approach to users how to interact"},
+            {"aspect": "expertise", "query": "AI expertise knowledge specialty skills capabilities"}
+        ]
+        
+        all_entries = []
+        seen_ids = set()
+        
+        # Try each aspect query
+        for aspect_data in aspect_queries:
+            aspect = aspect_data["aspect"]
+            query = aspect_data["query"]
+            
+            logger.info(f"[PERSONALITY] Trying targeted query for {aspect}: '{query}'")
+            entries = await query_graph_knowledge(graph_version_id, query, top_k=3)
+            
+            # Apply specialized filtering for this aspect
+            if entries:
+                for entry in entries:
+                    # Skip if we've already seen this entry
+                    if entry["id"] in seen_ids:
+                        continue
+                        
+                    # Check for aspect-specific patterns
+                    if aspect == "identity" and self._has_identity_patterns(entry):
+                        all_entries.append(entry)
+                        seen_ids.add(entry["id"])
+                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
+                        self._extract_name_from_entry(entry)
+                    elif aspect == "tone" and any(term in entry["raw"].lower() for term in ["tone", "voice", "style", "communication"]):
+                        all_entries.append(entry)
+                        seen_ids.add(entry["id"])
+                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
+                    elif aspect == "behavior" and self._has_behavioral_patterns(entry):
+                        all_entries.append(entry)
+                        seen_ids.add(entry["id"])
+                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
+                    elif aspect == "expertise" and any(term in entry["raw"].lower() for term in ["expertise", "knowledge", "specialty", "skill", "capability"]):
+                        all_entries.append(entry)
+                        seen_ids.add(entry["id"])
+                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
+        
+        # If still no results, try the old backup queries as a last resort
+        if not all_entries:
+            logger.info("[PERSONALITY] No results from targeted queries, trying backup queries")
+            for backup_query in self.backup_queries:
+                backup_entries = await query_graph_knowledge(graph_version_id, backup_query, top_k=2)
+                
+                for entry in backup_entries:
+                    if entry["id"] not in seen_ids and (
+                        any(indicator in entry["raw"].lower() for indicator in self.personality_indicators) or
+                        self._has_personality_structure(entry) or
+                        self._has_behavioral_patterns(entry) or
+                        self._has_identity_patterns(entry)
+                    ):
+                        all_entries.append(entry)
+                        seen_ids.add(entry["id"])
+                        logger.info(f"[PERSONALITY] Found entry from backup query: {entry['id']}")
+                        self._extract_name_from_entry(entry)
+        
+        return all_entries
+    
+    def _compile_personality_instructions(self, entries: List[Dict]) -> str:
+        """
+        Compile personality entries into a cohesive set of instructions.
+        
+        Args:
+            entries: List of personality entries
+            
+        Returns:
+            str: Compiled personality instructions
+        """
+        if not entries:
+            return self._enhance_with_name_guidance(self.default_personality["raw"])
+            
+        # If only one entry, return it directly with name guidance
+        if len(entries) == 1:
+            return self._enhance_with_name_guidance(entries[0]["raw"])
+            
+        # For multiple entries, organize by priority and combine
+        # Sort entries by length (assumes longer entries are more comprehensive)
+        entries.sort(key=lambda x: len(x["raw"]), reverse=True)
+        
+        # Combine entries with clear section separation
+        combined = "\n\n".join(entry["raw"] for entry in entries)
+        
+        return self._enhance_with_name_guidance(combined)
+        
+    def _enhance_with_name_guidance(self, instructions: str) -> str:
+        """
+        Enhance personality instructions with natural name usage guidance.
+        
+        Args:
+            instructions: Original personality instructions
+            
+        Returns:
+            str: Enhanced instructions with name usage guidance
+        """
+        # Check if name guidance already exists in instructions
+        if "referring to yourself" in instructions.lower() or "use your name" in instructions.lower():
+            logger.info("[PERSONALITY] Name usage guidance already present in instructions")
+            return instructions
+            
+        # Create language-specific name guidance
+        if self._is_likely_non_english(instructions):
+            # Vietnamese guidance
+            name_guidance = f"""
+
+HƯỚNG DẪN SỬ DỤNG TÊN:
+- Chủ yếu sử dụng 'tôi' hoặc 'mình' khi nói về bản thân
+- Thỉnh thoảng sử dụng tên '{self.name}' trong các trường hợp sau:
+  + Để tạo sự thân thiện: "{self.name} rất vui được giúp bạn"
+  + Khi bày tỏ cảm xúc: "{self.name} hiểu cảm giác của bạn"
+  + Khi giới thiệu: "Xin chào, {self.name} ở đây để hỗ trợ bạn"
+- KHÔNG nói về bản thân một cách máy móc kiểu: "trợ lý này" hoặc "{self.name} muốn thông báo rằng..."
+"""
+        else:
+            # English guidance
+            name_guidance = f"""
+
+NAME USAGE GUIDANCE:
+- Primarily use "I" when referring to yourself
+- Occasionally use your name "{self.name}" in these situations:
+  + For warmth: "{self.name} is happy to help you with that"
+  + To express empathy: "{self.name} understands how you feel"
+  + In introductions: "Hi there, {self.name} here to assist you"
+- AVOID robotic self-references like "this assistant" or "{self.name} would like to inform you that..."
+"""
+        
+        # Add the guidance to instructions
+        enhanced_instructions = instructions + name_guidance
+        logger.info(f"[PERSONALITY] Enhanced instructions with name usage guidance for '{self.name}'")
+        
+        return enhanced_instructions
 
     def _filter_personality_entries(self, entries: List[Dict]) -> List[Dict]:
         """
@@ -113,12 +517,14 @@ class PersonalityManager:
             if has_personality_indicators:
                 filtered_entries.append(entry)
                 logger.info(f"[PERSONALITY] Entry {entry['id']} has personality indicators")
+                logger.info(f"[PERSONALITY] Raw personality content: {entry['raw'][:300]}...")
                 self._extract_name_from_entry(entry)
             else:
                 # Try to determine if an entry is about personality from its structure
                 if self._has_personality_structure(entry):
                     filtered_entries.append(entry)
                     logger.info(f"[PERSONALITY] Entry {entry['id']} has personality structure")
+                    logger.info(f"[PERSONALITY] Raw personality content: {entry['raw'][:300]}...")
                 else:
                     logger.info(f"[PERSONALITY] Filtered out entry {entry['id']} - not personality content")
         
@@ -150,7 +556,8 @@ class PersonalityManager:
         Args:
             entry: The entry to extract name from
         """
-        name_match = re.search(r'(?:bạn là|tên là|i am|my name is)\s+([^,.!?]+)', entry["raw"].lower())
+        # Enhanced pattern to catch both English and Vietnamese name patterns
+        name_match = re.search(r'(?:bạn là|tên là|i am|my name is|tên em là|em là|tôi là)\s+([^,.!?]+)', entry["raw"].lower())
         if name_match:
             extracted_name = name_match.group(1).strip()
             logger.info(f"[PERSONALITY] Found name match: '{extracted_name}'")
@@ -188,6 +595,7 @@ class PersonalityManager:
                     if has_personality_indicators or any(term in entry["raw"].lower() for term in ["personality", "character", "identity", "role", "tone"]):
                         filtered_entries.append(entry)
                         logger.info(f"[PERSONALITY] Found personality entry {entry['id']} from backup query")
+                        logger.info(f"[PERSONALITY] Raw personality content: {entry['raw'][:300]}...")
                         self._extract_name_from_entry(entry)
             
             # If we found at least one good entry from backup queries, exit the loop

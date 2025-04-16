@@ -31,6 +31,9 @@ try:
     ami_index_name = os.getenv("PRESET", "ami-index")
     ent_index_name = os.getenv("ENT", "ent-index")
     
+    # Log the actual index names
+    logger.info(f"Pinecone index names: AMI_INDEX={ami_index_name}, ENT_INDEX={ent_index_name}")
+    
     # Create placeholder indexes if needed
     try:
         ami_index = pc.Index(ami_index_name)
@@ -73,7 +76,10 @@ inferLLM = ChatOpenAI(model="gpt-4o", streaming=False)
 #embeddings = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=1536)
 
 def index_name(index) -> str:
-    return "ami_index" if index == ami_index else "ent_index"
+    if index == ami_index:
+        return f"ami_index ({ami_index_name})"
+    else:
+        return f"ent_index ({ent_index_name})"
 
 AI_NAME = None
 async def infer_categories(input: str, context: str = "") -> Dict:
@@ -237,9 +243,13 @@ async def save_training_with_chunk(
     global AI_NAME
     embedding = EMBEDDINGS.embed_query(input)
     logger.info(f"Bank name at Save training chunk={bank_name}")
+    logger.info(f"Environment variables: PRESET={os.getenv('PRESET', 'not set')}, ENT={os.getenv('ENT', 'not set')}")
     ns = bank_name 
     target_index = ami_index if mode == "pretrain" else ent_index
 
+    index_name_str = index_name(target_index)
+    logger.info(f"Saving to Target index at Save training chunk={index_name_str}, mode={mode}, namespace={ns}")
+    logger.info(f"Using user_id={user_id}, doc_id={doc_id}, chunk_id={chunk_id}")
 
     # Generate a default chunk_id if none provided
     chunk_id = chunk_id or str(uuid.uuid4())
@@ -259,8 +269,9 @@ async def save_training_with_chunk(
         }
         convo_id = f"{user_id}_{chunk_id}"
         try:
+            logger.info(f"Upserting raw chunk with convo_id={convo_id} to {index_name_str}")
             target_index.upsert([(convo_id, embedding, metadata)], namespace=ns)
-            logger.info(f"Saved raw chunk to {index_name(target_index)}: {convo_id}")
+            logger.info(f"Saved raw chunk to {index_name_str}: {convo_id}")
             return True
         except Exception as e:
             logger.error(f"Raw upsert failed: {e}")
@@ -320,8 +331,9 @@ async def save_training_with_chunk(
     # Upsert knowledge
     convo_id = f"{user_id}_{uuid.uuid4()}"
     try:
+        logger.info(f"Upserting knowledge with convo_id={convo_id} to {index_name_str}, categories={categories}")
         target_index.upsert([(convo_id, embedding, metadata)], namespace=ns)
-        logger.info(f"Saved knowledge to {index_name(target_index)}: {convo_id} - Categories: {categories}")
+        logger.info(f"Saved knowledge to {index_name_str}: {convo_id} - Categories: {categories}")
         return True
     except Exception as e:
         logger.error(f"Upsert failed: {e}")
@@ -417,7 +429,7 @@ async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> L
                 filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
             )
             matches = results.get("matches", [])
-            #logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
+            logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
             knowledge.extend([
                 {
                     "id": match["id"],

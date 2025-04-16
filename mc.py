@@ -530,12 +530,26 @@ class MC:
                 }
 
             # Load personality if not already loaded or if graph_version_id changed
-            if not hasattr(self, 'personality_instructions') or self.state.get("graph_version_id") != graph_version_id:
-                logger.info(f"[PERSONALITY] Loading personality instructions for graph_version_id: {graph_version_id}")
+            personality_loaded = (hasattr(self, 'personality_instructions') and self.personality_instructions and 
+                                 hasattr(self.personality_manager, 'loaded_graph_version_id') and 
+                                 self.personality_manager.loaded_graph_version_id == graph_version_id)
+            
+            # Log detailed personality status
+            logger.info(f"[PERSONALITY] Check load status - has_attr: {hasattr(self, 'personality_instructions')}, " +
+                       f"loaded_gvid: {getattr(self.personality_manager, 'loaded_graph_version_id', None)}, " +
+                       f"current_gvid: {graph_version_id}, " +
+                       f"is_loaded_from_kb: {getattr(self.personality_manager, 'is_loaded_from_knowledge', False)}")
+                                 
+            if not personality_loaded:
+                logger.info(f"[PERSONALITY] Loading personality from knowledge base for graph_version_id: {graph_version_id}")
                 await self.load_personality_instructions(graph_version_id)
                 self.state["graph_version_id"] = graph_version_id
             else:
                 logger.info(f"[PERSONALITY] Personality instructions already loaded for graph_version_id: {graph_version_id}")
+                # Log the already loaded personality for debugging
+                if hasattr(self, 'personality_instructions') and self.personality_instructions:
+                    logger.info(f"[PERSONALITY] Current loaded personality (first 500 chars): {self.personality_instructions[:500]}...")
+                    logger.info(f"[PERSONALITY] Current AI name: {self.name}")
 
             # Break conversation into lines
             conversation = [line.strip() for line in context.split("\n") if line.strip()]
@@ -703,7 +717,8 @@ class MC:
                     f"Instructions:\n"
                     f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
                     f"2. The system has determined that you need more information to properly respond.\n"
-                    f"3. Craft a response that genuinely seeks clarification, in a friendly and conversational way.\n\n"
+                    f"3. Craft a response that genuinely seeks clarification, in a friendly and conversational way.\n"
+                    f"4. Follow any name usage guidance in the personality instructions - use your name naturally where appropriate.\n\n"
                     
                     f"Here is the specific feedback request: \"{feedback_request}\"\n\n"
                     
@@ -736,6 +751,7 @@ class MC:
                 f"4. Keep responses concise and conversational.\n"
                 f"5. GREETING RULES:\n"
                 f"   - If this is the first message in the conversation (no previous messages), use a natural greeting appropriate to the time and context\n"
+                f"   - For first messages, it's appropriate to introduce yourself with your name ({self.name})\n"
                 f"   - If there are previous messages, DO NOT use any greeting - respond directly to the content\n"
                 f"6. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
                 f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n\n"
