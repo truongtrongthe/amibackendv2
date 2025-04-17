@@ -512,25 +512,29 @@ class PersonalityManager:
             # Vietnamese guidance
             name_guidance = f"""
 
-HƯỚNG DẪN SỬ DỤNG TÊN:
-- Chủ yếu sử dụng 'tôi' hoặc 'mình' khi nói về bản thân
-- Thỉnh thoảng sử dụng tên '{self.name}' trong các trường hợp sau:
-  + Để tạo sự thân thiện: "{self.name} rất vui được giúp bạn"
-  + Khi bày tỏ cảm xúc: "{self.name} hiểu cảm giác của bạn"
-  + Khi giới thiệu: "Xin chào, {self.name} ở đây để hỗ trợ bạn"
-- KHÔNG nói về bản thân một cách máy móc kiểu: "trợ lý này" hoặc "{self.name} muốn thông báo rằng..."
+HƯỚNG DẪN TỰ NHIÊN VỀ CÁCH SỬ DỤNG TÊN:
+- Chủ yếu sử dụng 'tôi' hoặc 'mình' một cách tự nhiên trong đối thoại
+- Sử dụng tên '{self.name}' một cách tự nhiên trong những tình huống như:
+  + Khi chào đón: "Chào bạn, {self.name} đây!"
+  + Thể hiện sự đồng cảm: "{self.name} hiểu điều bạn đang trải qua"
+  + Khi bạn thể hiện quan điểm cá nhân: "{self.name} nghĩ rằng..."
+  + Khi kết thúc cuộc trò chuyện: "{self.name} rất vui được trò chuyện với bạn hôm nay"
+- TRÁNH những cách diễn đạt máy móc như: "trợ lý này" hoặc "tôi, {self.name}, xin thông báo..."
+- Điều quan trọng là phải nghe như một người thật đang nói chuyện, không phải một AI đang cố gắng bắt chước con người
 """
         else:
             # English guidance
             name_guidance = f"""
 
-NAME USAGE GUIDANCE:
-- Primarily use "I" when referring to yourself
-- Occasionally use your name "{self.name}" in these situations:
-  + For warmth: "{self.name} is happy to help you with that"
-  + To express empathy: "{self.name} understands how you feel"
-  + In introductions: "Hi there, {self.name} here to assist you"
-- AVOID robotic self-references like "this assistant" or "{self.name} would like to inform you that..."
+NATURAL NAME USAGE GUIDANCE:
+- Mainly use "I" and "me" in conversation as a real person would
+- Use your name "{self.name}" naturally in contexts like:
+  + In warm greetings: "Hi there, {self.name} here!"
+  + When showing understanding: "{self.name} gets what you're going through"
+  + When sharing personal perspectives: "{self.name} thinks that..."
+  + When closing conversations: "{self.name} enjoyed chatting with you today"
+- AVOID robotic phrases like: "this assistant" or "I, {self.name}, would like to inform you..."
+- The key is to sound like a real person talking, not an AI trying to act human
 """
         
         # Add the guidance to instructions
@@ -604,14 +608,16 @@ NAME USAGE GUIDANCE:
         lower_text = original_text.lower()
         
         # Look for specific name declarations in Vietnamese (case insensitive for detection)
+        # Improved patterns to avoid capturing instructional phrases
         vietnamese_patterns = [
-            r'(?:tên em là|em là|tôi là|mình là|xưng tên|gọi là)\s+([A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:[,\.\?!;:]|$)',
-            r'(?:xưng|gọi|tên)\s+(?:là|tên)\s+([A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:[,\.\?!;:]|$)',
-            r'chỉ xưng tên\s+([A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:[,\.\?!;:]|$)'
+            # Match name followed by punctuation or instructional phrases
+            r'(?:tên em là|em là|tôi là|mình là|xưng tên|gọi là)\s+([A-ZÀ-Ỹa-zà-ỹ]{1,20}(?:\s+[A-ZÀ-Ỹa-zà-ỹ]{1,20}){0,3})(?:\s+(?:khi|trong|để|với|mà|là|lúc)|[,\.\?!;:]|$)',
+            r'(?:xưng|gọi|tên)\s+(?:là|tên)\s+([A-ZÀ-Ỹa-zà-ỹ]{1,20}(?:\s+[A-ZÀ-Ỹa-zà-ỹ]{1,20}){0,3})(?:\s+(?:khi|trong|để|với|mà|là|lúc)|[,\.\?!;:]|$)',
+            r'chỉ xưng tên\s+([A-ZÀ-Ỹa-zà-ỹ]{1,20}(?:\s+[A-ZÀ-Ỹa-zà-ỹ]{1,20}){0,3})(?:\s+(?:khi|trong|để|với|mà|là|lúc)|[,\.\?!;:]|$)'
         ]
         
         # Look for all caps names which might be emphasized
-        caps_pattern = r'(?:TÊN|XƯng|GỌI)\s+(?:LÀ)?\s+([A-ZÀ-Ỹ\s]+)(?:[,\.\?!;:]|$)'
+        caps_pattern = r'(?:TÊN|XƯng|GỌI)\s+(?:LÀ)?\s+([A-ZÀ-Ỹ]{1,20}(?:\s+[A-ZÀ-Ỹ]{1,20}){0,3})(?:\s+(?:KHI|TRONG|ĐỂ|VỚI|MÀ|LÀ|LÚC)|[,\.\?!;:]|$)'
         
         # Check Vietnamese patterns
         for pattern in vietnamese_patterns:
@@ -622,9 +628,13 @@ NAME USAGE GUIDANCE:
                 extracted_name = original_text[start:end].strip()
                 logger.info(f"[PERSONALITY] Found Vietnamese name match: '{extracted_name}'")
                 if extracted_name and len(extracted_name) > 1:
-                    self.name = extracted_name
-                    logger.info(f"[PERSONALITY] Updated name to: {self.name}")
-                    return
+                    # Extra validation to prevent long phrases
+                    if len(extracted_name.split()) <= 4:
+                        self.name = extracted_name
+                        logger.info(f"[PERSONALITY] Updated name to: {self.name}")
+                        return
+                    else:
+                        logger.info(f"[PERSONALITY] Name too long, might include instructions: '{extracted_name}'")
         
         # Check for ALL CAPS names separately
         caps_match = re.search(caps_pattern, original_text)
@@ -632,21 +642,29 @@ NAME USAGE GUIDANCE:
             extracted_name = caps_match.group(1).strip()
             logger.info(f"[PERSONALITY] Found ALL CAPS name: '{extracted_name}'")
             if extracted_name and len(extracted_name) > 1:
-                self.name = extracted_name
-                logger.info(f"[PERSONALITY] Updated name to: {self.name}")
-                return
+                # Extra validation to prevent long phrases
+                if len(extracted_name.split()) <= 4:
+                    self.name = extracted_name
+                    logger.info(f"[PERSONALITY] Updated name to: {self.name}")
+                    return
+                else:
+                    logger.info(f"[PERSONALITY] Name too long, might include instructions: '{extracted_name}'")
         
         # English patterns as fallback
-        english_match = re.search(r'(?:i am|my name is|name is|called)\s+([A-Za-z\s]+?)(?:[,\.\?!;:]|$)', lower_text)
+        english_match = re.search(r'(?:i am|my name is|name is|called)\s+([A-Za-z]{1,20}(?:\s+[A-Za-z]{1,20}){0,3})(?:\s+(?:when|during|in|if|while|for|to|with|as)|[,\.\?!;:]|$)', lower_text)
         if english_match:
             # Extract from original text
             start, end = english_match.span(1)
             extracted_name = original_text[start:end].strip()
             logger.info(f"[PERSONALITY] Found English name match: '{extracted_name}'")
             if extracted_name and len(extracted_name) > 1:
-                self.name = extracted_name
-                logger.info(f"[PERSONALITY] Updated name to: {self.name}")
-                return
+                # Extra validation to prevent long phrases
+                if len(extracted_name.split()) <= 4:
+                    self.name = extracted_name
+                    logger.info(f"[PERSONALITY] Updated name to: {self.name}")
+                    return
+                else:
+                    logger.info(f"[PERSONALITY] Name too long, might include instructions: '{extracted_name}'")
         
         logger.info(f"[PERSONALITY] No name found in entry {entry['id']}")
 
@@ -721,13 +739,17 @@ NAME USAGE GUIDANCE:
         Returns:
             bool: True if a Vietnamese name was found and set
         """
-        # This specifically looks for the pattern from your logs
-        name_match = re.search(r'(?:xưng tên|chỉ xưng tên)\s+([A-ZÀ-Ỹ\s]+)', entry["raw"], re.IGNORECASE)
+        # Improved pattern that stops at instructional phrases
+        name_match = re.search(r'(?:xưng tên|chỉ xưng tên)\s+([A-ZÀ-Ỹ]{1,20}(?:\s+[A-ZÀ-Ỹ]{1,20}){0,3})(?:\s+(?:khi|trong|để|với|mà|là|lúc)|[,\.\?!;:]|$)', entry["raw"], re.IGNORECASE)
         if name_match:
             name = name_match.group(1).strip()
             logger.info(f"[PERSONALITY] Found Vietnamese name declaration: '{name}'")
             if name and len(name) > 1:
-                self.name = name
-                logger.info(f"[PERSONALITY] Set name from Vietnamese declaration: {self.name}")
-                return True
+                # Extra validation to prevent long phrases
+                if len(name.split()) <= 4:
+                    self.name = name
+                    logger.info(f"[PERSONALITY] Set name from Vietnamese declaration: {self.name}")
+                    return True
+                else:
+                    logger.info(f"[PERSONALITY] Name too long, might include instructions: '{name}'")
         return False 

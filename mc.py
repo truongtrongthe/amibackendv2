@@ -517,6 +517,192 @@ class MC:
             
         return question
 
+    async def maintain_contextual_memory(self, context, message, knowledge_context, lang_info=None):
+        """
+        Maintain contextual memory to improve conversation continuity.
+        
+        Args:
+            context: Full conversation context
+            message: Current user message
+            knowledge_context: Retrieved knowledge
+            lang_info: Optional language information dictionary
+            
+        Returns:
+            dict: Enhanced contextual memory for more natural responses
+        """
+        # Determine language attributes for safe language-specific enhancements
+        language_confident = lang_info and lang_info.get("confidence", 0) > 0.7
+        language_code = lang_info.get("code", "en") if language_confident else "en"
+        
+        logger.info(f"[MEMORY] Processing conversation with language code: {language_code}, confidence: {lang_info.get('confidence', 'unknown') if lang_info else 'using default'}")
+        
+        # Parse conversation into structured format
+        turns = []
+        current_turn = {"speaker": None, "text": ""}
+        
+        for line in context.split('\n'):
+            if line.startswith("User:"):
+                if current_turn["speaker"] == "AI":
+                    turns.append(current_turn)
+                current_turn = {"speaker": "User", "text": line[5:].strip()}
+            elif line.startswith("AI:"):
+                if current_turn["speaker"] == "User":
+                    turns.append(current_turn)
+                current_turn = {"speaker": "AI", "text": line[4:].strip()}
+            elif line.strip() and current_turn["speaker"]:
+                current_turn["text"] += " " + line.strip()
+        
+        # Add the last turn if not empty
+        if current_turn["speaker"] and current_turn["text"]:
+            turns.append(current_turn)
+        
+        # Extract key information from conversation
+        context_memory = {
+            "mentioned_topics": [],
+            "user_preferences": {},
+            "answered_questions": [],
+            "unresolved_topics": [],
+            "emotional_markers": {},
+            "conversation_history_summary": "",
+            "continuity_hints": [],
+            "language_support": {
+                "code": language_code,
+                "full_support": language_code == "en",  # Only English fully supported initially
+                "partial_support": language_code in ["vi", "ms", "zh", "fr", "es"],  # Partial support for other languages
+                "confidence": lang_info.get("confidence", 1.0) if lang_info else 1.0
+            }
+        }
+        
+        # Track mentioned topics
+        all_content = " ".join([turn["text"] for turn in turns])
+        
+        # Extract potential topics from knowledge context
+        if knowledge_context:
+            # Simple keyword extraction (could be enhanced with NLP)
+            words = knowledge_context.lower().split()
+            potential_topics = [word for word in words if len(word) > 3 
+                               and not word in ["this", "that", "with", "from", "have", "about", "what", "when", "where", "your", "will", "should"]]
+            
+            # Count occurrences
+            topic_counts = {}
+            for word in potential_topics:
+                if word in topic_counts:
+                    topic_counts[word] += 1
+                else:
+                    topic_counts[word] = 1
+            
+            # Select most frequent topics
+            sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
+            context_memory["mentioned_topics"] = [topic for topic, count in sorted_topics[:5]]
+        
+        # Identify unresolved topics - questions in last 3 user turns without clear AI answers
+        recent_user_turns = [turn for turn in turns[-6:] if turn["speaker"] == "User"]
+        
+        # Language-specific question detection enhancements
+        for turn in recent_user_turns:
+            # Default question detection using question marks
+            has_question_mark = "?" in turn["text"]
+            questions_by_mark = [sent.strip() + "?" for sent in turn["text"].split("?") if sent.strip()]
+            
+            # Language-specific question detection (safely enhanced)
+            additional_questions = []
+            
+            # Only apply enhanced detection for supported languages with high confidence
+            if language_confident:
+                if language_code == "vi":
+                    # Vietnamese question particles
+                    vi_particles = ["không", " nhỉ", " nhé", " chứ", " hả", " à", " sao"]
+                    
+                    # Extract sentences without question marks
+                    sentences = [s.strip() for s in turn["text"].split(".") if s.strip() and "?" not in s]
+                    
+                    for sentence in sentences:
+                        if any(particle in sentence.lower() for particle in vi_particles):
+                            additional_questions.append(sentence)
+                            logger.info(f"[MEMORY] Detected Vietnamese question without question mark: {sentence}")
+                
+                elif language_code == "ms":  # Malay
+                    # Malay question particles
+                    ms_particles = [" kah", " tak", " ke", " apa", " siapa", " bila", " mana"]
+                    
+                    # Extract sentences without question marks
+                    sentences = [s.strip() for s in turn["text"].split(".") if s.strip() and "?" not in s]
+                    
+                    for sentence in sentences:
+                        if any(particle in sentence.lower() for particle in ms_particles):
+                            additional_questions.append(sentence)
+                            logger.info(f"[MEMORY] Detected Malay question without question mark: {sentence}")
+            
+            # Combine standard and language-specific questions
+            all_questions = questions_by_mark + additional_questions
+            
+            for question in all_questions:
+                if not question:
+                    continue
+                    
+                # Check if this question appears to be answered
+                question_words = set(question.lower().split())
+                is_answered = False
+                
+                # Adjust word overlap threshold based on language
+                overlap_threshold = 2 if language_code in ["vi", "zh"] else 3
+                
+                # Look for AI responses that contain multiple words from the question
+                for ai_turn in [t for t in turns if t["speaker"] == "AI"]:
+                    ai_words = set(ai_turn["text"].lower().split())
+                    if len(question_words.intersection(ai_words)) >= overlap_threshold:
+                        is_answered = True
+                        context_memory["answered_questions"].append(question)
+                        break
+                
+                if not is_answered:
+                    context_memory["unresolved_topics"].append(question)
+        
+        # Generate continuity hints
+        if turns:
+            # Look at the last AI response
+            last_ai_turns = [turn for turn in turns if turn["speaker"] == "AI"]
+            if last_ai_turns:
+                last_ai_response = last_ai_turns[-1]["text"]
+                
+                # Define continuity markers based on language
+                if language_code == "vi" and language_confident:
+                    continuity_markers = ["ngoài ra", "thêm nữa", "bên cạnh đó", "hơn nữa", "cũng", "còn"]
+                elif language_code == "ms" and language_confident:
+                    continuity_markers = ["juga", "tambahan pula", "selain itu", "lagi", "dan"]
+                else:
+                    # Default English markers
+                    continuity_markers = ["also", "another", "additionally", "furthermore", "moreover"]
+                
+                sentences = [s.strip() for s in last_ai_response.split(".") if s.strip()]
+                
+                for sentence in sentences:
+                    sentence_lower = sentence.lower()
+                    # If the last sentence has continuity markers, note it
+                    if any(marker in sentence_lower for marker in continuity_markers):
+                        context_memory["continuity_hints"].append(
+                            {"type": "continue_thread", "thread": sentence}
+                        )
+        
+        # Create brief history summary
+        if len(turns) > 4:
+            topics_text = ", ".join(context_memory['mentioned_topics'][:3]) if context_memory['mentioned_topics'] else "general topics"
+            context_memory["conversation_history_summary"] = f"This conversation has {len(turns)} turns and covers topics like {topics_text}."
+            
+            # Add unresolved topics hint
+            if context_memory["unresolved_topics"]:
+                context_memory["conversation_history_summary"] += f" There are {len(context_memory['unresolved_topics'])} unresolved questions."
+        
+        # Log language-specific insights for future improvements
+        if language_code != "en":
+            question_stats = {
+                "with_marks": len([q for q in context_memory["unresolved_topics"] if "?" in q]),
+                "without_marks": len([q for q in context_memory["unresolved_topics"] if "?" not in q])
+            }
+            logger.info(f"[MEMORY] Language ({language_code}) question stats: {question_stats}")
+        
+        return context_memory
+        
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = "", use_websocket=False, thread_id_for_analysis=None):
         try:
             # Initialize cache if not exists
@@ -564,11 +750,19 @@ class MC:
             profile_query = "contact profile building information gathering customer understanding"
             profile_task = query_graph_knowledge(graph_version_id, profile_query, top_k=5)
             
+            # IMPROVEMENT 2: Track conversation dynamics
+            dynamics_task = self.track_conversation_dynamics(context, message)
+            
+            # IMPROVEMENT 3: Enhance response naturalness
+            naturalness_task = self.enhance_response_naturalness(context)
+            
             # Wait for all parallel tasks
-            lang_info, conversation_language, profile_entries = await asyncio.gather(
+            lang_info, conversation_language, profile_entries, dynamics_insights, naturalness_guidance = await asyncio.gather(
                 language_task,
                 conversation_language_task,
-                profile_task
+                profile_task,
+                dynamics_task,
+                naturalness_task
             )
             
             # Override language confidence if conversation history establishes a pattern
@@ -577,6 +771,29 @@ class MC:
                 lang_info["language"] = conversation_language
                 lang_info["confidence"] = 0.9
                 lang_info["responseGuidance"] = f"Respond in {conversation_language}, maintaining consistency with previous messages"
+            
+            # Add language code to lang_info if not present
+            if "code" not in lang_info:
+                # Map common language names to ISO codes
+                language_to_code = {
+                    "english": "en",
+                    "vietnamese": "vi",
+                    "malay": "ms",
+                    "indonesian": "id",
+                    "chinese": "zh",
+                    "french": "fr",
+                    "spanish": "es"
+                }
+                # Default to English if language not in mapping
+                lang_info["code"] = language_to_code.get(lang_info["language"].lower(), "en")
+                logger.info(f"Added language code: {lang_info['code']} for {lang_info['language']}")
+            
+            # IMPROVEMENT 1: Set culture code for selective cultural adaptation
+            culture_code = "default"
+            if lang_info["language"].lower() == "vietnamese":
+                culture_code = "vi"
+            elif lang_info["language"].lower() == "english":
+                culture_code = "en"
             
             # Process profile instructions
             profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
@@ -695,6 +912,39 @@ class MC:
             # Create knowledge context
             knowledge_context = "\n\n".join(entry["raw"] for entry in unique_knowledge)
             
+            # IMPROVEMENT 4: Build contextual memory with language awareness
+            contextual_memory = await self.maintain_contextual_memory(context, message, knowledge_context, lang_info)
+            
+            # Log key contextual memory insights
+            logger.info(f"[MEMORY] Language support: {contextual_memory['language_support']['code']} " +
+                       f"(full: {contextual_memory['language_support']['full_support']}, " +
+                       f"partial: {contextual_memory['language_support']['partial_support']})")
+            
+            # Safely use language-specific features based on support level
+            language_specific_insights = ""
+            if contextual_memory['language_support']['full_support']:
+                # Full language support - use all features
+                unresolved_count = len(contextual_memory["unresolved_topics"])
+                if unresolved_count > 0:
+                    logger.info(f"[MEMORY] Using all {unresolved_count} unresolved topics with full language support")
+                    language_specific_insights = f"Identified {unresolved_count} unresolved questions in the conversation."
+            elif contextual_memory['language_support']['partial_support']:
+                # Partial support - use only question-mark based features for reliability
+                reliable_questions = [q for q in contextual_memory["unresolved_topics"] if "?" in q]
+                if reliable_questions:
+                    logger.info(f"[MEMORY] Using {len(reliable_questions)} reliable questions from {len(contextual_memory['unresolved_topics'])} total with partial language support")
+                    language_specific_insights = f"Identified {len(reliable_questions)} clear questions in the conversation."
+                
+                # Replace full list with reliable subset for safety
+                if contextual_memory['language_support']['confidence'] < 0.8:
+                    # Only keep the reliable questions if confidence is low
+                    contextual_memory["unresolved_topics"] = reliable_questions
+                    logger.info(f"[MEMORY] Filtered to reliable questions only due to low confidence")
+            else:
+                # Minimal support - don't rely on language-specific features
+                logger.info(f"[MEMORY] Using minimal language features due to limited support")
+                language_specific_insights = "Basic conversation tracking active."
+            
             # Assess knowledge coverage and determine if feedback is needed
             coverage_score, missing_aspects, requires_feedback = await self.assess_knowledge_coverage(
                 {query: len(self._cache['knowledge'].get(f"{graph_version_id}:{query}", [])) for query in search_terms},
@@ -731,11 +981,31 @@ class MC:
                     f"Always respond in {lang_info['language']}."
                 )
                 
+                # Add naturalness guidance and conversation dynamics insights
+                additional_guidance = (
+                    f"\n\nNATURALNESS GUIDANCE:\n"
+                    f"Recommended patterns: {', '.join(naturalness_guidance['recommended_patterns'])}\n"
+                    f"Sentence variations: {', '.join(naturalness_guidance['sentence_variations'])}\n"
+                    f"Transitional phrases: {', '.join(naturalness_guidance['transitional_phrases'])}\n"
+                    f"Avoid patterns: {', '.join(naturalness_guidance['avoid_patterns'])}\n\n"
+                    f"CONVERSATION DYNAMICS:\n"
+                    f"User engagement: {dynamics_insights['user_engagement']}\n"
+                    f"Repetition risk: {dynamics_insights['repetition_risk']}\n"
+                    f"Repeated themes: {', '.join(dynamics_insights['repeated_themes']) if dynamics_insights['repeated_themes'] else 'none'}\n"
+                    f"Suggested approaches: {', '.join(dynamics_insights['suggested_approaches']) if dynamics_insights['suggested_approaches'] else 'natural conversation'}\n\n"
+                    f"CONTEXTUAL MEMORY:\n"
+                    f"Mentioned topics: {', '.join(contextual_memory['mentioned_topics'][:3]) if contextual_memory['mentioned_topics'] else 'none'}\n"
+                    f"Language insights: {language_specific_insights}\n"
+                    f"Apply cultural adaptations for: {culture_code}"
+                )
+                
+                feedback_prompt += additional_guidance
+                
                 async for _ in self.stream_response(feedback_prompt, builder):
                     yield builder.build()
                 return
             
-            # Generate response
+            # Generate response - PRESERVE EXISTING PROMPT
             response_prompt = (
                 f"AI: {self.name}\n"
                 f"Context: {context}\n"
@@ -765,6 +1035,41 @@ class MC:
                 f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n"
                 f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."
             )
+            
+            # Add guidance from the new improvements as additional context
+            additional_guidance = (
+                f"\n\nNATURALNESS GUIDANCE:\n"
+                f"Recommended patterns: {', '.join(naturalness_guidance['recommended_patterns'])}\n"
+                f"Sentence variations: {', '.join(naturalness_guidance['sentence_variations'])}\n"
+                f"Transitional phrases: {', '.join(naturalness_guidance['transitional_phrases'])}\n"
+                f"Avoid patterns: {', '.join(naturalness_guidance['avoid_patterns'])}\n\n"
+                f"CONVERSATION DYNAMICS:\n"
+                f"User engagement: {dynamics_insights['user_engagement']}\n"
+                f"Repetition risk: {dynamics_insights['repetition_risk']}\n"
+                f"Repeated themes: {', '.join(dynamics_insights['repeated_themes']) if dynamics_insights['repeated_themes'] else 'none'}\n"
+                f"Suggested approaches: {', '.join(dynamics_insights['suggested_approaches']) if dynamics_insights['suggested_approaches'] else 'natural conversation'}\n\n"
+                f"CONTEXTUAL MEMORY:\n"
+            )
+            
+            # Add language-appropriate contextual memory guidance
+            if contextual_memory['language_support']['full_support'] or contextual_memory['language_support']['confidence'] > 0.8:
+                # Full information for well-supported languages or high confidence
+                additional_guidance += (
+                    f"Mentioned topics: {', '.join(contextual_memory['mentioned_topics'][:3]) if contextual_memory['mentioned_topics'] else 'none'}\n"
+                    f"Unresolved topics: {', '.join(contextual_memory['unresolved_topics'][:2]) if contextual_memory['unresolved_topics'] else 'none'}\n"
+                    f"Continuity hints: {contextual_memory['conversation_history_summary'] if 'conversation_history_summary' in contextual_memory else ''}\n"
+                )
+            else:
+                # Limited information for less-supported languages
+                additional_guidance += (
+                    f"Mentioned topics: {', '.join(contextual_memory['mentioned_topics'][:3]) if contextual_memory['mentioned_topics'] else 'none'}\n"
+                    f"Language insights: {language_specific_insights}\n"
+                )
+            
+            additional_guidance += f"Apply cultural adaptations for: {culture_code}"
+            
+            # Append the additional guidance to the preserved prompt
+            response_prompt += additional_guidance
             
             async for _ in self.stream_response(response_prompt, builder):
                 yield builder.build()
@@ -819,3 +1124,252 @@ class MC:
                 query_graph_knowledge(graph_version_id, query, top_k)
                 for query in queries
             ])
+
+    async def adapt_response_to_culture(self, text, culture="default"):
+        """
+        Adapt a response to be appropriate for specific cultural contexts.
+        
+        Args:
+            text: The response text to adapt
+            culture: The target culture code (e.g., "vi" for Vietnamese, "en" for English)
+            
+        Returns:
+            str: The culturally adapted response
+        """
+        # Define cultural adaptation patterns
+        cultural_adaptations = {
+            "vi": {
+                "greeting_patterns": [
+                    "Xin chào", "Chào bạn", "Kính chào", "Chào mừng"
+                ],
+                "politeness_markers": [
+                    "ạ", "nhé", "nha", "ạh", "vui lòng"
+                ],
+                "emotion_expressions": {
+                    "happy": ["vui", "mừng", "thích thú"],
+                    "sorry": ["xin lỗi", "tiếc quá", "rất tiếc"],
+                    "agreement": ["đồng ý", "dĩ nhiên", "chắc chắn rồi"]
+                },
+                "cultural_references": [
+                    "Tết", "Trung Thu", "chả giò", "phở", "áo dài"
+                ],
+                "relationship_terms": [
+                    "bạn", "anh", "chị", "quý khách"
+                ]
+            },
+            "en": {
+                "greeting_patterns": [
+                    "Hello", "Hi", "Good day", "Welcome"
+                ],
+                "politeness_markers": [
+                    "please", "would you", "could you", "thank you"
+                ],
+                "emotion_expressions": {
+                    "happy": ["happy", "glad", "pleased"],
+                    "sorry": ["sorry", "apologize", "regret"],
+                    "agreement": ["agree", "certainly", "absolutely"]
+                },
+                "cultural_references": [
+                    "weekend", "holiday", "movie", "coffee"
+                ],
+                "relationship_terms": [
+                    "you", "friend", "customer"
+                ]
+            },
+            # Other cultures can be added here
+        }
+        
+        # If no specific adaptations for this culture, return original
+        if culture not in cultural_adaptations:
+            return text
+            
+        # Apply cultural adaptations
+        adapted_text = text
+        
+        # This method allows for future sophisticated cultural adaptations
+        # Currently, it returns the original text, but can be enhanced to:
+        # 1. Scan for appropriate places to insert culture-specific expressions
+        # 2. Replace generic terms with culture-specific ones
+        # 3. Adjust speech formality based on cultural norms
+        # 4. Incorporate regional sayings or references
+        
+        return adapted_text
+
+    async def track_conversation_dynamics(self, conversation, current_message):
+        """
+        Track conversation dynamics to improve natural flow and reduce repetition.
+        
+        Args:
+            conversation: The conversation history
+            current_message: The current user message
+            
+        Returns:
+            dict: Insights about conversation dynamics
+        """
+        # Extract only the user messages for analysis
+        user_messages = []
+        for line in conversation.split('\n'):
+            if line.startswith("User:"):
+                user_message = line[5:].strip()
+                if user_message:
+                    user_messages.append(user_message)
+        
+        # Add the current message if it's not already included
+        if current_message not in user_messages:
+            user_messages.append(current_message)
+            
+        # Initialize insights dictionary
+        insights = {
+            "repetition_risk": False,
+            "user_engagement": "medium",
+            "conversation_pace": "normal",
+            "topic_shifts": [],
+            "repeated_themes": [],
+            "suggested_approaches": []
+        }
+        
+        # Check for repetition
+        if len(user_messages) >= 3:
+            # Check for repeated questions or phrases from the user
+            recent_messages = user_messages[-3:]
+            repeated_words = set()
+            
+            # Extract key nouns and verbs
+            for msg in recent_messages:
+                words = msg.lower().split()
+                for word in words:
+                    if len(word) > 3 and word not in ["what", "when", "where", "how", "why", "which", "this", "that", "with", "from", "have", "about"]:
+                        repeated_words.add(word)
+            
+            # Count occurrences of each word
+            word_counts = {}
+            for msg in recent_messages:
+                for word in repeated_words:
+                    if word in msg.lower():
+                        word_counts[word] = word_counts.get(word, 0) + 1
+            
+            # Identify words that appear in multiple messages
+            repeated_themes = [word for word, count in word_counts.items() if count >= 2]
+            insights["repeated_themes"] = repeated_themes
+            
+            if repeated_themes:
+                insights["repetition_risk"] = True
+                insights["suggested_approaches"].append("introduce_new_aspects")
+        
+        # Analyze message length for user engagement
+        avg_msg_length = sum(len(msg) for msg in user_messages[-3:]) / min(3, len(user_messages))
+        if avg_msg_length < 15:
+            insights["user_engagement"] = "low"
+            insights["suggested_approaches"].append("ask_engaging_questions")
+        elif avg_msg_length > 100:
+            insights["user_engagement"] = "high"
+            insights["suggested_approaches"].append("provide_concise_responses")
+        
+        # Detect potential topic shifts
+        if len(user_messages) >= 2:
+            last_msg = user_messages[-1].lower()
+            prev_msg = user_messages[-2].lower()
+            
+            shift_indicators = ["instead", "actually", "by the way", "speaking of", "different", "change", "another", "forget", "what about"]
+            
+            if any(indicator in last_msg for indicator in shift_indicators):
+                insights["topic_shifts"].append("user_initiated")
+                insights["suggested_approaches"].append("acknowledge_shift")
+        
+        return insights
+
+    async def enhance_response_naturalness(self, context):
+        """
+        Generate guidance for varying sentence structures and speech patterns
+        to make responses more natural based on conversation context.
+        
+        Args:
+            context: The conversation context
+            
+        Returns:
+            dict: Guidance for natural language patterns
+        """
+        # Analyze conversation context
+        message_count = len([line for line in context.split('\n') if line.strip()])
+        is_early_conversation = message_count < 6
+        
+        # Init naturalness guidance
+        guidance = {
+            "sentence_variations": [],
+            "transitional_phrases": [],
+            "recommended_patterns": [],
+            "avoid_patterns": []
+        }
+        
+        # Generate sentence structure variations appropriate for conversation stage
+        if is_early_conversation:
+            # Early conversation - more direct and engaging
+            guidance["sentence_variations"] = [
+                "shorter_sentences",
+                "questions",
+                "simple_statements"
+            ]
+            guidance["transitional_phrases"] = [
+                "first",
+                "to start with",
+                "I'd like to know"
+            ]
+            guidance["recommended_patterns"] = [
+                "personal_greeting",
+                "open_ended_questions",
+                "brief_self_intro"
+            ]
+            guidance["avoid_patterns"] = [
+                "complex_explanations",
+                "multiple_questions_at_once",
+                "technical_jargon"
+            ]
+        else:
+            # Established conversation - more varied and complex
+            guidance["sentence_variations"] = [
+                "mix_short_and_long",
+                "conditional_statements",
+                "reflective_observations"
+            ]
+            guidance["transitional_phrases"] = [
+                "additionally",
+                "that said",
+                "considering what you mentioned",
+                "building on that"
+            ]
+            guidance["recommended_patterns"] = [
+                "refer_to_previous_points",
+                "add_personal_perspective",
+                "strategic_pauses"
+            ]
+            guidance["avoid_patterns"] = [
+                "repetitive_structure",
+                "overuse_of_questions",
+                "obvious_templated_responses"
+            ]
+        
+        # Analyze conversational mood
+        positive_indicators = ["thanks", "good", "great", "appreciate", "help", "useful", "like"]
+        negative_indicators = ["no", "not", "don't", "isn't", "wrong", "bad", "problem", "issue", "mistake"]
+        
+        positive_count = sum(1 for indicator in positive_indicators if indicator in context.lower())
+        negative_count = sum(1 for indicator in negative_indicators if indicator in context.lower())
+        
+        # Adjust guidance based on conversational mood
+        if positive_count > negative_count * 2:
+            # Very positive conversation
+            guidance["recommended_patterns"].append("upbeat_friendly")
+            guidance["sentence_variations"].append("enthusiastic_expressions")
+        elif negative_count > positive_count * 2:
+            # Challenging conversation
+            guidance["recommended_patterns"].append("empathetic_listening")
+            guidance["recommended_patterns"].append("solution_focused")
+            guidance["avoid_patterns"].append("overly_cheerful")
+        
+        # Add variation for long conversations to avoid monotony
+        if message_count > 10:
+            guidance["recommended_patterns"].append("introduce_new_elements")
+            guidance["sentence_variations"].append("vary_sentence_structure")
+            guidance["avoid_patterns"].append("conversation_fatigue_markers")
+        
+        return guidance
