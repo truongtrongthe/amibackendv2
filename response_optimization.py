@@ -493,11 +493,33 @@ class ResponseProcessor:
         context_analysis["knowledge_found"] = knowledge_found
         return context_analysis
     
-    def segment_response(self, response: str) -> List[str]:
-        """Segment a response into sentences for restructuring."""
-        # Use NLTK for proper sentence tokenization
-        sentences = self.sentence_tokenizer(response)
-        return sentences
+    def segment_response(self, response):
+        """Segment a response into sentences."""
+        try:
+            # Try to use the standard NLTK sentence tokenizer
+            sentences = self.sentence_tokenizer(response)
+            return sentences
+        except LookupError as e:
+            # If punkt_tab is missing, use a fallback tokenization approach
+            import re
+            from nltk.tokenize import RegexpTokenizer
+            
+            # Log the error but continue with fallback
+            logger.warning(f"NLTK resource error in sentence tokenizer: {str(e)}. Using fallback tokenizer.")
+            
+            # Simple regex-based sentence tokenizer as fallback
+            # This handles common Vietnamese and English sentence terminators
+            pattern = r'(?<=[.!?;])\s+'
+            
+            # Use regex split with lookbehind for sentence boundaries
+            sentences = re.split(pattern, response)
+            
+            # Further split by newlines for better readability
+            result = []
+            for sent in sentences:
+                result.extend([s.strip() for s in sent.split('\n') if s.strip()])
+            
+            return result
     
     def categorize_sentences(self, sentences: List[str]) -> Dict[str, List[str]]:
         """Categorize sentences into different section types."""
