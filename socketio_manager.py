@@ -29,6 +29,14 @@ ws_sessions = {}
 session_lock = threading.RLock()
 
 # Storage for undelivered messages
+# Structure:
+# {
+#   thread_id: {
+#     "analysis": [events...],
+#     "knowledge": [events...],
+#     "other": [events...]
+#   }
+# }
 undelivered_messages = {}
 message_lock = threading.RLock()
 
@@ -413,16 +421,54 @@ def register_handlers(socketio_instance):
         logger.info(f"Session {session_id} requested missed messages for thread {thread_id}")
         
         # Get missed messages for this thread
+        analysis_messages = []
+        knowledge_messages = []
+        other_messages = []
+        
         with message_lock:
-            missed_messages = undelivered_messages.get(thread_id, [])
             if thread_id in undelivered_messages:
+                thread_messages = undelivered_messages[thread_id]
+                
+                # Get messages by type
+                if isinstance(thread_messages, dict):
+                    # New structured format
+                    analysis_messages = thread_messages.get('analysis', [])
+                    knowledge_messages = thread_messages.get('knowledge', [])
+                    other_messages = thread_messages.get('other', [])
+                else:
+                    # Legacy format (list) - treat all as analysis
+                    analysis_messages = thread_messages
+                
                 # Clear the queue after retrieving
                 del undelivered_messages[thread_id]
         
-        if missed_messages:
-            logger.info(f"Sending {len(missed_messages)} missed messages to session {session_id} for thread {thread_id}")
-            for msg in missed_messages:
+        # Keep track of message types for logging
+        analysis_count = len(analysis_messages)
+        knowledge_count = len(knowledge_messages)
+        other_count = len(other_messages)
+        total_count = analysis_count + knowledge_count + other_count
+        
+        if total_count > 0:
+            logger.info(f"Sending {total_count} missed messages to session {session_id} for thread {thread_id}")
+            
+            # Send all analysis messages
+            for msg in analysis_messages:
                 emit('analysis_update', msg)
+            
+            # Send all knowledge messages
+            for msg in knowledge_messages:
+                emit('knowledge', msg)
+            
+            # Send other message types
+            for msg in other_messages:
+                if isinstance(msg, dict) and 'type' in msg:
+                    # Use the type field if available
+                    emit(msg['type'], msg)
+                else:
+                    # Default to analysis_update
+                    emit('analysis_update', msg)
+            
+            logger.info(f"Sent {analysis_count} analysis events, {knowledge_count} knowledge events, and {other_count} other events to session {session_id}")
         else:
             logger.info(f"No missed messages found for thread {thread_id}")
             emit('missed_messages_status', {'status': 'none', 'thread_id': thread_id})
@@ -574,8 +620,10 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
         if not success:
             with message_lock:
                 if thread_id not in undelivered_messages:
-                    undelivered_messages[thread_id] = []
-                undelivered_messages[thread_id] = (undelivered_messages[thread_id] + [data])[-50:]
+                    undelivered_messages[thread_id] = {}
+                if 'analysis' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['analysis'] = []
+                undelivered_messages[thread_id]['analysis'] = (undelivered_messages[thread_id]['analysis'] + [data])[-50:]
                 #logger.debug(f"[SESSION_TRACE] Stored undelivered message due to delivery failure")
         
         log_session_state(f"After successful emit_analysis_event for thread {thread_id}", thread_id=thread_id)
@@ -588,14 +636,92 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
         # Store undelivered message for later retrieval
         with message_lock:
             if thread_id not in undelivered_messages:
-                undelivered_messages[thread_id] = []
+                undelivered_messages[thread_id] = {}
+            if 'analysis' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['analysis'] = []
             # Only keep the last 50 messages per thread
-            undelivered_messages[thread_id] = (undelivered_messages[thread_id] + [data])[-50:]
-            #logger.debug(f"[SESSION_TRACE] Stored undelivered message for thread {thread_id}, total queued: {len(undelivered_messages[thread_id])}")
+            undelivered_messages[thread_id]['analysis'] = (undelivered_messages[thread_id]['analysis'] + [data])[-50:]
+            #logger.debug(f"[SESSION_TRACE] Stored undelivered message for thread {thread_id}, total queued: {len(undelivered_messages[thread_id]['analysis'])}")
         
         log_session_state(f"After failed emit_analysis_event for thread {thread_id}", thread_id=thread_id)
         
         #logger.debug(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
+        return False
+
+
+def emit_knowledge_event(thread_id: str, data: Dict[str, Any]):
+    """
+    Emit a knowledge event to all clients in a thread room
+    
+    Args:
+        thread_id: The thread ID to send the event to
+        data: The knowledge event data to send
+        
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    logger.info(f"[KNOWLEDGE_EVENT] Emitting knowledge event to thread {thread_id}")
+    
+    # Check if there are any active sessions in this thread room
+    active_sessions_count = 0
+    active_session_ids = []
+    
+    with session_lock:
+        for session_id, session_data in ws_sessions.items():
+            stored_thread_id = session_data.get('thread_id')
+            
+            # Match sessions with the target thread_id
+            if stored_thread_id == thread_id:
+                active_sessions_count += 1
+                active_session_ids.append(session_id)
+                # Update last activity timestamp to mark session as active
+                session_data['last_activity'] = datetime.now().isoformat()
+    
+    logger.info(f"[KNOWLEDGE_EVENT] Found {active_sessions_count} active sessions for thread {thread_id}")
+    
+    if active_sessions_count > 0:
+        # First try to emit to the room
+        try:
+            socketio.emit('knowledge', data, room=thread_id)
+            logger.info(f"[KNOWLEDGE_EVENT] Successfully emitted knowledge event to room {thread_id}")
+        except Exception as e:
+            logger.error(f"[KNOWLEDGE_EVENT] Error emitting to room {thread_id}: {str(e)}")
+        
+        # Also send directly to each session as a backup
+        success = False
+        for session_id in active_session_ids:
+            try:
+                socketio.emit('knowledge', data, room=session_id)
+                logger.info(f"[KNOWLEDGE_EVENT] Sent knowledge event directly to session {session_id}")
+                success = True
+            except Exception as e:
+                logger.error(f"[KNOWLEDGE_EVENT] Failed direct knowledge delivery to session {session_id}: {str(e)}")
+        
+        # Store message in case not all deliveries were successful
+        if not success:
+            with message_lock:
+                if thread_id not in undelivered_messages:
+                    undelivered_messages[thread_id] = {}
+                if 'knowledge' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['knowledge'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
+                logger.info(f"[KNOWLEDGE_EVENT] Stored undelivered knowledge event for thread {thread_id}")
+        
+        return True
+    else:
+        logger.warning(f"[KNOWLEDGE_EVENT] No active sessions found for thread {thread_id}, knowledge event NOT DELIVERED")
+        
+        # Store undelivered message for later retrieval
+        with message_lock:
+            if thread_id not in undelivered_messages:
+                undelivered_messages[thread_id] = {}
+            if 'knowledge' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['knowledge'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
+            logger.info(f"[KNOWLEDGE_EVENT] Stored undelivered knowledge event for thread {thread_id}")
+        
         return False
 
 

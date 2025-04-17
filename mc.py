@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Dict
+from typing import List, Dict, Optional
 from langchain_openai import ChatOpenAI
 from utilities import logger
 from langchain_core.messages import HumanMessage,AIMessage
@@ -11,7 +11,18 @@ import re
 from typing import Tuple, Dict, Any
 from analysis import stream_analysis, build_context_analysis_prompt, process_analysis_result
 from personality import PersonalityManager
+from response_optimization import ResponseFilter, ResponseStructure, ResponseProcessor
 import time
+import datetime
+import os
+import random
+import uuid
+
+import nltk
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt', quiet=True)
 
 def add_messages(existing_messages, new_messages):
     return existing_messages + new_messages
@@ -46,6 +57,8 @@ class MC:
         self.similarity_threshold = similarity_threshold
         self.max_active_requests = max_active_requests
         self.personality_manager = PersonalityManager()
+        self.response_filter = ResponseFilter()  # Add response filter
+        self.response_processor = ResponseProcessor()  # Add response processor
         self.state = {
             "messages": [],
             "intent_history": [],
@@ -78,28 +91,48 @@ class MC:
             self.personality_manager = PersonalityManager()
         # No longer load personality here, will be loaded on first request
     
-    async def stream_response(self, prompt: str, builder: ResponseBuilder):
+    async def stream_response(self, prompt: str, builder: ResponseBuilder, knowledge_found: bool = False):
         if len(self.state["messages"]) > 20:
             prompt += "\nKeep it short and sweet."
+        
+        # Check if this is the first message or a continuation
+        is_first_message = len(self.state["messages"]) <= 1
         buffer = ""
+        
         try:
+            # First collect the full response
+            full_response = ""
             async for chunk in StreamLLM.astream(prompt):
                 buffer += chunk.content
-                # Split on sentence boundaries or size limit
-                if "\n" in buffer or buffer.endswith((".", "!", "?")) or len(buffer) > 500:
-                    # Take the complete part, leave the rest in buffer
-                    parts = buffer.split("\n", 1) if "\n" in buffer else [buffer, ""]
-                    complete_part = parts[0].strip()
-                    if complete_part:  # Only add if there's something meaningful
-                        builder.add(complete_part)
-                        yield builder.build(separator="\n")  # Use newline for natural flow
-                    buffer = parts[1] if len(parts) > 1 else ""
-            # Flush any remaining buffer
-            if buffer.strip():
-                builder.add(buffer.strip())
-                yield builder.build(separator="\n")
+                full_response += chunk.content
+            
+            # Process the full response to optimize structure
+            processed_response = self.response_processor.process_response(
+                full_response, 
+                self.state, 
+                self.state["messages"][-1].content if self.state["messages"] else "",
+                knowledge_found
+            )
+            
+            # Then apply greeting filter if needed
+            if not is_first_message:
+                processed_response = self.response_filter.remove_greeting(processed_response)
+            
+            # Break into sentences for streaming
+            sentences = processed_response.split(". ")
+            for i, sentence in enumerate(sentences):
+                # Add period back unless it's the last sentence and already has punctuation
+                if i < len(sentences) - 1 or not sentence.endswith((".", "!", "?")):
+                    sentence = sentence + "."
+                
+                builder.add(sentence.strip())
+                yield builder.build(separator=" ")
+            
+            # Update conversation state after successful response
+            self.response_filter.increment_turn()
+            
         except Exception as e:
-            logger.info(f"Streaming failed: {e}")
+            logger.error(f"Streaming failed: {e}", exc_info=True)
             builder.add("Có lỗi nhỏ, thử lại nhé!")
             yield builder.build(separator="\n")
 
@@ -237,6 +270,7 @@ class MC:
         builder = ResponseBuilder()
         
         analysis_events_sent = 0
+        knowledge_events_sent = 0
         
         async for response_chunk in self._handle_request(latest_msg_content, user_id, context, builder, state, 
                                                        graph_version_id=graph_version_id,
@@ -249,6 +283,15 @@ class MC:
                 #logger.info(f"Yielding analysis chunk #{analysis_events_sent} from trigger: {response_chunk.get('content', '')[:50]}...")
                 
                 # When using WebSockets, we don't need to yield the analysis chunks through the regular flow
+                # They're already sent via WebSocket, but we still yield them for proper counting and state management
+                yield response_chunk
+            # Check if this is a knowledge event
+            elif isinstance(response_chunk, dict) and response_chunk.get("type") == "knowledge":
+                # For knowledge chunks, pass them through directly
+                knowledge_events_sent += 1
+                logger.info(f"Yielding knowledge chunk #{knowledge_events_sent} from trigger: {len(response_chunk.get('content', []))} results")
+                
+                # When using WebSockets, we don't need to yield the knowledge chunks through the regular flow
                 # They're already sent via WebSocket, but we still yield them for proper counting and state management
                 yield response_chunk
             else:
@@ -264,6 +307,7 @@ class MC:
         self.state.update(state)
         logger.info(f"Final response: {state['prompt_str']}")
         logger.info(f"Total analysis events sent from trigger: {analysis_events_sent}")
+        logger.info(f"Total knowledge events sent from trigger: {knowledge_events_sent}")
         
         # Yield the final state as a special chunk
         yield {"state": state}
@@ -889,7 +933,23 @@ class MC:
                 
                 # Use vector search for batch processing
                 try:
-                    batch_results = await self._batch_query_knowledge(graph_version_id, batch)
+                    # Call with streaming and thread ID if websocket is enabled
+                    if use_websocket:
+                        batch_results = []
+                        async for knowledge_event in self._stream_batch_query_knowledge(
+                            graph_version_id, batch, top_k=3, thread_id=thread_id_for_analysis
+                        ):
+                            # Pass through knowledge events to trigger method
+                            yield knowledge_event
+                            
+                            # If this is the final event with complete flag, save the results
+                            if knowledge_event.get("complete") and not knowledge_event.get("error"):
+                                # The complete event doesn't include results, as they've been streamed
+                                # Results should be saved via standard method from other events
+                                pass
+                    else:
+                        # Normal non-streaming call
+                        batch_results = await self._batch_query_knowledge(graph_version_id, batch)
                     
                     # Update cache with new results
                     for query, results in zip(batch, batch_results):
@@ -1014,7 +1074,8 @@ class MC:
                 
                 feedback_prompt += additional_guidance
                 
-                async for _ in self.stream_response(feedback_prompt, builder):
+                # Feedback requests typically don't include knowledge
+                async for _ in self.stream_response(feedback_prompt, builder, knowledge_found=False):
                     yield builder.build()
                 return
             
@@ -1081,10 +1142,20 @@ class MC:
             
             additional_guidance += f"Apply cultural adaptations for: {culture_code}"
             
-            # Append the additional guidance to the preserved prompt
+            # Add the guidance to instructions
             response_prompt += additional_guidance
             
-            async for _ in self.stream_response(response_prompt, builder):
+            # Check if knowledge was found
+            knowledge_found = bool(knowledge_context and knowledge_context.strip())
+            
+            # Log the knowledge context for debugging
+            logger.info(f"[KNOWLEDGE_CONTEXT] For message: '{message[:100]}...' (if longer)")
+            if knowledge_context:
+                logger.info(f"[KNOWLEDGE_CONTEXT] Content: {knowledge_context[:1500]}..." if len(knowledge_context) > 1500 else f"[KNOWLEDGE_CONTEXT] Content: {knowledge_context}")
+            else:
+                logger.info(f"[KNOWLEDGE_CONTEXT] No knowledge context found")
+            
+            async for _ in self.stream_response(response_prompt, builder, knowledge_found):
                 yield builder.build()
                 
         except Exception as e:
@@ -1128,45 +1199,66 @@ class MC:
         
         return self.personality_manager.personality_instructions
 
-    async def _batch_query_knowledge(self, graph_version_id: str, queries: List[str], top_k: int = 3) -> List[List[Dict]]:
+    async def _batch_query_knowledge(self, graph_version_id: str, queries: List[str], top_k: int = 3, should_stream: bool = False, thread_id: str = None):
         """
         Batch process multiple queries using vector search for efficiency.
-        This optimized version reduces the number of database calls by grouping queries.
+        For streaming, use _stream_batch_query_knowledge instead.
         
         Args:
             graph_version_id: The version ID of the knowledge graph
             queries: List of queries to process
             top_k: Number of results to return per query
+            should_stream: DEPRECATED - Use _stream_batch_query_knowledge for streaming
+            thread_id: DEPRECATED - Use _stream_batch_query_knowledge for streaming
             
         Returns:
-            List of results for each query
+            List[List[Dict]]: Results for each query
         """
+        # Handle streaming mode by delegating to the streaming-specific function
+        if should_stream:
+            logger.warning("Using should_stream=True with _batch_query_knowledge is deprecated. Use _stream_batch_query_knowledge instead.")
+            # Use a list to collect all the streamed results
+            final_results = [[] for _ in range(len(queries))]
+            async for event in self._stream_batch_query_knowledge(graph_version_id, queries, top_k, thread_id):
+                # Process the event if needed
+                pass
+            # Return the collected results from streaming
+            return final_results
+
+        # Early return for empty queries
+        if not queries:
+            logger.warning("[KNOWLEDGE_DEBUG] Empty queries list provided to _batch_query_knowledge")
+            return []
+        
+        logger.info(f"[KNOWLEDGE_DEBUG] Starting batch query for {len(queries)} queries: {queries[:5]}{'...' if len(queries) > 5 else ''}")
+        
         try:
-            # Early return for empty queries
-            if not queries:
-                return []
-            
             # Get brain banks once for all queries
             brain_banks = await get_version_brain_banks(graph_version_id)
             
             if not brain_banks:
-                logger.warning(f"No brain banks found for graph version {graph_version_id}")
+                logger.warning(f"[KNOWLEDGE_DEBUG] No brain banks found for graph version {graph_version_id}")
                 return [[] for _ in queries]  # Return empty results for all queries
             
+            logger.info(f"[KNOWLEDGE_DEBUG] Found {len(brain_banks)} brain banks for graph version {graph_version_id}")
+            
             # Generate all embeddings in parallel (with caching)
-            logger.info(f"Generating embeddings for {len(queries)} queries")
+            logger.info(f"[KNOWLEDGE_DEBUG] Generating embeddings for {len(queries)} queries")
             embedding_tasks = [get_cached_embedding(query) for query in queries]
             embeddings = await asyncio.gather(*embedding_tasks)
             
             # Create a mapping of query index to embedding
             query_embeddings = {i: embedding for i, embedding in enumerate(embeddings)}
+            logger.info(f"[KNOWLEDGE_DEBUG] Successfully generated {len(query_embeddings)} embeddings")
             
             # Process each brain bank in parallel, but send all queries at once
-            all_results = [{} for _ in range(len(queries))]  # Initialize result containers
+            all_results = [[] for _ in range(len(queries))]  # Initialize result containers
             
             async def process_brain_bank(brain_bank):
                 bank_name = brain_bank["bank_name"]
                 brain_id = brain_bank["id"]
+                
+                logger.info(f"[KNOWLEDGE_DEBUG] Processing brain bank: {bank_name} (ID: {brain_id})")
                 
                 # Import necessary function
                 from database import query_brain_with_embeddings_batch
@@ -1176,43 +1268,299 @@ class MC:
                     query_embeddings, bank_name, brain_id, top_k
                 )
                 
+                # Log results for this brain bank
+                result_counts = {query_idx: len(results) for query_idx, results in brain_results.items()}
+                logger.info(f"[KNOWLEDGE_DEBUG] Brain {bank_name} results: {result_counts}")
+                
                 # Merge results
                 for query_idx, results in brain_results.items():
-                    if query_idx not in all_results:
-                        all_results[query_idx] = []
-                    all_results[query_idx].extend(results)
+                    # We ensure query_idx is a valid index in all_results
+                    if 0 <= query_idx < len(all_results):
+                        # Add all results to the full results list
+                        all_results[query_idx].extend(results)
+                        
+                        # Log score ranges to help debug potential filtering issues
+                        if results:
+                            scores = [result.get("score", 0) for result in results]
+                            logger.info(f"[KNOWLEDGE_DEBUG] Query {query_idx} ({queries[query_idx][:30]}...) scores in {bank_name}: min={min(scores):.4f}, max={max(scores):.4f}, count={len(scores)}")
+                    else:
+                        logger.warning(f"[KNOWLEDGE_DEBUG] Received invalid query_idx {query_idx} from brain {bank_name}")
             
             # Process all brain banks in parallel
             await asyncio.gather(*[process_brain_bank(brain_bank) for brain_bank in brain_banks])
             
+            # Log detailed results after processing all brain banks
+            for query_idx in range(len(queries)):
+                result_count = len(all_results[query_idx])
+                logger.info(f"[KNOWLEDGE_DEBUG] After merging, query {query_idx} ({queries[query_idx][:30]}...) has {result_count} results")
+            
             # Sort results by score and trim to top_k
             final_results = []
             for query_idx in range(len(queries)):
-                if query_idx in all_results:
+                results = all_results[query_idx]
+                if results:  # Simplified check, just see if the list has any items
                     # Sort by score and take top results
                     sorted_results = sorted(
-                        all_results[query_idx],
+                        results,
                         key=lambda x: x.get("score", 0),
                         reverse=True
                     )[:top_k]
+                    
+                    # Log filtering effect
+                    original_count = len(results)
+                    final_count = len(sorted_results)
+                    logger.info(f"[KNOWLEDGE_DEBUG] Query {query_idx} ({queries[query_idx][:30]}...): filtered from {original_count} to {final_count} results")
+                    
+                    # Log score details
+                    if sorted_results:
+                        scores = [result.get("score", 0) for result in sorted_results]
+                        logger.info(f"[KNOWLEDGE_DEBUG] Final scores for query {query_idx}: min={min(scores):.4f}, max={max(scores):.4f}")
+                    
                     final_results.append(sorted_results)
                 else:
+                    logger.warning(f"[KNOWLEDGE_DEBUG] Query {query_idx} ({queries[query_idx][:30]}...) has NO results after processing")
                     final_results.append([])
             
-            logger.info(f"Batch processing complete for {len(queries)} queries")
+            # Count total results
+            total_results = sum(len(results) for results in final_results)
+            empty_queries = sum(1 for results in final_results if not results)
+            
+            logger.info(f"[KNOWLEDGE_DEBUG] Batch processing complete: {total_results} total results, {empty_queries}/{len(queries)} queries with no results")
+            
+            # Warning if no results found for any query
+            if total_results == 0:
+                logger.warning("[KNOWLEDGE_DEBUG] No knowledge results found for any query")
+            
             return final_results
             
         except Exception as e:
-            logger.error(f"Error in batch query processing: {str(e)}")
+            logger.error(f"[KNOWLEDGE_DEBUG] Error in batch query processing: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             
             # Fallback to standard parallel execution
-            logger.info("Falling back to individual query processing")
+            logger.info("[KNOWLEDGE_DEBUG] Falling back to individual query processing")
             return await asyncio.gather(*[
                 query_graph_knowledge(graph_version_id, query, top_k)
                 for query in queries
             ])
+
+    async def _stream_batch_query_knowledge(self, graph_version_id: str, queries: List[str], top_k: int = 3, thread_id: str = None):
+        """
+        Stream batch query knowledge results for real-time updates.
+        This is an async generator function that yields results as they're found.
+        
+        Args:
+            graph_version_id: The version ID of the knowledge graph
+            queries: List of queries to process
+            top_k: Number of results to return per query
+            thread_id: Thread ID for WebSocket delivery of streamed results
+            
+        Yields:
+            Dict events with streaming knowledge results
+        """
+        try:
+            # Early return for empty queries
+            if not queries:
+                logger.warning("[KNOWLEDGE_DEBUG] Empty queries list provided to _stream_batch_query_knowledge")
+                yield {"type": "knowledge", "content": [], "complete": True}
+                return
+            
+            logger.info(f"[KNOWLEDGE_DEBUG] Starting batch query for {len(queries)} queries: {queries[:5]}{'...' if len(queries) > 5 else ''}")
+            
+            # Get brain banks once for all queries
+            brain_banks = await get_version_brain_banks(graph_version_id)
+            
+            if not brain_banks:
+                logger.warning(f"[KNOWLEDGE_DEBUG] No brain banks found for graph version {graph_version_id}")
+                yield {"type": "knowledge", "content": [], "complete": True}
+                return
+            
+            logger.info(f"[KNOWLEDGE_DEBUG] Found {len(brain_banks)} brain banks for graph version {graph_version_id}")
+            
+            # Generate all embeddings in parallel (with caching)
+            logger.info(f"[KNOWLEDGE_DEBUG] Generating embeddings for {len(queries)} queries")
+            embedding_tasks = [get_cached_embedding(query) for query in queries]
+            embeddings = await asyncio.gather(*embedding_tasks)
+            
+            # Create a mapping of query index to embedding
+            query_embeddings = {i: embedding for i, embedding in enumerate(embeddings)}
+            logger.info(f"[KNOWLEDGE_DEBUG] Successfully generated {len(query_embeddings)} embeddings")
+            
+            # Process each brain bank in parallel, but send all queries at once
+            all_results = [[] for _ in range(len(queries))]  # Initialize result containers
+            
+            # For streaming: track already streamed knowledge to avoid duplicates
+            streamed_ids = set()
+            
+            # Create a list to collect all results for streaming
+            streaming_results = []
+            
+            # Streaming version - uses generators
+            async def process_brain_bank_streaming(brain_bank):
+                bank_name = brain_bank["bank_name"]
+                brain_id = brain_bank["id"]
+                
+                logger.info(f"[KNOWLEDGE_DEBUG] Processing brain bank: {bank_name} (ID: {brain_id})")
+                
+                # Import necessary function
+                from database import query_brain_with_embeddings_batch
+                
+                # Send all embeddings to this brain bank at once
+                brain_results = await query_brain_with_embeddings_batch(
+                    query_embeddings, bank_name, brain_id, top_k
+                )
+                
+                # Log results for this brain bank
+                result_counts = {query_idx: len(results) for query_idx, results in brain_results.items()}
+                logger.info(f"[KNOWLEDGE_DEBUG] Brain {bank_name} results: {result_counts}")
+                
+                # Prepare new results to stream
+                new_results_to_stream = []
+                
+                # Merge results
+                for query_idx, results in brain_results.items():
+                    # We ensure query_idx is a valid index in all_results
+                    if 0 <= query_idx < len(all_results):
+                        # Collect new results for streaming
+                        for result in results:
+                            if result['id'] not in streamed_ids:
+                                streamed_ids.add(result['id'])
+                                # Add query info to help frontend organize results
+                                result_with_query = result.copy()
+                                result_with_query['query'] = queries[query_idx]
+                                result_with_query['query_idx'] = query_idx
+                                new_results_to_stream.append(result_with_query)
+                        
+                        # Add all results to the full results list
+                        all_results[query_idx].extend(results)
+                        
+                        # Log score ranges to help debug potential filtering issues
+                        if results:
+                            scores = [result.get("score", 0) for result in results]
+                            logger.info(f"[KNOWLEDGE_DEBUG] Query {query_idx} ({queries[query_idx][:30]}...) scores in {bank_name}: min={min(scores):.4f}, max={max(scores):.4f}, count={len(scores)}")
+                    else:
+                        logger.warning(f"[KNOWLEDGE_DEBUG] Received invalid query_idx {query_idx} from brain {bank_name}")
+                
+                # Return the results to be streamed (no longer a generator)
+                return new_results_to_stream
+            
+            # Process all brain banks in parallel, but now with regular coroutines
+            brain_bank_tasks = [process_brain_bank_streaming(brain_bank) for brain_bank in brain_banks]
+            
+            # Use asyncio.gather instead of as_completed for simplicity
+            brain_bank_results = await asyncio.gather(*brain_bank_tasks)
+            
+            # Process and yield each batch of results
+            for results_batch in brain_bank_results:
+                if results_batch:
+                    # Create a knowledge event with current results
+                    knowledge_event = {
+                        "type": "knowledge", 
+                        "content": results_batch,
+                        "complete": False
+                    }
+                    
+                    # If using WebSocket and thread ID is provided, emit to that room
+                    if thread_id:
+                        try:
+                            # Import from socketio_manager module
+                            from socketio_manager import emit_knowledge_event
+                            emit_knowledge_event(thread_id, knowledge_event)
+                        except Exception as e:
+                            logger.error(f"Error in socketio_manager websocket delivery for knowledge: {str(e)}")
+                            logger.error(f"Make sure you implement emit_knowledge_event in socketio_manager.py similar to: def emit_knowledge_event(thread_id, event): socketio.emit('knowledge', event, room=thread_id)")
+                    
+                    # Yield the event for standard flow
+                    yield knowledge_event
+            
+            # Log detailed results after processing all brain banks
+            for query_idx in range(len(queries)):
+                result_count = len(all_results[query_idx])
+                logger.info(f"[KNOWLEDGE_DEBUG] After merging, query {query_idx} ({queries[query_idx][:30]}...) has {result_count} results")
+            
+            # Sort results by score and trim to top_k
+            final_results = []
+            for query_idx in range(len(queries)):
+                results = all_results[query_idx]
+                if results:  # Simplified check, just see if the list has any items
+                    # Sort by score and take top results
+                    sorted_results = sorted(
+                        results,
+                        key=lambda x: x.get("score", 0),
+                        reverse=True
+                    )[:top_k]
+                    
+                    # Log filtering effect
+                    original_count = len(results)
+                    final_count = len(sorted_results)
+                    logger.info(f"[KNOWLEDGE_DEBUG] Query {query_idx} ({queries[query_idx][:30]}...): filtered from {original_count} to {final_count} results")
+                    
+                    # Log score details
+                    if sorted_results:
+                        scores = [result.get("score", 0) for result in sorted_results]
+                        logger.info(f"[KNOWLEDGE_DEBUG] Final scores for query {query_idx}: min={min(scores):.4f}, max={max(scores):.4f}")
+                    
+                    final_results.append(sorted_results)
+                else:
+                    logger.warning(f"[KNOWLEDGE_DEBUG] Query {query_idx} ({queries[query_idx][:30]}...) has NO results after processing")
+                    final_results.append([])
+            
+            # Count total results
+            total_results = sum(len(results) for results in final_results)
+            empty_queries = sum(1 for results in final_results if not results)
+            
+            logger.info(f"[KNOWLEDGE_DEBUG] Batch processing complete: {total_results} total results, {empty_queries}/{len(queries)} queries with no results")
+            
+            # Warning if no results found for any query
+            if total_results == 0:
+                logger.warning("[KNOWLEDGE_DEBUG] No knowledge results found for any query")
+            
+            # Send final "complete" event for streaming
+            complete_event = {
+                "type": "knowledge", 
+                "content": [],  # Empty as we've already streamed all content
+                "complete": True,
+                "summary": {
+                    "total_results": total_results,
+                    "empty_queries": empty_queries,
+                    "total_queries": len(queries)
+                }
+            }
+            
+            # Send via WebSocket if configured
+            if thread_id:
+                try:
+                    from socketio_manager import emit_knowledge_event
+                    emit_knowledge_event(thread_id, complete_event)
+                except Exception as e:
+                    logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
+            
+            # Yield for standard flow
+            yield complete_event
+            
+        except Exception as e:
+            logger.error(f"[KNOWLEDGE_DEBUG] Error in stream batch query processing: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
+            # Send error event for streaming
+            error_event = {
+                "type": "knowledge", 
+                "content": [],
+                "complete": True,
+                "error": True,
+                "error_message": str(e)
+            }
+            
+            if thread_id:
+                try:
+                    from socketio_manager import emit_knowledge_event
+                    emit_knowledge_event(thread_id, error_event)
+                except Exception as socket_e:
+                    logger.error(f"Error in socketio_manager delivery of error event: {str(socket_e)}")
+            
+            yield error_event
 
     async def adapt_response_to_culture(self, text, culture="default"):
         """
