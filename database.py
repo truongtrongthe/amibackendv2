@@ -13,6 +13,15 @@ import json
 import re
 from supabase import create_client, Client
 from typing import Dict, List
+import time
+
+# Global embedding cache
+_embedding_cache = {}
+_cache_ttl = 3600  # 1 hour TTL for cache entries
+
+# Global brain structure cache
+_brain_structure_cache = {}
+_brain_cache_ttl = 300  # 5 minutes cache TTL
 
 # Initialize Supabase client
 # Initialize Supabase client
@@ -148,7 +157,7 @@ async def infer_categories(input: str, context: str = "") -> Dict:
         }
 async def save_training(input: str, user_id: str, context: str = "", bank_name :str = "", mode: str = "default") -> bool:
     global AI_NAME
-    embedding = EMBEDDINGS.embed_query(input)
+    embedding = await get_cached_embedding(input)
     data = await infer_categories(input, context)
     ns = bank_name
     
@@ -241,7 +250,7 @@ async def save_training_with_chunk(
     
 ) -> bool:
     global AI_NAME
-    embedding = EMBEDDINGS.embed_query(input)
+    embedding = await get_cached_embedding(input)
     logger.info(f"Bank name at Save training chunk={bank_name}")
     logger.info(f"Environment variables: PRESET={os.getenv('PRESET', 'not set')}, ENT={os.getenv('ENT', 'not set')}")
     ns = bank_name 
@@ -412,22 +421,36 @@ async def find_knowledge(user_id: str, primary: str, special: str = "description
     return knowledge
 
 async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> List[Dict]:
-    query_embedding = EMBEDDINGS.embed_query(query)
+    """
+    Query knowledge from vector databases (ami_index and ent_index)
+    
+    Args:
+        query: The search query
+        bank_name: Optional namespace (bank name) to query
+        top_k: Maximum number of results to return
+        
+    Returns:
+        List of knowledge entries
+    """
+    embedding = await get_cached_embedding(query)
     ns = bank_name
     knowledge = []
     
     logger.info(f"Querying namespace={ns} in Index:{ami_index_name} and {ent_index_name}")
+    
     for index in [ami_index, ent_index]:
         try:
             # Broaden filter to include all non-character entries
-            results = index.query(
-                vector=query_embedding,
+            results = await asyncio.to_thread(
+                index.query,
+                vector=embedding,
                 top_k=top_k,
                 include_metadata=True,
                 namespace=ns,
                 #filter={"categories_special": {"$in": ["", "description"]}}
                 filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
             )
+            
             matches = results.get("matches", [])
             #logger.info(f"Knowledge matches from {index_name(index)}: {matches}")
             knowledge.extend([
@@ -449,8 +472,6 @@ async def query_knowledge(query: str, bank_name :str = "", top_k: int = 10) -> L
     knowledge = sorted(knowledge, key=lambda x: x["score"], reverse=True)[:top_k]
     logger.info(f"Queried {len(knowledge)} knowledge entries for '{query}'")
     return knowledge
-
-
 
 async def get_all_primary_categories(bank_name :str = "") -> set[str]:
     """
@@ -647,7 +668,7 @@ def clean_text(raw: str) -> str:
 
 async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
     """
-    Get the bank names for all brains in a version
+    Get the bank names for all brains in a version with caching
     
     Args:
         version_id: UUID of the graph version
@@ -655,6 +676,18 @@ async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
     Returns:
         List of dicts containing brain_id and bank_name
     """
+    # Check if we have a valid cache entry
+    current_time = time.time()
+    cache_key = f"brain_banks_{version_id}"
+    
+    if cache_key in _brain_structure_cache:
+        cache_entry = _brain_structure_cache[cache_key]
+        # Check if the cache entry is still valid
+        if current_time - cache_entry["timestamp"] < _brain_cache_ttl:
+            logger.info(f"Using cached brain structure for version {version_id}, {len(cache_entry['data'])} brains")
+            return cache_entry["data"]
+    
+    # Cache miss or expired, query the database
     try:
         # First get the brain IDs from the version
         version_response = supabase.table("brain_graph_version")\
@@ -683,8 +716,8 @@ async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
             
         if not brain_response.data:
             return []
-            
-        return [
+        
+        brain_banks = [
             {
                 "id": brain["id"],               # UUID for reference
                 "brain_id": brain["brain_id"],   # Integer ID if needed elsewhere
@@ -692,28 +725,31 @@ async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
             }
             for brain in brain_response.data
         ]
+        
+        # Cache the result
+        _brain_structure_cache[cache_key] = {
+            "data": brain_banks,
+            "timestamp": current_time
+        }
+        
+        # Prune cache if it gets too large (keep it under 100 entries)
+        if len(_brain_structure_cache) > 100:
+            # Remove oldest 20% of entries
+            sorted_keys = sorted(_brain_structure_cache.keys(), 
+                               key=lambda k: _brain_structure_cache[k]["timestamp"])
+            for key in sorted_keys[:20]:  # Remove oldest 20%
+                _brain_structure_cache.pop(key, None)
+        
+        logger.info(f"Cached brain structure for version {version_id}, {len(brain_banks)} brains")
+        return brain_banks
     except Exception as e:
         logger.error(f"Error getting brain banks: {e}")
         return []
 
-async def query_brain_knowledge_parallel(query: str, bank_name: str, top_k: int = 10) -> List[Dict]:
-    """
-    Query knowledge from a single brain's namespace
-    This is a helper function for parallel processing
-    """
-    try:
-        results = await query_knowledge(query, bank_name=bank_name, top_k=top_k)
-        return [{
-            "bank_name": bank_name,
-            **result
-        } for result in results]
-    except Exception as e:
-        logger.error(f"Error querying brain {bank_name}: {e}")
-        return []
 
 async def query_graph_knowledge(version_id: str, query: str, top_k: int = 10) -> List[Dict]:
     """
-    Query knowledge across all brains in a graph version
+    Query knowledge across all brains in a graph version with optimization
     
     Args:
         version_id: UUID of the graph version
@@ -724,41 +760,101 @@ async def query_graph_knowledge(version_id: str, query: str, top_k: int = 10) ->
         List of knowledge entries from all brains, sorted by relevance
     """
     try:
-        # Get all brain banks in this version
+        # Get all brain banks in this version (now cached)
         brain_banks = await get_version_brain_banks(version_id)
         if not brain_banks:
             logger.warning(f"No brain banks found for version {version_id}")
             return []
             
-        # Query all brains in parallel
-        tasks = [
-            query_brain_knowledge_parallel(query, brain["bank_name"], top_k)
-            for brain in brain_banks
-        ]
-        results = await asyncio.gather(*tasks)
+        # Generate embedding only once for the query
+        embedding = await get_cached_embedding(query)
         
-        # Flatten and sort results
+        # Query all brains in parallel directly with the embedding
         all_results = []
-        for brain_results in results:
-            all_results.extend(brain_results)
-            
+        tasks = []
+        
+        for brain in brain_banks:
+            # Create tasks for querying each brain's namespace
+            ns = brain["bank_name"]
+            tasks.append(
+                asyncio.create_task(
+                    _query_brain_with_embedding(embedding, ns, top_k, brain["id"])
+                )
+            )
+        
+        # Run all tasks in parallel
+        brain_results = await asyncio.gather(*tasks)
+        
+        # Flatten results
+        for results in brain_results:
+            all_results.extend(results)
+        
         # Sort by score and take top_k
         sorted_results = sorted(
             all_results,
             key=lambda x: x["score"],
             reverse=True
         )[:top_k]
-        
-        # Enhance results with brain information (using UUID from updated get_version_brain_banks)
-        brain_bank_map = {b["bank_name"]: b["id"] for b in brain_banks}
-        for result in sorted_results:
-            result["brain_id"] = brain_bank_map.get(result["bank_name"])
             
         logger.info(f"Found {len(sorted_results)} results across {len(brain_banks)} brains for version {version_id}")
         return sorted_results
         
     except Exception as e:
         logger.error(f"Error in graph knowledge query: {e}")
+        return []
+
+async def _query_brain_with_embedding(embedding, namespace: str, top_k: int = 10, brain_id: str = None) -> List[Dict]:
+    """
+    Query a brain using a pre-computed embedding to avoid redundant embedding generation
+    
+    Args:
+        embedding: Pre-computed embedding vector
+        namespace: Brain namespace/bank name
+        top_k: Maximum number of results to return
+        brain_id: ID of the brain being queried
+        
+    Returns:
+        List of knowledge entries from the specified brain
+    """
+    try:
+        knowledge = []
+        
+        # Query both indexes with the same embedding
+        for index in [ami_index, ent_index]:
+            try:
+                results = await asyncio.to_thread(
+                    index.query,
+                    vector=embedding,
+                    top_k=top_k,
+                    include_metadata=True,
+                    namespace=namespace,
+                    filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
+                )
+                
+                matches = results.get("matches", [])
+                knowledge.extend([
+                    {
+                        "id": match["id"],
+                        "bank_name": namespace,
+                        "brain_id": brain_id,
+                        "raw": match["metadata"]["raw"],
+                        "categories": {
+                            "primary": match["metadata"]["categories_primary"],
+                            "special": match["metadata"]["categories_special"]
+                        },
+                        "confidence": match["metadata"]["confidence"],
+                        "score": match["score"]
+                    }
+                    for match in matches
+                ])
+            except Exception as e:
+                logger.error(f"Knowledge query failed in {index_name(index)} for namespace {namespace}: {e}")
+        
+        # Sort results by score
+        knowledge = sorted(knowledge, key=lambda x: x["score"], reverse=True)[:top_k]
+        return knowledge
+    except Exception as e:
+        logger.error(f"Error querying brain with embedding for namespace {namespace}: {e}")
         return []
 
 async def query_graph_knowledge_by_category(version_id: str, category: str, top_k: int = 10) -> List[Dict]:
@@ -804,4 +900,184 @@ async def query_graph_knowledge_by_category(version_id: str, category: str, top_
     except Exception as e:
         logger.error(f"Error in graph category query: {e}")
         return []
+
+async def get_cached_embedding(text: str):
+    """
+    Get embedding with caching to reduce redundant API calls
+    
+    Args:
+        text: Text to embed
+        
+    Returns:
+        Embedding vector
+    """
+    # Normalize text for cache key
+    cache_key = text.strip().lower()
+    current_time = time.time()
+    
+    # Check cache
+    if cache_key in _embedding_cache:
+        cache_entry = _embedding_cache[cache_key]
+        # Check if entry is still valid
+        if current_time - cache_entry["timestamp"] < _cache_ttl:
+            logger.debug(f"Embedding cache hit for: {text[:30]}...")
+            return cache_entry["embedding"]
+    
+    # Generate new embedding
+    embedding = EMBEDDINGS.embed_query(text)
+    
+    # Store in cache
+    _embedding_cache[cache_key] = {
+        "embedding": embedding,
+        "timestamp": current_time
+    }
+    
+    # Prune cache if it gets too large (keep it under 1000 entries)
+    if len(_embedding_cache) > 1000:
+        # Remove oldest 20% of entries
+        sorted_keys = sorted(_embedding_cache.keys(), 
+                            key=lambda k: _embedding_cache[k]["timestamp"])
+        for key in sorted_keys[:200]:  # Remove oldest 20%
+            _embedding_cache.pop(key, None)
+    
+    return embedding
+
+async def query_brain_with_embeddings_batch(query_embeddings: Dict[int, List[float]], 
+                                   namespace: str, 
+                                   brain_id: str, 
+                                   top_k: int = 10) -> Dict[int, List[Dict]]:
+    """
+    Batch process multiple query embeddings for a single brain namespace.
+    This optimizes performance by reducing the number of vector store API calls.
+    
+    Args:
+        query_embeddings: Dictionary mapping query indices to their embeddings
+        namespace: Brain namespace/bank name
+        brain_id: ID of the brain being queried
+        top_k: Maximum number of results to return per query
+        
+    Returns:
+        Dictionary mapping query indices to their results
+    """
+    try:
+        # Initialize results container
+        results_by_query = {}
+        
+        # If batch size is small, we can optimize by querying both indexes in a 
+        # single execution context to prevent connection thrashing
+        if len(query_embeddings) <= 5:
+            logger.info(f"Small batch size ({len(query_embeddings)}), using optimized dual-index query")
+            
+            # Group queries by index to optimize IO
+            for index in [ami_index, ent_index]:
+                index_name_str = index_name(index)
+                logger.info(f"Batch querying {index_name_str} with {len(query_embeddings)} embeddings for namespace {namespace}")
+                
+                # Create a list of tasks, one for each query
+                tasks = []
+                for query_idx, embedding in query_embeddings.items():
+                    # Use asyncio.to_thread to avoid blocking
+                    task = asyncio.to_thread(
+                        index.query,
+                        vector=embedding,
+                        top_k=top_k,
+                        include_metadata=True,
+                        namespace=namespace,
+                        filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
+                    )
+                    tasks.append((query_idx, task))
+                
+                # Execute all tasks in parallel
+                for query_idx, task in tasks:
+                    try:
+                        results = await task
+                        matches = results.get("matches", [])
+                        
+                        # Convert to standard result format
+                        for match in matches:
+                            result = {
+                                "id": match["id"],
+                                "bank_name": namespace,
+                                "brain_id": brain_id,
+                                "raw": match["metadata"]["raw"],
+                                "categories": {
+                                    "primary": match["metadata"]["categories_primary"],
+                                    "special": match["metadata"]["categories_special"]
+                                },
+                                "confidence": match["metadata"]["confidence"],
+                                "score": match["score"]
+                            }
+                            
+                            # Initialize results list for this query if needed
+                            if query_idx not in results_by_query:
+                                results_by_query[query_idx] = []
+                                
+                            results_by_query[query_idx].append(result)
+                    except Exception as e:
+                        logger.error(f"Error processing query {query_idx} for {index_name_str}: {e}")
+        else:
+            # For larger batch sizes, process in parallel per query and index
+            logger.info(f"Large batch size ({len(query_embeddings)}), using parallel processing")
+            
+            async def process_query_for_index(query_idx, embedding, index):
+                index_name_str = index_name(index)
+                try:
+                    results = await asyncio.to_thread(
+                        index.query,
+                        vector=embedding,
+                        top_k=top_k,
+                        include_metadata=True,
+                        namespace=namespace,
+                        filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
+                    )
+                    
+                    matches = results.get("matches", [])
+                    query_results = []
+                    
+                    # Convert to standard result format
+                    for match in matches:
+                        result = {
+                            "id": match["id"],
+                            "bank_name": namespace,
+                            "brain_id": brain_id,
+                            "raw": match["metadata"]["raw"],
+                            "categories": {
+                                "primary": match["metadata"]["categories_primary"],
+                                "special": match["metadata"]["categories_special"]
+                            },
+                            "confidence": match["metadata"]["confidence"],
+                            "score": match["score"]
+                        }
+                        query_results.append(result)
+                        
+                    return query_idx, query_results
+                except Exception as e:
+                    logger.error(f"Error processing query {query_idx} for {index_name_str}: {e}")
+                    return query_idx, []
+            
+            # Create tasks for all queries and both indexes
+            all_tasks = []
+            for query_idx, embedding in query_embeddings.items():
+                for index in [ami_index, ent_index]:
+                    all_tasks.append(process_query_for_index(query_idx, embedding, index))
+            
+            # Execute all tasks in parallel
+            all_results = await asyncio.gather(*all_tasks)
+            
+            # Merge results
+            for query_idx, query_results in all_results:
+                if query_idx not in results_by_query:
+                    results_by_query[query_idx] = []
+                results_by_query[query_idx].extend(query_results)
+        
+        # Log summary of results
+        total_results = sum(len(results) for results in results_by_query.values())
+        logger.info(f"Batch query complete for {len(query_embeddings)} embeddings in namespace {namespace}: {total_results} total results")
+        
+        return results_by_query
+    except Exception as e:
+        logger.error(f"Error in batch query processing for namespace {namespace}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {}
 

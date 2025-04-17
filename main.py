@@ -7,6 +7,10 @@
 import eventlet
 eventlet.monkey_patch()
 
+# Add at the top with other imports
+import nest_asyncio
+nest_asyncio.apply()  # Apply patch to allow nested event loops
+
 from flask import Flask, Response, request, jsonify
 import json
 from uuid import UUID, uuid4
@@ -18,6 +22,8 @@ from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
 from typing import List, Optional, Dict, Any  # Added List and Optional imports
 from collections import deque
+import threading
+import queue
 
 # Keep track of recent webhook requests to detect duplicates
 recent_requests = deque(maxlen=100)
@@ -53,6 +59,69 @@ from socketio_manager import (
     socketio, ws_sessions, session_lock, 
     undelivered_messages, message_lock,
 )
+
+# Thread-safe function to run async code in separate thread
+def run_async_in_thread(async_func, *args, **kwargs):
+    """
+    Run an async function in a separate thread with its own event loop,
+    or in the current event loop if one is already running.
+    Returns the result of the async function.
+    Handles exceptions by propagating them back to the caller.
+    
+    Args:
+        async_func: The async function to run
+        *args, **kwargs: Arguments to pass to the async function
+    
+    Returns:
+        The result of the async function
+    """
+    # First, check if we're already in an event loop
+    try:
+        current_loop = asyncio.get_event_loop()
+        if current_loop.is_running():
+            logger.info("Event loop already running, using nest_asyncio to run coroutine")
+            # If we're already in a running loop, use it directly with nest_asyncio
+            return current_loop.run_until_complete(async_func(*args, **kwargs))
+    except RuntimeError:
+        # No event loop in this thread, we'll create one in a new thread
+        logger.info("No event loop in current thread, creating new thread with event loop")
+        pass
+    
+    # If we get here, we need to create a new thread with its own event loop
+    result_queue = queue.Queue()
+    
+    def thread_target():
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # Run the async function and get the result
+            result = loop.run_until_complete(async_func(*args, **kwargs))
+            # Put the result in the queue
+            result_queue.put(result)
+        except Exception as e:
+            # If there's an exception, put it in the queue
+            logger.error(f"Error in async thread: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            result_queue.put(e)
+        finally:
+            # Always close the loop
+            loop.close()
+    
+    # Start the thread and wait for it to finish
+    thread = threading.Thread(target=thread_target)
+    thread.start()
+    thread.join()
+    
+    # Get the result (or exception) from the queue
+    result = result_queue.get()
+    
+    # If it's an exception, raise it
+    if isinstance(result, Exception):
+        raise result
+    
+    return result
 
 # Load inbox mapping for Chatwoot
 INBOX_MAPPING = {}
@@ -111,7 +180,6 @@ except Exception as e:
     supabase = MockSupabase()
     logger.warning("Using mock Supabase client in main.py for testing")
 
-
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'ami_secret_key')
@@ -131,7 +199,8 @@ else:
 
 cm = ContactManager()
 convo_mgr = ConversationManager()
-# Create a new event loop for the app
+# We'll keep a reference to the loop but won't use it directly in request handlers
+# This is kept for compatibility with any existing code not modified yet
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
@@ -306,7 +375,7 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
 
 # Existing endpoints (pilot, training, havefun) remain unchanged
 @app.route('/pilot', methods=['POST', 'OPTIONS'])
-async def pilot():
+def pilot():
     if request.method == 'OPTIONS':
         return handle_options()
     
@@ -315,28 +384,65 @@ async def pilot():
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "pilot_thread")
     
-    print("Headers:", request.headers)
-    print("Pilot API called!")
+    logger.info("Pilot API called!")
     
-    try:
-        # Import fresh
-        from ami import convo_stream
-        
-        # Create the generator without awaiting it
-        async_gen = convo_stream(
-            user_input=user_input, 
-            user_id=user_id, 
-            thread_id=thread_id, 
-            mode="pilot"
-        )
-        
-        return create_stream_response(async_gen)
-    except Exception as e:
-        logger.error(f"Exception in pilot endpoint: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    # Create a synchronous response streaming solution
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Import directly here to ensure fresh imports
+            from ami import convo_stream
+            
+            # Define the async process function
+            async def process_stream():
+                """Process the stream and return all items."""
+                outputs = []
+                try:
+                    # Get the stream
+                    stream = convo_stream(
+                        user_input=user_input, 
+                        user_id=user_id, 
+                        thread_id=thread_id, 
+                        mode="pilot"
+                    )
+                    
+                    # Process all the output
+                    async for item in stream:
+                        outputs.append(item)
+                except Exception as e:
+                    error_msg = f"Error processing stream: {str(e)}"
+                    logger.error(error_msg)
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                
+                return outputs
+            
+            # Run the async function in a separate thread
+            outputs = run_async_in_thread(process_stream)
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+                
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in pilot response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
+    
+    # Create a streaming response with our generator
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 @app.route('/training', methods=['POST', 'OPTIONS'])
-async def training():
+def training():
     if request.method == 'OPTIONS':
         return handle_options()
     
@@ -345,30 +451,67 @@ async def training():
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "training_thread")
     
-    print("Headers:", request.headers)
-    print("Training API called!")
+    logger.info("Training API called!")
     
-    try:
-        # Import fresh
-        from ami import convo_stream
-        
-        # Create the generator without awaiting it
-        async_gen = convo_stream(
-            user_input=user_input, 
-            user_id=user_id, 
-            thread_id=thread_id, 
-            mode="training"
-        )
-        
-        return create_stream_response(async_gen)
-    except Exception as e:
-        logger.error(f"Exception in training endpoint: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    # Create a synchronous response streaming solution
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Import directly here to ensure fresh imports
+            from ami import convo_stream
+            
+            # Define the async process function
+            async def process_stream():
+                """Process the stream and return all items."""
+                outputs = []
+                try:
+                    # Get the stream
+                    stream = convo_stream(
+                        user_input=user_input, 
+                        user_id=user_id, 
+                        thread_id=thread_id, 
+                        mode="training"
+                    )
+                    
+                    # Process all the output
+                    async for item in stream:
+                        outputs.append(item)
+                except Exception as e:
+                    error_msg = f"Error processing stream: {str(e)}"
+                    logger.error(error_msg)
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                
+                return outputs
+            
+            # Run the async function in a separate thread
+            outputs = run_async_in_thread(process_stream)
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+                
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in training response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
+    
+    # Create a streaming response with our generator
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 @app.route('/havefun', methods=['POST', 'OPTIONS'])
 def havefun():
     """
-    Handle havefun requests using a synchronous approach to avoid Flask async context issues.
+    Handle havefun requests using a thread-based approach to avoid Flask/Eventlet event loop conflicts.
     """
     if request.method == 'OPTIONS':
         return handle_options()
@@ -407,7 +550,6 @@ def havefun():
         """Generate streaming response items synchronously."""
         try:
             # Import directly here to ensure fresh imports
-            import asyncio
             from ami import convo_stream
             
             # Set up response parameters
@@ -422,12 +564,8 @@ def havefun():
             if use_websocket:
                 stream_params["use_websocket"] = True
                 stream_params["thread_id_for_analysis"] = thread_id
-                
-            # Create a new event loop for this request
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             
-            # Process the convo_stream in the event loop
+            # Define the async process function
             async def process_stream():
                 """Process the stream and return all items."""
                 outputs = []
@@ -447,11 +585,8 @@ def havefun():
                 
                 return outputs
             
-            # Run the processor and get all outputs
-            outputs = loop.run_until_complete(process_stream())
-            
-            # Clean up the event loop
-            loop.close()
+            # Run the async function in a separate thread
+            outputs = run_async_in_thread(process_stream)
             
             # Yield each output
             for item in outputs:
@@ -479,7 +614,7 @@ def havefun():
     return response
 
 @app.route('/autopilot', methods=['POST', 'OPTIONS'])
-async def gopilot():
+def gopilot():
     if request.method == 'OPTIONS':
         return handle_options()
     
@@ -488,28 +623,65 @@ async def gopilot():
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
     
-    print("Headers:", request.headers)
-    print("Autopilot API called!")
+    logger.info("Autopilot API called!")
     
-    try:
-        # Import here to ensure it's fresh
-        from ami import convo_stream
-        
-        # Create the generator without awaiting it
-        async_gen = convo_stream(
-            user_input=user_input, 
-            user_id=user_id, 
-            thread_id=thread_id, 
-            mode="mc"
-        )
-        
-        return create_stream_response(async_gen)
-    except Exception as e:
-        logger.error(f"Exception in autopilot endpoint: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    # Create a synchronous response streaming solution
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Import directly here to ensure fresh imports
+            from ami import convo_stream
+            
+            # Define the async process function
+            async def process_stream():
+                """Process the stream and return all items."""
+                outputs = []
+                try:
+                    # Get the stream
+                    stream = convo_stream(
+                        user_input=user_input, 
+                        user_id=user_id, 
+                        thread_id=thread_id, 
+                        mode="mc"
+                    )
+                    
+                    # Process all the output
+                    async for item in stream:
+                        outputs.append(item)
+                except Exception as e:
+                    error_msg = f"Error processing stream: {str(e)}"
+                    logger.error(error_msg)
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                
+                return outputs
+            
+            # Run the async function in a separate thread
+            outputs = run_async_in_thread(process_stream)
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+                
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in autopilot response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
+    
+    # Create a streaming response with our generator
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 @app.route('/labels', methods=['GET', 'OPTIONS'])
-async def get_labels():
+def get_labels():
     print(f"Received request: {request.method} {request.path}")
     if request.method == 'OPTIONS':
         return handle_options()
@@ -518,16 +690,22 @@ async def get_labels():
     if not bank_name:
         return jsonify({"error": "bank_name parameter is required"}), 400
     
-    labels = await get_all_labels(lang="original",bank_name=bank_name)
-    print(f"Labels from DB: {labels}")
-    if not labels:
-        return jsonify({"error": "No labels found"}), 404
-    
-    label_list = list(labels)
-    return jsonify({"labels": label_list}), 200
+    try:
+        # Run the async get_all_labels function in a separate thread
+        labels = run_async_in_thread(get_all_labels, lang="original", bank_name=bank_name)
+        print(f"Labels from DB: {labels}")
+        
+        if not labels:
+            return jsonify({"error": "No labels found"}), 404
+        
+        label_list = list(labels)
+        return jsonify({"labels": label_list}), 200
+    except Exception as e:
+        logger.error(f"Error in get_labels: {str(e)}")
+        return jsonify({"error": f"Error retrieving labels: {str(e)}"}), 500
 
 @app.route('/label-details', methods=['GET', 'OPTIONS'])
-async def get_label_details():
+def get_label_details():
     if request.method == 'OPTIONS':
         return handle_options()
     
@@ -538,18 +716,24 @@ async def get_label_details():
     if not bank_name:
         return jsonify({"error": "bank_name parameter is required"}), 400
     
-    raw_data = await get_raw_data_by_label(label, lang="original",bank_name=bank_name)
-    if not raw_data:
-        return jsonify({"error": f"No data found for label '{label}'"}), 404
-    
-    cleaned_data = [clean_text(text) for text in raw_data]
-    
-    response_data = {
-        "label": label,
-        "total_entries": len(cleaned_data),
-        "data": cleaned_data
-    }
-    return jsonify(response_data), 200
+    try:
+        # Run the async get_raw_data_by_label function in a separate thread
+        raw_data = run_async_in_thread(get_raw_data_by_label, label, lang="original", bank_name=bank_name)
+        
+        if not raw_data:
+            return jsonify({"error": f"No data found for label '{label}'"}), 404
+        
+        cleaned_data = [clean_text(text) for text in raw_data]
+        
+        response_data = {
+            "label": label,
+            "total_entries": len(cleaned_data),
+            "data": cleaned_data
+        }
+        return jsonify(response_data), 200
+    except Exception as e:
+        logger.error(f"Error in get_label_details: {str(e)}")
+        return jsonify({"error": f"Error retrieving label details: {str(e)}"}), 500
 
 @app.route('/summarize-document', methods=['POST', 'OPTIONS'])
 def summary_document_endpoint():
@@ -566,16 +750,23 @@ def summary_document_endpoint():
     if not file.filename:
         return jsonify({"error": "No file selected"}), 400
 
-    # Run the async process_document function synchronously using the event loop
-    summary = loop.run_until_complete(summarize_document(file, user_id, mode))
-
-    if summary:
+    # Use the thread-based approach instead of the global event loop
+    try:
+        # Run the async summarize_document function in a separate thread
+        summary = run_async_in_thread(summarize_document, file, user_id, mode)
+        
+        if summary:
+            return jsonify({
+                "summary": summary
+            }), 200
+        else:
+            return jsonify({
+                "error": "Failed to process document"
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in summarize_document: {str(e)}")
         return jsonify({
-            "summary": summary
-        }), 200
-    else:
-        return jsonify({
-            "error": "Failed to process document"
+            "error": f"Error processing document: {str(e)}"
         }), 500
 
 @app.route('/process-document', methods=['POST', 'OPTIONS'])
@@ -591,20 +782,26 @@ def process_document_endpoint():
     bank_name=request.form['bank_name']
     mode = request.form.get('mode', 'default')  # Optional mode parameter
     
-
     if not file.filename:
         return jsonify({"error": "No file selected"}), 400
 
-    # Run the async process_document function synchronously using the event loop
-    success = loop.run_until_complete(process_document(file, user_id, mode,bank_name))
-
-    if success:
+    # Use the thread-based approach instead of the global event loop
+    try:
+        # Run the async process_document function in a separate thread
+        success = run_async_in_thread(process_document, file, user_id, mode, bank_name)
+        
+        if success:
+            return jsonify({
+                "message": "Document processed successfully"
+            }), 200
+        else:
+            return jsonify({
+                "error": "Failed to process document"
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in process_document: {str(e)}")
         return jsonify({
-            "message": "Document processed successfully"
-        }), 200
-    else:
-        return jsonify({
-            "error": "Failed to process document"
+            "error": f"Error processing document: {str(e)}"
         }), 500
 
 
@@ -1424,59 +1621,77 @@ def chatwoot_webhook():
     """
     Handle Chatwoot webhook events and route based on inbox_id and organization_id
     """
+    logger.info(f"→ RECEIVED WEBHOOK - Method: {request.method}, Path: {request.path}, Args: {request.args}")
+    logger.info(f"→ HEADERS: {dict(request.headers)}")
+    
     if request.method == 'OPTIONS':
+        logger.info("→ Processing OPTIONS request")
         return handle_options()
         
     try:
+        # Log raw request data first
+        raw_data = request.get_data().decode('utf-8')
+        logger.info(f"→ RAW REQUEST DATA: {raw_data[:1000]}")  # Log first 1000 chars to avoid huge logs
+        
         data = request.get_json()
         if not data:
-            logger.error("No JSON data received in webhook")
+            logger.error("→ ERROR: No JSON data received in webhook")
             return jsonify({"status": "error", "message": "No JSON data received"}), 400
             
+        logger.info(f"→ PARSED JSON: {json.dumps(data)[:1000]}...")  # Log first 1000 chars
         event = data.get('event')
+        logger.info(f"→ EVENT TYPE: {event}")
         
         # Get organization_id from query parameters or headers
         organization_id = request.args.get('organization_id')
+        logger.info(f"→ QUERY PARAM organization_id: {organization_id}")
+        
         if not organization_id:
             organization_id = request.headers.get('X-Organization-Id')
+            logger.info(f"→ HEADER X-Organization-Id: {organization_id}")
         
         # Extract inbox information
         inbox = data.get('inbox', {})
         inbox_id = str(inbox.get('id', ''))
         facebook_page_id = inbox.get('channel', {}).get('facebook_page_id', 'N/A')
         
+        logger.info(f"→ INBOX DETAILS - ID: {inbox_id}, Facebook Page ID: {facebook_page_id}")
+        
         # Create a unique ID for this webhook to detect duplicates
         request_id = f"{event}_{data.get('id', '')}_{inbox_id}_{datetime.now().timestamp()}"
         
         # Check for duplicates
         if request_id in recent_requests:
-            logger.info(f"Duplicate webhook detected! Ignoring: {request_id}")
+            logger.info(f"→ DUPLICATE detected! Ignoring: {request_id}")
             return jsonify({"status": "success", "message": "Duplicate request ignored"}), 200
         
         recent_requests.append(request_id)
+        logger.info(f"→ Added to recent_requests: {request_id}")
         
         # Log basic information
         logger.info(
-            f"Chatwoot Webhook - Event: {event}, Inbox: {inbox_id}, "
+            f"→ WEBHOOK SUMMARY - Event: {event}, Inbox: {inbox_id}, "
             f"Page: {facebook_page_id}, Organization: {organization_id or 'Not provided'}"
         )
         
         # Validate against inbox mapping if available
         if INBOX_MAPPING and inbox_id:
+            logger.info(f"→ CHECKING inbox mapping for inbox_id: {inbox_id}")
             inbox_config = INBOX_MAPPING.get(inbox_id)
             if inbox_config:
+                logger.info(f"→ FOUND inbox config: {inbox_config}")
                 expected_organization_id = inbox_config['organization_id']
                 expected_facebook_page_id = inbox_config['facebook_page_id']
                 
                 # If organization_id was not provided, use the one from mapping
                 if not organization_id:
                     organization_id = expected_organization_id
-                    logger.info(f"Using organization_id {organization_id} from inbox mapping")
+                    logger.info(f"→ USING organization_id {organization_id} from inbox mapping")
                 
                 # If provided, validate that it matches what's expected
                 elif organization_id != expected_organization_id:
                     logger.warning(
-                        f"Organization mismatch: provided={organization_id}, "
+                        f"→ ORGANIZATION MISMATCH: provided={organization_id}, "
                         f"expected={expected_organization_id} for inbox {inbox_id}"
                     )
                     return jsonify({
@@ -1487,26 +1702,27 @@ def chatwoot_webhook():
                 # Validate Facebook page ID if available
                 if facebook_page_id != 'N/A' and facebook_page_id != expected_facebook_page_id:
                     logger.warning(
-                        f"Facebook page mismatch: actual={facebook_page_id}, "
+                        f"→ FACEBOOK PAGE MISMATCH: actual={facebook_page_id}, "
                         f"expected={expected_facebook_page_id} for inbox {inbox_id}"
                     )
             else:
-                logger.warning(f"No mapping found for inbox_id: {inbox_id}")
+                logger.warning(f"→ NO MAPPING found for inbox_id: {inbox_id}")
                 # Continue processing even without mapping, using provided organization_id
         
         # Handle different event types
         if event == "message_created":
-            logger.info(f"Processing message_created event for organization: {organization_id or 'None'}")
+            logger.info(f"→ PROCESSING message_created event for organization: {organization_id or 'None'}")
             handle_message_created(data, organization_id)
         elif event == "message_updated":
-            logger.info(f"Processing message_updated event for organization: {organization_id or 'None'}")
+            logger.info(f"→ PROCESSING message_updated event for organization: {organization_id or 'None'}")
             handle_message_updated(data, organization_id)
         elif event == "conversation_created":
-            logger.info(f"Processing conversation_created event for organization: {organization_id or 'None'}")
+            logger.info(f"→ PROCESSING conversation_created event for organization: {organization_id or 'None'}")
             handle_conversation_created(data, organization_id)
         else:
-            logger.info(f"Unhandled event type: {event}")
+            logger.info(f"→ UNHANDLED event type: {event}")
         
+        logger.info("→ WEBHOOK PROCESSING SUCCESSFUL - Returning 200 OK")
         return jsonify({
             "status": "success", 
             "message": f"Processed {event} event", 
@@ -1515,9 +1731,10 @@ def chatwoot_webhook():
         }), 200
     
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}")
+        logger.error(f"→ CRITICAL ERROR processing webhook: {str(e)}")
         import traceback
-        traceback.print_exc()
+        trace = traceback.format_exc()
+        logger.error(f"→ STACK TRACE: {trace}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/')

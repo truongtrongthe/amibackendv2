@@ -6,11 +6,12 @@ from langchain_core.messages import HumanMessage,AIMessage
 import json
 #from sentence_transformers import SentenceTransformer, util
 import numpy as np
-from database import query_graph_knowledge
+from database import query_graph_knowledge, get_version_brain_banks, get_cached_embedding
 import re
 from typing import Tuple, Dict, Any
 from analysis import stream_analysis, build_context_analysis_prompt, process_analysis_result
 from personality import PersonalityManager
+import time
 
 def add_messages(existing_messages, new_messages):
     return existing_messages + new_messages
@@ -104,7 +105,7 @@ class MC:
 
     async def stream_analysis(self, prompt: str, thread_id_for_analysis=None, use_websocket=False):
         """
-        Stream the context analysis from the LLM
+        Stream the context analysis from the LLM with optimized chunking to reduce overhead
         
         Args:
             prompt: The prompt to analyze
@@ -112,39 +113,59 @@ class MC:
             use_websocket: Whether to use WebSocket for streaming
         """
         analysis_buffer = ""
+        chunk_buffer = ""
+        chunk_size_threshold = 250  # Larger chunk size reduces message count
+        
         try:
             async for chunk in StreamLLM.astream(prompt):
                 chunk_content = chunk.content
                 analysis_buffer += chunk_content
+                chunk_buffer += chunk_content
                 
-                # Create analysis event
-                analysis_event = {
-                    "type": "analysis", 
-                    "content": chunk_content, 
+                # Only emit chunks when they reach a significant size or contain a natural break
+                if (len(chunk_buffer) >= chunk_size_threshold or 
+                    (len(chunk_buffer) > 50 and chunk_buffer.endswith((".", "!", "?", "\n")))):
+                    
+                    # Create analysis event with current buffer
+                    analysis_event = {
+                        "type": "analysis", 
+                        "content": chunk_buffer, 
+                        "complete": False
+                    }
+                    
+                    # If using WebSocket and thread ID is provided, emit to that room
+                    if use_websocket and thread_id_for_analysis:
+                        try:
+                            # Import from socketio_manager module
+                            from socketio_manager import emit_analysis_event
+                            emit_analysis_event(thread_id_for_analysis, analysis_event)
+                        except Exception as e:
+                            logger.error(f"Error in socketio_manager websocket delivery: {str(e)}")
+                    
+                    # Always yield for the standard flow too
+                    yield analysis_event
+                    
+                    # Reset chunk buffer
+                    chunk_buffer = ""
+            
+            # Send any remaining buffer content
+            if chunk_buffer:
+                intermediate_event = {
+                    "type": "analysis",
+                    "content": chunk_buffer,
                     "complete": False
                 }
                 
-                # If using WebSocket and thread ID is provided, emit to that room
                 if use_websocket and thread_id_for_analysis:
                     try:
-                        # Import from socketio_manager module instead of socket
                         from socketio_manager import emit_analysis_event
-                        was_delivered = emit_analysis_event(thread_id_for_analysis, analysis_event)
-                        #if was_delivered:
-                        #    logger.info(f"Sent analysis chunk via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)}")
-                        #else:
-                        #    logger.warning(f"Analysis chunk NOT DELIVERED via socketio_manager to room {thread_id_for_analysis}, length: {len(chunk_content)} - No active sessions")
+                        emit_analysis_event(thread_id_for_analysis, intermediate_event)
                     except Exception as e:
-                        logger.error(f"Error in socketio_manager websocket delivery: {str(e)}")
-                        was_delivered = False
-                
-                # Always yield for the standard flow too
-                yield {"type": "analysis", "content": chunk_content, "complete": False}
+                        logger.error(f"Error in socketio_manager delivery: {str(e)}")
+                        
+                yield intermediate_event
             
-            # Send a final complete message with the full analysis
-            #logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
-            
-            # Final complete event
+            # Final complete message with the full analysis
             complete_event = {
                 "type": "analysis", 
                 "content": analysis_buffer, 
@@ -154,24 +175,14 @@ class MC:
             # Send via WebSocket if configured
             if use_websocket and thread_id_for_analysis:
                 try:
-                    # Import from socketio_manager module instead of socket
+                    # Import from socketio_manager module
                     from socketio_manager import emit_analysis_event
-                    was_delivered = emit_analysis_event(thread_id_for_analysis, complete_event)
-                    #if was_delivered:
-                    #    logger.info(f"Sent complete analysis via socketio_manager to room {thread_id_for_analysis}")
-                    #else:
-                    #    logger.warning(f"Complete analysis NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
+                    emit_analysis_event(thread_id_for_analysis, complete_event)
                 except Exception as e:
                     logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
-                    was_delivered = False
-
-                #if was_delivered:
-                #    logger.info(f"Sent complete analysis via WebSocket to room {thread_id_for_analysis}")
-                #else:
-                #    logger.warning(f"Complete analysis NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
             
             # Always yield for standard flow
-            yield {"type": "analysis", "content": analysis_buffer, "complete": True}
+            yield complete_event
             
         except Exception as e:
             logger.error(f"Analysis streaming failed: {e}")
@@ -186,22 +197,11 @@ class MC:
             # Send via WebSocket if configured
             if use_websocket and thread_id_for_analysis:
                 try:
-                    # Import from socketio_manager module instead of socket
+                    # Import from socketio_manager module
                     from socketio_manager import emit_analysis_event
                     emit_analysis_event(thread_id_for_analysis, error_event)
-                    #was_delivered = emit_analysis_event(thread_id_for_analysis, error_event)
-                    #if was_delivered:
-                    #    logger.info(f"Sent error event via socketio_manager to room {thread_id_for_analysis}")
-                    #else:
-                    #    logger.warning(f"Error event NOT DELIVERED via socketio_manager to room {thread_id_for_analysis} - No active sessions")
                 except Exception as e:
                     logger.error(f"Error in socketio_manager delivery of error event: {str(e)}")
-                    #was_delivered = False
-
-                #if was_delivered:
-                #    logger.info(f"Sent error event via WebSocket to room {thread_id_for_analysis}")
-                #else:
-                #    logger.warning(f"Error event NOT DELIVERED via WebSocket to room {thread_id_for_analysis} - No active sessions")
             
             # Always yield for standard flow
             yield {"type": "analysis", "content": "Error in analysis process", "complete": True, "error": True}
@@ -715,19 +715,24 @@ class MC:
                     'query_embeddings': {}  # Add cache for query embeddings
                 }
 
-            # Load personality if not already loaded or if graph_version_id changed
+            # Load personality if not already loaded, if graph_version_id changed, or if we have it cached
             personality_loaded = (hasattr(self, 'personality_instructions') and self.personality_instructions and 
                                  hasattr(self.personality_manager, 'loaded_graph_version_id') and 
                                  self.personality_manager.loaded_graph_version_id == graph_version_id)
-            
+
+            # Check if we have this personality in cache
+            cache_key = f"personality_{graph_version_id}"
+            personality_in_cache = cache_key in self._cache.get('personality', {})
+
             # Log detailed personality status
             logger.info(f"[PERSONALITY] Check load status - has_attr: {hasattr(self, 'personality_instructions')}, " +
                        f"loaded_gvid: {getattr(self.personality_manager, 'loaded_graph_version_id', None)}, " +
                        f"current_gvid: {graph_version_id}, " +
+                       f"in_cache: {personality_in_cache}, " +
                        f"is_loaded_from_kb: {getattr(self.personality_manager, 'is_loaded_from_knowledge', False)}")
                                  
-            if not personality_loaded:
-                logger.info(f"[PERSONALITY] Loading personality from knowledge base for graph_version_id: {graph_version_id}")
+            if not personality_loaded or personality_in_cache:
+                logger.info(f"[PERSONALITY] Loading personality for graph_version_id: {graph_version_id}, from_cache: {personality_in_cache}")
                 await self.load_personality_instructions(graph_version_id)
                 self.state["graph_version_id"] = graph_version_id
             else:
@@ -847,6 +852,14 @@ class MC:
                     if normalized_term and normalized_term not in seen_terms:
                         seen_terms.add(normalized_term)
                         search_terms.append(normalized_term)
+
+            # Release memory by clearing large objects no longer needed
+            del entity_json
+            if full_analysis and len(full_analysis) > 10000:  # Only clear if it's large
+                context_analysis = full_analysis[:5000] + "..." + full_analysis[-5000:]  # Keep start and end
+                del full_analysis  # Release the full analysis to free memory
+            else:
+                context_analysis = full_analysis
 
             # Pre-filter queries based on relevance
             filtered_queries = []
@@ -1081,13 +1094,44 @@ class MC:
 
     async def load_personality_instructions(self, graph_version_id: str = ""):
         """
-        Load personality instructions using the PersonalityManager.
+        Load personality instructions using the PersonalityManager with caching.
         """
-        return await self.personality_manager.load_personality_instructions(graph_version_id)
+        # Check if we have this personality in cache
+        cache_key = f"personality_{graph_version_id}"
+        
+        if cache_key in self._cache.get('personality', {}):
+            cached_data = self._cache['personality'][cache_key]
+            # Apply cached personality data
+            self.personality_manager.personality_instructions = cached_data.get('instructions', '')
+            self.personality_manager.name = cached_data.get('name', 'Ami')
+            self.personality_manager.instincts = cached_data.get('instincts', {})
+            self.personality_manager.is_loaded_from_knowledge = True
+            self.personality_manager.loaded_graph_version_id = graph_version_id
+            
+            logger.info(f"[PERSONALITY] Loaded personality from cache for graph_version_id: {graph_version_id}")
+            logger.info(f"[PERSONALITY] Cached AI name: {self.personality_manager.name}")
+            
+            return self.personality_manager.personality_instructions
+        
+        # Not in cache, load from knowledge base
+        await self.personality_manager.load_personality_instructions(graph_version_id)
+        
+        # Cache the personality for future use
+        self._cache.setdefault('personality', {})[cache_key] = {
+            'instructions': self.personality_manager.personality_instructions,
+            'name': self.personality_manager.name,
+            'instincts': self.personality_manager.instincts,
+            'timestamp': time.time()
+        }
+        
+        logger.info(f"[PERSONALITY] Cached personality for graph_version_id: {graph_version_id}")
+        
+        return self.personality_manager.personality_instructions
 
     async def _batch_query_knowledge(self, graph_version_id: str, queries: List[str], top_k: int = 3) -> List[List[Dict]]:
         """
         Batch process multiple queries using vector search for efficiency.
+        This optimized version reduces the number of database calls by grouping queries.
         
         Args:
             graph_version_id: The version ID of the knowledge graph
@@ -1098,28 +1142,73 @@ class MC:
             List of results for each query
         """
         try:
-            # Combine queries for batch processing
-            combined_query = " ".join(queries)
+            # Early return for empty queries
+            if not queries:
+                return []
             
-            # Get embeddings for the combined query
-            if combined_query not in self._cache['query_embeddings']:
-                # Use your embedding model here
-                # self._cache['query_embeddings'][combined_query] = await get_embeddings(combined_query)
-                pass
+            # Get brain banks once for all queries
+            brain_banks = await get_version_brain_banks(graph_version_id)
             
-            # Use vector search to get results for all queries at once
-            # This is a placeholder - implement your vector search logic here
-            # results = await vector_search(graph_version_id, self._cache['query_embeddings'][combined_query], top_k * len(queries))
+            if not brain_banks:
+                logger.warning(f"No brain banks found for graph version {graph_version_id}")
+                return [[] for _ in queries]  # Return empty results for all queries
             
-            # For now, fallback to individual queries
-            return await asyncio.gather(*[
-                query_graph_knowledge(graph_version_id, query, top_k)
-                for query in queries
-            ])
+            # Generate all embeddings in parallel (with caching)
+            logger.info(f"Generating embeddings for {len(queries)} queries")
+            embedding_tasks = [get_cached_embedding(query) for query in queries]
+            embeddings = await asyncio.gather(*embedding_tasks)
+            
+            # Create a mapping of query index to embedding
+            query_embeddings = {i: embedding for i, embedding in enumerate(embeddings)}
+            
+            # Process each brain bank in parallel, but send all queries at once
+            all_results = [{} for _ in range(len(queries))]  # Initialize result containers
+            
+            async def process_brain_bank(brain_bank):
+                bank_name = brain_bank["bank_name"]
+                brain_id = brain_bank["id"]
+                
+                # Import necessary function
+                from database import query_brain_with_embeddings_batch
+                
+                # Send all embeddings to this brain bank at once
+                brain_results = await query_brain_with_embeddings_batch(
+                    query_embeddings, bank_name, brain_id, top_k
+                )
+                
+                # Merge results
+                for query_idx, results in brain_results.items():
+                    if query_idx not in all_results:
+                        all_results[query_idx] = []
+                    all_results[query_idx].extend(results)
+            
+            # Process all brain banks in parallel
+            await asyncio.gather(*[process_brain_bank(brain_bank) for brain_bank in brain_banks])
+            
+            # Sort results by score and trim to top_k
+            final_results = []
+            for query_idx in range(len(queries)):
+                if query_idx in all_results:
+                    # Sort by score and take top results
+                    sorted_results = sorted(
+                        all_results[query_idx],
+                        key=lambda x: x.get("score", 0),
+                        reverse=True
+                    )[:top_k]
+                    final_results.append(sorted_results)
+                else:
+                    final_results.append([])
+            
+            logger.info(f"Batch processing complete for {len(queries)} queries")
+            return final_results
             
         except Exception as e:
             logger.error(f"Error in batch query processing: {str(e)}")
-            # Fallback to individual queries
+            import traceback
+            logger.error(traceback.format_exc())
+            
+            # Fallback to standard parallel execution
+            logger.info("Falling back to individual query processing")
             return await asyncio.gather(*[
                 query_graph_knowledge(graph_version_id, query, top_k)
                 for query in queries

@@ -113,7 +113,8 @@ class PersonalityManager:
 
     async def _semantic_personality_retrieval(self, graph_version_id: str) -> List[Dict]:
         """
-        Retrieve potential personality entries using semantic search with multiple queries.
+        Retrieve potential personality entries using semantic search with a consolidated query.
+        This optimized version uses a single comprehensive query instead of multiple separate queries.
         
         Args:
             graph_version_id: The graph version ID to query
@@ -121,44 +122,30 @@ class PersonalityManager:
         Returns:
             List[Dict]: Retrieved potential personality entries
         """
-        # Define semantic queries covering different aspects of personality
-        semantic_queries = [
-            "who am I how should I behave my identity character role", # Existing query
-            "AI personality tone voice communication style",
-            "how AI should respond to users communication guidelines",
-            "AI character traits behavior instructions",
-            "AI identity and persona description"
-        ]
-        
-        # Add Vietnamese specific queries
-        vietnamese_queries = [
-            "tên tôi là ai xưng tên nhân vật",
-            "nhân vật vai trò tính cách",
+        # Define a single comprehensive query that covers all aspects of personality
+        # This avoids multiple separate queries that often retrieve overlapping results
+        comprehensive_query = (
+            "who am I my identity character role name personality tone voice communication style " +
+            "how AI should respond behave guidelines instructions character traits behavior identity " +
+            "persona description tên tôi là ai xưng tên nhân vật vai trò tính cách " +
             "cách giao tiếp phong cách trả lời"
-        ]
+        )
         
-        # Combine all queries
-        all_queries = semantic_queries + vietnamese_queries
+        logger.info(f"[PERSONALITY] Using optimized comprehensive personality query")
         
-        # Retrieve entries for each query
-        all_entries = []
-        seen_ids = set()
+        # Retrieve entries with a single query but higher top_k to ensure comprehensive coverage
+        entries = await query_graph_knowledge(graph_version_id, comprehensive_query, top_k=20)
         
-        for query in all_queries:
-            entries = await query_graph_knowledge(graph_version_id, query, top_k=5)
-            
-            # Add unique entries to the result set
-            for entry in entries:
-                if entry["id"] not in seen_ids:
-                    seen_ids.add(entry["id"])
-                    # Try to extract name immediately to increase chances of finding it
-                    self._check_for_vietnamese_name(entry)
-                    all_entries.append(entry)
+        # Process entries to extract names
+        for entry in entries:
+            # Try to extract name immediately to increase chances of finding it
+            self._check_for_vietnamese_name(entry)
         
         # Log any name found during initial retrieval
-        logger.info(f"[PERSONALITY] After initial retrieval, current AI name: {self.name}")
+        logger.info(f"[PERSONALITY] After optimized retrieval, current AI name: {self.name}")
+        logger.info(f"[PERSONALITY] Retrieved {len(entries)} entries with optimized query")
         
-        return all_entries
+        return entries
     
     async def _classify_personality_entries(self, entries: List[Dict]) -> List[Dict]:
         """
@@ -393,7 +380,8 @@ class PersonalityManager:
     
     async def _targeted_retrieval(self, graph_version_id: str) -> List[Dict]:
         """
-        Perform targeted retrieval for specific personality aspects.
+        Perform targeted retrieval for personality entries when general semantic search fails.
+        This optimized version uses fewer, more targeted queries.
         
         Args:
             graph_version_id: The graph version ID to query
@@ -401,70 +389,38 @@ class PersonalityManager:
         Returns:
             List[Dict]: Retrieved personality entries
         """
-        # Define targeted aspect queries
-        aspect_queries = [
-            {"aspect": "identity", "query": "AI identity name background story who am I"},
-            {"aspect": "tone", "query": "AI tone voice communication style formal casual professional"},
-            {"aspect": "behavior", "query": "AI behavior response approach to users how to interact"},
-            {"aspect": "expertise", "query": "AI expertise knowledge specialty skills capabilities"}
-        ]
+        logger.info("[PERSONALITY] Performing targeted personality retrieval")
         
-        all_entries = []
-        seen_ids = set()
+        # Try name-specific queries first (highest priority)
+        name_queries = ["AI name is called identity", "tên tôi là xưng là gọi là"]
         
-        # Try each aspect query
-        for aspect_data in aspect_queries:
-            aspect = aspect_data["aspect"]
-            query = aspect_data["query"]
+        # Combine into a single query with comprehensive coverage
+        combined_query = " ".join(name_queries) + " " + " ".join(self.backup_queries)
+        
+        # Perform a single query with higher top_k
+        entries = await query_graph_knowledge(graph_version_id, combined_query, top_k=15)
+        
+        # If we found anything, return it
+        if entries:
+            # Extract names and other important info
+            for entry in entries:
+                self._extract_name_from_entry(entry)
+                self._check_for_vietnamese_name(entry)
             
-            logger.info(f"[PERSONALITY] Trying targeted query for {aspect}: '{query}'")
-            entries = await query_graph_knowledge(graph_version_id, query, top_k=3)
-            
-            # Apply specialized filtering for this aspect
-            if entries:
-                for entry in entries:
-                    # Skip if we've already seen this entry
-                    if entry["id"] in seen_ids:
-                        continue
-                        
-                    # Check for aspect-specific patterns
-                    if aspect == "identity" and self._has_identity_patterns(entry):
-                        all_entries.append(entry)
-                        seen_ids.add(entry["id"])
-                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
-                        self._extract_name_from_entry(entry)
-                    elif aspect == "tone" and any(term in entry["raw"].lower() for term in ["tone", "voice", "style", "communication"]):
-                        all_entries.append(entry)
-                        seen_ids.add(entry["id"])
-                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
-                    elif aspect == "behavior" and self._has_behavioral_patterns(entry):
-                        all_entries.append(entry)
-                        seen_ids.add(entry["id"])
-                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
-                    elif aspect == "expertise" and any(term in entry["raw"].lower() for term in ["expertise", "knowledge", "specialty", "skill", "capability"]):
-                        all_entries.append(entry)
-                        seen_ids.add(entry["id"])
-                        logger.info(f"[PERSONALITY] Found {aspect} entry: {entry['id']}")
+            logger.info(f"[PERSONALITY] Found {len(entries)} entries through targeted retrieval")
+            return entries
         
-        # If still no results, try the old backup queries as a last resort
-        if not all_entries:
-            logger.info("[PERSONALITY] No results from targeted queries, trying backup queries")
-            for backup_query in self.backup_queries:
-                backup_entries = await query_graph_knowledge(graph_version_id, backup_query, top_k=2)
-                
-                for entry in backup_entries:
-                    if entry["id"] not in seen_ids and (
-                        any(indicator in entry["raw"].lower() for indicator in self.personality_indicators) or
-                        self._has_personality_structure(entry) or
-                        self._has_behavioral_patterns(entry) or
-                        self._has_identity_patterns(entry)
-                    ):
-                        all_entries.append(entry)
-                        seen_ids.add(entry["id"])
-                        logger.info(f"[PERSONALITY] Found entry from backup query: {entry['id']}")
-                        self._extract_name_from_entry(entry)
+        # If all targeted queries fail, create a minimal personality
+        logger.warning("[PERSONALITY] Targeted retrieval yielded no results, using minimal personality")
         
-        return all_entries
+        # Create a minimal personality with a default name
+        minimal_entry = {
+            "id": "minimal_personality",
+            "raw": "Be helpful, friendly, and concise. Provide accurate information.",
+            "score": 0.95
+        }
+        
+        return [minimal_entry]
     
     def _compile_personality_instructions(self, entries: List[Dict]) -> str:
         """
