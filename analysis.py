@@ -207,7 +207,7 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
         
         f"ENGLISH ANALYSIS:\n"
         f"1. CONTACT ANALYSIS:\n"
-        f"   - Extract all relevant information provided by the contact in the entire conversation\n"
+        f"   - Extract all relevant information provided by the contact in the entire conversation context\n"
         f"   - Identify any required information according to instructions that is missing\n"
         f"   - Assess completeness of required information (0-100%)\n\n"
         
@@ -540,6 +540,7 @@ def extract_search_terms(analysis_text: str) -> List[str]:
 def extract_search_terms_from_next_actions(next_actions_text: str) -> List[str]:
     """
     Extract search terms from the next actions to guide focused knowledge retrieval.
+    Prioritizes full sentences to maintain context and nuance for better knowledge queries.
     
     Args:
         next_actions_text: The next actions text
@@ -577,59 +578,74 @@ def extract_search_terms_from_next_actions(next_actions_text: str) -> List[str]:
         if not english_section:
             logger.warning(f"No English section found in next_actions_text, using full text")
             english_section = next_actions_text
+            
+        logger.info(f"[DEBUG] Extracted English section for knowledge queries (length: {len(english_section)})")
         
-        # Extract specific questions (often in quotes)
-        question_pattern = r'["\'](.*?)[\"\']'
-        questions = re.findall(question_pattern, english_section)
-        for question in questions:
-            if question.strip() and len(question.strip().split()) > 3:
+        # Priority 1: Extract full sentences with action verbs (most contextually relevant)
+        action_sentence_pattern = r'([^.!?\n]*(?:ask|inquire|request|provide|offer|explain|clarify|confirm|determine|find out|recommend|suggest|address|acknowledge)[^.!?\n]*[.!?])'
+        action_sentences = re.findall(action_sentence_pattern, english_section, re.IGNORECASE)
+        for sentence in action_sentences:
+            sentence = sentence.strip()
+            if len(sentence.split()) > 3:
+                search_terms.append(sentence)
+                logger.info(f"[DEBUG] Added full action sentence as query: {sentence}")
+        
+        # Priority 2: Extract quoted questions (important for follow-up queries)
+        quoted_questions = re.findall(r'"([^"]*\?)"', english_section)
+        for question in quoted_questions:
+            if question.strip() and len(question.strip().split()) > 3 and question not in search_terms:
                 search_terms.append(question.strip())
-                logger.info(f"Added next action question as search term: {question.strip()}")
+                logger.info(f"[DEBUG] Added quoted question as query: {question.strip()}")
         
-        # Extract key sentences related to information gathering or response focus
-        if "information gathering is needed" in english_section.lower():
-            info_gathering_section = re.search(r'information gathering is needed[,\s]*(.*?)(?:\n|\Z)', english_section, re.IGNORECASE | re.DOTALL)
-            if info_gathering_section:
-                sentences = re.split(r'[.!?]', info_gathering_section.group(1))
-                for sentence in sentences:
-                    if sentence.strip() and len(sentence.strip().split()) > 3:
-                        search_terms.append(sentence.strip())
-                        logger.info(f"Added info gathering focus as search term: {sentence.strip()}")
-        
-        if "information is complete" in english_section.lower():
-            response_focus_section = re.search(r'information is complete[,\s]*(.*?)(?:\n|\Z)', english_section, re.IGNORECASE | re.DOTALL)
-            if response_focus_section:
-                sentences = re.split(r'[.!?]', response_focus_section.group(1))
-                for sentence in sentences:
-                    if sentence.strip() and len(sentence.strip().split()) > 3:
-                        search_terms.append(sentence.strip())
-                        logger.info(f"Added response focus as search term: {sentence.strip()}")
-        
-        # Extract bullet points (often contain key actions)
+        # Priority 3: Extract full sentences (preserve context and nuance)
+        sentence_pattern = r'([^.!?\n]+[.!?])'
+        sentences = re.findall(sentence_pattern, english_section)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence.split()) > 5 and sentence not in search_terms:
+                search_terms.append(sentence)
+                logger.info(f"[DEBUG] Added complete sentence as query: {sentence}")
+                
+        # Priority 4: Extract bullet points (often contain key actions)
         bullet_points = re.findall(r'[-•*]\s*(.*?)(?:\n|\Z)', english_section)
         for point in bullet_points:
-            if point.strip() and len(point.strip().split()) > 3:
-                search_terms.append(point.strip())
-                logger.info(f"Added bullet point as search term: {point.strip()}")
+            point = point.strip()
+            if point and len(point.split()) > 3 and point not in search_terms:
+                search_terms.append(point)
+                logger.info(f"[DEBUG] Added bullet point as query: {point}")
+
+        # Priority 5: Extract specific information requirement sections
+        info_sections = [
+            (r'information gathering is needed[,\s]*(.*?)(?:\n\n|\Z)', "info gathering focus"),
+            (r'information is complete[,\s]*(.*?)(?:\n\n|\Z)', "response focus"),
+            (r'specific questions(?:\s|:|are)+(.*?)(?:\n\n|\Z)', "specific questions"),
+            (r'knowledge items selected(?:\s|:|as)+(.*?)(?:\n\n|\Z)', "selected knowledge")
+        ]
         
-        # Extract any sentences containing action words or instructions
-        action_words = ["ask", "inquire", "request", "provide", "offer", "explain", "clarify", "confirm", "determine", "find out"]
-        for line in english_section.split("\n"):
-            if any(action_word in line.lower() for action_word in action_words):
-                if line.strip() and len(line.strip().split()) > 3:
-                    search_terms.append(line.strip())
-                    logger.info(f"Added action sentence as search term: {line.strip()}")
+        for pattern, section_type in info_sections:
+            section_match = re.search(pattern, english_section, re.IGNORECASE | re.DOTALL)
+            if section_match:
+                section_text = section_match.group(1).strip()
+                # Extract complete sentences from section
+                section_sentences = re.findall(r'([^.!?\n]+[.!?])', section_text)
+                for sentence in section_sentences:
+                    sentence = sentence.strip()
+                    if sentence and len(sentence.split()) > 3 and sentence not in search_terms:
+                        search_terms.append(sentence)
+                        logger.info(f"[DEBUG] Added {section_type} sentence as query: {sentence}")
         
-        # As a fallback, if no search terms found yet, extract key sentences
+        # As a fallback, if no search terms found yet, use key phrases
         if not search_terms:
+            logger.warning(f"No structured search terms found, using fallback approach")
             # Extract any sentence with more than 5 words as a potential search term
             sentences = re.split(r'[.!?]', english_section)
             for sentence in sentences:
-                if sentence.strip() and len(sentence.strip().split()) > 5:
-                    search_terms.append(sentence.strip())
-                    logger.info(f"Added fallback sentence as search term: {sentence.strip()}")
+                sentence = sentence.strip()
+                if sentence and len(sentence.split()) > 5:
+                    search_terms.append(sentence)
+                    logger.info(f"[DEBUG] Added fallback sentence as query: {sentence}")
         
-        # Deduplicate search terms
+        # Deduplicate search terms while maintaining original order (first appearance has priority)
         unique_terms = []
         seen = set()
         for term in search_terms:
@@ -637,7 +653,8 @@ def extract_search_terms_from_next_actions(next_actions_text: str) -> List[str]:
             if normalized not in seen:
                 seen.add(normalized)
                 unique_terms.append(term)
-                
+        
+        logger.info(f"[DEBUG] Final extracted search terms for knowledge queries ({len(unique_terms)}): {unique_terms}")
         return unique_terms
         
     except Exception as e:

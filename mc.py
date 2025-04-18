@@ -1039,7 +1039,7 @@ class MC:
             
             if not next_action_error and next_action_content and len(next_action_content) > 50:
                 try:
-                    logger.info("Extracting search terms from next actions for targeted knowledge retrieval")
+                    logger.info("Extracting content from next actions for targeted knowledge retrieval")
                     from analysis import extract_search_terms_from_next_actions, process_next_actions_result
                     
                     # First, process the next_action_content to get structured data
@@ -1062,41 +1062,88 @@ class MC:
                             next_actions_data["next_action_english"] = english_next_actions + warning_note
                             next_actions_data["next_action_full"] = next_actions_data["next_action_full"] + warning_note
                     
-                    # Extract search terms from the structured English next actions
+                    # Extract the English next actions
                     english_next_actions = next_actions_data.get("next_action_english", "")
+                    
                     if english_next_actions:
-                        logger.info(f"Extracting search terms from English next actions: {english_next_actions[:100]}...")
-                        next_action_search_terms = extract_search_terms_from_next_actions(english_next_actions)
-                    else:
-                        # Fallback to extracting from full content if the structured parsing failed
-                        logger.info(f"Falling back to full content for search term extraction: {next_action_content[:100]}...")
-                        next_action_search_terms = extract_search_terms_from_next_actions(next_action_content)
-                    
-                    logger.info(f"Extracted {len(next_action_search_terms)} search terms from next actions: {next_action_search_terms[:5]}{'...' if len(next_action_search_terms) > 5 else ''}")
-                    
-                    # Only continue if we actually found some search terms
-                    if next_action_search_terms:
-                        # Filter and process next action search terms
-                        filtered_next_action_queries = []
-                        seen_terms = set()  # For deduplication
+                        logger.info(f"Using English next actions for knowledge queries: {english_next_actions[:100]}...")
                         
-                        for term in next_action_search_terms:
-                            # Skip very short or common terms and deduplicate
-                            normalized_term = term.lower().strip()
-                            if (len(normalized_term) > 3 and
-                                normalized_term not in seen_terms and
-                                not normalized_term in ['the', 'and', 'or', 'but', 'for', 'with', 'that']):
-                                seen_terms.add(normalized_term)
-                                filtered_next_action_queries.append(term)
+                        # Split the English next actions into sentences for more contextual queries
+                        import re
+                        # Split by sentence boundaries while preserving punctuation
+                        sentences = re.findall(r'[^.!?]+[.!?]', english_next_actions)
                         
-                        # Retrieve additional knowledge based on next action search terms
-                        if filtered_next_action_queries:
-                            logger.info(f"Retrieving additional knowledge based on {len(filtered_next_action_queries)} next action queries")
+                        # Filter sentences to avoid very short ones
+                        filtered_sentences = []
+                        for sentence in sentences:
+                            sentence = sentence.strip()
+                            # Only include meaningful sentences (more than 5 words and not just a heading)
+                            if len(sentence.split()) > 5 and not all(c.isupper() for c in sentence if c.isalpha()):
+                                filtered_sentences.append(sentence)
+                                logger.info(f"[DEBUG] Added next action sentence as query: {sentence}")
+                        
+                        # If we have bullet points, those might not end with periods
+                        bullet_points = re.findall(r'[-•*]\s*[^-•*\n]+', english_next_actions)
+                        for point in bullet_points:
+                            point = point.strip()
+                            if len(point.split()) > 5 and point not in filtered_sentences:
+                                filtered_sentences.append(point)
+                                logger.info(f"[DEBUG] Added bullet point as query: {point}")
+                        
+                        # Add quoted questions (these are important as they're directly from knowledge)
+                        quoted_questions = re.findall(r'"([^"]*\?)"', english_next_actions)
+                        for question in quoted_questions:
+                            if question not in filtered_sentences and len(question.split()) > 3:
+                                filtered_sentences.append(question)
+                                logger.info(f"[DEBUG] Added quoted question as query: {question}")
+                        
+                        # Extract instructions and actions (imperative sentences)
+                        action_patterns = [
+                            r'(Ask about [^.!?]+[.!?])',
+                            r'(Inquire about [^.!?]+[.!?])',
+                            r'(Explain [^.!?]+[.!?])',
+                            r'(Suggest [^.!?]+[.!?])',
+                            r'(Recommend [^.!?]+[.!?])',
+                            r'(Provide [^.!?]+[.!?])',
+                            r'(Clarify [^.!?]+[.!?])',
+                            r'(Address [^.!?]+[.!?])',
+                            r'(Acknowledge [^.!?]+[.!?])',
+                            r'(Follow up [^.!?]+[.!?])'
+                        ]
+                        
+                        for pattern in action_patterns:
+                            action_sentences = re.findall(pattern, english_next_actions)
+                            for action in action_sentences:
+                                if action not in filtered_sentences and len(action.split()) > 3:
+                                    filtered_sentences.append(action)
+                                    logger.info(f"[DEBUG] Added action sentence as query: {action}")
+                        
+                        logger.info(f"Extracted {len(filtered_sentences)} sentences from next actions")
+                        
+                        # Use these sentences directly as queries without further processing
+                        next_action_queries = filtered_sentences
+                        
+                        # Deduplicate but keep the original sentence structure
+                        unique_queries = []
+                        seen_normalized = set()
+                        
+                        for query in next_action_queries:
+                            # Normalize for comparison but keep original for querying
+                            normalized = query.lower().strip()
+                            if normalized not in seen_normalized:
+                                seen_normalized.add(normalized)
+                                unique_queries.append(query)
+                        
+                        logger.info(f"Using {len(unique_queries)} unique contextual queries from next actions")
+                        
+                        # Retrieve additional knowledge based on these contextual queries
+                        if unique_queries:
+                            logger.info(f"Retrieving additional knowledge based on {len(unique_queries)} next action queries")
                             
                             # Process next action queries in batches
-                            batch_size = 5  # Process queries in batches
-                            for i in range(0, len(filtered_next_action_queries), batch_size):
-                                batch = filtered_next_action_queries[i:i + batch_size]
+                            batch_size = 3  # Smaller batch size for longer queries
+                            for i in range(0, len(unique_queries), batch_size):
+                                batch = unique_queries[i:i + batch_size]
                                 
                                 # Use vector search for batch processing
                                 try:
@@ -1111,29 +1158,42 @@ class MC:
                                             
                                             # Extract content from non-complete events (contains actual knowledge)
                                             if not knowledge_event.get("complete", False) and knowledge_event.get("content"):
+                                                # Log which queries got results
                                                 for result in knowledge_event.get("content", []):
+                                                    query_idx = result.get("query_idx", -1)
+                                                    query = batch[query_idx] if 0 <= query_idx < len(batch) else "unknown"
+                                                    logger.info(f"[NEXT_ACTION_PINECONE_QUERY] Streaming sentence: \"{query}\" → Retrieved knowledge: {result.get('id', 'unknown-id')[:10]}")
+                                                    
                                                     if result not in additional_knowledge:
                                                         additional_knowledge.append(result)
+                                                        logger.info(f"[DEBUG] Added knowledge result from next action sentence: {result.get('id', 'unknown-id')[:10]}...")
                                     else:
                                         # Normal non-streaming call
                                         next_action_batch_results = await self._batch_query_knowledge(graph_version_id, batch)
-                                        for results in next_action_batch_results:
-                                            additional_knowledge.extend(results)
+                                        logger.info(f"[DEBUG] Received batch results with {sum(len(results) for results in next_action_batch_results)} total items")
+                                        for batch_idx, results in enumerate(next_action_batch_results):
+                                            query = batch[batch_idx]
+                                            logger.info(f"[NEXT_ACTION_PINECONE_QUERY] Sentence: \"{query}\" → Retrieved {len(results)} knowledge results")
+                                            for result in results:
+                                                additional_knowledge.append(result)
+                                                logger.info(f"[DEBUG] Added knowledge result from next action sentence: {result.get('id', 'unknown-id')[:10]}...")
                                 except Exception as e:
                                     logger.error(f"Error in next action batch processing: {str(e)}")
+                                    import traceback
+                                    logger.error(traceback.format_exc())
                     else:
-                        logger.warning("No search terms found in next actions content")
+                        logger.warning("No English next actions found for knowledge queries")
                 except Exception as e:
-                    logger.error(f"Error extracting search terms from next actions: {str(e)}")
+                    logger.error(f"Error processing next actions for knowledge queries: {str(e)}")
                     import traceback
                     logger.error(traceback.format_exc())
             else:
                 if next_action_error:
-                    logger.warning("Skipping next action search terms extraction due to error in next_action generation")
+                    logger.warning("Skipping next action knowledge queries due to error in next_action generation")
                 elif not next_action_content:
-                    logger.warning("Skipping next action search terms extraction due to empty next_action_content")
+                    logger.warning("Skipping next action knowledge queries due to empty next_action_content")
                 else:
-                    logger.warning(f"Skipping next action search terms extraction due to short content: {len(next_action_content)} chars")
+                    logger.warning(f"Skipping next action knowledge queries due to short content: {len(next_action_content)} chars")
             
             # Process any additional knowledge found
             if additional_knowledge:
@@ -1154,6 +1214,7 @@ class MC:
             
             # STEP 4: Build contextual memory with language awareness
             contextual_memory = await self.maintain_contextual_memory(context, message, knowledge_context, lang_info)
+            
             
             # Log key contextual memory insights
             logger.info(f"[MEMORY] Language support: {contextual_memory['language_support']['code']} " +
@@ -1186,152 +1247,31 @@ class MC:
                 language_specific_insights = "Basic conversation tracking active."
             
             # Assess knowledge coverage and determine if feedback is needed
-            coverage_score, missing_aspects, requires_feedback = await self.assess_knowledge_coverage(
-                {query: len(self._cache['knowledge'].get(f"{graph_version_id}:{query}", [])) for query in search_terms},
-                context_analysis,
-                message
-            )
             
-            # If feedback is required, generate a specific request for more information
-            if requires_feedback:
-                feedback_request = await self.generate_feedback_request(missing_aspects, message, context)
-                
-                # Simplified response prompt for feedback requests
-                feedback_prompt = (
-                    f"AI: {self.name}\n"
-                    f"Context: {context}\n"
-                    f"Message: '{message}'\n"
-                    f"Language: {lang_info['language']}\n"
-                    f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
-                    
-                    f"Instructions:\n"
-                    f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
-                    f"2. The system has determined that you need more information to properly respond.\n"
-                    f"3. Craft a response that genuinely seeks clarification, in a friendly and conversational way.\n"
-                    f"4. Follow any name usage guidance in the personality instructions - use your name naturally where appropriate.\n\n"
-                    
-                    f"Here is the specific feedback request: \"{feedback_request}\"\n\n"
-                    
-                    f"Your response should:\n"
-                    f"1. Acknowledge the user's message briefly\n"
-                    f"2. Express that you want to help but need more specific information\n"
-                    f"3. Include the feedback request, making it sound natural and aligned with your personality\n"
-                    f"4. Be concise and friendly\n\n"
-                    
-                    f"Always respond in {lang_info['language']}. When the NEXT ACTIONS include specific questions to ask, prioritize using these exact questions in your response rather than creating new ones."
-                )
-                
-                # Add naturalness guidance and conversation dynamics insights
-                additional_guidance = (
-                    f"\n\nNATURALNESS GUIDANCE:\n"
-                    f"Recommended patterns: {', '.join(naturalness_guidance['recommended_patterns'])}\n"
-                    f"Sentence variations: {', '.join(naturalness_guidance['sentence_variations'])}\n"
-                    f"Transitional phrases: {', '.join(naturalness_guidance['transitional_phrases'])}\n"
-                    f"Avoid patterns: {', '.join(naturalness_guidance['avoid_patterns'])}\n\n"
-                    f"CONVERSATION DYNAMICS:\n"
-                    f"User engagement: {dynamics_insights['user_engagement']}\n"
-                    f"Repetition risk: {dynamics_insights['repetition_risk']}\n"
-                    f"Repeated themes: {', '.join(dynamics_insights['repeated_themes']) if dynamics_insights['repeated_themes'] else 'none'}\n"
-                    f"Suggested approaches: {', '.join(dynamics_insights['suggested_approaches']) if dynamics_insights['suggested_approaches'] else 'natural conversation'}\n\n"
-                    f"CONTEXTUAL MEMORY:\n"
-                    f"Mentioned topics: {', '.join(contextual_memory['mentioned_topics'][:3]) if contextual_memory['mentioned_topics'] else 'none'}\n"
-                    f"Language insights: {language_specific_insights}\n"
-                    f"Apply cultural adaptations for: {culture_code}"
-                )
-                
-                feedback_prompt += additional_guidance
-                
-                # Feedback requests typically don't include knowledge
-                async for _ in self.stream_response(feedback_prompt, builder, knowledge_found=False):
-                    yield builder.build()
-                return
-            
-            # Generate response - PRESERVE EXISTING PROMPT
+            # Generate ultra-simplified response prompt
             response_prompt = (
                 f"AI: {self.name}\n"
-                f"Context: {context}\n"
                 f"Message: '{message}'\n"
+                f"Context: {context}\n"
                 f"Context Analysis: {context_analysis}\n"
-                f"Next Actions: {next_action_content}\n"
+                f"NEXT ACTIONS: {next_action_content}\n"
                 f"Knowledge: {knowledge_context}\n"
-                f"Language: {lang_info['language']} (confidence: {lang_info['confidence']})\n\n"
-                f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
-                f"Instructions:\n"
-                f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
-                f"2. STRICT PRIORITY ORDER - FOLLOW THIS HIERARCHY:\n"
-                f"   a) FIRST PRIORITY: Follow the guidance from the 'Next Actions' input - this is your PRIMARY DRIVER\n"
-                f"   b) SECOND PRIORITY: Use Knowledge as SUPPORTING MATERIAL for executing the 'Next Actions' guidance, not to override them\n"
-                f"   c) THIRD PRIORITY: If the 'Next Actions' guidance and Knowledge conflict, ALWAYS prioritize the 'Next Actions' guidance\n"
-                f"3. REASONING-BASED KNOWLEDGE USAGE:\n"
-                f"   a) ALWAYS use the specific knowledge items that the 'Next Actions' section explicitly selected as most relevant\n" 
-                f"   b) Look for 'Explain which specific knowledge items you selected as most relevant and why' in the 'Next Actions' section\n"
-                f"   c) Use these selected knowledge items as your primary knowledge source\n"
-                f"   d) If the 'Next Actions' section identifies 'priority information gaps', focus on addressing these specific gaps\n"
-                f"4. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
-                f"5. Keep responses concise and conversational.\n"
-                f"6. GREETING RULES - STRICT ENFORCEMENT:\n"
-                f"   - FIRST MESSAGE ONLY: If this is the VERY FIRST message in the conversation, use a greeting and introduce yourself as \"{self.name}\"\n"
-                f"   - ALL OTHER MESSAGES: NEVER use any greeting, NEVER introduce yourself, and NEVER say \"{self.name} đây\" or any variation\n"
-                f"   - ZERO TOLERANCE: Any name introduction after the first message is a critical error\n"
-                f"7. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
-                f"8. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n"
-                f"9. NEXT ACTIONS QUESTIONS - MANDATORY EXACT USAGE:\n"
-                f"   - When the 'Next Actions' section contains specific questions in quotes like \"...\", you MUST copy and paste these EXACT questions\n"
-                f"   - NEVER rephrase or create your own questions when specific questions are provided\n"
-                f"   - Examples: If 'Next Actions' says to ask \"Could you share more about your situation?\", use EXACTLY those words\n"
-                f"   - CRITICAL: This is the highest priority instruction for information gathering\n\n"
-                f"10. EMPATHY PRIORITY: If the 'Next Actions' section specifically mentions showing empathy (e.g., \"Show empathy and understanding\"), start your response with a brief empathetic acknowledgment BEFORE asking questions, but still NEVER introduce yourself by name in follow-up messages.\n\n"
-                f"11. KNOWLEDGE USAGE - SUPPORTING ROLE ONLY:\n"
-                f"   - Use Knowledge to INFORM your responses, not REPLACE the 'Next Actions' guidance\n"
-                f"   - Example: If 'Next Actions' says to ask about symptoms, use Knowledge about symptoms to sound informed, but still ask the exact questions from 'Next Actions'\n"
-                f"   - NEVER extract questions from Knowledge when 'Next Actions' already provides specific questions\n"
-                f"   - Knowledge provides background expertise; 'Next Actions' directs the conversation flow\n\n"
-                f"Response Structure:\n"
-                f"1. For first-time messages only: Brief greeting with name\n"
-                f"2. For all other messages: Start DIRECTLY with content, NO greeting, NO name introduction\n"
-                f"3. ADDRESS the current context appropriately:\n"
-                f"   a) If gathering information is needed, use VERBATIM the questions from the 'Next Actions' section that appear in quotes\n"
-                f"   b) If providing information is needed, present relevant details from the SPECIFICALLY SELECTED knowledge items\n"
-                f"   c) If addressing concerns, provide targeted responses based on the reasoning in the 'Next Actions' section\n"
-                f"4. PROGRESS the conversation with something new that hasn't been discussed yet\n\n"
-                f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n"
-                f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."
+                f"Language: {lang_info['language']}\n\n"
+                f"PERSONALITY: {self.personality_instructions}\n\n"
+                f"TASK:\n"
+                f"1. You are a sales assistant named {self.name}. Respond to the user's message by performing the most appropriate action from the NEXT ACTIONS, prioritizing user intent from the MESSAGE and CONTEXT ANALYSIS.\n"
+                f"2. Use the KNOWLEDGE and CONTEXT ANALYSIS to inform the response. If specific knowledge is unavailable (e.g., for resolving registration barriers like missing email), propose practical workarounds (e.g., phone-based registration) using general sales expertise.\n"
+                f"3. Reflect the PERSONALITY instructions, maintaining a consistent, empathetic, and culturally sensitive tone.\n"
+                f"4. Respond in the user’s LANGUAGE, ensuring cultural alignment (e.g., address trust-building requests like 'meeting' with alternatives like calls or demos in Vietnamese contexts).\n"
+                f"5. Stay in character as a friendly, supportive sales assistant.\n"
+                f"6. Keep the response concise, clear, and action-oriented.\n"
+                f"7. Show GENUINE EMPATHY by analyzing emotional signals (e.g., hesitation, trust needs) from the CONTEXT ANALYSIS and MESSAGE.\n"
+                f"8. AVOID REPEATING messages, asking for information already provided (e.g., email absence noted in CONTEXT ANALYSIS), or pushing premature actions (e.g., registration before resolving barriers).\n"
+                f"9. DYNAMIC ACTION SELECTION: If NEXT ACTIONS are misaligned with the user’s MESSAGE or CONTEXT ANALYSIS (e.g., user requests personal interaction), prioritize the user’s intent and adapt using LLM-driven context analysis.\n"
+                f"10. CONVERSATION PROGRESSION: Move the conversation forward by addressing the user’s current need (e.g., trust-building, registration barriers) before proceeding to the next logical step (e.g., registration).\n"
+                f"11. VECTOR FLEXIBILITY: If KNOWLEDGE vectors have low relevance, supplement with general sales expertise, CONTEXT ANALYSIS, and user-specific details to ensure relevance.\n"
+                f"12. CULTURAL SENSITIVITY: For culturally specific requests (e.g., 'meet you' in Vietnamese contexts), acknowledge the request empathetically and offer trust-building alternatives (e.g., phone call, detailed explanation, or demo).\n"
             )
-            
-            # Add guidance from the new improvements as additional context
-            additional_guidance = (
-                f"\n\nNATURALNESS GUIDANCE:\n"
-                f"Recommended patterns: {', '.join(naturalness_guidance['recommended_patterns'])}\n"
-                f"Sentence variations: {', '.join(naturalness_guidance['sentence_variations'])}\n"
-                f"Transitional phrases: {', '.join(naturalness_guidance['transitional_phrases'])}\n"
-                f"Avoid patterns: {', '.join(naturalness_guidance['avoid_patterns'])}\n\n"
-                f"CONVERSATION DYNAMICS:\n"
-                f"User engagement: {dynamics_insights['user_engagement']}\n"
-                f"Repetition risk: {dynamics_insights['repetition_risk']}\n"
-                f"Repeated themes: {', '.join(dynamics_insights['repeated_themes']) if dynamics_insights['repeated_themes'] else 'none'}\n"
-                f"Suggested approaches: {', '.join(dynamics_insights['suggested_approaches']) if dynamics_insights['suggested_approaches'] else 'natural conversation'}\n\n"
-                f"CONTEXTUAL MEMORY:\n"
-            )
-            
-            # Add language-appropriate contextual memory guidance
-            if contextual_memory['language_support']['full_support'] or contextual_memory['language_support']['confidence'] > 0.8:
-                # Full information for well-supported languages or high confidence
-                additional_guidance += (
-                    f"Mentioned topics: {', '.join(contextual_memory['mentioned_topics'][:3]) if contextual_memory['mentioned_topics'] else 'none'}\n"
-                    f"Unresolved topics: {', '.join(contextual_memory['unresolved_topics'][:2]) if contextual_memory['unresolved_topics'] else 'none'}\n"
-                    f"Continuity hints: {contextual_memory['conversation_history_summary'] if 'conversation_history_summary' in contextual_memory else ''}\n"
-                )
-            else:
-                # Limited information for less-supported languages
-                additional_guidance += (
-                    f"Mentioned topics: {', '.join(contextual_memory['mentioned_topics'][:3]) if contextual_memory['mentioned_topics'] else 'none'}\n"
-                    f"Language insights: {language_specific_insights}\n"
-                )
-            
-            additional_guidance += f"Apply cultural adaptations for: {culture_code}"
-            
-            # Add the guidance to instructions
-            response_prompt += additional_guidance
             
             # Check if knowledge was found
             knowledge_found = bool(knowledge_context and knowledge_context.strip())
