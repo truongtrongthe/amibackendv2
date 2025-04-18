@@ -54,7 +54,7 @@ from threading import Lock
 from utilities import logger
 
 # Import SocketIO functionality from socketio_manager.py
-from socketio_manager import init_socketio, emit_analysis_event
+from socketio_manager import init_socketio, emit_analysis_event, emit_next_action_event
 from socketio_manager import (
     socketio, ws_sessions, session_lock, 
     undelivered_messages, message_lock,
@@ -372,6 +372,13 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
     
     #logger.debug(f"[SESSION_TRACE] Event data preview: {str(data)[:100]}...")
     socketio.emit('analysis_update', data, room=thread_id)
+
+# Function to emit next_action events to specific thread
+def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
+    """Emit a next_action event to all clients in a thread room"""
+    
+    #logger.debug(f"[SESSION_TRACE] Next Action event data preview: {str(data)[:100]}...")
+    socketio.emit('next_action', data, room=thread_id)
 
 # Existing endpoints (pilot, training, havefun) remain unchanged
 @app.route('/pilot', methods=['POST', 'OPTIONS'])

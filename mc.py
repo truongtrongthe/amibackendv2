@@ -9,7 +9,16 @@ import numpy as np
 from database import query_graph_knowledge, get_version_brain_banks, get_cached_embedding
 import re
 from typing import Tuple, Dict, Any
-from analysis import stream_analysis, build_context_analysis_prompt, process_analysis_result
+from analysis import (
+    stream_analysis, 
+    stream_next_action,
+    build_context_analysis_prompt, 
+    build_next_actions_prompt,
+    process_analysis_result, 
+    process_next_actions_result,
+    extract_search_terms, 
+    extract_search_terms_from_next_actions
+)
 from personality import PersonalityManager
 from response_optimization import ResponseFilter, ResponseStructure, ResponseProcessor
 import time
@@ -848,76 +857,47 @@ class MC:
             profile_instructions = "\n\n".join(entry["raw"] for entry in profile_entries)
             process_instructions = profile_instructions
             
-            # Build and process context analysis in parallel with entity extraction
+            # STEP 1: Build and process initial context analysis (parts 1-3)
             context_analysis_prompt = build_context_analysis_prompt(context, process_instructions)
             
-            # Run analysis
-            analysis_task = stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket)
+            # Run initial analysis
+            logger.info("Starting initial analysis (parts 1-3)")
+            from analysis import stream_analysis
+            initial_analysis_task = stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket)
             
-            # Process analysis results
+            # Process initial analysis results
             context_analysis = ""
-            full_analysis = None
-            async for analysis_chunk in analysis_task:
+            analysis_result = None
+            initial_search_terms = []
+            
+            # Collect results from initial analysis
+            async for analysis_chunk in initial_analysis_task:
+                # Pass through all chunks to caller
                 yield analysis_chunk
-                if analysis_chunk.get("complete", False):
-                    full_analysis = analysis_chunk.get("content", "")
+                
+                # Store the analysis content when it's complete
+                if analysis_chunk.get("type") == "analysis" and analysis_chunk.get("complete", False):
+                    context_analysis = analysis_chunk.get("content", "")
+                    # Process the analysis result to extract search terms
+                    logger.info(f"[DEBUG] Processing initial analysis with length: {len(context_analysis)}")
+                    analysis_result = process_analysis_result(context_analysis)
+                    initial_search_terms = analysis_result.get("search_terms", [])
+                    logger.info(f"[DEBUG] Received complete initial analysis, extracted {len(initial_search_terms)} search terms: {initial_search_terms}")
             
-            # Use the full analysis if available, otherwise use an empty string
-            context_analysis = full_analysis or ""
+            # STEP 2: Use search terms from initial analysis for knowledge queries
+            logger.info("Using search terms from initial analysis for knowledge retrieval")
+            search_terms = initial_search_terms
             
-            # Extract NEXT ACTIONS from analysis to guide knowledge queries
-            search_terms = []
-            try:
-                # Extract next actions from the analysis using regex
-                next_actions_match = re.search(r'NEXT ACTIONS?[:\s]*(.*?)(?:\n\n|\Z)', context_analysis, re.IGNORECASE | re.DOTALL)
-                if next_actions_match:
-                    next_actions_text = next_actions_match.group(1).strip()
-                    logger.info(f"Extracted next actions: {next_actions_text[:200]}...")
-                    
-                    # Add the entire NEXT ACTIONS section as one search term for comprehensive coverage
-                    if len(next_actions_text) > 10:  # Ensure it's substantial enough
-                        search_terms.append(next_actions_text)
-                        logger.info(f"Added complete NEXT ACTIONS section as search term ({len(next_actions_text)} chars)")
-                    
-                    # Also split into sentences and use as individual search terms for more targeted retrieval
-                    action_sentences = re.split(r'[.!?]', next_actions_text)
-                    for sentence in action_sentences:
-                        if sentence.strip():
-                            # Keep only the most meaningful terms (more than 3 words)
-                            terms = sentence.strip().split()
-                            if len(terms) > 3:
-                                search_terms.append(sentence.strip())
-                
-                # If we couldn't extract or no meaningful terms, use the message as fallback
-                if not search_terms:
-                    search_terms.append(message)
-                    logger.info(f"Using message as fallback search term: {message}")
-                
-                # Also add requirements if available
-                requirements_match = re.search(r'REQUIREMENTS?[:\s]*(.*?)(?:\n\n|\Z)', context_analysis, re.IGNORECASE | re.DOTALL)
-                if requirements_match:
-                    requirements_text = requirements_match.group(1).strip()
-                    # Add key requirement phrases
-                    req_sentences = re.split(r'[.!?]', requirements_text)
-                    for sentence in req_sentences:
-                        if sentence.strip() and len(sentence.strip().split()) > 3:
-                            search_terms.append(sentence.strip())
-                
-                # Add topic focus from conversation context if available
-                topic_match = re.search(r'current topic or focus\?[:\s]*(.*?)(?:\n|\Z)', context_analysis, re.IGNORECASE)
-                if topic_match:
-                    topic = topic_match.group(1).strip()
-                    if topic and len(topic.split()) <= 5:  # Only use concise topics
-                        search_terms.append(topic)
-                
-                logger.info(f"Generated {len(search_terms)} search terms from analysis")
-                
-            except Exception as e:
-                logger.error(f"Error extracting search terms from analysis: {str(e)}")
-                # Fallback to using message
+            # If we couldn't extract any search terms, use the message as fallback
+            if not search_terms:
                 search_terms = [message]
-                logger.info(f"Falling back to message as search term: {message}")
-
+                logger.info(f"[DEBUG] No search terms extracted, using message as fallback search term: {message}")
+            
+            # Also add the message itself as a search term if short enough
+            if len(message.split()) <= 10 and message not in search_terms:
+                search_terms.append(message)
+                logger.info(f"[DEBUG] Added original message as additional search term: {message}")
+                
             # Pre-filter queries based on relevance
             filtered_queries = []
             seen_terms = set()  # For deduplication
@@ -930,7 +910,9 @@ class MC:
                     not normalized_term in ['the', 'and', 'or', 'but', 'for', 'with', 'that']):
                     seen_terms.add(normalized_term)
                     filtered_queries.append(term)
-
+            
+            logger.info(f"[DEBUG] After filtering, {len(filtered_queries)} search terms remain: {filtered_queries}")
+            
             # Batch process queries with vector search
             unique_queries = []
             cache_hits = 0
@@ -960,20 +942,28 @@ class MC:
                             # Pass through knowledge events to trigger method
                             yield knowledge_event
                             
+                            # Extract content from non-complete events (contains actual knowledge)
+                            if not knowledge_event.get("complete", False) and knowledge_event.get("content"):
+                                logger.info(f"[DEBUG] Received knowledge event with {len(knowledge_event.get('content', []))} results")
+                                for result in knowledge_event.get("content", []):
+                                    all_knowledge.append(result)
+                                    logger.info(f"[DEBUG] Added knowledge result: {result.get('id', 'unknown-id')[:10]}...")
+                            
                             # If this is the final event with complete flag, save the results
                             if knowledge_event.get("complete") and not knowledge_event.get("error"):
                                 # The complete event doesn't include results, as they've been streamed
                                 # Results should be saved via standard method from other events
+                                logger.info(f"[DEBUG] Received complete knowledge event")
                                 pass
                     else:
                         # Normal non-streaming call
                         batch_results = await self._batch_query_knowledge(graph_version_id, batch)
-                    
-                    # Update cache with new results
-                    for query, results in zip(batch, batch_results):
-                        cache_key = f"{graph_version_id}:{query}"
-                        self._cache['knowledge'][cache_key] = results
-                        all_knowledge.extend(results)
+                        logger.info(f"[DEBUG] Received batch results with {sum(len(results) for results in batch_results)} total items")
+                        # Update cache with new results
+                        for query, results in zip(batch, batch_results):
+                            cache_key = f"{graph_version_id}:{query}"
+                            self._cache['knowledge'][cache_key] = results
+                            all_knowledge.extend(results)
                 except Exception as e:
                     logger.error(f"Error in batch processing: {str(e)}")
                     # Fallback to individual queries
@@ -987,23 +977,182 @@ class MC:
                             logger.error(f"Error processing query '{query}': {str(e)}")
 
             # Combine cached and new results
+            logger.info(f"[DEBUG] all_knowledge has {len(all_knowledge)} items before adding cached results")
             for query in filtered_queries:
                 cache_key = f"{graph_version_id}:{query}"
                 if cache_key in self._cache['knowledge']:
-                    all_knowledge.extend(self._cache['knowledge'][cache_key])
+                    cached_results = self._cache['knowledge'][cache_key]
+                    logger.info(f"[DEBUG] Adding {len(cached_results)} cached results for query '{query}'")
+                    all_knowledge.extend(cached_results)
 
             # Remove duplicates using a more efficient method
+            logger.info(f"[DEBUG] all_knowledge has {len(all_knowledge)} items before deduplication")
             unique_knowledge = []
             seen_ids = set()
             for entry in all_knowledge:
-                if entry['id'] not in seen_ids:
-                    seen_ids.add(entry['id'])
+                entry_id = entry.get('id', 'unknown')
+                if entry_id not in seen_ids:
+                    seen_ids.add(entry_id)
                     unique_knowledge.append(entry)
+                    logger.info(f"[DEBUG] Added unique knowledge entry: {entry_id[:10]}...")
+                else:
+                    logger.info(f"[DEBUG] Skipped duplicate knowledge entry: {entry_id[:10]}...")
 
             # Create knowledge context
-            knowledge_context = "\n\n".join(entry["raw"] for entry in unique_knowledge)
+            knowledge_context = "\n\n".join(entry.get("raw", "") for entry in unique_knowledge)
+            logger.info(f"[DEBUG] Final unique_knowledge has {len(unique_knowledge)} items with IDs: {[entry.get('id', 'unknown')[:8] for entry in unique_knowledge]}")
+            logger.info(f"Retrieved {len(unique_knowledge)} unique knowledge entries")
+            logger.info(f"Knowledge context: {knowledge_context[:200]}..." if len(knowledge_context) > 200 else f"Knowledge context: {knowledge_context}")
             
-            # IMPROVEMENT 4: Build contextual memory with language awareness
+            # STEP 3: Generate next actions using the retrieved knowledge
+            logger.info("Generating next actions with retrieved knowledge")
+            next_actions_prompt = build_next_actions_prompt(context, context_analysis, knowledge_context)
+            
+            # Run next actions generation using the dedicated stream_next_action function
+            from analysis import stream_next_action
+            next_actions_task = stream_next_action(next_actions_prompt, thread_id_for_analysis, use_websocket)
+            next_action_content = ""
+            next_action_error = False
+            
+            # Process next actions results
+            async for next_action_chunk in next_actions_task:
+                # Pass through all chunks to caller
+                yield next_action_chunk
+                
+                # Check for error flag
+                if next_action_chunk.get("error", False):
+                    next_action_error = True
+                    logger.warning(f"Received error in next action: {next_action_chunk.get('content', '')}")
+                
+                # Store the complete next action content
+                if next_action_chunk.get("complete", False) and next_action_chunk.get("content"):
+                    next_action_content = next_action_chunk.get("content", "")
+                    logger.info(f"Received complete next actions, length: {len(next_action_content)}")
+            
+            # Now we should have:
+            # 1. context_analysis - from the initial analysis (parts 1-3)
+            # 2. next_action_content - from the next actions generation
+            
+            # STEP 3.5: Extract search terms from next actions and retrieve more targeted knowledge
+            # Only proceed if we have valid next_action_content without errors
+            additional_knowledge = []
+            
+            if not next_action_error and next_action_content and len(next_action_content) > 50:
+                try:
+                    logger.info("Extracting search terms from next actions for targeted knowledge retrieval")
+                    from analysis import extract_search_terms_from_next_actions, process_next_actions_result
+                    
+                    # First, process the next_action_content to get structured data
+                    next_actions_data = process_next_actions_result(next_action_content)
+                    
+                    # Make sure we have valid data and handle potential errors
+                    if not next_actions_data or not isinstance(next_actions_data, dict):
+                        logger.warning(f"Invalid next_actions_data format: {next_actions_data}")
+                        next_actions_data = {"next_action_english": "", "next_action_vietnamese": "", "next_action_full": next_action_content}
+                    
+                    # Check if unattributed questions were detected
+                    if "warning" in next_actions_data and next_actions_data.get("unattributed_questions", []):
+                        logger.warning(f"DETECTED UNATTRIBUTED QUESTIONS IN NEXT ACTIONS: {next_actions_data['warning']}")
+                        logger.warning(f"Unattributed questions: {next_actions_data['unattributed_questions']}")
+                        
+                        # If we have unattributed questions, modify the next_actions content to indicate this
+                        english_next_actions = next_actions_data.get("next_action_english", "")
+                        if english_next_actions:
+                            warning_note = "\n\nNOTE: Some suggested questions may not directly come from knowledge content and should be reviewed."
+                            next_actions_data["next_action_english"] = english_next_actions + warning_note
+                            next_actions_data["next_action_full"] = next_actions_data["next_action_full"] + warning_note
+                    
+                    # Extract search terms from the structured English next actions
+                    english_next_actions = next_actions_data.get("next_action_english", "")
+                    if english_next_actions:
+                        logger.info(f"Extracting search terms from English next actions: {english_next_actions[:100]}...")
+                        next_action_search_terms = extract_search_terms_from_next_actions(english_next_actions)
+                    else:
+                        # Fallback to extracting from full content if the structured parsing failed
+                        logger.info(f"Falling back to full content for search term extraction: {next_action_content[:100]}...")
+                        next_action_search_terms = extract_search_terms_from_next_actions(next_action_content)
+                    
+                    logger.info(f"Extracted {len(next_action_search_terms)} search terms from next actions: {next_action_search_terms[:5]}{'...' if len(next_action_search_terms) > 5 else ''}")
+                    
+                    # Only continue if we actually found some search terms
+                    if next_action_search_terms:
+                        # Filter and process next action search terms
+                        filtered_next_action_queries = []
+                        seen_terms = set()  # For deduplication
+                        
+                        for term in next_action_search_terms:
+                            # Skip very short or common terms and deduplicate
+                            normalized_term = term.lower().strip()
+                            if (len(normalized_term) > 3 and
+                                normalized_term not in seen_terms and
+                                not normalized_term in ['the', 'and', 'or', 'but', 'for', 'with', 'that']):
+                                seen_terms.add(normalized_term)
+                                filtered_next_action_queries.append(term)
+                        
+                        # Retrieve additional knowledge based on next action search terms
+                        if filtered_next_action_queries:
+                            logger.info(f"Retrieving additional knowledge based on {len(filtered_next_action_queries)} next action queries")
+                            
+                            # Process next action queries in batches
+                            batch_size = 5  # Process queries in batches
+                            for i in range(0, len(filtered_next_action_queries), batch_size):
+                                batch = filtered_next_action_queries[i:i + batch_size]
+                                
+                                # Use vector search for batch processing
+                                try:
+                                    # Call with streaming and thread ID if websocket is enabled
+                                    if use_websocket:
+                                        next_action_batch_results = []
+                                        async for knowledge_event in self._stream_batch_query_knowledge(
+                                            graph_version_id, batch, top_k=3, thread_id=thread_id_for_analysis
+                                        ):
+                                            # Pass through knowledge events to trigger method
+                                            yield knowledge_event
+                                            
+                                            # Extract content from non-complete events (contains actual knowledge)
+                                            if not knowledge_event.get("complete", False) and knowledge_event.get("content"):
+                                                for result in knowledge_event.get("content", []):
+                                                    if result not in additional_knowledge:
+                                                        additional_knowledge.append(result)
+                                    else:
+                                        # Normal non-streaming call
+                                        next_action_batch_results = await self._batch_query_knowledge(graph_version_id, batch)
+                                        for results in next_action_batch_results:
+                                            additional_knowledge.extend(results)
+                                except Exception as e:
+                                    logger.error(f"Error in next action batch processing: {str(e)}")
+                    else:
+                        logger.warning("No search terms found in next actions content")
+                except Exception as e:
+                    logger.error(f"Error extracting search terms from next actions: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+            else:
+                if next_action_error:
+                    logger.warning("Skipping next action search terms extraction due to error in next_action generation")
+                elif not next_action_content:
+                    logger.warning("Skipping next action search terms extraction due to empty next_action_content")
+                else:
+                    logger.warning(f"Skipping next action search terms extraction due to short content: {len(next_action_content)} chars")
+            
+            # Process any additional knowledge found
+            if additional_knowledge:
+                # Remove duplicates with original knowledge
+                unique_additional_knowledge = []
+                seen_ids = set(entry['id'] for entry in unique_knowledge)
+                
+                for entry in additional_knowledge:
+                    if entry['id'] not in seen_ids:
+                        seen_ids.add(entry['id'])
+                        unique_additional_knowledge.append(entry)
+                
+                # Add new unique knowledge to the knowledge context
+                if unique_additional_knowledge:
+                    additional_knowledge_context = "\n\n".join(entry["raw"] for entry in unique_additional_knowledge)
+                    knowledge_context += "\n\n" + additional_knowledge_context
+                    logger.info(f"Added {len(unique_additional_knowledge)} additional knowledge entries from next action queries")
+            
+            # STEP 4: Build contextual memory with language awareness
             contextual_memory = await self.maintain_contextual_memory(context, message, knowledge_context, lang_info)
             
             # Log key contextual memory insights
@@ -1103,41 +1252,47 @@ class MC:
                 f"Context: {context}\n"
                 f"Message: '{message}'\n"
                 f"Context Analysis: {context_analysis}\n"
+                f"Next Actions: {next_action_content}\n"
                 f"Knowledge: {knowledge_context}\n"
                 f"Language: {lang_info['language']} (confidence: {lang_info['confidence']})\n\n"
                 f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
                 f"Instructions:\n"
                 f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
                 f"2. STRICT PRIORITY ORDER - FOLLOW THIS HIERARCHY:\n"
-                f"   a) FIRST PRIORITY: Follow the NEXT ACTIONS section from Context Analysis - this is your PRIMARY DRIVER\n"
-                f"   b) SECOND PRIORITY: Use Knowledge as SUPPORTING MATERIAL for executing the NEXT ACTIONS, not to override them\n"
-                f"   c) THIRD PRIORITY: If NEXT ACTIONS and Knowledge conflict, ALWAYS prioritize the NEXT ACTIONS guidance\n"
-                f"3. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
-                f"4. Keep responses concise and conversational.\n"
-                f"5. GREETING RULES - STRICT ENFORCEMENT:\n"
+                f"   a) FIRST PRIORITY: Follow the guidance from the 'Next Actions' input - this is your PRIMARY DRIVER\n"
+                f"   b) SECOND PRIORITY: Use Knowledge as SUPPORTING MATERIAL for executing the 'Next Actions' guidance, not to override them\n"
+                f"   c) THIRD PRIORITY: If the 'Next Actions' guidance and Knowledge conflict, ALWAYS prioritize the 'Next Actions' guidance\n"
+                f"3. REASONING-BASED KNOWLEDGE USAGE:\n"
+                f"   a) ALWAYS use the specific knowledge items that the 'Next Actions' section explicitly selected as most relevant\n" 
+                f"   b) Look for 'Explain which specific knowledge items you selected as most relevant and why' in the 'Next Actions' section\n"
+                f"   c) Use these selected knowledge items as your primary knowledge source\n"
+                f"   d) If the 'Next Actions' section identifies 'priority information gaps', focus on addressing these specific gaps\n"
+                f"4. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
+                f"5. Keep responses concise and conversational.\n"
+                f"6. GREETING RULES - STRICT ENFORCEMENT:\n"
                 f"   - FIRST MESSAGE ONLY: If this is the VERY FIRST message in the conversation, use a greeting and introduce yourself as \"{self.name}\"\n"
                 f"   - ALL OTHER MESSAGES: NEVER use any greeting, NEVER introduce yourself, and NEVER say \"{self.name} đây\" or any variation\n"
                 f"   - ZERO TOLERANCE: Any name introduction after the first message is a critical error\n"
-                f"6. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
-                f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n"
-                f"8. NEXT ACTIONS QUESTIONS - MANDATORY EXACT USAGE:\n"
-                f"   - When the NEXT ACTIONS contain specific questions in quotes like \"...\", you MUST copy and paste these EXACT questions\n"
+                f"7. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
+                f"8. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n"
+                f"9. NEXT ACTIONS QUESTIONS - MANDATORY EXACT USAGE:\n"
+                f"   - When the 'Next Actions' section contains specific questions in quotes like \"...\", you MUST copy and paste these EXACT questions\n"
                 f"   - NEVER rephrase or create your own questions when specific questions are provided\n"
-                f"   - Examples: If NEXT ACTIONS says to ask \"Could you share more about your situation?\", use EXACTLY those words\n"
+                f"   - Examples: If 'Next Actions' says to ask \"Could you share more about your situation?\", use EXACTLY those words\n"
                 f"   - CRITICAL: This is the highest priority instruction for information gathering\n\n"
-                f"9. EMPATHY PRIORITY: If NEXT ACTIONS specifically mentions showing empathy (e.g., \"Show empathy and understanding\"), start your response with a brief empathetic acknowledgment BEFORE asking questions, but still NEVER introduce yourself by name in follow-up messages.\n\n"
-                f"10. KNOWLEDGE USAGE - SUPPORTING ROLE ONLY:\n"
-                f"   - Use Knowledge to INFORM your responses, not REPLACE the NEXT ACTIONS guidance\n"
-                f"   - Example: If NEXT ACTIONS says to ask about symptoms, use Knowledge about symptoms to sound informed, but still ask the exact questions from NEXT ACTIONS\n"
-                f"   - NEVER extract questions from Knowledge when NEXT ACTIONS already provides specific questions\n"
-                f"   - Knowledge provides background expertise; NEXT ACTIONS directs the conversation flow\n\n"
+                f"10. EMPATHY PRIORITY: If the 'Next Actions' section specifically mentions showing empathy (e.g., \"Show empathy and understanding\"), start your response with a brief empathetic acknowledgment BEFORE asking questions, but still NEVER introduce yourself by name in follow-up messages.\n\n"
+                f"11. KNOWLEDGE USAGE - SUPPORTING ROLE ONLY:\n"
+                f"   - Use Knowledge to INFORM your responses, not REPLACE the 'Next Actions' guidance\n"
+                f"   - Example: If 'Next Actions' says to ask about symptoms, use Knowledge about symptoms to sound informed, but still ask the exact questions from 'Next Actions'\n"
+                f"   - NEVER extract questions from Knowledge when 'Next Actions' already provides specific questions\n"
+                f"   - Knowledge provides background expertise; 'Next Actions' directs the conversation flow\n\n"
                 f"Response Structure:\n"
                 f"1. For first-time messages only: Brief greeting with name\n"
                 f"2. For all other messages: Start DIRECTLY with content, NO greeting, NO name introduction\n"
                 f"3. ADDRESS the current context appropriately:\n"
-                f"   a) If gathering information is needed, use VERBATIM the questions from NEXT ACTIONS that appear in quotes\n"
-                f"   b) If providing information is needed, present relevant details in a fresh way\n"
-                f"   c) If addressing concerns, provide targeted responses\n"
+                f"   a) If gathering information is needed, use VERBATIM the questions from the 'Next Actions' section that appear in quotes\n"
+                f"   b) If providing information is needed, present relevant details from the SPECIFICALLY SELECTED knowledge items\n"
+                f"   c) If addressing concerns, provide targeted responses based on the reasoning in the 'Next Actions' section\n"
                 f"4. PROGRESS the conversation with something new that hasn't been discussed yet\n\n"
                 f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n"
                 f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."

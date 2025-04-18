@@ -423,6 +423,7 @@ def register_handlers(socketio_instance):
         # Get missed messages for this thread
         analysis_messages = []
         knowledge_messages = []
+        next_action_messages = []
         other_messages = []
         
         with message_lock:
@@ -434,6 +435,7 @@ def register_handlers(socketio_instance):
                     # New structured format
                     analysis_messages = thread_messages.get('analysis', [])
                     knowledge_messages = thread_messages.get('knowledge', [])
+                    next_action_messages = thread_messages.get('next_action', [])
                     other_messages = thread_messages.get('other', [])
                 else:
                     # Legacy format (list) - treat all as analysis
@@ -445,8 +447,9 @@ def register_handlers(socketio_instance):
         # Keep track of message types for logging
         analysis_count = len(analysis_messages)
         knowledge_count = len(knowledge_messages)
+        next_action_count = len(next_action_messages)
         other_count = len(other_messages)
-        total_count = analysis_count + knowledge_count + other_count
+        total_count = analysis_count + knowledge_count + next_action_count + other_count
         
         if total_count > 0:
             logger.info(f"Sending {total_count} missed messages to session {session_id} for thread {thread_id}")
@@ -459,16 +462,30 @@ def register_handlers(socketio_instance):
             for msg in knowledge_messages:
                 emit('knowledge', msg)
             
+            # Send all next_action messages
+            for msg in next_action_messages:
+                emit('next_action', msg)
+            
             # Send other message types
             for msg in other_messages:
                 if isinstance(msg, dict) and 'type' in msg:
                     # Use the type field if available
-                    emit(msg['type'], msg)
+                    event_type = msg['type']
+                    if event_type == 'analysis':
+                        emit('analysis_update', msg)
+                    elif event_type == 'knowledge':
+                        emit('knowledge', msg)
+                    elif event_type == 'next_action':
+                        emit('next_action', msg)
+                    else:
+                        # Try using the type as the event name
+                        emit(event_type, msg)
                 else:
                     # Default to analysis_update
                     emit('analysis_update', msg)
             
-            logger.info(f"Sent {analysis_count} analysis events, {knowledge_count} knowledge events, and {other_count} other events to session {session_id}")
+            logger.info(f"Sent {analysis_count} analysis events, {knowledge_count} knowledge events, " 
+                      f"{next_action_count} next_action events, and {other_count} other events to session {session_id}")
         else:
             logger.info(f"No missed messages found for thread {thread_id}")
             emit('missed_messages_status', {'status': 'none', 'thread_id': thread_id})
@@ -721,6 +738,82 @@ def emit_knowledge_event(thread_id: str, data: Dict[str, Any]):
             # Only keep the last 50 messages per thread
             undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
             logger.info(f"[KNOWLEDGE_EVENT] Stored undelivered knowledge event for thread {thread_id}")
+        
+        return False
+
+
+def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
+    """
+    Emit a next_action event to all clients in a thread room
+    
+    Args:
+        thread_id: The thread ID to send the event to
+        data: The next_action event data to send
+        
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    #logger.info(f"[NEXT_ACTION_EVENT] Emitting next_action event to thread {thread_id}")
+    
+    # Check if there are any active sessions in this thread room
+    active_sessions_count = 0
+    active_session_ids = []
+    
+    with session_lock:
+        for session_id, session_data in ws_sessions.items():
+            stored_thread_id = session_data.get('thread_id')
+            
+            # Match sessions with the target thread_id
+            if stored_thread_id == thread_id:
+                active_sessions_count += 1
+                active_session_ids.append(session_id)
+                # Update last activity timestamp to mark session as active
+                session_data['last_activity'] = datetime.now().isoformat()
+    
+    #logger.info(f"[NEXT_ACTION_EVENT] Found {active_sessions_count} active sessions for thread {thread_id}")
+    
+    if active_sessions_count > 0:
+        # First try to emit to the room
+        try:
+            socketio.emit('next_action', data, room=thread_id)
+            #logger.info(f"[NEXT_ACTION_EVENT] Successfully emitted next_action event to room {thread_id}")
+        except Exception as e:
+            logger.error(f"[NEXT_ACTION_EVENT] Error emitting to room {thread_id}: {str(e)}")
+        
+        # Also send directly to each session as a backup
+        success = False
+        for session_id in active_session_ids:
+            try:
+                socketio.emit('next_action', data, room=session_id)
+                #logger.info(f"[NEXT_ACTION_EVENT] Sent next_action event directly to session {session_id}")
+                success = True
+            except Exception as e:
+                logger.error(f"[NEXT_ACTION_EVENT] Failed direct next_action delivery to session {session_id}: {str(e)}")
+        
+        # Store message in case not all deliveries were successful
+        if not success:
+            with message_lock:
+                if thread_id not in undelivered_messages:
+                    undelivered_messages[thread_id] = {}
+                if 'next_action' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['next_action'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['next_action'] = (undelivered_messages[thread_id]['next_action'] + [data])[-50:]
+                #logger.info(f"[NEXT_ACTION_EVENT] Stored undelivered next_action event for thread {thread_id}")
+        
+        return True
+    else:
+        #logger.warning(f"[NEXT_ACTION_EVENT] No active sessions found for thread {thread_id}, next_action event NOT DELIVERED")
+        
+        # Store undelivered message for later retrieval
+        with message_lock:
+            if thread_id not in undelivered_messages:
+                undelivered_messages[thread_id] = {}
+            if 'next_action' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['next_action'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['next_action'] = (undelivered_messages[thread_id]['next_action'] + [data])[-50:]
+            #logger.info(f"[NEXT_ACTION_EVENT] Stored undelivered next_action event for thread {thread_id}")
         
         return False
 
