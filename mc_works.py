@@ -27,8 +27,8 @@ except LookupError:
 def add_messages(existing_messages, new_messages):
     return existing_messages + new_messages
 
-LLM = ChatOpenAI(model="gpt-4o-mini", streaming=False)
-StreamLLM = ChatOpenAI(model="gpt-4o-mini", streaming=True)
+LLM = ChatOpenAI(model="gpt-4o", streaming=False)
+StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
 
 class ResponseBuilder:
     def __init__(self):
@@ -850,9 +850,21 @@ class MC:
             
             # Build and process context analysis in parallel with entity extraction
             context_analysis_prompt = build_context_analysis_prompt(context, process_instructions)
+            entity_extraction_prompt = (
+                f"Based on the conversation and analysis:\n\n"
+                f"CONVERSATION:\n{context}\n\n"
+                f"Extract all relevant search terms that would help find information in a knowledge base:\n\n"
+                f"1. CONTACT INFORMATION: Information about the person (demographics, preferences, etc.)\n"
+                f"2. TOPICS: Main topics, product categories, or services mentioned\n"
+                f"3. QUESTIONS: Specific questions or information requests\n"
+                f"4. STAGE INDICATORS: Terms that indicate where in a process the conversation is\n"
+                f"5. REACTIONS: Terms indicating agreement, disagreement, satisfaction, frustration\n\n"
+                f"Format your response as a JSON object with these categories and 1-3 specific search terms for each that would help retrieve relevant knowledge."
+            )
             
-            # Run analysis
+            # Run analysis and entity extraction in parallel
             analysis_task = stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket)
+            entity_task = LLM.ainvoke(entity_extraction_prompt)
             
             # Process analysis results
             context_analysis = ""
@@ -862,74 +874,44 @@ class MC:
                 if analysis_chunk.get("complete", False):
                     full_analysis = analysis_chunk.get("content", "")
             
-            # Use the full analysis if available, otherwise use an empty string
-            context_analysis = full_analysis or ""
+            # Process entity extraction results
+            entity_response = await entity_task
+            entity_json = json.loads(re.search(r'\{[\s\S]*\}', entity_response.content).group(0))
             
-            # Extract NEXT ACTIONS from analysis to guide knowledge queries
+            # Create targeted queries with caching and optimization
             search_terms = []
-            try:
-                # Extract next actions from the analysis using regex
-                next_actions_match = re.search(r'NEXT ACTIONS?[:\s]*(.*?)(?:\n\n|\Z)', context_analysis, re.IGNORECASE | re.DOTALL)
-                if next_actions_match:
-                    next_actions_text = next_actions_match.group(1).strip()
-                    logger.info(f"Extracted next actions: {next_actions_text[:200]}...")
-                    
-                    # Add the entire NEXT ACTIONS section as one search term for comprehensive coverage
-                    if len(next_actions_text) > 10:  # Ensure it's substantial enough
-                        search_terms.append(next_actions_text)
-                        logger.info(f"Added complete NEXT ACTIONS section as search term ({len(next_actions_text)} chars)")
-                    
-                    # Also split into sentences and use as individual search terms for more targeted retrieval
-                    action_sentences = re.split(r'[.!?]', next_actions_text)
-                    for sentence in action_sentences:
-                        if sentence.strip():
-                            # Keep only the most meaningful terms (more than 3 words)
-                            terms = sentence.strip().split()
-                            if len(terms) > 3:
-                                search_terms.append(sentence.strip())
-                
-                # If we couldn't extract or no meaningful terms, use the message as fallback
-                if not search_terms:
-                    search_terms.append(message)
-                    logger.info(f"Using message as fallback search term: {message}")
-                
-                # Also add requirements if available
-                requirements_match = re.search(r'REQUIREMENTS?[:\s]*(.*?)(?:\n\n|\Z)', context_analysis, re.IGNORECASE | re.DOTALL)
-                if requirements_match:
-                    requirements_text = requirements_match.group(1).strip()
-                    # Add key requirement phrases
-                    req_sentences = re.split(r'[.!?]', requirements_text)
-                    for sentence in req_sentences:
-                        if sentence.strip() and len(sentence.strip().split()) > 3:
-                            search_terms.append(sentence.strip())
-                
-                # Add topic focus from conversation context if available
-                topic_match = re.search(r'current topic or focus\?[:\s]*(.*?)(?:\n|\Z)', context_analysis, re.IGNORECASE)
-                if topic_match:
-                    topic = topic_match.group(1).strip()
-                    if topic and len(topic.split()) <= 5:  # Only use concise topics
-                        search_terms.append(topic)
-                
-                logger.info(f"Generated {len(search_terms)} search terms from analysis")
-                
-            except Exception as e:
-                logger.error(f"Error extracting search terms from analysis: {str(e)}")
-                # Fallback to using message
-                search_terms = [message]
-                logger.info(f"Falling back to message as search term: {message}")
+            seen_terms = set()  # For deduplication
+            
+            # Extract and deduplicate search terms
+            for category, terms in entity_json.items():
+                if isinstance(terms, list):
+                    for term in terms:
+                        # Normalize and deduplicate terms
+                        normalized_term = term.lower().strip()
+                        if normalized_term and normalized_term not in seen_terms:
+                            seen_terms.add(normalized_term)
+                            search_terms.append(normalized_term)
+                elif isinstance(terms, str):
+                    normalized_term = terms.lower().strip()
+                    if normalized_term and normalized_term not in seen_terms:
+                        seen_terms.add(normalized_term)
+                        search_terms.append(normalized_term)
+
+            # Release memory by clearing large objects no longer needed
+            del entity_json
+            if full_analysis and len(full_analysis) > 10000:  # Only clear if it's large
+                context_analysis = full_analysis[:5000] + "..." + full_analysis[-5000:]  # Keep start and end
+                del full_analysis  # Release the full analysis to free memory
+            else:
+                context_analysis = full_analysis
 
             # Pre-filter queries based on relevance
             filtered_queries = []
-            seen_terms = set()  # For deduplication
-            
             for term in search_terms:
-                # Skip very short or common terms and deduplicate
-                normalized_term = term.lower().strip()
-                if (len(normalized_term) > 3 and
-                    normalized_term not in seen_terms and
-                    not normalized_term in ['the', 'and', 'or', 'but', 'for', 'with', 'that']):
-                    seen_terms.add(normalized_term)
-                    filtered_queries.append(term)
+                # Skip very short or common terms
+                if len(term) < 3 or term in ['the', 'and', 'or', 'but', 'for', 'with', 'that']:
+                    continue
+                filtered_queries.append(term)
 
             # Batch process queries with vector search
             unique_queries = []
@@ -1069,7 +1051,7 @@ class MC:
                     f"3. Include the feedback request, making it sound natural and aligned with your personality\n"
                     f"4. Be concise and friendly\n\n"
                     
-                    f"Always respond in {lang_info['language']}. When the NEXT ACTIONS include specific questions to ask, prioritize using these exact questions in your response rather than creating new ones."
+                    f"Always respond in {lang_info['language']}."
                 )
                 
                 # Add naturalness guidance and conversation dynamics insights
@@ -1108,37 +1090,22 @@ class MC:
                 f"CRITICAL PERSONALITY INSTRUCTIONS - YOU MUST FOLLOW THESE EXACTLY:\n{self.personality_instructions}\n\n"
                 f"Instructions:\n"
                 f"1. PERSONALITY IS YOUR TOP PRIORITY: You MUST embody the exact role, expertise, tone, and positioning specified in the PERSONALITY INSTRUCTIONS above.\n"
-                f"2. STRICT PRIORITY ORDER - FOLLOW THIS HIERARCHY:\n"
-                f"   a) FIRST PRIORITY: Follow the NEXT ACTIONS section from Context Analysis - this is your PRIMARY DRIVER\n"
-                f"   b) SECOND PRIORITY: Use Knowledge as SUPPORTING MATERIAL for executing the NEXT ACTIONS, not to override them\n"
-                f"   c) THIRD PRIORITY: If NEXT ACTIONS and Knowledge conflict, ALWAYS prioritize the NEXT ACTIONS guidance\n"
+                f"2. Your primary guidance comes from the knowledge base. Strictly follow the NEXT ACTIONS from the Context Analysis.\n"
                 f"3. ALWAYS reply in {lang_info['language']} - this is mandatory regardless of what language appears in the knowledge base.\n"
                 f"4. Keep responses concise and conversational.\n"
-                f"5. GREETING RULES - STRICT ENFORCEMENT:\n"
-                f"   - FIRST MESSAGE ONLY: If this is the VERY FIRST message in the conversation, use a greeting and introduce yourself as \"{self.name}\"\n"
-                f"   - ALL OTHER MESSAGES: NEVER use any greeting, NEVER introduce yourself, and NEVER say \"{self.name} đây\" or any variation\n"
-                f"   - ZERO TOLERANCE: Any name introduction after the first message is a critical error\n"
+                f"5. GREETING RULES:\n"
+                f"   - If this is the first message in the conversation (no previous messages), use a natural greeting appropriate to the time and context\n"
+                f"   - For first messages, introduce yourself with your name ({self.name})\n"
+                f"   - If there are previous messages, DO NOT use any greeting - respond directly to the content\n"
                 f"6. If the user expressed disagreement or rejection, acknowledge it respectfully.\n"
-                f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n"
-                f"8. NEXT ACTIONS QUESTIONS - MANDATORY EXACT USAGE:\n"
-                f"   - When the NEXT ACTIONS contain specific questions in quotes like \"...\", you MUST copy and paste these EXACT questions\n"
-                f"   - NEVER rephrase or create your own questions when specific questions are provided\n"
-                f"   - Examples: If NEXT ACTIONS says to ask \"Could you share more about your situation?\", use EXACTLY those words\n"
-                f"   - CRITICAL: This is the highest priority instruction for information gathering\n\n"
-                f"9. EMPATHY PRIORITY: If NEXT ACTIONS specifically mentions showing empathy (e.g., \"Show empathy and understanding\"), start your response with a brief empathetic acknowledgment BEFORE asking questions, but still NEVER introduce yourself by name in follow-up messages.\n\n"
-                f"10. KNOWLEDGE USAGE - SUPPORTING ROLE ONLY:\n"
-                f"   - Use Knowledge to INFORM your responses, not REPLACE the NEXT ACTIONS guidance\n"
-                f"   - Example: If NEXT ACTIONS says to ask about symptoms, use Knowledge about symptoms to sound informed, but still ask the exact questions from NEXT ACTIONS\n"
-                f"   - NEVER extract questions from Knowledge when NEXT ACTIONS already provides specific questions\n"
-                f"   - Knowledge provides background expertise; NEXT ACTIONS directs the conversation flow\n\n"
+                f"7. AVOID REPETITION: Do not repeat the same information or questions from previous exchanges.\n\n"
                 f"Response Structure:\n"
-                f"1. For first-time messages only: Brief greeting with name\n"
-                f"2. For all other messages: Start DIRECTLY with content, NO greeting, NO name introduction\n"
-                f"3. ADDRESS the current context appropriately:\n"
-                f"   a) If gathering information is needed, use VERBATIM the questions from NEXT ACTIONS that appear in quotes\n"
+                f"1. Follow the GREETING RULES above\n"
+                f"2. ADDRESS the current context appropriately:\n"
+                f"   a) If gathering information is needed, ask specific questions (but not ones already asked)\n"
                 f"   b) If providing information is needed, present relevant details in a fresh way\n"
                 f"   c) If addressing concerns, provide targeted responses\n"
-                f"4. PROGRESS the conversation with something new that hasn't been discussed yet\n\n"
+                f"3. PROGRESS the conversation with something new that hasn't been discussed yet\n\n"
                 f"CRITICAL: Maintain a natural conversation flow that doesn't feel repetitive. Introduce fresh angles or questions rather than repeating previous points.\n"
                 f"Always respond in {lang_info['language']}. Use knowledge when relevant, but prioritize a natural conversation flow."
             )
