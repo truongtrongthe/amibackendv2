@@ -30,6 +30,8 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
         Dict: Analysis events with streaming content
     """
     analysis_buffer = ""
+    logger.info(f"Starting stream_analysis with use_websocket={use_websocket}, thread_id={thread_id_for_analysis}")
+    
     try:
         async for chunk in StreamLLM.astream(prompt):
             chunk_content = chunk.content
@@ -55,7 +57,7 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
             yield {"type": "analysis", "content": chunk_content, "complete": False}
         
         # Send a final complete message with the full analysis
-        logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
+        #logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
         
         # Process the analysis to extract search terms and structure content
         analysis_parts = process_analysis_result(analysis_buffer)
@@ -70,8 +72,13 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
         # Send via WebSocket if configured
         if use_websocket and thread_id_for_analysis:
             try:
+                logger.info(f"Emitting complete analysis via WebSocket to thread {thread_id_for_analysis}, length={len(analysis_buffer)}")
                 from socketio_manager import emit_analysis_event
                 was_delivered_analysis = emit_analysis_event(thread_id_for_analysis, analysis_complete_event)
+                if was_delivered_analysis:
+                    logger.info(f"Successfully emitted complete analysis to WebSocket thread {thread_id_for_analysis}")
+                else:
+                    logger.warning(f"Complete analysis NOT delivered to WebSocket thread {thread_id_for_analysis} - No active sessions")
             except Exception as e:
                 logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
         
@@ -436,7 +443,8 @@ def process_next_actions_result(next_actions_content: str) -> dict:
 
 def extract_search_terms(analysis_text: str) -> List[str]:
     """
-    Extract search terms from the initial analysis to guide knowledge retrieval.
+    Extract search terms from the initial analysis to guide knowledge retrieval,
+    using LLM instead of regex patterns for better semantic understanding.
     
     Args:
         analysis_text: The initial analysis text
@@ -444,91 +452,100 @@ def extract_search_terms(analysis_text: str) -> List[str]:
     Returns:
         List[str]: List of search terms for knowledge queries
     """
-    search_terms = []
     try:
-        # Log the length and first part of the analysis text for debugging
+        # Log the input for debugging
         logger.info(f"[DEBUG] extract_search_terms called with analysis_text length: {len(analysis_text)}")
-        logger.info(f"[DEBUG] First 200 chars of analysis_text: {analysis_text[:200]}")
         
-        # Extract topic and focus
-        topic_match = re.search(r'current topic or focus\?[:\s]*(.*?)(?:\n|\Z)', analysis_text, re.IGNORECASE)
-        if topic_match:
-            topic = topic_match.group(1).strip()
-            if topic and len(topic) > 3:
-                search_terms.append(topic)
-                logger.info(f"Added topic as search term: {topic}")
-        else:
-            logger.info("[DEBUG] No match found for 'current topic or focus'")
-            # Try an alternative pattern
-            alt_topic_match = re.search(r'topic.*?(?:is|:)[^\n\.,]*', analysis_text, re.IGNORECASE)
-            if alt_topic_match:
-                alt_topic = alt_topic_match.group(0).strip()
-                if alt_topic and len(alt_topic) > 3:
-                    search_terms.append(alt_topic)
-                    logger.info(f"[DEBUG] Added alternative topic as search term: {alt_topic}")
+        # Use existing LLM to extract search terms
+        extraction_prompt = f"""
+        Extract the most relevant search terms from the following analysis text. 
+        Focus on extracting:
         
-        # Extract requirements assessment information
-        requirements_match = re.search(r'specific information requirements[:\s]*(.*?)(?:\n\n|\Z)', analysis_text, re.IGNORECASE | re.DOTALL)
-        if requirements_match:
-            requirements_text = requirements_match.group(1).strip()
-            # Add key requirement phrases
-            req_sentences = re.split(r'[.!?]', requirements_text)
-            for sentence in req_sentences:
-                if sentence.strip() and len(sentence.strip().split()) > 3:
-                    search_terms.append(sentence.strip())
-                    logger.info(f"Added requirement as search term: {sentence.strip()}")
-        else:
-            logger.info("[DEBUG] No match found for 'specific information requirements'")
+        1. The main topic or focus of the conversation
+        2. Specific information requirements mentioned
+        3. Missing requirements that need to be addressed
+        4. Priority information that should be gathered
+        5. The current conversation stage
         
-        # Extract missing requirements information
-        missing_match = re.search(r'requirements have been met and which are still missing[:\s]*(.*?)(?:\n\n|\Z)', analysis_text, re.IGNORECASE | re.DOTALL)
-        if missing_match:
-            missing_text = missing_match.group(1).strip()
-            # Add key missing requirement phrases
-            missing_sentences = re.split(r'[.!?]', missing_text)
-            for sentence in missing_sentences:
-                if sentence.strip() and len(sentence.strip().split()) > 3:
-                    search_terms.append(sentence.strip())
-                    logger.info(f"Added missing requirement as search term: {sentence.strip()}")
-        else:
-            logger.info("[DEBUG] No match found for 'requirements have been met and which are still missing'")
+        For each extracted term, ensure it is:
+        - A complete phrase (at least 3 words where appropriate)
+        - Directly relevant to knowledge retrieval
+        - Non-redundant with other terms
         
-        # Extract priority information
-        priority_match = re.search(r'priority order for gathering missing information[:\s]*(.*?)(?:\n\n|\Z)', analysis_text, re.IGNORECASE | re.DOTALL)
-        if priority_match:
-            priority_text = priority_match.group(1).strip()
-            # Add priority phrases
-            priority_sentences = re.split(r'[.!?]', priority_text)
-            for sentence in priority_sentences:
-                if sentence.strip() and len(sentence.strip().split()) > 3:
-                    search_terms.append(sentence.strip())
-                    logger.info(f"Added priority as search term: {sentence.strip()}")
+        Format your response as a JSON array of strings, with each string being a search term.
+        Example: ["customer inquiry about pricing", "product specifications", "delivery options"]
+        
+        Here's the analysis text:
+        
+        {analysis_text}
+        """
+        
+        # Use the existing LLM model
+        response = StreamLLM.invoke(extraction_prompt)
+        
+        # Check if the response is valid and extract the terms
+        content = response.content
+        logger.info(f"[DEBUG] LLM response for search term extraction: {content[:200]}...")
+        
+        # Try to extract JSON array from the response
+        import json
+        import re
+        
+        # Look for JSON-like array in the response
+        json_pattern = r'\[.*\]'
+        json_match = re.search(json_pattern, content, re.DOTALL)
+        
+        if json_match:
+            try:
+                search_terms = json.loads(json_match.group(0))
+                logger.info(f"[DEBUG] Successfully extracted {len(search_terms)} search terms from LLM response")
+            except json.JSONDecodeError:
+                logger.warning(f"[DEBUG] Failed to parse JSON from the match: {json_match.group(0)}")
+                search_terms = []
         else:
-            logger.info("[DEBUG] No match found for 'priority order for gathering missing information'")
+            # Fallback: split by lines and look for bullet points or numbered lists
+            logger.warning("[DEBUG] No JSON array found in LLM response, trying fallback extraction")
+            lines = content.split('\n')
+            search_terms = []
             
-        # ADD FALLBACK FOR GREETINGS - Extract greeting-related terms if the analysis mentions greeting
+            for line in lines:
+                # Remove bullet points, numbers, etc.
+                cleaned_line = re.sub(r'^[\s-•*\d.]+\s*', '', line).strip()
+                if cleaned_line and len(cleaned_line.split()) >= 3:
+                    search_terms.append(cleaned_line)
+        
+        # Add fallback for greetings
         if any(word in analysis_text.lower() for word in ["greeting", "hello", "welcome", "introduction", "initial contact", "first message"]):
             for greeting_term in ["greeting", "welcome", "introduction", "hello"]:
-                search_terms.append(greeting_term)
-                logger.info(f"[DEBUG] Added greeting fallback term: {greeting_term}")
-                
-        # General fallback - Extract any sentence containing "stage is" to identify conversation stage
-        stage_match = re.search(r'(?:stage|conversation).*?(?:is|in)[^\n\.]+', analysis_text, re.IGNORECASE)
-        if stage_match and len(search_terms) < 2:
-            stage_info = stage_match.group(0).strip()
-            search_terms.append(stage_info)
-            logger.info(f"[DEBUG] Added conversation stage as fallback term: {stage_info}")
-                    
-        # Deduplicate search terms
+                if greeting_term not in search_terms:
+                    search_terms.append(greeting_term)
+                    logger.info(f"[DEBUG] Added greeting fallback term: {greeting_term}")
+        
+        # Ensure we have at least one term - add general stage fallback if needed
+        if not search_terms:
+            stage_match = re.search(r'(?:stage|conversation).*?(?:is|in)[^\n\.]+', analysis_text, re.IGNORECASE)
+            if stage_match:
+                stage_info = stage_match.group(0).strip()
+                search_terms.append(stage_info)
+                logger.info(f"[DEBUG] Added conversation stage as fallback term: {stage_info}")
+            else:
+                # Last-resort fallback
+                search_terms = ["general inquiry", "customer interaction"]
+                logger.info(f"[DEBUG] Using last-resort fallback terms: {search_terms}")
+        
+        # Deduplicate and clean terms
         unique_terms = []
         seen = set()
         for term in search_terms:
+            if not isinstance(term, str):
+                continue
+            term = term.strip()
             normalized = term.lower()
-            if normalized not in seen:
+            if normalized and normalized not in seen:
                 seen.add(normalized)
                 unique_terms.append(term)
         
-        logger.info(f"[DEBUG] Final extracted search terms ({len(unique_terms)}): {unique_terms}")        
+        logger.info(f"[DEBUG] Final extracted search terms ({len(unique_terms)}): {unique_terms}")
         return unique_terms
         
     except Exception as e:
@@ -537,128 +554,132 @@ def extract_search_terms(analysis_text: str) -> List[str]:
         logger.error(traceback.format_exc())
         return []
 
-def extract_search_terms_from_next_actions(next_actions_text: str) -> List[str]:
+def extract_search_terms_from_next_actions(
+    next_actions_text: str,
+    min_words: int = 4,
+    max_input_length: int = 10000
+) -> List[str]:
     """
-    Extract search terms from the next actions to guide focused knowledge retrieval.
-    Prioritizes full sentences to maintain context and nuance for better knowledge queries.
-    
+    Extract search terms from next actions text to guide focused knowledge retrieval.
+    Prioritizes context-rich terms (e.g., full sentences, quoted questions) for better query relevance.
+
     Args:
-        next_actions_text: The next actions text
-        
+        next_actions_text: The input text containing next actions (str).
+        min_words: Minimum number of words for a term to be included (default: 4).
+        max_input_length: Maximum allowed input length to prevent performance issues (default: 10000).
+
     Returns:
-        List[str]: List of search terms for focused knowledge queries
+        List[str]: Deduplicated list of search terms (e.g., sentences, questions, bullet points).
+
+    Examples:
+        >>> text = "ENGLISH NEXT ACTIONS:\\n- Confirm meeting.\\nAsk \\"What is the deadline?\\""
+        >>> extract_search_terms_from_next_actions(text)
+        ['Confirm meeting.', 'What is the deadline?']
     """
-    # Safety check for empty or invalid input
-    if not next_actions_text or not isinstance(next_actions_text, str) or len(next_actions_text) < 10:
-        logger.warning(f"Invalid input to extract_search_terms_from_next_actions: {next_actions_text}")
+    # Input validation
+    if not isinstance(next_actions_text, str):
+        logger.warning(f"Input must be a string, got {type(next_actions_text)}")
         return []
-        
+    if not next_actions_text.strip():
+        logger.warning("Input is empty or whitespace")
+        return []
+    if len(next_actions_text) > max_input_length:
+        logger.warning(f"Input exceeds max length ({max_input_length} chars), truncating")
+        next_actions_text = next_actions_text[:max_input_length]
+    if len(next_actions_text) < 10:
+        logger.warning(f"Input too short (< 10 chars): {next_actions_text}")
+        return []
+
     search_terms = []
     try:
-        # Extract from English next actions (focus on the specific questions or actions)
-        english_section = ""
-        if "ENGLISH NEXT ACTIONS:" in next_actions_text:
-            parts = next_actions_text.split("ENGLISH NEXT ACTIONS:")
-            if len(parts) > 1:
-                second_part = parts[1]
-                if "VIETNAMESE NEXT ACTIONS" in second_part:
-                    english_section = second_part.split("VIETNAMESE NEXT ACTIONS")[0].strip()
-                else:
-                    english_section = second_part.strip()
-        elif "ENGLISH NEXT ACTIONS" in next_actions_text:
-            parts = next_actions_text.split("ENGLISH NEXT ACTIONS")
-            if len(parts) > 1:
-                second_part = parts[1]
-                if "VIETNAMESE NEXT ACTIONS" in second_part:
-                    english_section = second_part.split("VIETNAMESE NEXT ACTIONS")[0].strip()
-                else:
-                    english_section = second_part.strip()
-        
-        # If no structured sections found, use the whole text
-        if not english_section:
-            logger.warning(f"No English section found in next_actions_text, using full text")
-            english_section = next_actions_text
-            
-        logger.info(f"[DEBUG] Extracted English section for knowledge queries (length: {len(english_section)})")
-        
-        # Priority 1: Extract full sentences with action verbs (most contextually relevant)
-        action_sentence_pattern = r'([^.!?\n]*(?:ask|inquire|request|provide|offer|explain|clarify|confirm|determine|find out|recommend|suggest|address|acknowledge)[^.!?\n]*[.!?])'
-        action_sentences = re.findall(action_sentence_pattern, english_section, re.IGNORECASE)
-        for sentence in action_sentences:
-            sentence = sentence.strip()
-            if len(sentence.split()) > 3:
-                search_terms.append(sentence)
-                logger.info(f"[DEBUG] Added full action sentence as query: {sentence}")
-        
-        # Priority 2: Extract quoted questions (important for follow-up queries)
-        quoted_questions = re.findall(r'"([^"]*\?)"', english_section)
-        for question in quoted_questions:
-            if question.strip() and len(question.strip().split()) > 3 and question not in search_terms:
-                search_terms.append(question.strip())
-                logger.info(f"[DEBUG] Added quoted question as query: {question.strip()}")
-        
-        # Priority 3: Extract full sentences (preserve context and nuance)
-        sentence_pattern = r'([^.!?\n]+[.!?])'
-        sentences = re.findall(sentence_pattern, english_section)
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if len(sentence.split()) > 5 and sentence not in search_terms:
-                search_terms.append(sentence)
-                logger.info(f"[DEBUG] Added complete sentence as query: {sentence}")
-                
-        # Priority 4: Extract bullet points (often contain key actions)
-        bullet_points = re.findall(r'[-•*]\s*(.*?)(?:\n|\Z)', english_section)
-        for point in bullet_points:
-            point = point.strip()
-            if point and len(point.split()) > 3 and point not in search_terms:
-                search_terms.append(point)
-                logger.info(f"[DEBUG] Added bullet point as query: {point}")
+        # Extract English section (case-insensitive, flexible header)
+        english_section = next_actions_text
+        section_pattern = r"(?:ENGLISH\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS|\Z))"
+        section_match = re.search(section_pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
+        if section_match:
+            english_section = section_match.group(1).strip()
+            logger.info(f"Extracted English section (length: {len(english_section)})")
+        else:
+            logger.info("No English section found, using full text")
 
-        # Priority 5: Extract specific information requirement sections
-        info_sections = [
-            (r'information gathering is needed[,\s]*(.*?)(?:\n\n|\Z)', "info gathering focus"),
-            (r'information is complete[,\s]*(.*?)(?:\n\n|\Z)', "response focus"),
-            (r'specific questions(?:\s|:|are)+(.*?)(?:\n\n|\Z)', "specific questions"),
-            (r'knowledge items selected(?:\s|:|as)+(.*?)(?:\n\n|\Z)', "selected knowledge")
+        # Define extraction patterns (ordered by priority)
+        extraction_patterns = [
+            # Priority 1: Action sentences (with verbs like ask, confirm)
+            {
+                "pattern": r'([^.!?\n]*(?:ask|inquire|request|provide|offer|explain|clarify|confirm|determine|find out|recommend|suggest|address|acknowledge)[^.!?\n]*[.!?])',
+                "type": "action_sentence",
+                "min_words": max(min_words, 4),
+            },
+            # Priority 2: Quoted questions
+            {
+                "pattern": r'"([^"]*\?)"',
+                "type": "quoted_question",
+                "min_words": max(min_words, 3),
+            },
+            # Priority 3: General sentences
+            {
+                "pattern": r'([^.!?\n]+[.!?])',
+                "type": "sentence",
+                "min_words": max(min_words, 5),
+            },
+            # Priority 4: Bullet points
+            {
+                "pattern": r'[-•*]\s*(.*?)(?=\n|\Z)',
+                "type": "bullet_point",
+                "min_words": max(min_words, 3),
+            },
         ]
-        
+
+        # Extract terms using patterns
+        for extraction in extraction_patterns:
+            matches = re.findall(extraction["pattern"], english_section, re.IGNORECASE)
+            for match in matches:
+                term = match.strip()
+                if len(term.split()) >= extraction["min_words"]:
+                    search_terms.append(term)
+                    logger.debug(f"Added {extraction['type']}: {term}")
+
+        # Priority 5: Specific information sections
+        info_sections = [
+            (r'information gathering is needed[,\s]*(.*?)(?=\n\n|\Z)', "info_gathering"),
+            (r'information is complete[,\s]*(.*?)(?=\n\n|\Z)', "response_focus"),
+            (r'specific questions(?:\s|:|are)+(.*?)(?=\n\n|\Z)', "specific_questions"),
+            (r'knowledge items selected(?:\s|:|as)+(.*?)(?=\n\n|\Z)', "selected_knowledge"),
+        ]
+
         for pattern, section_type in info_sections:
             section_match = re.search(pattern, english_section, re.IGNORECASE | re.DOTALL)
             if section_match:
                 section_text = section_match.group(1).strip()
-                # Extract complete sentences from section
-                section_sentences = re.findall(r'([^.!?\n]+[.!?])', section_text)
-                for sentence in section_sentences:
+                sentences = re.findall(r'([^.!?\n]+[.!?])', section_text)
+                for sentence in sentences:
                     sentence = sentence.strip()
-                    if sentence and len(sentence.split()) > 3 and sentence not in search_terms:
+                    if len(sentence.split()) >= min_words and sentence not in search_terms:
                         search_terms.append(sentence)
-                        logger.info(f"[DEBUG] Added {section_type} sentence as query: {sentence}")
-        
-        # As a fallback, if no search terms found yet, use key phrases
+                        logger.debug(f"Added {section_type} sentence: {sentence}")
+
+        # Fallback: Extract long phrases if no terms found
         if not search_terms:
-            logger.warning(f"No structured search terms found, using fallback approach")
-            # Extract any sentence with more than 5 words as a potential search term
+            logger.warning("No structured terms found, using fallback")
             sentences = re.split(r'[.!?]', english_section)
             for sentence in sentences:
                 sentence = sentence.strip()
-                if sentence and len(sentence.split()) > 5:
+                if len(sentence.split()) >= max(min_words, 5):
                     search_terms.append(sentence)
-                    logger.info(f"[DEBUG] Added fallback sentence as query: {sentence}")
-        
-        # Deduplicate search terms while maintaining original order (first appearance has priority)
+                    logger.debug(f"Added fallback sentence: {sentence}")
+
+        # Deduplicate terms (case-insensitive, preserve original)
         unique_terms = []
         seen = set()
         for term in search_terms:
-            normalized = term.lower()
+            normalized = term.lower().strip()
             if normalized not in seen:
                 seen.add(normalized)
                 unique_terms.append(term)
-        
-        logger.info(f"[DEBUG] Final extracted search terms for knowledge queries ({len(unique_terms)}): {unique_terms}")
+
+        logger.info(f"Extracted {len(unique_terms)} unique search terms")
         return unique_terms
-        
+
     except Exception as e:
-        logger.error(f"Error extracting search terms from next actions: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return [] 
+        logger.error(f"Error extracting search terms: {str(e)}", exc_info=True)
+        return []

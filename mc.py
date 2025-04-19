@@ -570,192 +570,6 @@ class MC:
             
         return question
 
-    async def maintain_contextual_memory(self, context, message, knowledge_context, lang_info=None):
-        """
-        Maintain contextual memory to improve conversation continuity.
-        
-        Args:
-            context: Full conversation context
-            message: Current user message
-            knowledge_context: Retrieved knowledge
-            lang_info: Optional language information dictionary
-            
-        Returns:
-            dict: Enhanced contextual memory for more natural responses
-        """
-        # Determine language attributes for safe language-specific enhancements
-        language_confident = lang_info and lang_info.get("confidence", 0) > 0.7
-        language_code = lang_info.get("code", "en") if language_confident else "en"
-        
-        logger.info(f"[MEMORY] Processing conversation with language code: {language_code}, confidence: {lang_info.get('confidence', 'unknown') if lang_info else 'using default'}")
-        
-        # Parse conversation into structured format
-        turns = []
-        current_turn = {"speaker": None, "text": ""}
-        
-        for line in context.split('\n'):
-            if line.startswith("User:"):
-                if current_turn["speaker"] == "AI":
-                    turns.append(current_turn)
-                current_turn = {"speaker": "User", "text": line[5:].strip()}
-            elif line.startswith("AI:"):
-                if current_turn["speaker"] == "User":
-                    turns.append(current_turn)
-                current_turn = {"speaker": "AI", "text": line[4:].strip()}
-            elif line.strip() and current_turn["speaker"]:
-                current_turn["text"] += " " + line.strip()
-        
-        # Add the last turn if not empty
-        if current_turn["speaker"] and current_turn["text"]:
-            turns.append(current_turn)
-        
-        # Extract key information from conversation
-        context_memory = {
-            "mentioned_topics": [],
-            "user_preferences": {},
-            "answered_questions": [],
-            "unresolved_topics": [],
-            "emotional_markers": {},
-            "conversation_history_summary": "",
-            "continuity_hints": [],
-            "language_support": {
-                "code": language_code,
-                "full_support": language_code == "en",  # Only English fully supported initially
-                "partial_support": language_code in ["vi", "ms", "zh", "fr", "es"],  # Partial support for other languages
-                "confidence": lang_info.get("confidence", 1.0) if lang_info else 1.0
-            }
-        }
-        
-        # Track mentioned topics
-        all_content = " ".join([turn["text"] for turn in turns])
-        
-        # Extract potential topics from knowledge context
-        if knowledge_context:
-            # Simple keyword extraction (could be enhanced with NLP)
-            words = knowledge_context.lower().split()
-            potential_topics = [word for word in words if len(word) > 3 
-                               and not word in ["this", "that", "with", "from", "have", "about", "what", "when", "where", "your", "will", "should"]]
-            
-            # Count occurrences
-            topic_counts = {}
-            for word in potential_topics:
-                if word in topic_counts:
-                    topic_counts[word] += 1
-                else:
-                    topic_counts[word] = 1
-            
-            # Select most frequent topics
-            sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)
-            context_memory["mentioned_topics"] = [topic for topic, count in sorted_topics[:5]]
-        
-        # Identify unresolved topics - questions in last 3 user turns without clear AI answers
-        recent_user_turns = [turn for turn in turns[-6:] if turn["speaker"] == "User"]
-        
-        # Language-specific question detection enhancements
-        for turn in recent_user_turns:
-            # Default question detection using question marks
-            has_question_mark = "?" in turn["text"]
-            questions_by_mark = [sent.strip() + "?" for sent in turn["text"].split("?") if sent.strip()]
-            
-            # Language-specific question detection (safely enhanced)
-            additional_questions = []
-            
-            # Only apply enhanced detection for supported languages with high confidence
-            if language_confident:
-                if language_code == "vi":
-                    # Vietnamese question particles
-                    vi_particles = ["không", " nhỉ", " nhé", " chứ", " hả", " à", " sao"]
-                    
-                    # Extract sentences without question marks
-                    sentences = [s.strip() for s in turn["text"].split(".") if s.strip() and "?" not in s]
-                    
-                    for sentence in sentences:
-                        if any(particle in sentence.lower() for particle in vi_particles):
-                            additional_questions.append(sentence)
-                            logger.info(f"[MEMORY] Detected Vietnamese question without question mark: {sentence}")
-                
-                elif language_code == "ms":  # Malay
-                    # Malay question particles
-                    ms_particles = [" kah", " tak", " ke", " apa", " siapa", " bila", " mana"]
-                    
-                    # Extract sentences without question marks
-                    sentences = [s.strip() for s in turn["text"].split(".") if s.strip() and "?" not in s]
-                    
-                    for sentence in sentences:
-                        if any(particle in sentence.lower() for particle in ms_particles):
-                            additional_questions.append(sentence)
-                            logger.info(f"[MEMORY] Detected Malay question without question mark: {sentence}")
-            
-            # Combine standard and language-specific questions
-            all_questions = questions_by_mark + additional_questions
-            
-            for question in all_questions:
-                if not question:
-                    continue
-                    
-                # Check if this question appears to be answered
-                question_words = set(question.lower().split())
-                is_answered = False
-                
-                # Adjust word overlap threshold based on language
-                overlap_threshold = 2 if language_code in ["vi", "zh"] else 3
-                
-                # Look for AI responses that contain multiple words from the question
-                for ai_turn in [t for t in turns if t["speaker"] == "AI"]:
-                    ai_words = set(ai_turn["text"].lower().split())
-                    if len(question_words.intersection(ai_words)) >= overlap_threshold:
-                        is_answered = True
-                        context_memory["answered_questions"].append(question)
-                        break
-                
-                if not is_answered:
-                    context_memory["unresolved_topics"].append(question)
-        
-        # Generate continuity hints
-        if turns:
-            # Look at the last AI response
-            last_ai_turns = [turn for turn in turns if turn["speaker"] == "AI"]
-            if last_ai_turns:
-                last_ai_response = last_ai_turns[-1]["text"]
-                
-                # Define continuity markers based on language
-                if language_code == "vi" and language_confident:
-                    continuity_markers = ["ngoài ra", "thêm nữa", "bên cạnh đó", "hơn nữa", "cũng", "còn"]
-                elif language_code == "ms" and language_confident:
-                    continuity_markers = ["juga", "tambahan pula", "selain itu", "lagi", "dan"]
-                else:
-                    # Default English markers
-                    continuity_markers = ["also", "another", "additionally", "furthermore", "moreover"]
-                
-                sentences = [s.strip() for s in last_ai_response.split(".") if s.strip()]
-                
-                for sentence in sentences:
-                    sentence_lower = sentence.lower()
-                    # If the last sentence has continuity markers, note it
-                    if any(marker in sentence_lower for marker in continuity_markers):
-                        context_memory["continuity_hints"].append(
-                            {"type": "continue_thread", "thread": sentence}
-                        )
-        
-        # Create brief history summary
-        if len(turns) > 4:
-            topics_text = ", ".join(context_memory['mentioned_topics'][:3]) if context_memory['mentioned_topics'] else "general topics"
-            context_memory["conversation_history_summary"] = f"This conversation has {len(turns)} turns and covers topics like {topics_text}."
-            
-            # Add unresolved topics hint
-            if context_memory["unresolved_topics"]:
-                context_memory["conversation_history_summary"] += f" There are {len(context_memory['unresolved_topics'])} unresolved questions."
-        
-        # Log language-specific insights for future improvements
-        if language_code != "en":
-            question_stats = {
-                "with_marks": len([q for q in context_memory["unresolved_topics"] if "?" in q]),
-                "without_marks": len([q for q in context_memory["unresolved_topics"] if "?" not in q])
-            }
-            logger.info(f"[MEMORY] Language ({language_code}) question stats: {question_stats}")
-        
-        return context_memory
-        
     async def _handle_request(self, message: str, user_id: str, context: str, builder: "ResponseBuilder", state: Dict, graph_version_id: str = "", use_websocket=False, thread_id_for_analysis=None):
         try:
             # Initialize cache if not exists
@@ -808,18 +622,14 @@ class MC:
             profile_query = "contact profile building information gathering customer understanding"
             profile_task = query_graph_knowledge(graph_version_id, profile_query, top_k=5)
             
-            # IMPROVEMENT 2: Track conversation dynamics
-            dynamics_task = self.track_conversation_dynamics(context, message)
-            
             # IMPROVEMENT 3: Enhance response naturalness
             naturalness_task = self.enhance_response_naturalness(context)
             
             # Wait for all parallel tasks
-            lang_info, conversation_language, profile_entries, dynamics_insights, naturalness_guidance = await asyncio.gather(
+            lang_info, conversation_language, profile_entries,naturalness_guidance = await asyncio.gather(
                 language_task,
                 conversation_language_task,
                 profile_task,
-                dynamics_task,
                 naturalness_task
             )
             
@@ -862,6 +672,7 @@ class MC:
             
             # Run initial analysis
             logger.info("Starting initial analysis (parts 1-3)")
+            # Use stream_analysis from analysis.py which has important post-processing logic
             from analysis import stream_analysis
             initial_analysis_task = stream_analysis(context_analysis_prompt, thread_id_for_analysis, use_websocket)
             
@@ -1212,42 +1023,7 @@ class MC:
                     knowledge_context += "\n\n" + additional_knowledge_context
                     logger.info(f"Added {len(unique_additional_knowledge)} additional knowledge entries from next action queries")
             
-            # STEP 4: Build contextual memory with language awareness
-            contextual_memory = await self.maintain_contextual_memory(context, message, knowledge_context, lang_info)
-            
-            
-            # Log key contextual memory insights
-            logger.info(f"[MEMORY] Language support: {contextual_memory['language_support']['code']} " +
-                       f"(full: {contextual_memory['language_support']['full_support']}, " +
-                       f"partial: {contextual_memory['language_support']['partial_support']})")
-            
-            # Safely use language-specific features based on support level
-            language_specific_insights = ""
-            if contextual_memory['language_support']['full_support']:
-                # Full language support - use all features
-                unresolved_count = len(contextual_memory["unresolved_topics"])
-                if unresolved_count > 0:
-                    logger.info(f"[MEMORY] Using all {unresolved_count} unresolved topics with full language support")
-                    language_specific_insights = f"Identified {unresolved_count} unresolved questions in the conversation."
-            elif contextual_memory['language_support']['partial_support']:
-                # Partial support - use only question-mark based features for reliability
-                reliable_questions = [q for q in contextual_memory["unresolved_topics"] if "?" in q]
-                if reliable_questions:
-                    logger.info(f"[MEMORY] Using {len(reliable_questions)} reliable questions from {len(contextual_memory['unresolved_topics'])} total with partial language support")
-                    language_specific_insights = f"Identified {len(reliable_questions)} clear questions in the conversation."
-                
-                # Replace full list with reliable subset for safety
-                if contextual_memory['language_support']['confidence'] < 0.8:
-                    # Only keep the reliable questions if confidence is low
-                    contextual_memory["unresolved_topics"] = reliable_questions
-                    logger.info(f"[MEMORY] Filtered to reliable questions only due to low confidence")
-            else:
-                # Minimal support - don't rely on language-specific features
-                logger.info(f"[MEMORY] Using minimal language features due to limited support")
-                language_specific_insights = "Basic conversation tracking active."
-            
-            # Assess knowledge coverage and determine if feedback is needed
-            
+            # STEP 3: Build Prompt
             # Generate ultra-simplified response prompt
             response_prompt = (
                 f"AI: {self.name}\n"
@@ -1259,18 +1035,17 @@ class MC:
                 f"Language: {lang_info['language']}\n\n"
                 f"PERSONALITY: {self.personality_instructions}\n\n"
                 f"TASK:\n"
-                f"1. You are a sales assistant named {self.name}. Respond to the user's message by performing the most appropriate action from the NEXT ACTIONS, prioritizing user intent from the MESSAGE and CONTEXT ANALYSIS.\n"
-                f"2. Use the KNOWLEDGE and CONTEXT ANALYSIS to inform the response. If specific knowledge is unavailable (e.g., for resolving registration barriers like missing email), propose practical workarounds (e.g., phone-based registration) using general sales expertise.\n"
-                f"3. Reflect the PERSONALITY instructions, maintaining a consistent, empathetic, and culturally sensitive tone.\n"
-                f"4. Respond in the user’s LANGUAGE, ensuring cultural alignment (e.g., address trust-building requests like 'meeting' with alternatives like calls or demos in Vietnamese contexts).\n"
-                f"5. Stay in character as a friendly, supportive sales assistant.\n"
-                f"6. Keep the response concise, clear, and action-oriented.\n"
-                f"7. Show GENUINE EMPATHY by analyzing emotional signals (e.g., hesitation, trust needs) from the CONTEXT ANALYSIS and MESSAGE.\n"
-                f"8. AVOID REPEATING messages, asking for information already provided (e.g., email absence noted in CONTEXT ANALYSIS), or pushing premature actions (e.g., registration before resolving barriers).\n"
-                f"9. DYNAMIC ACTION SELECTION: If NEXT ACTIONS are misaligned with the user’s MESSAGE or CONTEXT ANALYSIS (e.g., user requests personal interaction), prioritize the user’s intent and adapt using LLM-driven context analysis.\n"
-                f"10. CONVERSATION PROGRESSION: Move the conversation forward by addressing the user’s current need (e.g., trust-building, registration barriers) before proceeding to the next logical step (e.g., registration).\n"
-                f"11. VECTOR FLEXIBILITY: If KNOWLEDGE vectors have low relevance, supplement with general sales expertise, CONTEXT ANALYSIS, and user-specific details to ensure relevance.\n"
-                f"12. CULTURAL SENSITIVITY: For culturally specific requests (e.g., 'meet you' in Vietnamese contexts), acknowledge the request empathetically and offer trust-building alternatives (e.g., phone call, detailed explanation, or demo).\n"
+                f"Create a sophisticated response that precisely executes the NEXT ACTIONS while sounding completely natural:\n\n"
+                f"1. CAREFUL REVIEW: Understand exactly what stage the conversation is in and what specific action NEXT ACTIONS recommends.\n\n"
+                f"2. AUTHENTIC VOICE: Use your own natural voice rather than formulaic phrases or templates. Avoid sounding like you're following a script.\n\n"
+                f"3. LANGUAGE-SPECIFIC CONVERSATION PATTERNS: Use casual, warm conversation patterns appropriate for {lang_info['language']}. For Vietnamese, this might include relationship-based address terms that maintain the established dynamic. For other languages, draw on native-like casual speech patterns.\n\n"
+                f"4. NATURAL BEGINNINGS AND ENDINGS:\n"
+                f"   - Start with warm, casual greetings appropriate to the language and relationship\n"
+                f"   - End naturally without asking for feedback or using formulaic closings\n"
+                f"   - Never reintroduce yourself after the initial introduction\n\n"
+                f"5. PRECISE EXECUTION: Execute what the NEXT ACTIONS specifies without deviation or unnecessary additions.\n\n"
+                f"6. CULTURAL ATTUNEMENT: Draw on natural conversation patterns of {lang_info['language']}, including appropriate terms of address, conversation rhythm, and cultural expectations.\n\n"
+                f"Your response should feel like a warm, casual conversation with a thoughtful professional in the user's native language, while still precisely following the NEXT ACTIONS guidance.\n"
             )
             
             # Check if knowledge was found
@@ -1690,76 +1465,7 @@ class MC:
             
             yield error_event
 
-    async def adapt_response_to_culture(self, text, culture="default"):
-        """
-        Adapt a response to be appropriate for specific cultural contexts.
-        
-        Args:
-            text: The response text to adapt
-            culture: The target culture code (e.g., "vi" for Vietnamese, "en" for English)
-            
-        Returns:
-            str: The culturally adapted response
-        """
-        # Define cultural adaptation patterns
-        cultural_adaptations = {
-            "vi": {
-                "greeting_patterns": [
-                    "Xin chào", "Chào bạn", "Kính chào", "Chào mừng"
-                ],
-                "politeness_markers": [
-                    "ạ", "nhé", "nha", "ạh", "vui lòng"
-                ],
-                "emotion_expressions": {
-                    "happy": ["vui", "mừng", "thích thú"],
-                    "sorry": ["xin lỗi", "tiếc quá", "rất tiếc"],
-                    "agreement": ["đồng ý", "dĩ nhiên", "chắc chắn rồi"]
-                },
-                "cultural_references": [
-                    "Tết", "Trung Thu", "chả giò", "phở", "áo dài"
-                ],
-                "relationship_terms": [
-                    "bạn", "anh", "chị", "quý khách"
-                ]
-            },
-            "en": {
-                "greeting_patterns": [
-                    "Hello", "Hi", "Good day", "Welcome"
-                ],
-                "politeness_markers": [
-                    "please", "would you", "could you", "thank you"
-                ],
-                "emotion_expressions": {
-                    "happy": ["happy", "glad", "pleased"],
-                    "sorry": ["sorry", "apologize", "regret"],
-                    "agreement": ["agree", "certainly", "absolutely"]
-                },
-                "cultural_references": [
-                    "weekend", "holiday", "movie", "coffee"
-                ],
-                "relationship_terms": [
-                    "you", "friend", "customer"
-                ]
-            },
-            # Other cultures can be added here
-        }
-        
-        # If no specific adaptations for this culture, return original
-        if culture not in cultural_adaptations:
-            return text
-            
-        # Apply cultural adaptations
-        adapted_text = text
-        
-        # This method allows for future sophisticated cultural adaptations
-        # Currently, it returns the original text, but can be enhanced to:
-        # 1. Scan for appropriate places to insert culture-specific expressions
-        # 2. Replace generic terms with culture-specific ones
-        # 3. Adjust speech formality based on cultural norms
-        # 4. Incorporate regional sayings or references
-        
-        return adapted_text
-
+    
     async def track_conversation_dynamics(self, conversation, current_message):
         """
         Track conversation dynamics to improve natural flow and reduce repetition.

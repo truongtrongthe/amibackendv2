@@ -1,0 +1,14 @@
+{
+    "vi": {
+      "question_particles": ["không", "nhỉ", "nhé", "chứ", "hả", "à", "sao"],
+      "continuity_markers": ["ngoài ra", "thêm nữa", "bên cạnh đó", "hơn nữa", "cũng", "còn"]
+    },
+    "ms": {
+      "question_particles": ["kah", "tak", "ke", "apa", "siapa", "bila", "mana"],
+      "continuity_markers": ["juga", "tambahan pula", "selain itu", "lagi", "dan"]
+    },
+    "en": {
+      "question_particles": ["what", "how", "why", "where", "when"],
+      "continuity_markers": ["also", "another", "additionally", "furthermore", "moreover"]
+    }
+  }

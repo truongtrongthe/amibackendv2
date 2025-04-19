@@ -8,12 +8,15 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from utilities import EMBEDDINGS, logger
 from datetime import datetime
 import uuid
+import hashlib
 import asyncio
 import json
 import re
 from supabase import create_client, Client
-from typing import Dict, List
+from typing import Dict, List, Optional
 import time
+from sentence_transformers import SentenceTransformer
+import tenacity
 
 # Global embedding cache
 _embedding_cache = {}
@@ -822,6 +825,7 @@ async def _query_brain_with_embedding(embedding, namespace: str, top_k: int = 10
         # Query both indexes with the same embedding
         for index in [ami_index, ent_index]:
             try:
+                # Use to_thread for async execution since Pinecone client is synchronous
                 results = await asyncio.to_thread(
                     index.query,
                     vector=embedding,
@@ -901,183 +905,147 @@ async def query_graph_knowledge_by_category(version_id: str, category: str, top_
         logger.error(f"Error in graph category query: {e}")
         return []
 
-async def get_cached_embedding(text: str):
+def get_cached_embedding(text: str, cache_collection: str = "embedding_cache") -> List[float]:
     """
-    Get embedding with caching to reduce redundant API calls
-    
-    Args:
-        text: Text to embed
-        
-    Returns:
-        Embedding vector
+    Get or generate an embedding for the given text, caching the result.
     """
-    # Normalize text for cache key
-    cache_key = text.strip().lower()
-    current_time = time.time()
+    global _embedding_cache
     
-    # Check cache
+    # Initialize cache if not exists
+    if _embedding_cache is None:
+        _embedding_cache = {}
+    
+    # Check cache first
+    cache_key = f"{text[:50]}...{hash(text)}" if len(text) > 50 else text
     if cache_key in _embedding_cache:
-        cache_entry = _embedding_cache[cache_key]
-        # Check if entry is still valid
-        if current_time - cache_entry["timestamp"] < _cache_ttl:
-            logger.debug(f"Embedding cache hit for: {text[:30]}...")
-            return cache_entry["embedding"]
+        return _embedding_cache[cache_key]
     
-    # Generate new embedding
+    # If not in cache, generate embedding using OpenAI embedding from utilities
+    from utilities import EMBEDDINGS
     embedding = EMBEDDINGS.embed_query(text)
     
-    # Store in cache
-    _embedding_cache[cache_key] = {
-        "embedding": embedding,
-        "timestamp": current_time
-    }
+    # Cache the result
+    _embedding_cache[cache_key] = embedding
     
-    # Prune cache if it gets too large (keep it under 1000 entries)
-    if len(_embedding_cache) > 1000:
-        # Remove oldest 20% of entries
-        sorted_keys = sorted(_embedding_cache.keys(), 
-                            key=lambda k: _embedding_cache[k]["timestamp"])
-        for key in sorted_keys[:200]:  # Remove oldest 20%
-            _embedding_cache.pop(key, None)
+    # Log cache miss and new embedding generation
+    logger.info(f"[EMBEDDING_CACHE] Cache miss for text: '{text[:30]}...', generated new embedding")
+    
+    return embedding
+
+async def get_cached_embedding(text: str, cache_collection: str = "embedding_cache") -> List[float]:
+    """
+    Async version of get_cached_embedding.
+    """
+    global _embedding_cache
+    
+    # Initialize cache if not exists
+    if _embedding_cache is None:
+        _embedding_cache = {}
+    
+    # Check cache first
+    cache_key = f"{text[:50]}...{hash(text)}" if len(text) > 50 else text
+    if cache_key in _embedding_cache:
+        return _embedding_cache[cache_key]
+    
+    # If not in cache, generate embedding using OpenAI embedding from utilities
+    from utilities import EMBEDDINGS
+    embedding = await EMBEDDINGS.aembed_query(text)
+    
+    # Cache the result
+    _embedding_cache[cache_key] = embedding
+    
+    # Log cache miss and new embedding generation
+    logger.info(f"[EMBEDDING_CACHE] Cache miss for text: '{text[:30]}...', generated new embedding")
     
     return embedding
 
 async def query_brain_with_embeddings_batch(query_embeddings: Dict[int, List[float]], 
-                                   namespace: str, 
-                                   brain_id: str, 
-                                   top_k: int = 10) -> Dict[int, List[Dict]]:
+                                            namespace: str, 
+                                            brain_id: str, 
+                                            top_k: int = 10, 
+                                            metadata_filter: Optional[Dict] = None) -> Dict[int, List[Dict]]:
     """
-    Batch process multiple query embeddings for a single brain namespace.
-    This optimizes performance by reducing the number of vector store API calls.
-    
+    Batch process multiple query embeddings for a single brain namespace with optimized parallelism.
+
     Args:
-        query_embeddings: Dictionary mapping query indices to their embeddings
-        namespace: Brain namespace/bank name
-        brain_id: ID of the brain being queried
-        top_k: Maximum number of results to return per query
-        
+        query_embeddings: Dictionary mapping query indices to their embeddings.
+        namespace: Brain namespace/bank name.
+        brain_id: ID of the brain being queried.
+        top_k: Maximum number of results to return per query.
+        metadata_filter: Optional Pinecone metadata filter.
+
     Returns:
-        Dictionary mapping query indices to their results
+        Dictionary mapping query indices to their results.
     """
     try:
-        # Initialize results container
+        start_time = time.time()
         results_by_query = {}
-        
-        # If batch size is small, we can optimize by querying both indexes in a 
-        # single execution context to prevent connection thrashing
-        if len(query_embeddings) <= 5:
-            logger.info(f"Small batch size ({len(query_embeddings)}), using optimized dual-index query")
-            
-            # Group queries by index to optimize IO
-            for index in [ami_index, ent_index]:
-                index_name_str = index_name(index)
-                logger.info(f"Batch querying {index_name_str} with {len(query_embeddings)} embeddings for namespace {namespace}")
-                
-                # Create a list of tasks, one for each query
-                tasks = []
-                for query_idx, embedding in query_embeddings.items():
-                    # Use asyncio.to_thread to avoid blocking
-                    task = asyncio.to_thread(
-                        index.query,
-                        vector=embedding,
-                        top_k=top_k,
-                        include_metadata=True,
-                        namespace=namespace,
-                        filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
-                    )
-                    tasks.append((query_idx, task))
-                
-                # Execute all tasks in parallel
-                for query_idx, task in tasks:
-                    try:
-                        results = await task
-                        matches = results.get("matches", [])
-                        
-                        # Convert to standard result format
-                        for match in matches:
-                            result = {
-                                "id": match["id"],
-                                "bank_name": namespace,
-                                "brain_id": brain_id,
-                                "raw": match["metadata"]["raw"],
-                                "categories": {
-                                    "primary": match["metadata"]["categories_primary"],
-                                    "special": match["metadata"]["categories_special"]
-                                },
-                                "confidence": match["metadata"]["confidence"],
-                                "score": match["score"]
-                            }
-                            
-                            # Initialize results list for this query if needed
-                            if query_idx not in results_by_query:
-                                results_by_query[query_idx] = []
-                                
-                            results_by_query[query_idx].append(result)
-                    except Exception as e:
-                        logger.error(f"Error processing query {query_idx} for {index_name_str}: {e}")
-        else:
-            # For larger batch sizes, process in parallel per query and index
-            logger.info(f"Large batch size ({len(query_embeddings)}), using parallel processing")
-            
-            async def process_query_for_index(query_idx, embedding, index):
-                index_name_str = index_name(index)
-                try:
-                    results = await asyncio.to_thread(
-                        index.query,
-                        vector=embedding,
-                        top_k=top_k,
-                        include_metadata=True,
-                        namespace=namespace,
-                        filter={"categories_special": {"$in": ["", "description", "document", "procedural"]}}
-                    )
-                    
-                    matches = results.get("matches", [])
-                    query_results = []
-                    
-                    # Convert to standard result format
-                    for match in matches:
-                        result = {
-                            "id": match["id"],
-                            "bank_name": namespace,
-                            "brain_id": brain_id,
-                            "raw": match["metadata"]["raw"],
-                            "categories": {
-                                "primary": match["metadata"]["categories_primary"],
-                                "special": match["metadata"]["categories_special"]
-                            },
-                            "confidence": match["metadata"]["confidence"],
-                            "score": match["score"]
-                        }
-                        query_results.append(result)
-                        
-                    return query_idx, query_results
-                except Exception as e:
-                    logger.error(f"Error processing query {query_idx} for {index_name_str}: {e}")
-                    return query_idx, []
-            
-            # Create tasks for all queries and both indexes
-            all_tasks = []
-            for query_idx, embedding in query_embeddings.items():
-                for index in [ami_index, ent_index]:
-                    all_tasks.append(process_query_for_index(query_idx, embedding, index))
-            
-            # Execute all tasks in parallel
-            all_results = await asyncio.gather(*all_tasks)
-            
-            # Merge results
-            for query_idx, query_results in all_results:
-                if query_idx not in results_by_query:
-                    results_by_query[query_idx] = []
-                results_by_query[query_idx].extend(query_results)
-        
-        # Log summary of results
+        indexes = [ami_index, ent_index]  # Assume global ami_index, ent_index from Pinecone
+
+        # Skip irrelevant indexes based on brain_id or namespace
+        relevant_indexes = []
+        for index in indexes:
+            index_name_str = index_name(index)
+            # Example: Check if namespace is relevant to index (customize based on your setup)
+            if index_name_str in namespace or brain_id in index_name_str:
+                relevant_indexes.append(index)
+        if not relevant_indexes:
+            relevant_indexes = indexes  # Fallback to all indexes
+        logger.info(f"Querying {len(relevant_indexes)} relevant indexes for namespace {namespace}")
+
+        @tenacity.retry(stop=tenacity.stop_after_attempt(3), wait=tenacity.wait_exponential(multiplier=1, min=1, max=10))
+        async def query_index(query_idx, embedding, index):
+            index_name_str = index_name(index)
+            try:
+                # Use to_thread for async execution since Pinecone client is synchronous 
+                results = await asyncio.to_thread(
+                    index.query,
+                    vector=embedding,
+                    top_k=top_k,
+                    include_metadata=True,
+                    namespace=namespace,
+                    filter=metadata_filter or {
+                        "categories_special": {"$in": ["", "description", "document", "procedural"]}
+                    }
+                )
+                matches = results.get("matches", [])
+                query_results = []
+                for match in matches:
+                    result = {
+                        "id": match["id"],
+                        "bank_name": namespace,
+                        "brain_id": brain_id,
+                        "raw": match["metadata"]["raw"],
+                        "categories": {
+                            "primary": match["metadata"]["categories_primary"],
+                            "special": match["metadata"]["categories_special"]
+                        },
+                        "confidence": match["metadata"]["confidence"],
+                        "score": match["score"]
+                    }
+                    query_results.append(result)
+                return query_idx, query_results
+            except Exception as e:
+                logger.error(f"Error querying {index_name_str} for query {query_idx}: {e}")
+                return query_idx, []
+
+        # Process all queries and indexes in parallel
+        tasks = []
+        for query_idx, embedding in query_embeddings.items():
+            for index in relevant_indexes:
+                tasks.append(query_index(query_idx, embedding, index))
+
+        all_results = await asyncio.gather(*tasks)
+        for query_idx, query_results in all_results:
+            if query_idx not in results_by_query:
+                results_by_query[query_idx] = []
+            results_by_query[query_idx].extend(query_results)
+
         total_results = sum(len(results) for results in results_by_query.values())
-        logger.info(f"Batch query complete for {len(query_embeddings)} embeddings in namespace {namespace}: {total_results} total results")
-        
+        logger.info(f"Batch query complete for {len(query_embeddings)} embeddings in {time.time() - start_time:.2f}s: {total_results} results")
         return results_by_query
     except Exception as e:
         logger.error(f"Error in batch query processing for namespace {namespace}: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return {}
-

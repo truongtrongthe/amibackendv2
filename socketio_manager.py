@@ -555,36 +555,6 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
     Returns:
         bool: True if message was delivered to active sessions, False otherwise
     """
-    #log_session_state(f"Beginning emit_analysis_event for thread {thread_id}", thread_id=thread_id)
-    
-    # CRITICAL DEBUGGING: Print all sessions and the target thread
-    #logger.debug(f"\n[SESSION_TRACE] === BEGIN emit_analysis_event for thread {thread_id} ===")
-    #logger.debug(f"[SESSION_TRACE] Target thread_id: {thread_id}")
-    
-    session_details = []
-    with session_lock:
-        #logger.debug(f"[SESSION_TRACE] Total active sessions: {len(ws_sessions)}")
-        
-        # Print each session's details
-        for sid, s_data in ws_sessions.items():
-            s_thread = s_data.get('thread_id', 'NONE')
-            transport = s_data.get('transport', 'unknown')
-            last_activity = s_data.get('last_activity', 'unknown')
-            #logger.debug(f"[SESSION_TRACE] Session {sid}: thread_id={s_thread}, transport={transport}, last_activity={last_activity}")
-            session_details.append({
-                'sid': sid, 
-                'thread_id': s_thread,
-                'transport': transport,
-                'last_activity': last_activity,
-                'match': s_thread == thread_id
-            })
-            
-        all_thread_ids = [s_data.get('thread_id') for s_data in ws_sessions.values()]
-        #logger.debug(f"[SESSION_TRACE] All thread_ids in sessions: {all_thread_ids}")
-    
-    #logger.debug(f"[SESSION_TRACE] Session details: {json.dumps(session_details, default=str)}")
-    #logger.debug(f"[SESSION_TRACE] Exact thread match needed: '{thread_id}'")
-    
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
     active_session_ids = []
@@ -594,44 +564,31 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
         for session_id, session_data in ws_sessions.items():
             stored_thread_id = session_data.get('thread_id')
             
-            # Debug the thread_id comparison
             if stored_thread_id == thread_id:
-                #logger.debug(f"[SESSION_TRACE] MATCH: Session {session_id} has thread_id {stored_thread_id} matching {thread_id}")
                 active_sessions_count += 1
                 active_session_ids.append(session_id)
                 transport = session_data.get('transport', 'unknown')
                 session_transports.append(transport)
                 # Update last activity timestamp to mark session as active
                 session_data['last_activity'] = datetime.now().isoformat()
-                #logger.debug(f"[SESSION_TRACE] Updated last_activity for session {session_id}")
-            elif stored_thread_id:
-                #logger.debug(f"[SESSION_TRACE] NO MATCH: Session {session_id} has thread_id {stored_thread_id} NOT matching {thread_id}")
-                pass
-    
-    #logger.debug(f"[SESSION_TRACE] Found {active_sessions_count} active sessions for thread {thread_id}: {active_session_ids}")
     
     if active_sessions_count > 0:
-        #logger.debug(f"[SESSION_TRACE] Emitting analysis event to thread {thread_id}: "
-        #           f"({active_sessions_count} active sessions: {active_session_ids}, transports: {session_transports})")
+        #logger.info(f"Emitting analysis event to thread {thread_id} ({active_sessions_count} active sessions)")
         
         # First try to emit to the room
         try:
             socketio.emit('analysis_update', data, room=thread_id)
-            #logger.debug(f"[SESSION_TRACE] Successfully emitted to room {thread_id}")
         except Exception as e:
-            #logger.error(f"[SESSION_TRACE] Error emitting to room {thread_id}: {str(e)}")
-            pass
+            logger.error(f"Error emitting to room {thread_id}: {str(e)}")
         
         # Also send directly to each session as a backup
         success = False
         for session_id in active_session_ids:
             try:
                 socketio.emit('analysis_update', data, room=session_id)
-                #logger.debug(f"[SESSION_TRACE] Sent direct message to session {session_id}")
                 success = True
             except Exception as e:
-                #logger.error(f"[SESSION_TRACE] Failed direct delivery to session {session_id}: {str(e)}")
-                pass
+                logger.error(f"Failed direct delivery to session {session_id}: {str(e)}")
         
         # Store message in case not all deliveries were successful
         if not success:
@@ -641,14 +598,10 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
                 if 'analysis' not in undelivered_messages[thread_id]:
                     undelivered_messages[thread_id]['analysis'] = []
                 undelivered_messages[thread_id]['analysis'] = (undelivered_messages[thread_id]['analysis'] + [data])[-50:]
-                #logger.debug(f"[SESSION_TRACE] Stored undelivered message due to delivery failure")
         
-        log_session_state(f"After successful emit_analysis_event for thread {thread_id}", thread_id=thread_id)
-        
-        #logger.debug(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
         return True
     else:
-        #logger.warning(f"[SESSION_TRACE] NO ACTIVE SESSIONS found for thread {thread_id}, analysis event NOT DELIVERED.")
+        logger.warning(f"No active sessions found for thread {thread_id}, analysis event not delivered")
         
         # Store undelivered message for later retrieval
         with message_lock:
@@ -658,11 +611,7 @@ def emit_analysis_event(thread_id: str, data: Dict[str, Any]):
                 undelivered_messages[thread_id]['analysis'] = []
             # Only keep the last 50 messages per thread
             undelivered_messages[thread_id]['analysis'] = (undelivered_messages[thread_id]['analysis'] + [data])[-50:]
-            #logger.debug(f"[SESSION_TRACE] Stored undelivered message for thread {thread_id}, total queued: {len(undelivered_messages[thread_id]['analysis'])}")
         
-        log_session_state(f"After failed emit_analysis_event for thread {thread_id}", thread_id=thread_id)
-        
-        #logger.debug(f"[SESSION_TRACE] === END emit_analysis_event for thread {thread_id} ===\n")
         return False
 
 
@@ -677,8 +626,6 @@ def emit_knowledge_event(thread_id: str, data: Dict[str, Any]):
     Returns:
         bool: True if message was delivered to active sessions, False otherwise
     """
-    logger.info(f"[KNOWLEDGE_EVENT] Emitting knowledge event to thread {thread_id}")
-    
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
     active_session_ids = []
@@ -694,25 +641,23 @@ def emit_knowledge_event(thread_id: str, data: Dict[str, Any]):
                 # Update last activity timestamp to mark session as active
                 session_data['last_activity'] = datetime.now().isoformat()
     
-    logger.info(f"[KNOWLEDGE_EVENT] Found {active_sessions_count} active sessions for thread {thread_id}")
-    
     if active_sessions_count > 0:
+        logger.info(f"Emitting knowledge event to thread {thread_id} ({active_sessions_count} active sessions)")
+        
         # First try to emit to the room
         try:
             socketio.emit('knowledge', data, room=thread_id)
-            logger.info(f"[KNOWLEDGE_EVENT] Successfully emitted knowledge event to room {thread_id}")
         except Exception as e:
-            logger.error(f"[KNOWLEDGE_EVENT] Error emitting to room {thread_id}: {str(e)}")
+            logger.error(f"Error emitting knowledge event to room {thread_id}: {str(e)}")
         
         # Also send directly to each session as a backup
         success = False
         for session_id in active_session_ids:
             try:
                 socketio.emit('knowledge', data, room=session_id)
-                logger.info(f"[KNOWLEDGE_EVENT] Sent knowledge event directly to session {session_id}")
                 success = True
             except Exception as e:
-                logger.error(f"[KNOWLEDGE_EVENT] Failed direct knowledge delivery to session {session_id}: {str(e)}")
+                logger.error(f"Failed direct knowledge delivery to session {session_id}: {str(e)}")
         
         # Store message in case not all deliveries were successful
         if not success:
@@ -723,11 +668,10 @@ def emit_knowledge_event(thread_id: str, data: Dict[str, Any]):
                     undelivered_messages[thread_id]['knowledge'] = []
                 # Only keep the last 50 messages per thread
                 undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
-                logger.info(f"[KNOWLEDGE_EVENT] Stored undelivered knowledge event for thread {thread_id}")
         
         return True
     else:
-        logger.warning(f"[KNOWLEDGE_EVENT] No active sessions found for thread {thread_id}, knowledge event NOT DELIVERED")
+        logger.warning(f"No active sessions found for thread {thread_id}, knowledge event not delivered")
         
         # Store undelivered message for later retrieval
         with message_lock:
@@ -737,7 +681,6 @@ def emit_knowledge_event(thread_id: str, data: Dict[str, Any]):
                 undelivered_messages[thread_id]['knowledge'] = []
             # Only keep the last 50 messages per thread
             undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
-            logger.info(f"[KNOWLEDGE_EVENT] Stored undelivered knowledge event for thread {thread_id}")
         
         return False
 
@@ -753,8 +696,6 @@ def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
     Returns:
         bool: True if message was delivered to active sessions, False otherwise
     """
-    #logger.info(f"[NEXT_ACTION_EVENT] Emitting next_action event to thread {thread_id}")
-    
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
     active_session_ids = []
@@ -770,25 +711,21 @@ def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
                 # Update last activity timestamp to mark session as active
                 session_data['last_activity'] = datetime.now().isoformat()
     
-    #logger.info(f"[NEXT_ACTION_EVENT] Found {active_sessions_count} active sessions for thread {thread_id}")
-    
     if active_sessions_count > 0:
         # First try to emit to the room
         try:
             socketio.emit('next_action', data, room=thread_id)
-            #logger.info(f"[NEXT_ACTION_EVENT] Successfully emitted next_action event to room {thread_id}")
         except Exception as e:
-            logger.error(f"[NEXT_ACTION_EVENT] Error emitting to room {thread_id}: {str(e)}")
+            logger.error(f"Error emitting next_action event to room {thread_id}: {str(e)}")
         
         # Also send directly to each session as a backup
         success = False
         for session_id in active_session_ids:
             try:
                 socketio.emit('next_action', data, room=session_id)
-                #logger.info(f"[NEXT_ACTION_EVENT] Sent next_action event directly to session {session_id}")
                 success = True
             except Exception as e:
-                logger.error(f"[NEXT_ACTION_EVENT] Failed direct next_action delivery to session {session_id}: {str(e)}")
+                logger.error(f"Failed direct next_action delivery to session {session_id}: {str(e)}")
         
         # Store message in case not all deliveries were successful
         if not success:
@@ -799,12 +736,9 @@ def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
                     undelivered_messages[thread_id]['next_action'] = []
                 # Only keep the last 50 messages per thread
                 undelivered_messages[thread_id]['next_action'] = (undelivered_messages[thread_id]['next_action'] + [data])[-50:]
-                #logger.info(f"[NEXT_ACTION_EVENT] Stored undelivered next_action event for thread {thread_id}")
         
         return True
     else:
-        #logger.warning(f"[NEXT_ACTION_EVENT] No active sessions found for thread {thread_id}, next_action event NOT DELIVERED")
-        
         # Store undelivered message for later retrieval
         with message_lock:
             if thread_id not in undelivered_messages:
@@ -813,7 +747,6 @@ def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
                 undelivered_messages[thread_id]['next_action'] = []
             # Only keep the last 50 messages per thread
             undelivered_messages[thread_id]['next_action'] = (undelivered_messages[thread_id]['next_action'] + [data])[-50:]
-            #logger.info(f"[NEXT_ACTION_EVENT] Stored undelivered next_action event for thread {thread_id}")
         
         return False
 
