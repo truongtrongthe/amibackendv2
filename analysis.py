@@ -37,7 +37,7 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
             chunk_content = chunk.content
             analysis_buffer += chunk_content
             
-            # Create analysis event
+            # Create analysis event with proper structure
             analysis_event = {
                 "type": "analysis", 
                 "content": chunk_content, 
@@ -54,25 +54,30 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
                     was_delivered = False
             
             # Always yield for the standard flow too
-            yield {"type": "analysis", "content": chunk_content, "complete": False}
-        
-        # Send a final complete message with the full analysis
-        #logger.info(f"Streaming complete analysis, length: {len(analysis_buffer)}")
+            yield analysis_event
         
         # Process the analysis to extract search terms and structure content
-        analysis_parts = process_analysis_result(analysis_buffer)
+        try:
+            analysis_parts = process_analysis_result(analysis_buffer)
+            processed_content = analysis_parts.get("analysis_full", analysis_buffer)
+        except Exception as process_error:
+            logger.error(f"Error processing analysis: {str(process_error)}")
+            processed_content = analysis_buffer
         
-        # Final complete event for analysis
+        # Final complete event for analysis - ensure it's a string
+        if not isinstance(processed_content, str):
+            processed_content = str(processed_content)
+            
         analysis_complete_event = {
             "type": "analysis", 
-            "content": analysis_parts.get("analysis_full", analysis_buffer), 
+            "content": processed_content, 
             "complete": True
         }
         
         # Send via WebSocket if configured
         if use_websocket and thread_id_for_analysis:
             try:
-                logger.info(f"Emitting complete analysis via WebSocket to thread {thread_id_for_analysis}, length={len(analysis_buffer)}")
+                logger.info(f"Emitting complete analysis via WebSocket to thread {thread_id_for_analysis}, length={len(processed_content)}")
                 from socketio_manager import emit_analysis_event
                 was_delivered_analysis = emit_analysis_event(thread_id_for_analysis, analysis_complete_event)
                 if was_delivered_analysis:
@@ -130,7 +135,7 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
             
             # Create next_action event
             next_action_event = {
-                "type": "next_action", 
+                "type": "next_actions", 
                 "content": chunk_content, 
                 "complete": False
             }
@@ -151,12 +156,20 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
         logger.info(f"Streaming complete next actions, length: {len(next_action_buffer)}")
         
         # Process the next actions to structure content
-        next_actions_data = process_next_actions_result(next_action_buffer)
-        next_action_full = next_actions_data.get("next_action_full", next_action_buffer)
+        try:
+            next_actions_data = process_next_actions_result(next_action_buffer)
+            next_action_full = next_actions_data.get("next_action_full", next_action_buffer)
+        except Exception as process_error:
+            logger.error(f"Error processing next actions: {str(process_error)}")
+            next_action_full = next_action_buffer
+        
+        # Ensure content is a string
+        if not isinstance(next_action_full, str):
+            next_action_full = str(next_action_full)
         
         # Final complete event for next_action
         next_action_complete_event = {
-            "type": "next_action", 
+            "type": "next_actions", 
             "content": next_action_full, 
             "complete": True
         }
@@ -179,7 +192,7 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
         
         # Error event for next_action
         error_event = {
-            "type": "next_action", 
+            "type": "next_actions", 
             "content": f"Error in next action process: {str(e)}", 
             "complete": True, 
             "error": True

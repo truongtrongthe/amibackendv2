@@ -629,8 +629,26 @@ def gopilot():
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
+    graph_version_id = data.get("graph_version_id", "")
+    use_websocket = data.get("use_websocket", False)  # New flag to enable WebSocket
     
-    logger.info("Autopilot API called!")
+    logger.info(f"Autopilot API called! Thread ID: {thread_id}, Use WebSocket: {use_websocket}")
+    
+    # Update session info if using WebSockets
+    if use_websocket:
+        active_session_exists = False
+        
+        with session_lock:
+            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+            active_session_exists = len(thread_sessions) > 0
+            
+            if active_session_exists:
+                logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
+                for sid in thread_sessions:
+                    ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                    ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
+            else:
+                logger.warning(f"[SESSION_TRACE] WebSocket requested but no active session for thread {thread_id}")
     
     # Create a synchronous response streaming solution
     def generate_response():
@@ -639,18 +657,26 @@ def gopilot():
             # Import directly here to ensure fresh imports
             from ami import convo_stream
             
+            # Set up response parameters
+            stream_params = {
+                "user_input": user_input,
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "graph_version_id": graph_version_id,
+                "mode": "mc"
+            }
+            
+            if use_websocket:
+                stream_params["use_websocket"] = True
+                stream_params["thread_id_for_analysis"] = thread_id
+            
             # Define the async process function
             async def process_stream():
                 """Process the stream and return all items."""
                 outputs = []
                 try:
                     # Get the stream
-                    stream = convo_stream(
-                        user_input=user_input, 
-                        user_id=user_id, 
-                        thread_id=thread_id, 
-                        mode="mc"
-                    )
+                    stream = convo_stream(**stream_params)
                     
                     # Process all the output
                     async for item in stream:

@@ -8,7 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, AIMessage
 from training import Training
 from pilot import Pilot
-from mc import MC  # Import MC directly
+from mc_tools import MCWithTools  # Import MCWithTools instead of MC
 from utilities import logger
 import asyncio
 
@@ -24,7 +24,7 @@ class State(TypedDict):
     analysis: dict  # Add analysis field to the state schema
     stream_events: list  # Add stream_events for real-time events
 
-mc = MC(user_id="thefusionlab")
+mc = MCWithTools(user_id="thefusionlab")  # Use MCWithTools instead of MC
 graph_builder = StateGraph(State)
 
 async def mc_node(state: State, config=None):
@@ -71,9 +71,12 @@ async def mc_node(state: State, config=None):
                 # Only store the complete analysis in the state
                 complete_analysis_count += 1
                 final_state["analysis"] = output
-                logger.info(f"Stored COMPLETE analysis in state: {output.get('content', '')[:100]}...")
+                logger.info(f"Stored COMPLETE analysis in state: {output.get('content', '')[:100] if isinstance(output.get('content', ''), str) else str(output.get('content', ''))[:100]}...")
             else:
-                logger.debug(f"Received partial analysis chunk: {output.get('content', '')[:50]}...")
+                # Safely handle content that might be a dictionary or other non-string type
+                content = output.get('content', '')
+                content_str = content if isinstance(content, str) else str(content)
+                logger.debug(f"Received partial analysis chunk: {content_str[:50]}...")
         else:
             # Regular response chunk
             logger.debug(f"Received response chunk: {output}")
@@ -86,7 +89,9 @@ async def mc_node(state: State, config=None):
     logger.info(f"Analysis events received: {analysis_count} (complete: {complete_analysis_count})")
     logger.info(f"Final state has analysis: {'analysis' in final_state}")
     if 'analysis' in final_state:
-        logger.info(f"Final analysis content: {final_state['analysis'].get('content', '')[:100]}...")
+        analysis_content = final_state['analysis'].get('content', '')
+        analysis_str = analysis_content if isinstance(analysis_content, str) else str(analysis_content)
+        logger.info(f"Final analysis content: {analysis_str[:100]}...")
     
     # Make ABSOLUTELY sure analysis is included in the final state
     if 'analysis' not in final_state:
@@ -191,10 +196,16 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
             for event in updated_state["stream_events"]:
                 if event["event_type"] == "analysis":
                     analysis_data = event["data"]
+                    
+                    # Safely handle content that might be a dictionary or other non-string type
+                    content = analysis_data.get("content", "")
+                    if not isinstance(content, (str, dict, list, bool, int, float, type(None))):
+                        content = str(content)
+                    
                     # Format the analysis event for streaming
                     analysis_json = json.dumps({
                         "type": "analysis", 
-                        "content": analysis_data.get("content", ""),
+                        "content": content,
                         "complete": analysis_data.get("complete", False)
                     })
                     # Send analysis chunk in real-time
@@ -205,11 +216,17 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
             logger.warning("No stream_events found in updated state")
             
             # Fallback: Try to send the analysis from state if available
-            if "analysis" in updated_state and isinstance(updated_state["analysis"], dict) and "content" in updated_state["analysis"]:
+            if "analysis" in updated_state and isinstance(updated_state["analysis"], dict):
                 logger.info(f"Fallback: Streaming analysis from state directly")
+                
+                # Safely handle content that might be a dictionary or other non-string type
+                content = updated_state["analysis"].get("content", "")
+                if not isinstance(content, (str, dict, list, bool, int, float, type(None))):
+                    content = str(content)
+                
                 analysis_json = json.dumps({
                     "type": "analysis", 
-                    "content": updated_state["analysis"].get("content", ""),
+                    "content": content,
                     "complete": updated_state["analysis"].get("complete", False)
                 })
                 yield f"data: {analysis_json}\n\n"
