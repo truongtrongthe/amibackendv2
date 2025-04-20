@@ -15,12 +15,17 @@ import tempfile
 import pickle
 import queue
 import threading
+import logging
 
 # Add multiprocessing freeze support
 from multiprocessing import freeze_support
 
 # Load environment variables
 load_dotenv()
+
+# Setup logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 
@@ -52,7 +57,7 @@ response_queue = None
 ai_process_running = False
 process_lock = threading.Lock()
 
-def send_message(conversation_id: int, message: str, attachment_url: str = None) -> bool:
+def send_message(conversation_id: int, message: str, attachment_url: str = None) -> tuple:
     """
     Send a message to a conversation in Chatwoot.
     
@@ -62,19 +67,19 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
         attachment_url: Optional URL of an attachment to include
         
     Returns:
-        bool: True if successful, False if failed
+        tuple: (success_bool, response_data)
     """
     if not conversation_id:
         print("❌ Error: Missing conversation ID")
-        return False
+        return False, None
         
     if not message or not message.strip():
         print("❌ Error: Empty message")
-        return False
+        return False, None
         
     if not CHATWOOT_API_TOKEN or not CHATWOOT_BASE_URL or not CHATWOOT_ACCOUNT_ID:
         print("❌ Error: Chatwoot API configuration is incomplete")
-        return False
+        return False, None
     
     print(f"\n📤 Sending message to conversation {conversation_id}")
     print(f"Message: {message}")
@@ -104,7 +109,7 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
                 response = requests.get(attachment_url, timeout=10)
                 if response.status_code != 200:
                     print(f"❌ Failed to download attachment: Status code {response.status_code}")
-                    return False
+                    return False, None
                     
                 # Save the image temporarily with a unique name
                 temp_filename = f'temp_attachment_{int(time.time())}.dat'
@@ -154,10 +159,10 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
                 
             except requests.RequestException as e:
                 print(f"❌ Error handling attachment: {str(e)}")
-                return False
+                return False, None
             except Exception as e:
                 print(f"❌ Error processing attachment: {str(e)}")
-                return False
+                return False, None
                 
         else:
             # Send regular text message
@@ -177,18 +182,18 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
             response_data = response.json()
             print(f"✅ Message sent successfully in {elapsed_time:.2f}s")
             print(f"Message ID: {response_data.get('id')}")
-            return True
+            return True, response_data
         else:
             print(f"❌ Failed to send message. Status: {response.status_code}")
             print(f"Response: {response.text}")
-            return False
+            return False, None
             
     except requests.RequestException as e:
         print(f"❌ Network error sending message: {str(e)}")
-        return False
+        return False, None
     except Exception as e:
         print(f"❌ Unexpected error sending message: {str(e)}")
-        return False
+        return False, None
 
 def get_file_extension(content_type: str) -> str:
     """
@@ -771,27 +776,68 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
         if context.get('last_activity_at'):
             print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
-        # Add message to conversation
-        message = {
-            'sender_type': 'agent' if message_type == 'outgoing' else 'contact',
-            'content': content,
-            'platform': 'chatwoot',
-            'platform_message_id': message_id,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'direction': 'incoming' if is_incoming else 'outgoing',
-            'status': status
-        }
+        # For outgoing messages, check if we've already saved this exact message recently
+        # This prevents duplicating messages that we sent ourselves
+        if not is_incoming:
+            # Check existing conversation messages for duplicates
+            try:
+                conversation = conversation_manager.get_conversation(conversation_data['id'])
+                if conversation and "messages" in conversation.get("conversation_data", {}):
+                    messages = conversation["conversation_data"]["messages"]
+                    
+                    # Look for a recent message with same content (within last 10 seconds)
+                    current_time = datetime.now(timezone.utc)
+                    for msg in reversed(messages):  # Start from most recent
+                        # Skip non-matching messages
+                        if msg.get('content') != content or msg.get('direction') != 'outgoing':
+                            continue
+                            
+                        # Check timestamp if available
+                        if msg.get('timestamp'):
+                            try:
+                                msg_time = datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00'))
+                                # If message is within last 10 seconds, it's likely a duplicate
+                                time_diff = (current_time - msg_time).total_seconds()
+                                if time_diff < 10:
+                                    logger.info(f"Skipping duplicate outgoing message (already in DB, {time_diff:.1f}s ago)")
+                                    return
+                            except (ValueError, TypeError):
+                                # If timestamp parsing fails, continue checking
+                                pass
+            except Exception as e:
+                logger.warning(f"Error while checking for duplicate messages: {str(e)}")
+                # Continue processing - better to risk a duplicate than miss a message
         
-        if is_incoming:
-            message.update({
-                'source': context.get('channel', 'facebook'),
-                'raw_data': {
-                    'facebook_id': context.get('facebook_id'),
-                    'contact_name': context.get('contact_name')
-                }
-            })
+        # Add message to conversation - but only if it's incoming OR not from our own system
+        # (outgoing messages from our AI system are already stored when we send them)
+        sender_id = data.get('sender', {}).get('id')
+        sender_type = data.get('sender', {}).get('type')
         
-        conversation_manager.add_message(conversation_data['id'], message)
+        # Only store incoming messages or outgoing messages that weren't sent by our system
+        if is_incoming or (sender_type != 'bot' and sender_id is not None):
+            message = {
+                'sender_type': 'agent' if message_type == 'outgoing' else 'contact',
+                'content': content,
+                'platform': 'chatwoot',
+                'platform_message_id': message_id,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'direction': 'incoming' if is_incoming else 'outgoing',
+                'status': status
+            }
+            
+            if is_incoming:
+                message.update({
+                    'source': context.get('channel', 'facebook'),
+                    'raw_data': {
+                        'facebook_id': context.get('facebook_id'),
+                        'contact_name': context.get('contact_name')
+                    }
+                })
+                
+            logger.info(f"Adding message to conversation {conversation_data['id']}")
+            conversation_manager.add_message(conversation_data['id'], message)
+        else:
+            logger.info(f"Skipping storage of our own outgoing message (already stored when sent)")
         
         # If this is an incoming message from a customer, check if we should generate an AI response
         if is_incoming and ENABLE_AI_RESPONSES:
@@ -934,21 +980,45 @@ def send_message_chunks(message_chunks: List[str], context: Dict[str, Any], conv
         print(f"📤 Sending chunk {i+1}/{len(message_chunks)}: {chunk}")
         
         # Send the message via Chatwoot
-        success = send_message(context['conversation_id'], chunk)
+        success, response_data = send_message(context['conversation_id'], chunk)
         
         if success:
-            # Add the AI response to our conversation record
-            ai_message = {
-                'sender_type': 'agent',
-                'content': chunk,
-                'platform': 'ami',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'direction': 'outgoing',
-                'status': 'sent',
-                'chunk_index': i,
-                'total_chunks': len(message_chunks)
-            }
-            conversation_manager.add_message(conversation_data['id'], ai_message)
+            # Only store the message ourselves if we have the platform_message_id
+            # Otherwise, we'll rely on the webhook to store it
+            platform_message_id = response_data.get('id') if response_data else None
+            
+            if platform_message_id:
+                # Store with the platform_message_id to avoid duplication
+                ai_message = {
+                    'sender_type': 'agent',
+                    'content': chunk,
+                    'platform': 'chatwoot',
+                    'platform_message_id': platform_message_id,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'direction': 'outgoing',
+                    'status': 'sent'
+                    # No longer adding chunk_index and total_chunks to reduce duplication
+                }
+                
+                # Check if we already have this message stored (by platform_message_id)
+                should_store = True
+                try:
+                    conversation = conversation_manager.get_conversation(conversation_data['id'])
+                    if conversation and "messages" in conversation.get("conversation_data", {}):
+                        messages = conversation["conversation_data"]["messages"]
+                        for msg in messages:
+                            if msg.get('platform_message_id') == platform_message_id:
+                                should_store = False
+                                print(f"✅ Message already stored with platform_message_id: {platform_message_id}")
+                                break
+                except Exception as e:
+                    print(f"⚠️ Error checking existing messages: {str(e)}")
+                
+                if should_store:
+                    print(f"📝 Storing message with platform_message_id: {platform_message_id}")
+                    conversation_manager.add_message(conversation_data['id'], ai_message)
+            else:
+                print("⚠️ No platform_message_id received, relying on webhook for storage")
         else:
             print(f"❌ Failed to send message chunk {i+1}")
         
@@ -1002,8 +1072,9 @@ def handle_message_updated(data: Dict[str, Any], organization_id: str = None):
         if conversation_id:
             # Update the message in conversation record
             try:
-                # Method 1: Direct database update (preferred for efficiency)
+                # Get conversation information
                 conversation = conversation_manager.get_conversation(conversation_id)
+                
                 if conversation and "messages" in conversation.get("conversation_data", {}):
                     # Find the specific message
                     messages = conversation["conversation_data"]["messages"]
@@ -1011,63 +1082,36 @@ def handle_message_updated(data: Dict[str, Any], organization_id: str = None):
                     
                     for i, msg in enumerate(messages):
                         if msg.get("platform_message_id") == message_id:
-                            # Update the content
+                            # Update the content in place
                             messages[i]["content"] = content
+                            # Add update indicator but don't create a new message
+                            messages[i]["updated_at"] = datetime.now(timezone.utc).isoformat()
                             updated = True
                             break
                             
                     if updated:
-                        try:
-                            # Try to import and use direct database connection
-                            import json
-                            from utilities import get_db_connection
-                            
-                            db = get_db_connection()
-                            conversations_table = db.table("conversations")
-                            
-                            # Update the conversation data with the modified messages
-                            conversation_data = conversation.get("conversation_data", {})
-                            conversation_data["messages"] = messages
-                            
-                            # Update the conversation_data as JSON
-                            conversations_table.update(
-                                {"conversation_data": json.dumps(conversation_data)},
-                                ["id", "==", conversation_id]
-                            ).execute()
-                            
-                            print(f"✅ Updated message content in conversation {conversation_id} via direct DB access")
-                            return
-                        except ImportError:
-                            print("⚠️ Could not import database utilities, trying alternate method")
-                        except Exception as db_error:
-                            print(f"⚠️ Database update failed: {str(db_error)}, trying alternate method")
-                
-                # Method 2: Fallback - re-add the message with updated content
-                print("Using fallback method to update message")
-                
-                # Get conversation information if we don't already have it
-                if not conversation:
-                    conversation = conversation_manager.get_conversation(conversation_id)
-                
-                if conversation:
-                    # Create updated message record
-                    updated_message = {
-                        'sender_type': data.get('sender_type', 'unknown'),
-                        'content': content,
-                        'platform': 'chatwoot',
-                        'platform_message_id': message_id,
-                        'timestamp': datetime.now(timezone.utc).isoformat(),
-                        'direction': data.get('message_type', 'incoming'),
-                        'status': 'updated',
-                        'is_updated': True,
-                        'original_id': message_id
-                    }
-                    
-                    # Add a new message record with updated content
-                    conversation_manager.add_message(conversation_id, updated_message)
-                    print(f"✅ Added updated message to conversation {conversation_id}")
+                        # Instead of trying to update with conversation_data parameter,
+                        # create a new message record with the updated info
+                        updated_message = {
+                            'sender_type': messages[i].get('sender_type', 'unknown'),
+                            'content': content,
+                            'platform': 'chatwoot',
+                            'platform_message_id': message_id,
+                            'timestamp': datetime.now(timezone.utc).isoformat(),
+                            'direction': messages[i].get('direction', 'outgoing'),
+                            'status': 'updated',
+                            'is_updated': True,
+                            'original_id': message_id
+                        }
+                        
+                        # Add the new message with updated content instead
+                        # of trying to update the entire conversation
+                        conversation_manager.add_message(conversation_id, updated_message)
+                        print(f"✅ Added updated message to conversation {conversation_id}")
+                    else:
+                        print(f"⚠️ Message with ID {message_id} not found in conversation {conversation_id}")
                 else:
-                    print(f"⚠️ Could not find conversation with ID {conversation_id}")
+                    print(f"⚠️ Could not find messages in conversation with ID {conversation_id}")
             except Exception as e:
                 print(f"❌ Error updating message: {str(e)}")
                 import traceback

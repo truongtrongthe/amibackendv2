@@ -37,6 +37,7 @@ from contact import ContactManager
 from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user, verify_webhook_token
 from contactconvo import ConversationManager
 from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created, generate_ai_response
+from contact_analysis import ContactAnalyzer
 from braingraph import (
     create_brain_graph, get_brain_graph, create_brain_graph_version,
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
@@ -248,6 +249,7 @@ else:
 
 cm = ContactManager()
 convo_mgr = ConversationManager()
+contact_analyzer = ContactAnalyzer()
 # We'll keep a reference to the loop but won't use it directly in request handlers
 # This is kept for compatibility with any existing code not modified yet
 loop = asyncio.new_event_loop()
@@ -1382,6 +1384,27 @@ def update_profile_endpoint():
             "best_goals": updated_profile["best_goals"],
             "updated_at": updated_profile["updated_at"]
         }
+        
+        # After successful profile update, trigger sales signal analysis
+        try:
+            # Run in a separate thread to not block the response
+            def run_analysis():
+                analysis_result = contact_analyzer.analyze_and_store(
+                    int(contact_id),
+                    organization_id or contact.get("organization_id", ""),
+                    updated_profile
+                )
+                logger.info(f"Updated sales analysis for contact {contact_id} with score {analysis_result['analysis'].get('sales_readiness_score', 0)}")
+            
+            # Start analysis in background thread
+            import threading
+            thread = threading.Thread(target=run_analysis)
+            thread.daemon = True
+            thread.start()
+        except Exception as analysis_error:
+            # Log the error but don't fail the profile update
+            logger.error(f"Error updating sales analysis: {str(analysis_error)}")
+        
         return jsonify({"message": "Profile updated successfully", "profile": profile_data}), 200
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
@@ -1413,6 +1436,25 @@ def create_profile_endpoint():
             contact = cm.get_contact_details(int(contact_id), organization_id)
             if not contact:
                 return jsonify({"error": f"No contact found with id {contact_id} in this organization"}), 404
+            
+            # Check if profile already exists
+            if contact.get("profiles"):
+                # Profile already exists, return 409 Conflict with the existing profile
+                profile = contact["profiles"]
+                profile_data = {
+                    "id": profile["id"],
+                    "uuid": profile["uuid"],
+                    "contact_id": profile["contact_id"],
+                    "profile_summary": profile["profile_summary"],
+                    "general_info": profile["general_info"],
+                    "personality": profile["personality"],
+                    "hidden_desires": profile["hidden_desires"],
+                    "linkedin_url": profile["linkedin_url"],
+                    "social_media_urls": profile["social_media_urls"],
+                    "best_goals": profile["best_goals"],
+                    "updated_at": profile["updated_at"]
+                }
+                return jsonify({"message": "Profile already exists", "profile": profile_data}), 409
                 
         new_profile = cm.create_contact_profile(
             int(contact_id), profile_summary, general_info, personality,
@@ -1431,10 +1473,56 @@ def create_profile_endpoint():
             "best_goals": new_profile["best_goals"],
             "updated_at": new_profile["updated_at"]
         }
+        
+        # After successful profile creation, trigger sales signal analysis
+        try:
+            # Run in a separate thread to not block the response
+            def run_analysis():
+                analysis_result = contact_analyzer.analyze_and_store(
+                    int(contact_id),
+                    organization_id or "",
+                    new_profile
+                )
+                logger.info(f"Created initial sales analysis for contact {contact_id} with score {analysis_result['analysis'].get('sales_readiness_score', 0)}")
+            
+            # Start analysis in background thread
+            import threading
+            thread = threading.Thread(target=run_analysis)
+            thread.daemon = True
+            thread.start()
+        except Exception as analysis_error:
+            # Log the error but don't fail the profile creation
+            logger.error(f"Error creating initial sales analysis: {str(analysis_error)}")
+        
         return jsonify({"message": "Profile created successfully", "profile": profile_data}), 201
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
+        # Check for Supabase unique constraint violation
+        if "duplicate key value violates unique constraint" in str(e) and "profiles_contact_id_key" in str(e):
+            # Try to get the existing profile
+            try:
+                contact = cm.get_contact_details(int(contact_id), organization_id)
+                if contact and contact.get("profiles"):
+                    profile = contact["profiles"]
+                    profile_data = {
+                        "id": profile["id"],
+                        "uuid": profile["uuid"],
+                        "contact_id": profile["contact_id"],
+                        "profile_summary": profile["profile_summary"],
+                        "general_info": profile["general_info"],
+                        "personality": profile["personality"],
+                        "hidden_desires": profile["hidden_desires"],
+                        "linkedin_url": profile["linkedin_url"],
+                        "social_media_urls": profile["social_media_urls"],
+                        "best_goals": profile["best_goals"],
+                        "updated_at": profile["updated_at"]
+                    }
+                    return jsonify({"message": "Profile already exists", "profile": profile_data}), 409
+            except Exception:
+                pass
+                
+            return jsonify({"error": "A profile already exists for this contact"}), 409
         return jsonify({"error": str(e)}), 500
 
 @app.route('/contacts', methods=['GET', 'OPTIONS'])
@@ -2523,6 +2611,191 @@ def debug_thread_sessions():
     }
     
     return jsonify(result), 200
+
+@app.route('/analyze-contact', methods=['GET', 'OPTIONS'])
+def analyze_contact_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    contact_id = request.args.get('contact_id', '')
+    organization_id = request.args.get('organization_id', None)
+    store_result = request.args.get('store', 'false').lower() == 'true'
+    
+    if not contact_id:
+        return jsonify({"error": "contact_id parameter is required"}), 400
+    
+    try:
+        # Get contact details with profile
+        contact = cm.get_contact_details(int(contact_id), organization_id)
+        if not contact:
+            return jsonify({"error": f"No contact found with contact_id {contact_id}"}), 404
+        
+        # Check if contact has a profile
+        if not contact.get("profiles"):
+            return jsonify({"error": f"Contact with id {contact_id} does not have a profile"}), 404
+        
+        if store_result:
+            # Analyze and store the results
+            result = contact_analyzer.analyze_and_store(
+                int(contact_id), 
+                organization_id or contact.get("organization_id"), 
+                contact["profiles"]
+            )
+            return jsonify({
+                "contact_id": contact["id"],
+                "contact_name": f"{contact['first_name']} {contact['last_name']}",
+                "analysis": result["analysis"],
+                "changes": result["changes"],
+                "stored": result["stored"]
+            }), 200
+        else:
+            # Just analyze without storing
+            analysis = contact_analyzer.analyze_profile(contact["profiles"])
+            return jsonify({
+                "contact_id": contact["id"],
+                "contact_name": f"{contact['first_name']} {contact['last_name']}",
+                "analysis": analysis
+            }), 200
+    except ValueError:
+        return jsonify({"error": "contact_id must be an integer"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-analysis-history', methods=['GET', 'OPTIONS'])
+def get_analysis_history_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    contact_id = request.args.get('contact_id', '')
+    limit = request.args.get('limit', '10')
+    
+    if not contact_id:
+        return jsonify({"error": "contact_id parameter is required"}), 400
+    
+    try:
+        history = contact_analyzer.get_analysis_history(int(contact_id), int(limit))
+        return jsonify({"contact_id": contact_id, "history": history}), 200
+    except ValueError:
+        return jsonify({"error": "contact_id and limit must be integers"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-hot-leads', methods=['GET', 'OPTIONS'])
+def get_hot_leads_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    organization_id = request.args.get('organization_id', None)
+    min_score = request.args.get('min_score', '70')
+    limit = request.args.get('limit', '20')
+    
+    if not organization_id:
+        return jsonify({"error": "organization_id parameter is required"}), 400
+    
+    try:
+        hot_leads = contact_analyzer.get_hot_leads(
+            organization_id,
+            int(min_score),
+            int(limit)
+        )
+        
+        return jsonify({
+            "organization_id": organization_id,
+            "hot_leads_count": len(hot_leads),
+            "hot_leads": hot_leads
+        }), 200
+    except ValueError:
+        return jsonify({"error": "min_score and limit must be integers"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get-sales-report', methods=['GET', 'OPTIONS'])
+def get_sales_report():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    organization_id = request.args.get('organization_id', None)
+    
+    if not organization_id:
+        return jsonify({"error": "organization_id parameter is required"}), 400
+    
+    try:
+        # Get all contacts for the organization
+        contacts = cm.get_contacts(organization_id)
+        if not contacts:
+            return jsonify({"message": "No contacts found for this organization", "report": {
+                "total_contacts": 0,
+                "total_with_profiles": 0,
+                "lead_breakdown": {
+                    "hot_leads": 0,
+                    "warm_leads": 0,
+                    "nurture_leads": 0,
+                    "unqualified_leads": 0
+                },
+                "top_opportunities": [],
+                "urgent_opportunities": []
+            }}), 200
+        
+        # Generate the report
+        report = contact_analyzer.generate_weekly_leads_report(contacts)
+        
+        return jsonify({"report": report}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/run-bulk-analysis', methods=['POST', 'OPTIONS'])
+def run_bulk_analysis():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    organization_id = data.get("organization_id", "")
+    
+    if not organization_id:
+        return jsonify({"error": "organization_id is required"}), 400
+    
+    try:
+        # Get all contacts for the organization
+        contacts = cm.get_contacts(organization_id)
+        if not contacts:
+            return jsonify({"message": "No contacts found for this organization", "processed": 0}), 200
+        
+        # Count contacts with profiles
+        contacts_with_profiles = [c for c in contacts if c.get("profiles")]
+        
+        if not contacts_with_profiles:
+            return jsonify({"message": "No contacts with profiles found for this organization", "processed": 0}), 200
+        
+        # Start background task
+        def run_bulk_analysis():
+            processed = 0
+            for contact in contacts_with_profiles:
+                try:
+                    contact_analyzer.analyze_and_store(
+                        contact["id"],
+                        organization_id,
+                        contact["profiles"]
+                    )
+                    processed += 1
+                    logger.info(f"Processed {processed}/{len(contacts_with_profiles)} contacts in bulk analysis")
+                except Exception as e:
+                    logger.error(f"Error analyzing contact {contact['id']}: {str(e)}")
+            
+            logger.info(f"Bulk analysis completed. Processed {processed}/{len(contacts_with_profiles)} contacts")
+        
+        # Start analysis in background thread
+        import threading
+        thread = threading.Thread(target=run_bulk_analysis)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "message": "Bulk analysis started", 
+            "total_contacts": len(contacts),
+            "contacts_with_profiles": len(contacts_with_profiles)
+        }), 202  # 202 Accepted
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # Run the server when executed directly
 if __name__ == '__main__':
