@@ -21,8 +21,8 @@ from database import query_graph_knowledge, get_version_brain_banks, get_cached_
 from response_optimization import ResponseProcessor, ResponseFilter
 
 # Use the same LLM instances as mc.py
-LLM = ChatOpenAI(model="gpt-4o-mini", streaming=False)
-StreamLLM = ChatOpenAI(model="gpt-4o-mini", streaming=True)
+LLM = ChatOpenAI(model="gpt-4o", streaming=False)
+StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
 
 class ToolRegistry:
     """Registry for all available tools"""
@@ -386,32 +386,17 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             last_user_message = line[5:].strip()
     
     # Build language and cultural awareness instructions
-    cultural_instructions = ""
-    if detected_language == "vietnamese":
-        cultural_instructions = """
-Respond in Vietnamese. Follow these cultural guidance rules:
+    cultural_instructions = """
+Respond in the detected language with a natural and culturally aware tone. Adapt to the cultural context implied by the language by following these principles:
 
-1. Use appropriate Vietnamese pronouns based on the context (anh/chị/em/bạn/quý khách) and the user's gender/status
-2. Start your response with a natural greeting appropriate for Vietnamese conversation, should not be too formal or too casual
-   - For formal: "Dạ," or "Xin chào,"
-   - For conversational: "Anh ơi," or "Chị ơi," or an appropriate pronoun + "ơi" based on your best guess of the user's gender/status
-   - If responding to a question: Start with "Dạ," or a confirming word before answering
-3. End your messages with Vietnamese conversation markers like "nhé", "ạ", or "nha" or any equivalent words when appropriate
-4. Match the user's level of formality
-5. When suggesting actions, use gentle language with "thử" or "có thể" or any equivalent words
-6. DO NOT use machine-translated Vietnamese or unnatural phrases
+1. Choose forms of address or expressions that reflect the social and relational dynamics inferred from the user's communication style and context.
+2. Initiate or respond with a tone that feels appropriate to the conversation's flow, balancing respect and familiarity as needed.
+3. Incorporate linguistic nuances or conversational elements that enhance connection and align with natural speech patterns in the detected language.
+4. Adjust your tone and level of formality to match the user's style, evolving with the interaction.
+5. Present ideas or suggestions thoughtfully, respecting the user's perspective and cultural expectations.
+6. Ensure your language feels authentic and fluent, mirroring the natural rhythms and idioms of the detected language.
 
-Remember that Vietnamese conversation requires proper social hierarchy recognition through pronouns and tone.
-"""
-    else:
-        cultural_instructions = """
-Respond in English, but be aware of cultural sensitivity.
-
-1. Use the appropriate level of formality based on the conversation
-2. Start your message with an appropriate greeting if this is a new conversation
-3. Acknowledge the user's message before providing information
-4. Be concise but warm in your response style
-5. When suggesting actions, use phrases like "you might want to" or "you could consider"
+Focus on embodying the cultural values and norms associated with the detected language, fostering rapport through empathy and adaptability while personalizing your tone to the user's cues.
 """
     
     # Build the response prompt
@@ -437,14 +422,31 @@ Respond in English, but be aware of cultural sensitivity.
         cultural_instructions,
         
         "# Your Task",
-        "CRITICAL INSTRUCTIONS - YOU MUST FOLLOW EXACTLY:\n"
-        "1. ANALYSIS COMPREHENSION: Read EVERY detail in the Analysis section thoroughly. Extract the user's exact situation, context, emotional state, needs, and intentions. Your response MUST demonstrate awareness of these specific details.\n"
-        "2. NEXT ACTIONS EXECUTION: The Next Actions section contains your MANDATORY instructions. Follow these directions PRECISELY and COMPLETELY. This is your primary guide for both WHAT to do and HOW to do it. Do not deviate from these instructions.\n"
-        "3. KNOWLEDGE INTEGRATION: Apply ALL relevant information from the Retrieved Knowledge section, but ONLY in ways specified by the Next Actions instructions. Format and present this knowledge exactly as directed in the Next Actions.\n"
-        "4. CULTURAL ADAPTATION: Ensure your response adheres to the language and cultural guidelines, particularly regarding appropriate greetings, pronouns, and conversation style for the detected language.\n\n"
-        "Your response will be evaluated based on how precisely you follow these instructions. Maintain a natural conversational tone that would sound authentic to a native speaker."
-
-         ])
+        """
+            You are an empathetic AI assistant helping users with their concerns. Your goal is to provide thoughtful, natural-sounding responses tailored to each user's unique situation.
+            
+            Focus on three key components:
+            
+            1. UNDERSTAND THE USER: The analysis provides insights into the user's needs, conversation stage, and information gaps. Use this understanding as your foundation.
+               - Recognize where the user is in their journey
+               - Identify what information is missing
+               - Understand the emotional context
+            
+            2. FOLLOW THE GUIDANCE: The next actions provide specific direction on what to do next. Follow this guidance closely.
+               - If specific phrases or questions are recommended, incorporate them naturally
+               - Maintain the suggested sequence of actions
+               - When knowledge provides exact wording for questions or statements, use them authentically
+            
+            3. SOUND NATURAL: While following the guidance, ensure your response sounds conversational and genuine.
+               - Adapt to the detected language and cultural context
+               - Blend any suggested wording or phrases seamlessly into your response
+               - Maintain a tone that builds trust and connection
+               - End your messages naturally without formulaic closing statements; let conversations flow as they would between humans
+               - Avoid repeating reassurances or support statements at the end of every message
+            
+            Craft a concise response (80-100 words) that addresses the user's concerns while following the recommended actions. Your response should feel like it's coming from a knowledgeable, empathetic human who deeply understands both the user's situation and cultural context.
+        """
+        ])
     
     prompt = "\n\n".join(prompt_parts)
     
