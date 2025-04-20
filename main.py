@@ -18,7 +18,6 @@ from datetime import datetime
 import time
 
 from flask_cors import CORS
-from ami import convo_stream  # Unified stream function from ami.py
 import asyncio
 from typing import List, Optional, Dict, Any  # Added List and Optional imports
 from collections import deque
@@ -59,6 +58,56 @@ from socketio_manager import (
     socketio, ws_sessions, session_lock, 
     undelivered_messages, message_lock,
 )
+
+# Add a dictionary to store locks for each thread_id
+thread_locks = {}
+thread_locks_lock = threading.RLock()
+# Add a lock maintenance mechanism
+thread_lock_last_used = {}
+thread_lock_cleanup_interval = 300  # 5 minutes
+
+# Add a background thread to clean up unused locks
+def start_thread_lock_cleanup():
+    """Start a background thread to periodically clean up unused thread locks"""
+    def cleanup_worker():
+        while True:
+            try:
+                to_delete = []
+                now = time.time()
+                
+                with thread_locks_lock:
+                    # Find locks that haven't been used in the cleanup interval
+                    for tid, last_used in thread_lock_last_used.items():
+                        if now - last_used > thread_lock_cleanup_interval:
+                            # Only delete if not currently owned
+                            if tid in thread_locks and not thread_locks[tid]._is_owned():
+                                to_delete.append(tid)
+                    
+                    # Delete the identified locks
+                    for tid in to_delete:
+                        del thread_locks[tid]
+                        del thread_lock_last_used[tid]
+                        logger.info(f"Cleaned up unused thread lock for thread_id {tid}")
+                
+                # Log periodic stats about locks
+                with thread_locks_lock:
+                    logger.info(f"Thread locks stats: {len(thread_locks)} active locks, {len(to_delete)} cleaned up")
+            
+            except Exception as e:
+                logger.error(f"Error in thread lock cleanup: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+            
+            # Sleep for interval
+            time.sleep(60)  # Check every minute
+    
+    # Start the cleanup thread
+    thread = threading.Thread(target=cleanup_worker, daemon=True)
+    thread.start()
+    logger.info("Started thread lock cleanup worker")
+
+# Start the cleanup thread when module loads
+start_thread_lock_cleanup()
 
 # Thread-safe function to run async code in separate thread
 def run_async_in_thread(async_func, *args, **kwargs):
@@ -448,72 +497,6 @@ def pilot():
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
-@app.route('/training', methods=['POST', 'OPTIONS'])
-def training():
-    if request.method == 'OPTIONS':
-        return handle_options()
-    
-    data = request.get_json() or {}
-    user_input = data.get("user_input", "")
-    user_id = data.get("user_id", "thefusionlab")
-    thread_id = data.get("thread_id", "training_thread")
-    
-    logger.info("Training API called!")
-    
-    # Create a synchronous response streaming solution
-    def generate_response():
-        """Generate streaming response items synchronously."""
-        try:
-            # Import directly here to ensure fresh imports
-            from ami import convo_stream
-            
-            # Define the async process function
-            async def process_stream():
-                """Process the stream and return all items."""
-                outputs = []
-                try:
-                    # Get the stream
-                    stream = convo_stream(
-                        user_input=user_input, 
-                        user_id=user_id, 
-                        thread_id=thread_id, 
-                        mode="training"
-                    )
-                    
-                    # Process all the output
-                    async for item in stream:
-                        outputs.append(item)
-                except Exception as e:
-                    error_msg = f"Error processing stream: {str(e)}"
-                    logger.error(error_msg)
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
-                
-                return outputs
-            
-            # Run the async function in a separate thread
-            outputs = run_async_in_thread(process_stream)
-            
-            # Yield each output
-            for item in outputs:
-                yield item
-                
-        except Exception as outer_e:
-            # Handle any errors in the outer function
-            error_msg = f"Error in training response generator: {str(outer_e)}"
-            logger.error(error_msg)
-            import traceback
-            logger.error(traceback.format_exc())
-            yield f"data: {json.dumps({'error': error_msg})}\n\n"
-    
-    # Create a streaming response with our generator
-    from flask import stream_with_context
-    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
-    response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
 
 @app.route('/havefun', methods=['POST', 'OPTIONS'])
 def havefun():
@@ -533,67 +516,99 @@ def havefun():
     graph_version_id = data.get("graph_version_id", "")
     use_websocket = data.get("use_websocket", False)  # New flag to enable WebSocket
 
-    logger.info(f"[SESSION_TRACE] havefun API called! Thread ID: {thread_id}, Use WebSocket: {use_websocket}")
-    logger.info(f"[SESSION_TRACE] Request data: user_input length={len(user_input)}, user_id={user_id}, graph_version_id={graph_version_id}")
+    # Get or create a lock for this thread_id
+    thread_lock = None
+    with thread_locks_lock:
+        if thread_id not in thread_locks:
+            thread_locks[thread_id] = threading.RLock()
+        thread_lock = thread_locks[thread_id]
+        thread_lock_last_used[thread_id] = time.time()
     
-    # Update session info if using WebSockets
+    # Update session info if using WebSockets - do this outside the thread lock
+    # to minimize lock contention
     if use_websocket:
         active_session_exists = False
         
         with session_lock:
             thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-            active_session_exists = len(thread_sessions) > 0
-            
+            active_session_exists = len(thread_sessions) > 0            
             if active_session_exists:
-                logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
                 for sid in thread_sessions:
                     ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
                     ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
-            else:
-                logger.warning(f"[SESSION_TRACE] WebSocket requested but no active session for thread {thread_id}")
+                    ws_sessions[sid]['has_pending_request'] = True
     
-    # Create a synchronous response streaming solution
+    # Prepare stream parameters outside the lock
+    stream_params = {
+        "user_input": user_input,
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "graph_version_id": graph_version_id,
+        "mode": "mc"
+    }
+    
+    if use_websocket:
+        stream_params["use_websocket"] = True
+        stream_params["thread_id_for_analysis"] = thread_id
+
+    # Function to run the stream processing with proper locking
+    async def process_stream_with_lock():
+        outputs = []
+        # Acquire the thread-specific lock only for the processing part
+        with thread_lock:
+            try:
+                # Import directly here to ensure fresh imports
+                from ami import convo_stream
+                
+                # Define the async process function
+                async def process_stream():
+                    """Process the stream and return all items."""
+                    try:
+                        # Get the stream
+                        stream = convo_stream(**stream_params)
+                        
+                        # Process all the output
+                        async for item in stream:
+                            outputs.append(item)
+                    except Exception as e:
+                        error_msg = f"Error processing stream: {str(e)}"
+                        logger.error(error_msg)
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                    
+                    return True
+                
+                # Run the async function
+                await process_stream()
+                
+                # Update thread lock last used time
+                with thread_locks_lock:
+                    thread_lock_last_used[thread_id] = time.time()
+                
+                # If using WebSockets, update session to indicate request is done
+                if use_websocket:
+                    with session_lock:
+                        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                        for sid in thread_sessions:
+                            if 'has_pending_request' in ws_sessions[sid]:
+                                ws_sessions[sid]['has_pending_request'] = False
+                
+            except Exception as e:
+                error_msg = f"Error in stream processing: {str(e)}"
+                logger.error(error_msg)
+                import traceback
+                logger.error(traceback.format_exc())
+                outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+        
+        return outputs
+    
+    # Create a synchronous response streaming solution that runs the async processing
     def generate_response():
         """Generate streaming response items synchronously."""
         try:
-            # Import directly here to ensure fresh imports
-            from ami import convo_stream
-            
-            # Set up response parameters
-            stream_params = {
-                "user_input": user_input,
-                "user_id": user_id,
-                "thread_id": thread_id,
-                "graph_version_id": graph_version_id,
-                "mode": "mc"
-            }
-            
-            if use_websocket:
-                stream_params["use_websocket"] = True
-                stream_params["thread_id_for_analysis"] = thread_id
-            
-            # Define the async process function
-            async def process_stream():
-                """Process the stream and return all items."""
-                outputs = []
-                try:
-                    # Get the stream
-                    stream = convo_stream(**stream_params)
-                    
-                    # Process all the output
-                    async for item in stream:
-                        outputs.append(item)
-                except Exception as e:
-                    error_msg = f"Error processing stream: {str(e)}"
-                    logger.error(error_msg)
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
-                
-                return outputs
-            
-            # Run the async function in a separate thread
-            outputs = run_async_in_thread(process_stream)
+            # Run the async processing with proper locking
+            outputs = run_async_in_thread(process_stream_with_lock)
             
             # Yield each output
             for item in outputs:
@@ -607,99 +622,6 @@ def havefun():
         except Exception as outer_e:
             # Handle any errors in the outer function
             error_msg = f"Error in response generator: {str(outer_e)}"
-            logger.error(error_msg)
-            import traceback
-            logger.error(traceback.format_exc())
-            yield f"data: {json.dumps({'error': error_msg})}\n\n"
-    
-    # Create a streaming response with our generator
-    from flask import stream_with_context
-    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
-    response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
-
-@app.route('/autopilot', methods=['POST', 'OPTIONS'])
-def gopilot():
-    if request.method == 'OPTIONS':
-        return handle_options()
-    
-    data = request.get_json() or {}
-    user_input = data.get("user_input", "")
-    user_id = data.get("user_id", "thefusionlab")
-    thread_id = data.get("thread_id", "chat_thread")
-    graph_version_id = data.get("graph_version_id", "")
-    use_websocket = data.get("use_websocket", False)  # New flag to enable WebSocket
-    
-    logger.info(f"Autopilot API called! Thread ID: {thread_id}, Use WebSocket: {use_websocket}")
-    
-    # Update session info if using WebSockets
-    if use_websocket:
-        active_session_exists = False
-        
-        with session_lock:
-            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-            active_session_exists = len(thread_sessions) > 0
-            
-            if active_session_exists:
-                logger.info(f"[SESSION_TRACE] Thread {thread_id} has {len(thread_sessions)} active sessions: {thread_sessions}")
-                for sid in thread_sessions:
-                    ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
-                    ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
-            else:
-                logger.warning(f"[SESSION_TRACE] WebSocket requested but no active session for thread {thread_id}")
-    
-    # Create a synchronous response streaming solution
-    def generate_response():
-        """Generate streaming response items synchronously."""
-        try:
-            # Import directly here to ensure fresh imports
-            from ami import convo_stream
-            
-            # Set up response parameters
-            stream_params = {
-                "user_input": user_input,
-                "user_id": user_id,
-                "thread_id": thread_id,
-                "graph_version_id": graph_version_id,
-                "mode": "mc"
-            }
-            
-            if use_websocket:
-                stream_params["use_websocket"] = True
-                stream_params["thread_id_for_analysis"] = thread_id
-            
-            # Define the async process function
-            async def process_stream():
-                """Process the stream and return all items."""
-                outputs = []
-                try:
-                    # Get the stream
-                    stream = convo_stream(**stream_params)
-                    
-                    # Process all the output
-                    async for item in stream:
-                        outputs.append(item)
-                except Exception as e:
-                    error_msg = f"Error processing stream: {str(e)}"
-                    logger.error(error_msg)
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
-                
-                return outputs
-            
-            # Run the async function in a separate thread
-            outputs = run_async_in_thread(process_stream)
-            
-            # Yield each output
-            for item in outputs:
-                yield item
-                
-        except Exception as outer_e:
-            # Handle any errors in the outer function
-            error_msg = f"Error in autopilot response generator: {str(outer_e)}"
             logger.error(error_msg)
             import traceback
             logger.error(traceback.format_exc())
