@@ -52,6 +52,7 @@ import os
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from threading import Lock
 from utilities import logger
+from enrich_profile import ProfileEnricher
 
 # Import SocketIO functionality from socketio_manager.py
 from socketio_manager import init_socketio, emit_analysis_event, emit_next_action_event
@@ -2794,6 +2795,186 @@ def run_bulk_analysis():
             "total_contacts": len(contacts),
             "contacts_with_profiles": len(contacts_with_profiles)
         }), 202  # 202 Accepted
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/create-or-update-profile', methods=['POST', 'OPTIONS'])
+def create_or_update_profile_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    contact_id = data.get("contact_id", "")
+    organization_id = data.get("organization_id", None)
+    profile_summary = data.get("profile_summary", None)
+    general_info = data.get("general_info", None)
+    personality = data.get("personality", None)
+    hidden_desires = data.get("hidden_desires", None)
+    linkedin_url = data.get("linkedin_url", None)
+    social_media_urls = data.get("social_media_urls", None)
+    best_goals = data.get("best_goals", None)
+    
+    if not contact_id:
+        return jsonify({"error": "contact_id is required"}), 400
+    
+    try:
+        # First verify the contact exists and belongs to the organization
+        if organization_id:
+            contact = cm.get_contact_details(int(contact_id), organization_id)
+            if not contact:
+                return jsonify({"error": f"No contact found with id {contact_id} in this organization"}), 404
+                
+        # Prepare update data
+        profile_data = {}
+        if profile_summary is not None:
+            profile_data["profile_summary"] = profile_summary
+        if general_info is not None:
+            profile_data["general_info"] = general_info
+        if personality is not None:
+            profile_data["personality"] = personality
+        if hidden_desires is not None:
+            profile_data["hidden_desires"] = hidden_desires
+        if linkedin_url is not None:
+            profile_data["linkedin_url"] = linkedin_url
+        if social_media_urls is not None:
+            profile_data["social_media_urls"] = social_media_urls
+        if best_goals is not None:
+            profile_data["best_goals"] = best_goals
+        
+        # Create or update the profile
+        updated_profile = cm.create_or_update_contact_profile(int(contact_id), **profile_data)
+        if not updated_profile:
+            return jsonify({"error": f"Failed to create or update profile for contact {contact_id}"}), 500
+        
+        # Format response
+        profile_data = {
+            "id": updated_profile["id"],
+            "uuid": updated_profile["uuid"],
+            "contact_id": updated_profile["contact_id"],
+            "profile_summary": updated_profile["profile_summary"],
+            "general_info": updated_profile["general_info"],
+            "personality": updated_profile["personality"],
+            "hidden_desires": updated_profile["hidden_desires"],
+            "linkedin_url": updated_profile["linkedin_url"],
+            "social_media_urls": updated_profile["social_media_urls"],
+            "best_goals": updated_profile["best_goals"],
+            "updated_at": updated_profile["updated_at"]
+        }
+        
+        # After successful profile update, trigger sales signal analysis
+        try:
+            # Run in a separate thread to not block the response
+            def run_analysis():
+                analysis_result = contact_analyzer.analyze_and_store(
+                    int(contact_id),
+                    organization_id or contact.get("organization_id", ""),
+                    updated_profile
+                )
+                logger.info(f"Updated sales analysis for contact {contact_id} with score {analysis_result['analysis'].get('sales_readiness_score', 0)}")
+            
+            # Start analysis in background thread
+            import threading
+            thread = threading.Thread(target=run_analysis)
+            thread.daemon = True
+            thread.start()
+        except Exception as analysis_error:
+            # Log the error but don't fail the profile update
+            logger.error(f"Error updating sales analysis: {str(analysis_error)}")
+        
+        is_new = contact.get("profiles") is None
+        status_code = 201 if is_new else 200
+        message = "Profile created successfully" if is_new else "Profile updated successfully"
+        
+        return jsonify({"message": message, "profile": profile_data}), status_code
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/batch-enrich-profiles', methods=['POST', 'OPTIONS'])
+def batch_enrich_profiles_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    organization_id = data.get("organization_id", None)
+    max_contacts = data.get("max_contacts", 100)
+    
+    if not organization_id:
+        return jsonify({"error": "organization_id is required"}), 400
+    
+    try:
+        # Start background task
+        def run_batch_enrichment():
+            try:
+                enricher = ProfileEnricher()
+                profiles = asyncio.run(enricher.batch_update_profiles(organization_id, max_contacts))
+                logger.info(f"Batch profile enrichment completed. Updated {len(profiles)} profiles.")
+            except Exception as e:
+                logger.error(f"Error in batch profile enrichment: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        # Start enrichment in background thread
+        import threading
+        thread = threading.Thread(target=run_batch_enrichment)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "message": "Batch profile enrichment started", 
+            "organization_id": organization_id,
+            "max_contacts": max_contacts
+        }), 202  # 202 Accepted
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/batch-analyze-contacts', methods=['POST', 'OPTIONS'])
+def batch_analyze_contacts_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    data = request.get_json() or {}
+    organization_id = data.get("organization_id", None)
+    min_contacts = data.get("min_contacts", 5)
+    max_contacts = data.get("max_contacts", 100)
+    batch_size = data.get("batch_size", 10)
+    delay_seconds = data.get("delay_seconds", 0.5)
+    
+    if not organization_id:
+        return jsonify({"error": "organization_id is required"}), 400
+    
+    try:
+        # Start background task
+        def run_batch_analysis():
+            try:
+                analyzer = ContactAnalyzer()
+                result = analyzer.batch_analyze_contacts(
+                    organization_id=organization_id,
+                    min_contacts=min_contacts,
+                    max_contacts=max_contacts,
+                    batch_size=batch_size,
+                    delay_seconds=delay_seconds
+                )
+                logger.info(f"Batch contact analysis completed. Processed {result.get('processed', 0)} contacts.")
+            except Exception as e:
+                logger.error(f"Error in batch contact analysis: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        # Start analysis in background thread
+        import threading
+        thread = threading.Thread(target=run_batch_analysis)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            "message": "Batch contact analysis started", 
+            "organization_id": organization_id,
+            "max_contacts": max_contacts
+        }), 202  # 202 Accepted
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
