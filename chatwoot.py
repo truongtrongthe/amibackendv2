@@ -769,23 +769,32 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
             print("⏭️ Skipping empty message")
             return
         
-        # Log initial message
-        print(f"\n📨 {'Incoming' if is_incoming else 'Outgoing'} Message from {context['contact_name']}:")
+        # Log initial message with clearer direction indication
+        if is_incoming:
+            print(f"\n📨 Incoming Message FROM {context['contact_name']}:")
+        else:
+            print(f"\n📤 Outgoing Message TO {context['contact_name']}:")
         print(f"Content: {content}")
         print(f"Conversation ID: {context['conversation_id']}")
         if context.get('last_activity_at'):
             print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
-        # For outgoing messages, check if we've already saved this exact message recently
-        # This prevents duplicating messages that we sent ourselves
+        # Add message to conversation - but only if it's incoming OR not from our own system
+        # (outgoing messages from our AI system are already stored when we send them)
+        sender = data.get('sender')
+        sender_id = sender.get('id') if sender else None
+        sender_type = sender.get('type') if sender else None
+        
+        # For outgoing messages, determine if this might be our own message by checking
+        # if we've recently sent a similar message with this content
+        is_likely_our_message = False
         if not is_incoming:
-            # Check existing conversation messages for duplicates
             try:
                 conversation = conversation_manager.get_conversation(conversation_data['id'])
                 if conversation and "messages" in conversation.get("conversation_data", {}):
                     messages = conversation["conversation_data"]["messages"]
                     
-                    # Look for a recent message with same content (within last 10 seconds)
+                    # Look for a recent message with same content (within last 30 seconds)
                     current_time = datetime.now(timezone.utc)
                     for msg in reversed(messages):  # Start from most recent
                         # Skip non-matching messages
@@ -796,25 +805,20 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
                         if msg.get('timestamp'):
                             try:
                                 msg_time = datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00'))
-                                # If message is within last 10 seconds, it's likely a duplicate
+                                # If message is within last 30 seconds, it's likely a duplicate
                                 time_diff = (current_time - msg_time).total_seconds()
-                                if time_diff < 10:
-                                    logger.info(f"Skipping duplicate outgoing message (already in DB, {time_diff:.1f}s ago)")
-                                    return
+                                if time_diff < 30:
+                                    is_likely_our_message = True
+                                    logger.info(f"Detected outgoing message that is likely our own (based on content match)")
+                                    break
                             except (ValueError, TypeError):
                                 # If timestamp parsing fails, continue checking
                                 pass
             except Exception as e:
-                logger.warning(f"Error while checking for duplicate messages: {str(e)}")
-                # Continue processing - better to risk a duplicate than miss a message
+                logger.warning(f"Error while checking if message is our own: {str(e)}")
         
-        # Add message to conversation - but only if it's incoming OR not from our own system
-        # (outgoing messages from our AI system are already stored when we send them)
-        sender_id = data.get('sender', {}).get('id')
-        sender_type = data.get('sender', {}).get('type')
-        
-        # Only store incoming messages or outgoing messages that weren't sent by our system
-        if is_incoming or (sender_type != 'bot' and sender_id is not None):
+        # Only store incoming messages or outgoing messages that are not likely our own
+        if is_incoming or (not is_likely_our_message and sender_type != 'bot'):
             message = {
                 'sender_type': 'agent' if message_type == 'outgoing' else 'contact',
                 'content': content,
