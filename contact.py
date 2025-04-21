@@ -378,53 +378,49 @@ class ContactManager:
             ]
         }
 
-# Example usage
-if __name__ == "__main__":
-    cm = ContactManager()
+    # Create or update a contact profile (2-in-1 method)
+    def create_or_update_contact_profile(self, contact_id: int, **kwargs) -> dict:
+        """
+        Create a new profile if one doesn't exist for the contact, or update an existing profile.
+        
+        Args:
+            contact_id: The ID of the contact
+            **kwargs: Profile fields to set/update (profile_summary, general_info, personality, 
+                     hidden_desires, linkedin_url, social_media_urls, best_goals)
+                     
+        Returns:
+            The created or updated profile record
+        """
+        # Get contact details to check if profile exists
+        contact = self.get_contact_details(contact_id)
+        
+        # Set allowed fields
+        allowed_fields = {
+            "profile_summary", "general_info", "personality", "hidden_desires",
+            "linkedin_url", "social_media_urls", "best_goals"
+        }
+        
+        # Filter kwargs to only include allowed fields
+        profile_data = {k: v for k, v in kwargs.items() if k in allowed_fields}
+        
+        # Add updated_at timestamp
+        profile_data["updated_at"] = datetime.utcnow().isoformat()
+        
+        # If profile exists, update it
+        if contact and contact.get("profiles"):
+            return self.update_contact_profile(contact_id, **profile_data)
+        
+        # Otherwise create a new profile
+        # Add required contact_id
+        profile_data["contact_id"] = contact_id
+        
+        # Ensure arrays have default empty values
+        if "social_media_urls" not in profile_data:
+            profile_data["social_media_urls"] = []
+        if "best_goals" not in profile_data:
+            profile_data["best_goals"] = []
+            
+        # Create profile
+        response = supabase.table(self.profiles_table).insert(profile_data).execute()
+        return response.data[0] if response.data else None
 
-    # Create a contact
-    new_contact = cm.create_contact("org123", "customer", "Jane", "Smith", "jane@example.com", "555-5678")
-    print("Created Contact:", new_contact)
-
-    # Update contact
-    updated_contact = cm.update_contact(new_contact["id"], email="jane.smith@example.com")
-    print("Updated Contact:", updated_contact)
-
-    # Get all contacts
-    all_contacts = cm.get_contacts("org123")
-    print("All Contacts:", all_contacts)
-
-    # Create a profile
-    profile = cm.create_contact_profile(
-        new_contact["id"],
-        profile_summary="Creative marketer seeking recognition",
-        best_goals=[{"goal": "Close deal", "deadline": "2025-06-01"}]
-    )
-    print("Created Profile:", profile)
-
-    # Update profile
-    updated_profile = cm.update_contact_profile(
-        new_contact["id"],
-        profile_summary="Experienced marketer driving growth"
-    )
-    print("Updated Profile:", updated_profile)
-
-    # Get contact details
-    details = cm.get_contact_details(new_contact["id"], "org123")
-    print("Contact Details:", details)
-
-    # Get profile summary
-    summary = cm.get_profile_summary(new_contact["id"])
-    print("Profile Summary:", summary)
-
-    # Get profile summary versions
-    versions = cm.get_profile_summary_versions(new_contact["id"])
-    print("Summary Versions:", versions)
-
-    # Get contact by UUID
-    contact_by_uuid = cm.get_contact_by_uuid(new_contact["uuid"], "org123")
-    print("Contact by UUID:", contact_by_uuid)
-
-    # Get contact by Facebook ID
-    contact_by_facebook_id = cm.get_contact_by_facebook_id(new_contact["facebook_id"], "org123")
-    print("Contact by Facebook ID:", contact_by_facebook_id)

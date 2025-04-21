@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 import os
+import time
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,11 @@ class ContactAnalyzer:
                 if not isinstance(goal, dict):
                     continue
                     
-                goal_text = goal.get('goal', '')
+                goal_text = goal.get('goal_name', '') or goal.get('goal', '')
+                goal_description = goal.get('description', '')
+                if goal_description:
+                    goal_text = f"{goal_text} - {goal_description}"
+                    
                 goal_importance = goal.get('importance', '').lower()
                 goal_deadline_str = goal.get('deadline', '')
                 
@@ -642,4 +647,139 @@ class ContactAnalyzer:
             return hot_leads
         except Exception as e:
             logger.error(f"Error getting hot leads: {str(e)}")
-            return [] 
+            return []
+            
+    def batch_analyze_contacts(self, organization_id: Optional[str] = None, 
+                              min_contacts: int = 10, 
+                              max_contacts: int = 100,
+                              batch_size: int = 10,
+                              delay_seconds: float = 0.5) -> Dict:
+        """
+        Run batch analysis on contact profiles to detect sales signals and 
+        assign priority levels.
+        
+        Args:
+            organization_id: Optional organization ID to filter contacts
+            min_contacts: Minimum number of contacts to process
+            max_contacts: Maximum number of contacts to process
+            batch_size: Number of contacts to process in each batch
+            delay_seconds: Delay between batches to avoid rate limiting
+            
+        Returns:
+            Dict with analysis results summary
+        """
+        from contact import ContactManager
+        contact_manager = ContactManager()
+        
+        # Get contacts with profiles for the organization
+        logger.info(f"Fetching contacts for organization_id: {organization_id or 'all'}")
+        contacts = contact_manager.get_contacts(organization_id)
+        
+        # Filter contacts that have profiles
+        contacts_with_profiles = [c for c in contacts if c.get("profiles")]
+        
+        if not contacts_with_profiles:
+            logger.warning(f"No contacts with profiles found for organization_id: {organization_id or 'all'}")
+            return {
+                "success": False,
+                "message": "No contacts with profiles found",
+                "processed": 0,
+                "total": 0
+            }
+        
+        # Limit to max_contacts
+        contacts_to_process = contacts_with_profiles[:max_contacts]
+        total_contacts = len(contacts_to_process)
+        
+        if total_contacts < min_contacts:
+            logger.warning(f"Found only {total_contacts} contacts with profiles, which is below minimum threshold of {min_contacts}")
+            return {
+                "success": False,
+                "message": f"Only {total_contacts} contacts with profiles found, which is below minimum threshold of {min_contacts}",
+                "processed": 0,
+                "total": total_contacts
+            }
+        
+        logger.info(f"Starting batch analysis of {total_contacts} contacts for organization_id: {organization_id or 'all'}")
+        
+        # Process contacts in batches
+        processed_count = 0
+        success_count = 0
+        error_count = 0
+        
+        for i in range(0, total_contacts, batch_size):
+            batch = contacts_to_process[i:i+batch_size]
+            batch_number = i // batch_size + 1
+            batch_size_actual = len(batch)
+            
+            logger.info(f"Processing batch {batch_number}/{(total_contacts + batch_size - 1) // batch_size} with {batch_size_actual} contacts")
+            
+            for contact in batch:
+                contact_id = contact.get("id")
+                profile = contact.get("profiles")
+                
+                if not profile:
+                    logger.warning(f"Skipping contact {contact_id}: profile data missing")
+                    continue
+                    
+                try:
+                    # Get organization_id from contact if not provided
+                    org_id = organization_id or contact.get("organization_id")
+                    if not org_id:
+                        logger.warning(f"Skipping contact {contact_id}: organization_id missing")
+                        continue
+                    
+                    # Analyze and store results
+                    result = self.analyze_and_store(contact_id, org_id, profile)
+                    
+                    if result.get("stored"):
+                        success_count += 1
+                        logger.info(f"Successfully analyzed contact {contact_id} with score {result['analysis'].get('sales_readiness_score', 0)}")
+                    else:
+                        error_count += 1
+                        logger.error(f"Failed to store analysis for contact {contact_id}")
+                    
+                    processed_count += 1
+                    
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"Error analyzing contact {contact_id}: {str(e)}")
+            
+            # Add delay between batches
+            if batch_number * batch_size < total_contacts:
+                logger.info(f"Waiting {delay_seconds} seconds before processing next batch")
+                time.sleep(delay_seconds)
+        
+        # Generate summary
+        summary = {
+            "success": True,
+            "message": f"Processed {processed_count} contacts with {success_count} successes and {error_count} errors",
+            "processed": processed_count,
+            "success_count": success_count,
+            "error_count": error_count,
+            "total": total_contacts
+        }
+        
+        # Create weekly report if requested
+        if processed_count > 0:
+            try:
+                report = self.generate_weekly_leads_report(contacts_to_process)
+                summary["report"] = report
+                
+                logger.info(f"Generated sales report: {report['lead_breakdown']['hot_leads']} hot leads, " +
+                          f"{report['lead_breakdown']['warm_leads']} warm leads, " +
+                          f"{report['lead_breakdown']['nurture_leads']} nurture leads")
+                          
+            except Exception as e:
+                logger.error(f"Error generating weekly report: {str(e)}")
+            
+            # Refresh contact tags after analysis is complete
+            try:
+                logger.info("Refreshing contact tags based on latest analysis")
+                # This will trigger _enrich_contacts_with_tags to update all tags
+                contact_manager.get_contacts(organization_id)
+                logger.info("Contact tags refreshed successfully")
+            except Exception as e:
+                logger.error(f"Error refreshing contact tags: {str(e)}")
+        
+        return summary 
