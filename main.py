@@ -29,7 +29,8 @@ recent_requests = deque(maxlen=100)
 
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
-from docuhandler import process_document,summarize_document
+#from docuhandler import process_document,summarize_document
+from training_prep import process_document,refine_document,extract_knowledge_with_llm,extract_knowledge_from_chunk
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
@@ -136,7 +137,7 @@ def run_async_in_thread(async_func, *args, **kwargs):
     except RuntimeError:
         # No event loop in this thread, we'll create one in a new thread
         logger.info("No event loop in current thread, creating new thread with event loop")
-        pass
+        # No 'pass' statement here to ensure the code continues to the thread creation
     
     # If we get here, we need to create a new thread with its own event loop
     result_queue = queue.Queue()
@@ -693,6 +694,7 @@ def get_label_details():
         logger.error(f"Error in get_label_details: {str(e)}")
         return jsonify({"error": f"Error retrieving label details: {str(e)}"}), 500
 
+
 @app.route('/summarize-document', methods=['POST', 'OPTIONS'])
 def summary_document_endpoint():
     if request.method == 'OPTIONS':
@@ -710,19 +712,28 @@ def summary_document_endpoint():
 
     # Use the thread-based approach instead of the global event loop
     try:
-        # Run the async summarize_document function in a separate thread
-        summary = run_async_in_thread(summarize_document, file, user_id, mode)
+        # Run the async refine_document function in a separate thread
+        success, result = run_async_in_thread(
+            refine_document, 
+            file=file, 
+            user_id=user_id, 
+            mode=mode, 
+            reformat_text=True
+        )
         
-        if summary:
+        if success:
             return jsonify({
-                "summary": summary
+                "summary": result.get("summary", ""),
+                "knowledge_elements": result.get("knowledge_elements", ""),
+                "reformatted_text": result.get("reformatted_text", ""),
+                "metadata": result.get("metadata", {})
             }), 200
         else:
             return jsonify({
-                "error": "Failed to process document"
+                "error": result.get("error", "Failed to process document")
             }), 500
     except Exception as e:
-        logger.error(f"Error in summarize_document: {str(e)}")
+        logger.error(f"Error in refine_document: {str(e)}")
         return jsonify({
             "error": f"Error processing document: {str(e)}"
         }), 500
@@ -732,21 +743,27 @@ def process_document_endpoint():
     if request.method == 'OPTIONS':
         return handle_options()
 
-    if 'file' not in request.files or 'user_id' not in request.form or 'bank_name' not in request.form:
-        return jsonify({"error": "Missing file or user_id"}), 400
+    if 'user_id' not in request.form or 'bank_name' not in request.form or 'reformatted_text' not in request.form:
+        return jsonify({"error": "Missing user_id, bank_name, or reformatted_text"}), 400
 
-    file = request.files['file']
     user_id = request.form['user_id']
-    bank_name=request.form['bank_name']
+    bank_name = request.form['bank_name']
+    reformatted_text = request.form['reformatted_text']
     mode = request.form.get('mode', 'default')  # Optional mode parameter
-    
-    if not file.filename:
-        return jsonify({"error": "No file selected"}), 400
+
+    if not reformatted_text.strip():
+        return jsonify({"error": "Empty reformatted_text provided"}), 400
 
     # Use the thread-based approach instead of the global event loop
     try:
         # Run the async process_document function in a separate thread
-        success = run_async_in_thread(process_document, file, user_id, mode, bank_name)
+        success = run_async_in_thread(
+            process_document, 
+            text=reformatted_text, 
+            user_id=user_id, 
+            mode=mode, 
+            bank=bank_name
+        )
         
         if success:
             return jsonify({
@@ -761,7 +778,6 @@ def process_document_endpoint():
         return jsonify({
             "error": f"Error processing document: {str(e)}"
         }), 500
-
 
 @app.route('/brains', methods=['GET', 'OPTIONS'])
 def brains():

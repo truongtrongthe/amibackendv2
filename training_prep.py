@@ -1,310 +1,683 @@
-#!/usr/bin/env python3
-"""
-Training Preparation Module for Knowledge Processing
-
-This module provides functions for processing various knowledge inputs,
-including documents and fragmented text inputs, to prepare them for training.
-"""
-
-import os
-import logging
+import pdfplumber
+from docx import Document
+import uuid
+from io import BytesIO
+from utilities import logger
+from database import save_training_with_chunk
 import asyncio
-from typing import List, Dict, Any, Optional, Union
-
 from werkzeug.datastructures import FileStorage
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import openai
+import tiktoken
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Initialize the LLM client with timeout
+LLM = ChatOpenAI(streaming=False, request_timeout=60)  # 60 second timeout
+FAST_LLM = ChatOpenAI(model="gpt-4o-mini", streaming=False, request_timeout=45)  # 45 second timeout
+
+# Retry decorator for LLM calls
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(openai.APITimeoutError)
 )
-logger = logging.getLogger(__name__)
-
-# Allowed file extensions for document processing
-ALLOWED_EXTENSIONS = {'pdf', 'txt', 'doc', 'docx'}
-
-
-async def process_document(
-    document: FileStorage,
-    user_id: str,
-    tags: Optional[List[str]] = None
-) -> bool:
-    """
-    Process a document file for knowledge extraction.
-    
-    Args:
-        document: The document file object (pdf, txt, doc, docx)
-        user_id: User identifier for tracking and logging
-        tags: Optional list of tags to categorize the document
-    
-    Returns:
-        Boolean indicating success or failure of the processing
-    """
-    if not document or not document.filename:
-        logger.error(f"No valid document provided for user {user_id}")
-        return False
-    
-    # Check if file extension is allowed
-    extension = document.filename.rsplit('.', 1)[1].lower() if '.' in document.filename else ''
-    if extension not in ALLOWED_EXTENSIONS:
-        logger.error(f"Invalid file type {extension} for user {user_id}. Allowed types: {ALLOWED_EXTENSIONS}")
-        return False
-    
-    # Log the processing attempt
-    tag_str = ', '.join(tags) if tags else 'none'
-    logger.info(f"Processing document {document.filename} for user {user_id} with tags: {tag_str}")
-    
+async def invoke_llm_with_retry(llm, prompt, stop=None):
+    """Call LLM with retry logic for timeouts and transient errors"""
     try:
-        # Simulating document processing with a delay
-        # In a real implementation, this would involve actual document parsing and knowledge extraction
-        await asyncio.sleep(1)  # Simulate processing time
-        
-        logger.info(f"Successfully processed document {document.filename} for user {user_id}")
-        return True
+        return await llm.ainvoke(prompt, stop=stop)
     except Exception as e:
-        logger.error(f"Error processing document {document.filename} for user {user_id}: {str(e)}")
-        return False
+        logger.warning(f"LLM call error: {type(e).__name__}: {str(e)}")
+        raise
 
-
-async def process_fragmented_input(
-    messages: List[str],
-    user_id: str,
-    topic: Optional[str] = None,
-    tags: Optional[List[str]] = None
-) -> bool:
-    """
-    Process a list of fragmented inputs (like chat messages or notes).
-    
-    Args:
-        messages: List of text fragments to process
-        user_id: User identifier for tracking and logging
-        topic: Optional topic name for the fragmented input
-        tags: Optional list of tags to categorize the input
-    
-    Returns:
-        Boolean indicating success or failure of the processing
-    """
-    if not messages:
-        logger.error(f"No messages provided for user {user_id}")
-        return False
-    
-    topic_str = f" on topic '{topic}'" if topic else ""
-    tag_str = ', '.join(tags) if tags else 'none'
-    logger.info(f"Processing {len(messages)} fragments{topic_str} for user {user_id} with tags: {tag_str}")
-    
+async def summarize_with_llm(text: str, max_length: int = 150) -> str:
+    """Summarize text using the LLM, preserving key factual and actionable elements in the original language."""
     try:
-        # Simulating fragmented input processing
-        # In a real implementation, this would involve text processing and knowledge extraction
-        await asyncio.sleep(0.5)  # Simulate processing time
+        # Log the length of the text being summarized
+        text_length = len(text)
+        first_100_chars = text[:100].replace('\n', ' ') if text else "EMPTY TEXT"
+        last_100_chars = text[-100:].replace('\n', ' ') if text_length > 100 else ""
+        logger.debug(f"Summarizing text of length {text_length}. First 100 chars: '{first_100_chars}...'")
+        if last_100_chars:
+            logger.debug(f"Last 100 chars: '...{last_100_chars}'")
         
-        logger.info(f"Successfully processed {len(messages)} fragments for user {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Error processing fragments for user {user_id}: {str(e)}")
-        return False
-
-
-async def batch_process_fragment_collections(
-    user_id: str,
-    collections: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """
-    Process multiple collections of fragmented inputs concurrently.
-    
-    Args:
-        user_id: User identifier for tracking and logging
-        collections: List of dictionaries, each containing 'messages', optional 'topic', and optional 'tags'
-    
-    Returns:
-        List of processing results for each collection
-    """
-    if not collections:
-        logger.warning(f"No fragment collections provided for user {user_id}")
-        return []
-    
-    logger.info(f"Batch processing {len(collections)} fragment collections for user {user_id}")
-    
-    # Create tasks for each collection
-    tasks = []
-    for collection in collections:
-        messages = collection.get('messages', [])
-        topic = collection.get('topic')
-        tags = collection.get('tags')
+        if not text or text_length < 50:
+            logger.warning(f"Text is too short or empty for summarization: '{text}'")
+            return "Text provided is too short or empty for meaningful summarization."
         
-        task = asyncio.create_task(
-            process_fragmented_input(
-                messages=messages,
-                user_id=user_id,
-                topic=topic,
-                tags=tags
-            )
+        # Check if text appears to be a placeholder or metadata only
+        if text.count('\n') < 3 and "Document:" in text and "Type:" in text:
+            logger.warning(f"Text appears to be metadata only, no content: '{text}'")
+            return "The provided text appears to contain only metadata without substantial content to summarize."
+        
+        # Detect language to explicitly tell the model to maintain it
+        # This is a simple detection - the LLM will handle the actual language preservation
+        is_english = all(ord(c) < 128 for c in text[:100].replace('\n', ' ').replace(' ', ''))
+        language_instruction = "IMPORTANT: You MUST maintain the EXACT original language of the document. If the document is in Vietnamese or any non-English language, the summary MUST be in that same language. DO NOT translate to English under any circumstances." if not is_english else "Keep the document's original language."
+            
+        prompt = (
+            f"You are a precise document summarizer specialized in knowledge extraction and preserving cultural and business nuance.\n\n"
+            f"TASK: Create a concise summary of the following text in {max_length} words or less.\n\n"
+            f"GUIDELINES:\n"
+            f"1. Extract the most important FACTUAL information (e.g., names, numbers, dates).\n"
+            f"2. Prioritize actionable knowledge (e.g., procedures, requirements, steps).\n"
+            f"3. {language_instruction}\n"
+            f"4. Preserve all technical terms, proper names, and domain-specific vocabulary.\n"
+            f"5. Use clear, professional language without filler words.\n"
+            f"6. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text.\n"
+            f"7. INCLUDE real-life lessons, practical advice and applied knowledge from the text.\n"
+            f"8. Maintain the emotional tone and perspective of the original document.\n"
+            f"9. Output MUST be in the SAME LANGUAGE as the input - this is CRITICAL.\n\n"
+            f"TEXT TO SUMMARIZE:\n{text}"
         )
-        tasks.append((task, collection))
-    
-    # Wait for all tasks to complete and collect results
-    results = []
-    for task, collection in tasks:
-        try:
-            success = await task
-            results.append({
-                "success": success,
-                "processed_type": "fragmented",
-                "topic": collection.get('topic', 'Untitled'),
-                "message": "Processing completed successfully" if success else "Processing failed"
-            })
-        except Exception as e:
-            logger.error(f"Error in batch processing for user {user_id}: {str(e)}")
-            results.append({
-                "success": False,
-                "processed_type": "fragmented",
-                "topic": collection.get('topic', 'Untitled'),
-                "message": f"Exception occurred: {str(e)}"
-            })
-    
-    return results
-
-
-async def unified_knowledge_processor(
-    user_id: str,
-    mode: str,
-    document_file: Optional[FileStorage] = None,
-    fragmented_inputs: Optional[List[str]] = None,
-    topic: Optional[str] = None,
-    tags: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """
-    Unified interface to process either document files or fragmented inputs.
-    
-    Args:
-        user_id: User identifier for tracking and logging
-        mode: Processing mode - either 'document' or 'fragmented'
-        document_file: Document file (required if mode is 'document')
-        fragmented_inputs: List of text fragments (required if mode is 'fragmented')
-        topic: Optional topic for fragmented inputs
-        tags: Optional list of tags for categorization
-    
-    Returns:
-        Dictionary containing processing results
-    """
-    result = {
-        "success": False,
-        "processed_type": mode,
-        "message": ""
-    }
-    
-    if mode not in ["document", "fragmented"]:
-        result["message"] = f"Invalid mode: {mode}. Must be 'document' or 'fragmented'"
-        return result
-    
-    try:
-        if mode == "document":
-            if not document_file:
-                result["message"] = "No document file provided"
-                return result
-            
-            result["filename"] = document_file.filename
-            success = await process_document(
-                document=document_file,
-                user_id=user_id,
-                tags=tags
-            )
-            
-            result["success"] = success
-            result["message"] = "Document processed successfully" if success else "Document processing failed"
-            
-        elif mode == "fragmented":
-            if not fragmented_inputs:
-                result["message"] = "No fragmented inputs provided"
-                return result
-            
-            result["topic"] = topic or "Untitled"
-            success = await process_fragmented_input(
-                messages=fragmented_inputs,
-                user_id=user_id,
-                topic=topic,
-                tags=tags
-            )
-            
-            result["success"] = success
-            result["message"] = "Fragmented inputs processed successfully" if success else "Fragmented input processing failed"
-    
+        
+        # Log prompt length for debugging
+        logger.debug(f"Full prompt length: {len(prompt)} chars")
+        
+        response = await invoke_llm_with_retry(LLM, prompt)
+        summary = response.content.strip()
+        logger.info(f"Generated summary (approx {len(summary.split())} words): {summary}")
+        return summary
     except Exception as e:
-        logger.error(f"Error in unified processor for user {user_id}: {str(e)}")
-        result["success"] = False
-        result["message"] = f"Exception occurred: {str(e)}"
-    
-    return result
+        logger.error(f"LLM summarization failed: {e}")
+        return "Summary unavailable due to processing error."
+
+async def extract_knowledge_with_llm(text: str, domain: str = "", max_items: int = 10) -> str:
+    """Extract structured knowledge elements from text using the LLM while preserving the original language."""
+    try:
+        # Log the length of the text being analyzed
+        text_length = len(text)
+        first_100_chars = text[:100].replace('\n', ' ') if text else "EMPTY TEXT"
+        logger.debug(f"Extracting knowledge from text of length {text_length}. First 100 chars: '{first_100_chars}...'")
+        
+        if not text or text_length < 50:
+            logger.warning(f"Text is too short or empty for knowledge extraction: '{text}'")
+            return "Text provided is too short or empty for meaningful knowledge extraction."
+            
+        # Detect language to explicitly tell the model to maintain it
+        is_english = all(ord(c) < 128 for c in text[:100].replace('\n', ' ').replace(' ', ''))
+        language_instruction = "IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all knowledge elements MUST be in that same language. DO NOT translate to English under any circumstances." if not is_english else "Keep the document's original language."
+        
+        domain_context = f" in the {domain} domain" if domain else ""
+        prompt = (
+            f"You are a precise knowledge extractor specialized in identifying actionable information{domain_context} while preserving cultural context and nuance.\n\n"
+            f"TASK: Extract up to {max_items} key knowledge elements from the text below.\n\n"
+            f"GUIDELINES:\n"
+            f"1. Focus on FACTUAL and ACTIONABLE knowledge (e.g., procedures, requirements).\n"
+            f"2. Include specific details (e.g., quantities, timelines, criteria).\n"
+            f"3. {language_instruction}\n"
+            f"4. Maintain all technical terms, proper names, and specific vocabulary exactly as written.\n"
+            f"5. Format each element as: 'KEY POINT: [concise statement]'.\n"
+            f"6. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text.\n"
+            f"7. PRIORITIZE real-life lessons, practical advice, and applied knowledge.\n"
+            f"8. Capture the underlying reasoning and wisdom, not just surface instructions.\n"
+            f"9. Include both explicit statements and implied knowledge from the context.\n"
+            f"10. Output MUST be in the SAME LANGUAGE as the input - this is CRITICAL.\n\n"
+            f"TEXT TO ANALYZE:\n{text}"
+        )
+        
+        logger.debug(f"Knowledge extraction prompt length: {len(prompt)} chars")
+        
+        response = await invoke_llm_with_retry(LLM, prompt)
+        extracted_knowledge = response.content.strip()
+        logger.info(f"Extracted {extracted_knowledge.count('KEY POINT')} knowledge elements")
+        return extracted_knowledge
+    except Exception as e:
+        logger.error(f"LLM knowledge extraction failed: {e}")
+        return "Knowledge extraction unavailable due to processing error."
+
+async def extract_knowledge_from_chunk(chunk_text: str, chunk_context: str = "") -> str:
+    """Extract focused knowledge elements from a document chunk while preserving the original language."""
+    try:
+        # Simple language detection
+        is_english = all(ord(c) < 128 for c in chunk_text[:100].replace('\n', ' ').replace(' ', ''))
+        language_instruction = "IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all knowledge elements MUST be in that same language. DO NOT translate to English under any circumstances." if not is_english else "Keep the document's original language."
+        
+        prompt = (
+            f"You are a precision knowledge extractor for a document segment, specializing in cultural nuance and contextual wisdom.\n\n"
+            f"CONTEXT: This is a segment {chunk_context} from a larger document.\n\n"
+            f"TASK: Extract 3-5 key knowledge elements from this segment.\n\n"
+            f"GUIDELINES:\n"
+            f"1. Prioritize CONCRETE, ACTIONABLE information.\n"
+            f"2. Focus on specifics: facts, figures, requirements, steps, rules.\n"
+            f"3. {language_instruction}\n"
+            f"4. Preserve all technical terms, proper names, and specific vocabulary exactly as written.\n"
+            f"5. Format as: 'KEY POINT: [statement]'.\n"
+            f"6. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text.\n"
+            f"7. PRIORITIZE real-life lessons, practical advice, and applied knowledge.\n"
+            f"8. Capture the underlying reasoning and implicit wisdom.\n"
+            f"9. Include both explicit statements and implied knowledge from the context.\n"
+            f"10. Output MUST be in the SAME LANGUAGE as the input - this is CRITICAL.\n\n"
+            f"SEGMENT TEXT:\n{chunk_text}"
+        )
+        
+        # Log a sample of the chunk text for debugging
+        logger.debug(f"Processing chunk of length {len(chunk_text)}. First 50 chars: '{chunk_text[:50].replace(chr(10), ' ')}...'")
+        
+        response = await invoke_llm_with_retry(FAST_LLM, prompt)
+        extracted_knowledge = response.content.strip()
+        key_point_count = extracted_knowledge.count("KEY POINT")
+        logger.debug(f"Extracted {key_point_count} key points from chunk")
+        return extracted_knowledge
+    except Exception as e:
+        logger.error(f"Chunk knowledge extraction failed: {e}")
+        return "Knowledge extraction failed for this segment."
 
 
-async def process_multiple_inputs(
-    user_id: str,
-    documents: Optional[List[FileStorage]] = None,
-    fragment_collections: Optional[List[Dict[str, Any]]] = None
-) -> Dict[str, Any]:
+async def refine_document(file: FileStorage = None, text: str = None, user_id: str = "", mode: str = "default", reformat_text: bool = False) -> tuple[bool, dict]:
     """
-    Process multiple documents and/or fragment collections in parallel.
+    Refine a document or text: extract content, summarize, extract knowledge, and optionally reformat as structured text.
+    Returns (success: bool, result_dict: dict). Does not save to database.
     
     Args:
-        user_id: User identifier for tracking and logging
-        documents: Optional list of document files to process
-        fragment_collections: Optional list of fragmented input collections
-    
-    Returns:
-        Dictionary with summary of all processing operations
+        file: Input file (DOCX or PDF), optional if text is provided.
+        text: Raw text input, optional if file is provided.
+        user_id: User ID for metadata.
+        mode: Processing mode (e.g., "default", "pretrain").
+        reformat_text: If True, return a structured text representation.
     """
-    documents = documents or []
-    fragment_collections = fragment_collections or []
-    
-    if not documents and not fragment_collections:
-        return {
-            "success": False,
-            "message": "No inputs provided for processing",
-            "results": []
+    full_text = ""
+    document_metadata = {}
+    sections = []
+
+    try:
+        # Step 1: Extract text
+        if text and text.strip():  # Ensure text is not just whitespace
+            logger.debug(f"Processing text input of length {len(text)}")
+            full_text = text
+            document_metadata = {
+                'filename': 'text_input',
+                'file_type': 'TXT',
+                'paragraph_count': len([p for p in text.split('\n') if p.strip()])
+            }
+            # Parse text sections (assuming possible Markdown or plain text)
+            current_heading = "Document Start"
+            current_section = []
+            for line in text.split('\n'):
+                if line.strip():
+                    if line.startswith('# ') or line.startswith('## '):
+                        if current_section:
+                            sections.append((current_heading, "\n".join(current_section)))
+                            current_section = []
+                        current_heading = line.lstrip('# ').strip()
+                    else:
+                        current_section.append(line)
+            if current_section:
+                sections.append((current_heading, "\n".join(current_section)))
+                
+            # Verify that we have actual content not just metadata
+            if len(sections) == 0 or (len(sections) == 1 and len(sections[0][1]) < 50):
+                logger.warning(f"Insufficient text content: {text}")
+                return False, {"error": "Insufficient text content."}
+                
+        elif file:
+            file_extension = file.filename.split('.')[-1].lower()
+            logger.debug(f"Processing file: {file.filename} ({file_extension})")
+            
+            # Read file content
+            file_content = file.read()
+            if not file_content:
+                logger.warning(f"Empty file content for {file.filename}")
+                return False, {"error": "Empty file content."}
+
+            # Create a fresh BytesIO object for processing
+            file_content_bytes = BytesIO(file_content)
+            
+            if file_extension == 'pdf':
+                logger.debug("Opening PDF file")
+                try:
+                    with pdfplumber.open(file_content_bytes) as pdf:
+                        document_metadata = {
+                            'page_count': len(pdf.pages),
+                            'filename': file.filename,
+                            'file_type': 'PDF'
+                        }
+                        
+                        # Extract text with page context
+                        pages_text = []
+                        for i, page in enumerate(pdf.pages):
+                            page_text = page.extract_text() or ""
+                            if page_text.strip():
+                                logger.debug(f"PDF page {i+1}: extracted {len(page_text)} characters")
+                                pages_text.append(f"[Page {i+1}] {page_text}")
+                            else:
+                                logger.debug(f"PDF page {i+1}: empty or non-text content")
+                        
+                        # Join pages with clear separation
+                        full_text = "\n\n".join(pages_text)
+                        
+                        if not full_text.strip():
+                            logger.warning(f"No text extracted from {file.filename}")
+                            return False, {"error": "No text extracted from PDF."}
+                            
+                        # Create sections from pages for better processing
+                        sections = [(f"Page {i+1}", page) for i, page in enumerate(pages_text) if page.strip()]
+                        logger.debug(f"Created {len(sections)} sections from PDF pages")
+                except Exception as pdf_error:
+                    logger.error(f"PDF processing error: {type(pdf_error).__name__}: {str(pdf_error)}")
+                    return False, {"error": f"PDF processing error: {str(pdf_error)}"}
+                    
+            elif file_extension == 'docx':
+                logger.debug("Opening DOCX file")
+                try:
+                    # Reset BytesIO position
+                    file_content_bytes.seek(0)
+                    doc = Document(file_content_bytes)
+                    
+                    # Extract document properties
+                    document_metadata = {
+                        'filename': file.filename,
+                        'file_type': 'DOCX',
+                        'paragraph_count': len(doc.paragraphs)
+                    }
+                    
+                    # Extract text with structural context - similar to docuhandler approach
+                    full_text_parts = []
+                    current_heading = "Document Start"
+                    current_section = []
+                    
+                    for para in doc.paragraphs:
+                        if para.text.strip():
+                            if para.style.name.startswith('Heading'):
+                                # Save current section if it exists
+                                if current_section:
+                                    sections.append((current_heading, "\n".join(current_section)))
+                                    current_section = []
+                                
+                                current_heading = para.text.strip()
+                                full_text_parts.append(f"\n[{current_heading}]\n{para.text}")
+                            else:
+                                current_section.append(para.text)
+                                full_text_parts.append(para.text)
+                    
+                    # Don't forget the last section
+                    if current_section:
+                        sections.append((current_heading, "\n".join(current_section)))
+                    
+                    # Combine all the text parts
+                    full_text = "\n".join(full_text_parts)
+                    
+                    if not full_text.strip():
+                        logger.warning(f"No text extracted from {file.filename}")
+                        return False, {"error": "No text extracted from DOCX."}
+                except Exception as docx_error:
+                    logger.error(f"DOCX processing error: {type(docx_error).__name__}: {str(docx_error)}")
+                    return False, {"error": f"DOCX processing error: {str(docx_error)}"}
+            else:
+                logger.error(f"Unsupported file type: {file_extension}")
+                return False, {"error": f"Unsupported file type: {file_extension}"}
+        else:
+            logger.error("No file or valid text provided")
+            return False, {"error": "No file or valid text provided."}
+
+        # Additional validation to ensure we have content to process
+        if not full_text.strip():
+            logger.warning("No text content extracted")
+            return False, {"error": "No text content could be extracted."}
+            
+        if len(full_text.split()) < 10:
+            logger.warning(f"Text content too short: '{full_text}'")
+            return False, {"error": "Text content too short for meaningful processing."}
+
+        # Detect language for logging and validation
+        sample_text = full_text[:200]
+        is_english = all(ord(c) < 128 for c in sample_text.replace('\n', ' ').replace(' ', ''))
+        detected_language = "English" if is_english else "Non-English (possibly multilingual)"
+        logger.info(f"Detected language: {detected_language}")
+
+        logger.info(f"Extracted text content of {len(full_text.split())} words from {document_metadata.get('filename', 'unknown')}")
+        logger.debug(f"First 100 chars: {full_text[:100].replace(chr(10), ' ')}...")
+
+        # Step 2: Prepare contextual information - DO NOT include user_id or mode in the context
+        context_prefix = f"Document: {document_metadata.get('filename', 'unknown')}\nType: {document_metadata.get('file_type', 'Unknown')}\n"
+        if document_metadata.get('file_type') == 'PDF' and document_metadata.get('page_count'):
+            context_prefix += f"Pages: {document_metadata.get('page_count')}\n\n"
+        else:
+            context_prefix += "\n"  # Add a blank line after metadata
+        
+        # Combine content for summarization but don't include mode or user_id
+        combined_text = context_prefix + full_text
+        logger.debug(f"Prepared text for summarization: prefix length {len(context_prefix)} chars, content length {len(full_text)} chars")
+        
+        # Step 3: Run summarization and knowledge extraction
+        # For knowledge extraction, use just the full text without the metadata
+        summary_task = summarize_with_llm(combined_text)
+        knowledge_task = extract_knowledge_with_llm(full_text)
+        summary, knowledge = await asyncio.gather(summary_task, knowledge_task)
+
+        result = {
+            "summary": summary,
+            "knowledge_elements": knowledge,
+            "metadata": document_metadata,
+            "text_length": len(full_text.split())
         }
+
+        # Step 4: Reformat as structured text if requested
+        if reformat_text and sections:
+            async def reformat_document(sections: list[tuple[str, str]]) -> str:
+                """Reformat document sections into structured text with clear sections and subsections in original language."""
+                # Get the first section text to detect language
+                sample_text = sections[0][1] if sections and len(sections) > 0 else ""
+                is_english = all(ord(c) < 128 for c in sample_text[:100].replace('\n', ' ').replace(' ', ''))
+                language_instruction = "IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all content MUST be in that same language. DO NOT translate to English under any circumstances." if not is_english else "Keep the document's original language."
+                
+                prompt = (
+                    f"You are a document reformatter tasked with creating a structured text output from raw document sections while preserving cultural nuance and contextual wisdom.\n\n"
+                    f"INPUT SECTIONS:\n"
+                    f"{'\n'.join([f'Section: {h}\nContent: {c}' for h, c in sections])}\n\n"
+                    f"TASK:\n"
+                    f"1. Summarize each section concisely, keeping factual and actionable details.\n"
+                    f"2. Split mixed topics into subsections with descriptive headings.\n"
+                    f"3. Enhance incomplete content with inferred details based on context.\n"
+                    f"4. {language_instruction}\n"
+                    f"5. Preserve all technical terms, proper names, and specific vocabulary exactly as written.\n"
+                    f"6. Use professional language, fixing informal phrases and errors.\n"
+                    f"7. Output as plain text with sections ('# Heading') and subsections ('## Subheading').\n"
+                    f"8. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text.\n"
+                    f"9. PRIORITIZE real-life lessons, practical advice, and applied knowledge.\n"
+                    f"10. Maintain the emotional tone and perspective of the original document.\n"
+                    f"11. Capture both explicit statements and implied knowledge from the context.\n"
+                    f"12. Output MUST be in the SAME LANGUAGE as the input - this is CRITICAL.\n\n"
+                    f"OUTPUT FORMAT:\n"
+                    f"# Section Heading\n## Subsection Heading\nContent\n## Subsection Heading\nContent\n\n"
+                )
+                response = await invoke_llm_with_retry(LLM, prompt)
+                return response.content.strip()
+
+            reformatted_text = await reformat_document(sections)
+            result["reformatted_text"] = reformatted_text
+
+        logger.info(f"Processing complete for {document_metadata.get('filename', 'unknown')}")
+        return True, result
+
+    except Exception as e:
+        logger.error(f"Failed to refine document: {type(e).__name__}: {str(e)}")
+        return False, {"error": f"Processing error occurred: {str(e)}"}
+    finally:
+        if file:
+            file.close()
+
+async def process_document(text: str = "", file: FileStorage = None, user_id: str = "", mode: str = "default", bank: str = "") -> bool:
+    """
+    Process a document or text: split into semantic chunks, extract knowledge, and save to Pinecone.
     
-    logger.info(f"Processing multiple inputs for user {user_id}: {len(documents)} documents and {len(fragment_collections)} fragment collections")
-    
-    # Create tasks for document processing
-    document_tasks = []
-    for doc in documents:
-        task = asyncio.create_task(process_document(
-            document=doc,
-            user_id=user_id
-        ))
-        document_tasks.append((task, doc))
-    
-    # Process fragment collections
-    fragment_results = await batch_process_fragment_collections(
-        user_id=user_id,
-        collections=fragment_collections
-    )
-    
-    # Collect document processing results
-    document_results = []
-    for task, doc in document_tasks:
-        try:
-            success = await task
-            document_results.append({
-                "success": success,
-                "processed_type": "document",
-                "filename": doc.filename,
-                "message": "Processing completed successfully" if success else "Processing failed"
-            })
-        except Exception as e:
-            logger.error(f"Error processing document {doc.filename} for user {user_id}: {str(e)}")
-            document_results.append({
-                "success": False,
-                "processed_type": "document",
-                "filename": doc.filename,
-                "message": f"Exception occurred: {str(e)}"
-            })
-    
-    # Combine all results
-    all_results = document_results + fragment_results
-    success_count = sum(1 for r in all_results if r.get("success", False))
-    
-    return {
-        "success": success_count > 0,
-        "message": f"Processed {success_count}/{len(all_results)} inputs successfully",
-        "results": all_results
-    } 
+    Args:
+        text: Raw text input, preferred input method.
+        file: Input file (DOCX or PDF), optional for legacy support.
+        user_id: User ID for metadata.
+        mode: Processing mode (e.g., "default", "pretrain").
+        bank: Namespace for Pinecone storage.
+    """
+    doc_id = str(uuid.uuid4())
+    chunks = []
+    logger.info(f"Processing document with bank={bank}")
+
+    try:
+        # Step 1: Extract text and create paragraphs
+        if text and text.strip():  # Ensure text is not just whitespace
+            logger.debug(f"Processing text input of length {len(text)}")
+            full_text = text
+            
+            # Check for minimal content
+            if len(text.split()) < 10:
+                logger.warning(f"Text content too short: '{text}'")
+                return False
+                
+            # Parse text with Markdown headings
+            paragraphs = []
+            current_heading = "Introduction"
+            current_subheading = ""
+            for line in full_text.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith('# '):
+                    current_heading = line[2:].strip()
+                    current_subheading = ""
+                elif line.startswith('## '):
+                    current_subheading = line[3:].strip()
+                else:
+                    context = f"section: {current_heading}"
+                    if current_subheading:
+                        context += f", subsection: {current_subheading}"
+                    paragraphs.append((line, context))
+                    
+            logger.debug(f"Extracted {len(paragraphs)} paragraphs from text input")
+            
+        elif file:
+            file_extension = file.filename.split('.')[-1].lower()
+            logger.debug(f"Processing file: {file.filename} ({file_extension})")
+            
+            # Read file content
+            file_content = file.read()
+            if not file_content:
+                logger.warning(f"Empty file content for {file.filename}")
+                return False
+            
+            logger.debug(f"Successfully read {len(file_content)} bytes from {file.filename}")
+            
+            # Create a fresh BytesIO object for processing
+            file_content_bytes = BytesIO(file_content)
+
+            if file_extension == 'pdf':
+                logger.debug("Opening PDF file")
+                try:
+                    with pdfplumber.open(file_content_bytes) as pdf:
+                        page_count = len(pdf.pages)
+                        logger.debug(f"PDF processing: found {page_count} pages")
+                        all_text = []
+                        
+                        for i, page in enumerate(pdf.pages):
+                            page_text = page.extract_text() or ""
+                            if page_text.strip():
+                                logger.debug(f"PDF page {i+1}: extracted {len(page_text)} characters")
+                                all_text.append(page_text)
+                            else:
+                                logger.debug(f"PDF page {i+1}: empty or non-text content")
+                                
+                        if not all_text:
+                            logger.warning(f"No text extracted from {file.filename}")
+                            return False
+                                
+                        full_text = " ".join(all_text)
+                        logger.debug(f"Combined PDF text: {len(full_text)} characters")
+                        
+                        # Split the text into paragraphs
+                        paragraphs = []
+                        for para in full_text.split('\n'):
+                            if para.strip():
+                                paragraphs.append((para.strip(), f"PDF document, page info not preserved in combined text"))
+                        
+                        logger.debug(f"Extracted {len(paragraphs)} paragraphs from PDF")
+                except Exception as pdf_error:
+                    logger.error(f"PDF processing error: {type(pdf_error).__name__}: {str(pdf_error)}")
+                    return False
+                            
+            elif file_extension == 'docx':
+                logger.debug("Opening DOCX file")
+                try:
+                    # Reset BytesIO position
+                    file_content_bytes.seek(0)
+                    doc = Document(file_content_bytes)
+                    paragraphs = []
+                    current_heading = "Introduction"
+                    
+                    for para in doc.paragraphs:
+                        if not para.text.strip():
+                            continue
+                        if para.style.name.startswith('Heading'):
+                            current_heading = para.text.strip()
+                            # Include headings as their own paragraphs with context
+                            paragraphs.append((para.text.strip(), "heading"))
+                        else:
+                            paragraphs.append((para.text.strip(), f"section: {current_heading}"))
+                    
+                    logger.debug(f"Extracted {len(paragraphs)} paragraphs from DOCX")
+                    
+                    if not paragraphs:
+                        logger.warning(f"No paragraphs extracted from {file.filename}")
+                        return False
+                        
+                except Exception as docx_error:
+                    logger.error(f"DOCX processing error: {type(docx_error).__name__}: {str(docx_error)}")
+                    return False
+            else:
+                logger.error(f"Unsupported file type: {file_extension}")
+                return False
+        else:
+            logger.error("No file or valid text provided")
+            return False
+
+        # Check if we have paragraphs to process
+        if not paragraphs:
+            logger.warning("No paragraphs extracted from input")
+            return False
+            
+        logger.info(f"Successfully extracted {len(paragraphs)} paragraphs for processing")
+
+        # Step 2: Group paragraphs into semantic chunks
+        current_section = []
+        current_word_count = 0
+        section_index = 0
+        max_chunk_words = 300
+        min_chunk_words = 50
+
+        for para_text, para_context in paragraphs:
+            para_words = len(para_text.split())
+            
+            # Skip empty or very small paragraphs
+            if para_words < 2:
+                continue
+                
+            # Detect implicit headings (e.g., lines with ":" or short capitalized phrases)
+            is_implicit_heading = ':' in para_text or (para_text[0].isupper() and len(para_text.split()) < 10)
+            if is_implicit_heading and current_section:
+                # Save current section as a chunk
+                if current_word_count >= min_chunk_words:
+                    section_text = " ".join(current_section)
+                    chunk_id = f"chunk_{section_index}_0"
+                    chunks.append((chunk_id, section_text, para_context))
+                    section_index += 1
+                current_section = [para_text]
+                current_word_count = para_words
+                continue
+
+            # Handle large paragraphs
+            if para_words > max_chunk_words:
+                words = para_text.split()
+                for j in range(0, len(words), max_chunk_words - 50):
+                    sub_chunk = " ".join(words[j:j + (max_chunk_words - 50)])
+                    chunk_id = f"chunk_{section_index}_{j // (max_chunk_words - 50)}"
+                    chunks.append((chunk_id, sub_chunk, f"{para_context}, large paragraph part {j // (max_chunk_words - 50) + 1}"))
+                section_index += 1
+                continue
+
+            # Add to current section
+            if current_word_count + para_words <= max_chunk_words or current_word_count < min_chunk_words:
+                current_section.append(para_text)
+                current_word_count += para_words
+            else:
+                # Save current section
+                section_text = " ".join(current_section)
+                chunk_id = f"chunk_{section_index}_0"
+                chunks.append((chunk_id, section_text, para_context))
+                section_index += 1
+                current_section = [para_text]
+                current_word_count = para_words
+
+        # Save any remaining section
+        if current_section and current_word_count >= min_chunk_words:
+            section_text = " ".join(current_section)
+            chunk_id = f"chunk_{section_index}_0"
+            chunks.append((chunk_id, section_text, "final section"))
+            
+        if not chunks:
+            logger.warning("No chunks created from paragraphs")
+            return False
+            
+        logger.info(f"Created {len(chunks)} chunks for processing")
+
+        # Step 3: Process chunks and extract knowledge
+        processing_tasks = []
+        knowledge_extraction_tasks = []
+        
+        for chunk_id, chunk_text, chunk_context in chunks:
+            # Log the first chunk to help with debugging
+            if chunk_id.endswith("_0"):
+                logger.debug(f"Sample chunk {chunk_id}: {chunk_text[:100]}...")
+                
+            knowledge_extraction_tasks.append(
+                extract_knowledge_from_chunk(chunk_text, chunk_context)
+            )
+            processing_tasks.append(
+                save_training_with_chunk(
+                    input=chunk_text,
+                    user_id=user_id,
+                    mode=mode,
+                    doc_id=doc_id,
+                    chunk_id=chunk_id,
+                    bank_name=bank,
+                    is_raw=True
+                )
+            )
+            processing_tasks.append(
+                save_training_with_chunk(
+                    input=chunk_text,  # Placeholder for knowledge
+                    user_id=user_id,
+                    mode=mode,
+                    doc_id=doc_id,
+                    chunk_id=chunk_id,
+                    bank_name=bank,
+                    is_raw=False
+                )
+            )
+
+        # Run knowledge extraction
+        logger.debug(f"Starting knowledge extraction for {len(knowledge_extraction_tasks)} chunks")
+        knowledge_results = await asyncio.gather(*knowledge_extraction_tasks, return_exceptions=True)
+        
+        # Replace placeholder tasks with knowledge
+        for i, knowledge in enumerate(knowledge_results):
+            if isinstance(knowledge, Exception):
+                logger.error(f"Knowledge extraction failed for chunk {i}: {str(knowledge)}")
+                knowledge = f"Knowledge extraction failed: {str(knowledge)}"
+            task_index = (i * 2) + 1
+            if task_index < len(processing_tasks):
+                processing_tasks[task_index] = save_training_with_chunk(
+                    input=knowledge,
+                    user_id=user_id,
+                    mode=mode,
+                    doc_id=doc_id,
+                    chunk_id=chunks[i][0],
+                    bank_name=bank,
+                    is_raw=False
+                )
+
+        # Process save tasks
+        logger.debug(f"Starting data storage for {len(processing_tasks)} tasks")
+        results = await asyncio.gather(*processing_tasks, return_exceptions=True)
+        
+        success_count = 0
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Processing task failed: {result}")
+            elif not result:
+                logger.warning("Processing task returned False")
+            else:
+                success_count += 1
+        
+        if success_count == 0:
+            logger.error("All processing tasks failed")
+            return False
+            
+        logger.info(f"Processed document {doc_id} with {len(chunks)} chunks ({success_count}/{len(processing_tasks)} tasks succeeded)")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to process document: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+    finally:
+        if file:
+            file.close()
