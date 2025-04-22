@@ -749,20 +749,30 @@ def process_document_endpoint():
     user_id = request.form['user_id']
     bank_name = request.form['bank_name']
     reformatted_text = request.form['reformatted_text']
+    knowledge_elements = request.form['knowledge_elements'] # Get knowledge_elements from frontend
     mode = request.form.get('mode', 'default')  # Optional mode parameter
 
+    # Debug logging
+    logger.info(f"Process document request for bank_name={bank_name}")
+    logger.info(f"Knowledge elements provided to MAIN: {len(knowledge_elements)} characters")
+    if knowledge_elements and len(knowledge_elements) > 0:
+        logger.info(f"First 100 chars of knowledge elements hit at MAIN: {knowledge_elements[:100]}...")
+        logger.info(f"Knowledge elements contain 'KEY POINT': {'KEY POINT' in knowledge_elements}")
+    logger.debug(f"First 100 chars of reformatted_text: {reformatted_text[:100]}...")
     if not reformatted_text.strip():
         return jsonify({"error": "Empty reformatted_text provided"}), 400
 
     # Use the thread-based approach instead of the global event loop
     try:
         # Run the async process_document function in a separate thread
+        # We only pass the processed text and knowledge elements - no file to avoid reprocessing
         success = run_async_in_thread(
             process_document, 
             text=reformatted_text, 
             user_id=user_id, 
             mode=mode, 
-            bank=bank_name
+            bank=bank_name,
+            knowledge_elements=knowledge_elements  # Pass knowledge_elements to process_document
         )
         
         if success:
@@ -819,9 +829,9 @@ def brain_details():
         return jsonify({"error": "brain_id parameter is required"}), 400
     
     try:
-        brain = get_brain_details(int(brain_id))  # Convert to int since brain_id is an integer
+        brain = get_brain_details(brain_id)  # Pass the UUID string directly
         if not brain:
-            return jsonify({"error": f"No brain found with brain_id {brain_id}"}), 404
+            return jsonify({"error": f"No brain found with id {brain_id}"}), 404
         
         brain_data = {
             "id": brain.id,
@@ -834,8 +844,6 @@ def brain_details():
             "created_date":brain.created_date
         }
         return jsonify({"brain": brain_data}), 200
-    except ValueError:
-        return jsonify({"error": "brain_id must be an integer"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

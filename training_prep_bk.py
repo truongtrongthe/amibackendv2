@@ -5,14 +5,12 @@ from io import BytesIO
 from utilities import logger
 from database import save_training_with_chunk
 import asyncio
-import re
 from werkzeug.datastructures import FileStorage
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import openai
 import tiktoken
-import traceback
 
 # Initialize the LLM client with timeout
 LLM = ChatOpenAI(model="gpt-4o", streaming=False, request_timeout=60)  # 60 second timeout
@@ -68,12 +66,11 @@ async def summarize_with_llm(text: str, max_length: int = 150) -> str:
             f"8. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text, including tone and perspective.\n"
             f"9. INCLUDE real-life lessons, practical advice, and applied knowledge from the text.\n"
             f"10. Maintain the emotional tone and perspective of the original document.\n\n"
-            f"TEXT TO SUMMARIZE:\n{text}"
+            f"TEXT TO SUMMARIZE:\n{{text}}"
         )
         
         # Log prompt length for debugging
         logger.debug(f"Full prompt length: {len(prompt)} chars")
-        logger.debug(f"Summary prompt text length: {len(text)} characters")
         
         response = await invoke_llm_with_retry(LLM, prompt)
         summary = response.content.strip()
@@ -94,12 +91,9 @@ async def extract_knowledge_with_llm(text: str, domain: str = "", max_items: int
         if not text or text_length < 50:
             logger.warning(f"Text is too short or empty for knowledge extraction: '{text}'")
             return "Text provided is too short or empty for meaningful knowledge extraction."
-        
-        # Format domain context if provided
-        domain_context = f" in {domain}" if domain else ""
              
         prompt = (
-                f"You are a precise knowledge extractor specialized in identifying actionable information{domain_context} while preserving cultural context and nuance.\n\n"
+                f"You are a precise knowledge extractor specialized in identifying actionable information{{domain_context}} while preserving cultural context and nuance.\n\n"
                 f"TASK: Extract up to 20 key knowledge elements from the text below.\n\n"
                 f"GUIDELINES:\n"
                 f"1. Focus on FACTUAL and ACTIONABLE knowledge (e.g., procedures, requirements).\n"
@@ -113,13 +107,10 @@ async def extract_knowledge_with_llm(text: str, domain: str = "", max_items: int
                 f"9. Capture the underlying reasoning and wisdom, not just surface instructions.\n"
                 f"10. Include both explicit statements and implied knowledge from the context.\n"
                 f"11. Maintain the EXACT ORDER of steps and processes where applicable.\n\n"
-                f"TEXT TO ANALYZE:\n{text}"
+                f"TEXT TO ANALYZE:\n{{text}}"
             )
 
         logger.debug(f"Knowledge extraction prompt length: {len(prompt)} chars")
-        
-        logger.debug(f"Prompt for knowledge extraction (first 200 chars): {prompt[:200]}...")
-        logger.debug(f"Full text length for knowledge extraction: {len(text)}")
         
         response = await invoke_llm_with_retry(LLM, prompt)
         extracted_knowledge = response.content.strip()
@@ -356,13 +347,10 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
             async def reformat_document(sections: list[tuple[str, str]]) -> str:
                 """Reformat document sections into structured text with clear sections and subsections in original language."""
                
-                # Format sections into a string
-                formatted_sections = "\n".join([f"Section: {h}\nContent: {c}" for h, c in sections])
-               
                 prompt = (
                     f"You are a document reformatter tasked with creating a structured text output from raw document sections while preserving cultural nuance and contextual wisdom.\n\n"
                     f"INPUT SECTIONS:\n"
-                    f"{formatted_sections}\n\n"
+                    f"{{'\n'.join([f'Section: {{h}}\nContent: {{c}}' for h, c in sections])}}\n\n"
                     f"TASK:\n"
                     f"1. Summarize each section concisely, keeping factual and actionable details.\n"
                     f"2. Split mixed topics into subsections with descriptive headings.\n"
@@ -378,8 +366,6 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
                     f"OUTPUT FORMAT:\n"
                     f"# Section Heading\n## Subsection Heading\nContent\n## Subsection Heading\nContent\n\n"
                 )
-                logger.debug(f"Reformat document prompt length: {len(prompt)} chars")
-                logger.debug(f"Number of sections to reformat: {len(sections)}")
                 response = await invoke_llm_with_retry(LLM, prompt)
                 return response.content.strip()
 
@@ -397,25 +383,11 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
             file.close()
 
 async def enrich_key_points(key_points: str, full_text: str) -> str:
-    """
-    Enrich key points with supporting data from the original document text.
-    
-    This simplified version relies primarily on the LLM to extract supporting data
-    for key points, with minimal post-processing.
-    
-    Args:
-        key_points: String containing key points (format: "KEY POINT: text")
-        full_text: The full document text to extract supporting data from
-        
-    Returns:
-        Enriched text with both key points and supporting data
-    """
+    """Enrich key points with supporting data from the original document text."""
     try:
-        # Simple language detection for instruction
         is_english = all(ord(c) < 128 for c in full_text[:100].replace('\n', ' ').replace(' ', ''))
         language_instruction = "IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all content MUST be in that same language. DO NOT translate to English under any circumstances." if not is_english else "Keep the document's original language."
         
-        # Simplified prompt with clear instructions
         prompt = (
             f"You are a precise knowledge enhancer tasked with gathering supporting data for key points from a document, preserving cultural nuance and exact phrasing.\n\n"
             f"TASK: For each key point below, extract clear, concise supporting data from the original document text that provides context, descriptions, or relevant details. The supporting data must include all critical facts, scripts, or steps directly related to the key point.\n\n"
@@ -434,49 +406,18 @@ async def enrich_key_points(key_points: str, full_text: str) -> str:
             f"ORIGINAL TEXT:\n{full_text}"
         )
         
-        logger.debug(f"Enriching key points, prompt length: {len(prompt)} chars")
-        
-        # Call LLM
+        logger.debug(f"Enriching key points with prompt length: {len(prompt)} chars")
         response = await invoke_llm_with_retry(LLM, prompt)
         enriched_knowledge = response.content.strip()
-        
-        # Check if response looks like a refusal due to content moderation
-        if ("I'm sorry" in enriched_knowledge or 
-            "I apologize" in enriched_knowledge or 
-            "I cannot" in enriched_knowledge) and "KEY POINT:" not in enriched_knowledge:
-            logger.warning("LLM refused to process the content, using fallback")
-            
-            # Simple fallback approach: use key points as their own supporting data
-            fallback_lines = []
-            for line in key_points.split('\n'):
-                if line.strip() and line.lower().startswith("key point:"):
-                    colon_pos = line.find(':')
-                    if colon_pos > 0:
-                        key_point = line[colon_pos + 1:].strip()
-                        fallback_lines.append(f"KEY POINT: {key_point}")
-                        fallback_lines.append(f"SUPPORTING DATA: {key_point}")
-            
-            enriched_knowledge = '\n'.join(fallback_lines)
-            logger.info(f"Created fallback enrichment with {len(fallback_lines)//2} key points")
-        
-        # Log success statistics
-        key_point_count = enriched_knowledge.count("KEY POINT:")
-        supporting_data_count = enriched_knowledge.count("SUPPORTING DATA:")
-        logger.info(f"Enrichment contains {key_point_count} key points and {supporting_data_count} supporting data sections")
-        
+        logger.info(f"Enriched {enriched_knowledge.count('KEY POINT')} key points with supporting data")
         return enriched_knowledge
     except Exception as e:
         logger.error(f"Key point enrichment failed: {e}")
-        traceback_str = traceback.format_exc()
-        logger.error(f"Traceback: {traceback_str}")
-        
-        # Return a simple error-state response that maintains the expected format
-        return f"KEY POINT: {key_points.split('KEY POINT:')[1].strip() if 'KEY POINT:' in key_points else key_points}\nSUPPORTING DATA: Error occurred during enrichment."
+        return "Key point enrichment failed due to processing error."
 
-async def process_document(text: str = "", file: FileStorage = None, user_id: str = "", mode: str = "default", bank: str = "", knowledge_elements: str = "") -> bool:
+async def process_document(text: str = "", file: FileStorage = None, user_id: str = "", mode: str = "default", bank: str = "") -> bool:
     """
-    Process a document or text: extract key points from knowledge elements, enrich each with supporting data, 
-    and save to Pinecone.
+    Process a document or text: split into semantic chunks, extract knowledge, and save to Pinecone.
     
     Args:
         text: Raw text input, preferred input method.
@@ -484,135 +425,208 @@ async def process_document(text: str = "", file: FileStorage = None, user_id: st
         user_id: User ID for metadata.
         mode: Processing mode (e.g., "default", "pretrain").
         bank: Namespace for Pinecone storage.
-        knowledge_elements: Pre-extracted knowledge elements from refine_document function.
     """
     doc_id = str(uuid.uuid4())
+    chunks = []
     logger.info(f"Processing document with bank={bank}")
-    logger.info(f"Knowledge elements received: {knowledge_elements}")
 
     try:
-        # Step 1: Validate text content
-        if not text or not text.strip():
-            logger.error("No text content provided")
-            return False
+        # Step 1: Extract text and create paragraphs
+        if text and text.strip():  # Ensure text is not just whitespace
+            logger.debug(f"Processing text input of length {len(text)}")
+            full_text = text
             
-        logger.debug(f"Processing text input of length {len(text)}")
-        full_text = text
-        
-        # Check for minimal content
-        if len(text.split()) < 10:
-            logger.warning(f"Text content too short: '{text}'")
-            return False
-
-        # Step 2: Extract key points from knowledge elements
-        knowledge_elements_text = knowledge_elements
-        logger.info(f"Knowledge elements provided: {len(knowledge_elements_text)} characters")
-        
-        # Check if knowledge elements were provided
-        if not knowledge_elements_text or "KEY POINT" not in knowledge_elements_text:
-            logger.warning("No valid knowledge elements provided, attempting to extract them")
-            knowledge_elements_text = await extract_knowledge_with_llm(full_text)
-            
-            if not knowledge_elements_text or "KEY POINT" not in knowledge_elements_text:
-                logger.warning("Failed to extract knowledge elements")
+            # Check for minimal content
+            if len(text.split()) < 10:
+                logger.warning(f"Text content too short: '{text}'")
                 return False
-        
-        # Step 3: Extract individual key points
-        key_points = []
-        
-        # Handle numbered format (e.g., "1. KEY POINT: ...")
-        if re.search(r'^\d+\.\s+KEY POINT:', knowledge_elements_text, re.MULTILINE):
-            logger.info("Detected numbered list format in knowledge elements")
-            for line in knowledge_elements_text.split('\n'):
+                
+            # Parse text with Markdown headings
+            paragraphs = []
+            current_heading = "Introduction"
+            current_subheading = ""
+            for line in full_text.split('\n'):
                 line = line.strip()
                 if not line:
                     continue
-                
-                # Match both numbered and non-numbered KEY POINT lines
-                if re.match(r'^\d+\.\s*KEY POINT:', line, re.IGNORECASE) or line.lower().startswith("key point:"):
-                    # Clean up the line
-                    clean_line = re.sub(r'^\d+\.\s*', '', line)  # Remove numbering if present
-                    colon_pos = clean_line.find(':')
-                    if colon_pos > 0:
-                        key_point = clean_line[colon_pos + 1:].strip()
-                        if key_point:  # Only add non-empty key points
-                            key_points.append(key_point)
-                            logger.debug(f"Extracted key point: {key_point[:50]}...")
+                if line.startswith('# '):
+                    current_heading = line[2:].strip()
+                    current_subheading = ""
+                elif line.startswith('## '):
+                    current_subheading = line[3:].strip()
+                else:
+                    context = f"section: {current_heading}"
+                    if current_subheading:
+                        context += f", subsection: {current_subheading}"
+                    paragraphs.append((line, context))
+                    
+            logger.debug(f"Extracted {len(paragraphs)} paragraphs from text input")
+            
+        elif file:
+            file_extension = file.filename.split('.')[-1].lower()
+            logger.debug(f"Processing file: {file.filename} ({file_extension})")
+            
+            # Read file content
+            file_content = file.read()
+            if not file_content:
+                logger.warning(f"Empty file content for {file.filename}")
+                return False
+            
+            logger.debug(f"Successfully read {len(file_content)} bytes from {file.filename}")
+            
+            # Create a fresh BytesIO object for processing
+            file_content_bytes = BytesIO(file_content)
+
+            if file_extension == 'pdf':
+                logger.debug("Opening PDF file")
+                try:
+                    with pdfplumber.open(file_content_bytes) as pdf:
+                        page_count = len(pdf.pages)
+                        logger.debug(f"PDF processing: found {page_count} pages")
+                        all_text = []
+                        
+                        for i, page in enumerate(pdf.pages):
+                            page_text = page.extract_text() or ""
+                            if page_text.strip():
+                                logger.debug(f"PDF page {i+1}: extracted {len(page_text)} characters")
+                                all_text.append(page_text)
+                            else:
+                                logger.debug(f"PDF page {i+1}: empty or non-text content")
+                                
+                        if not all_text:
+                            logger.warning(f"No text extracted from {file.filename}")
+                            return False
+                                
+                        full_text = " ".join(all_text)
+                        logger.debug(f"Combined PDF text: {len(full_text)} characters")
+                        
+                        # Split the text into paragraphs
+                        paragraphs = []
+                        for para in full_text.split('\n'):
+                            if para.strip():
+                                paragraphs.append((para.strip(), f"PDF document, page info not preserved in combined text"))
+                        
+                        logger.debug(f"Extracted {len(paragraphs)} paragraphs from PDF")
+                except Exception as pdf_error:
+                    logger.error(f"PDF processing error: {type(pdf_error).__name__}: {str(pdf_error)}")
+                    return False
+                            
+            elif file_extension == 'docx':
+                logger.debug("Opening DOCX file")
+                try:
+                    # Reset BytesIO position
+                    file_content_bytes.seek(0)
+                    doc = Document(file_content_bytes)
+                    paragraphs = []
+                    current_heading = "Introduction"
+                    
+                    for para in doc.paragraphs:
+                        if not para.text.strip():
+                            continue
+                        if para.style.name.startswith('Heading'):
+                            current_heading = para.text.strip()
+                            # Include headings as their own paragraphs with context
+                            paragraphs.append((para.text.strip(), "heading"))
+                        else:
+                            paragraphs.append((para.text.strip(), f"section: {current_heading}"))
+                    
+                    logger.debug(f"Extracted {len(paragraphs)} paragraphs from DOCX")
+                    
+                    if not paragraphs:
+                        logger.warning(f"No paragraphs extracted from {file.filename}")
+                        return False
+                        
+                except Exception as docx_error:
+                    logger.error(f"DOCX processing error: {type(docx_error).__name__}: {str(docx_error)}")
+                    return False
+            else:
+                logger.error(f"Unsupported file type: {file_extension}")
+                return False
         else:
-            # Handle standard format (KEY POINT: ...)
-            for line in knowledge_elements_text.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                
-                if line.lower().startswith("key point:"):
-                    colon_pos = line.find(':')
-                    if colon_pos > 0:
-                        key_point = line[colon_pos + 1:].strip()
-                        if key_point:  # Only add non-empty key points
-                            key_points.append(key_point)
-                            logger.debug(f"Extracted key point: {key_point[:50]}...")
-        
-        logger.info(f"Extracted {len(key_points)} key points from knowledge elements")
-        
-        if not key_points:
-            logger.warning("No key points extracted from knowledge elements")
+            logger.error("No file or valid text provided")
+            return False
+
+        # Check if we have paragraphs to process
+        if not paragraphs:
+            logger.warning("No paragraphs extracted from input")
             return False
             
-        # Step 4: Enrich each key point individually and create chunks
-        key_point_chunks = []
-        
-        for i, key_point in enumerate(key_points):
-            # Format a single key point for enrichment
-            single_key_point_text = f"KEY POINT: {key_point}"
-            
-            # Enrich this specific key point with supporting data
-            logger.debug(f"Enriching key point {i+1}/{len(key_points)}: {key_point[:50]}...")
-            enriched_text = await enrich_key_points(single_key_point_text, full_text)
-            logger.info(f"Enriched text: {enriched_text}")
-            
-            # Parse the enrichment result to extract supporting data
-            supporting_data = ""
-            for line in enriched_text.split('\n'):
-                line = line.strip()
-                if line.lower().startswith("supporting data:"):
-                    colon_pos = line.find(':')
-                    if colon_pos > 0:
-                        supporting_data = line[colon_pos + 1:].strip()
-                        break
-            
-            # If no supporting data found, use the key point itself
-            if not supporting_data:
-                logger.warning(f"No supporting data found for key point {i+1}, using key point as fallback")
-                supporting_data = key_point
-            
-            # Add to chunks
-            key_point_chunks.append((key_point, supporting_data))
-            logger.debug(f"Created chunk {i+1} - Key Point: '{key_point[:50]}...' with Supporting Data: '{supporting_data[:50]}...'")
-        
-        logger.info(f"Created {len(key_point_chunks)} enriched knowledge chunks")
+        logger.info(f"Successfully extracted {len(paragraphs)} paragraphs for processing")
 
-        # Step 5: Save chunks to database
+        # Step 2: Group paragraphs into semantic chunks
+        current_section = []
+        current_word_count = 0
+        section_index = 0
+        max_chunk_words = 300
+        min_chunk_words = 50
+
+        for para_text, para_context in paragraphs:
+            para_words = len(para_text.split())
+            
+            # Skip empty or very small paragraphs
+            if para_words < 2:
+                continue
+                
+            # Detect implicit headings (e.g., lines with ":" or short capitalized phrases)
+            is_implicit_heading = ':' in para_text or (para_text[0].isupper() and len(para_text.split()) < 10)
+            if is_implicit_heading and current_section:
+                # Save current section as a chunk
+                if current_word_count >= min_chunk_words:
+                    section_text = " ".join(current_section)
+                    chunk_id = f"chunk_{section_index}_0"
+                    chunks.append((chunk_id, section_text, para_context))
+                    section_index += 1
+                current_section = [para_text]
+                current_word_count = para_words
+                continue
+
+            # Handle large paragraphs
+            if para_words > max_chunk_words:
+                words = para_text.split()
+                for j in range(0, len(words), max_chunk_words - 50):
+                    sub_chunk = " ".join(words[j:j + (max_chunk_words - 50)])
+                    chunk_id = f"chunk_{section_index}_{j // (max_chunk_words - 50)}"
+                    chunks.append((chunk_id, sub_chunk, f"{para_context}, large paragraph part {j // (max_chunk_words - 50) + 1}"))
+                section_index += 1
+                continue
+
+            # Add to current section
+            if current_word_count + para_words <= max_chunk_words or current_word_count < min_chunk_words:
+                current_section.append(para_text)
+                current_word_count += para_words
+            else:
+                # Save current section
+                section_text = " ".join(current_section)
+                chunk_id = f"chunk_{section_index}_0"
+                chunks.append((chunk_id, section_text, para_context))
+                section_index += 1
+                current_section = [para_text]
+                current_word_count = para_words
+
+        # Save any remaining section
+        if current_section and current_word_count >= min_chunk_words:
+            section_text = " ".join(current_section)
+            chunk_id = f"chunk_{section_index}_0"
+            chunks.append((chunk_id, section_text, "final section"))
+            
+        if not chunks:
+            logger.warning("No chunks created from paragraphs")
+            return False
+            
+        logger.info(f"Created {len(chunks)} chunks for processing")
+
+        # Step 3: Process chunks and extract knowledge
         processing_tasks = []
+        knowledge_extraction_tasks = []
         
-        for i, (key_point, supporting_data) in enumerate(key_point_chunks):
-            chunk_id = f"chunk_{doc_id}_{i}"
-            chunk_text = f"KEY POINT: {key_point}\nSUPPORTING DATA: {supporting_data}"
-            
-            # Create a task to save the raw chunk (supporting data)
-            processing_tasks.append(
-                save_training_with_chunk(
-                    input=supporting_data,
-                    user_id=user_id,
-                    mode=mode,
-                    doc_id=doc_id,
-                    chunk_id=chunk_id,
-                    bank_name=bank,
-                    is_raw=True
-                )
+        for chunk_id, chunk_text, chunk_context in chunks:
+            # Log the first chunk to help with debugging
+            if chunk_id.endswith("_0"):
+                logger.debug(f"Sample chunk {chunk_id}: {chunk_text[:100]}...")
+                
+            knowledge_extraction_tasks.append(
+                extract_knowledge_from_chunk(chunk_text, chunk_context)
             )
-            
-            # Create a task to save the structured knowledge (key point + supporting data)
             processing_tasks.append(
                 save_training_with_chunk(
                     input=chunk_text,
@@ -621,9 +635,41 @@ async def process_document(text: str = "", file: FileStorage = None, user_id: st
                     doc_id=doc_id,
                     chunk_id=chunk_id,
                     bank_name=bank,
+                    is_raw=True
+                )
+            )
+            processing_tasks.append(
+                save_training_with_chunk(
+                    input=chunk_text,  # Placeholder for knowledge
+                    user_id=user_id,
+                    mode=mode,
+                    doc_id=doc_id,
+                    chunk_id=chunk_id,
+                    bank_name=bank,
                     is_raw=False
                 )
             )
+
+        # Run knowledge extraction
+        logger.debug(f"Starting knowledge extraction for {len(knowledge_extraction_tasks)} chunks")
+        knowledge_results = await asyncio.gather(*knowledge_extraction_tasks, return_exceptions=True)
+        
+        # Replace placeholder tasks with knowledge
+        for i, knowledge in enumerate(knowledge_results):
+            if isinstance(knowledge, Exception):
+                logger.error(f"Knowledge extraction failed for chunk {i}: {str(knowledge)}")
+                knowledge = f"Knowledge extraction failed: {str(knowledge)}"
+            task_index = (i * 2) + 1
+            if task_index < len(processing_tasks):
+                processing_tasks[task_index] = save_training_with_chunk(
+                    input=knowledge,
+                    user_id=user_id,
+                    mode=mode,
+                    doc_id=doc_id,
+                    chunk_id=chunks[i][0],
+                    bank_name=bank,
+                    is_raw=False
+                )
 
         # Process save tasks
         logger.debug(f"Starting data storage for {len(processing_tasks)} tasks")
@@ -642,7 +688,7 @@ async def process_document(text: str = "", file: FileStorage = None, user_id: st
             logger.error("All processing tasks failed")
             return False
             
-        logger.info(f"Processed document {doc_id} with {len(key_point_chunks)} chunks ({success_count}/{len(processing_tasks)} tasks succeeded)")
+        logger.info(f"Processed document {doc_id} with {len(chunks)} chunks ({success_count}/{len(processing_tasks)} tasks succeeded)")
         return True
 
     except Exception as e:

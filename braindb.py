@@ -253,13 +253,13 @@ def get_brains(org_id: str) -> List[Brain]:
         logger.error(f"Error in get_brains: {str(e)}")
         raise
 
-def get_brain_details(brain_id: int) -> Optional[Brain]:
+def get_brain_details(brain_id: str) -> Optional[Brain]:
     """
-    Fetch details of a specific brain using the integer brain_id
+    Fetch details of a specific brain using the UUID id
     """
     response = supabase.table("brain")\
         .select("*")\
-        .eq("brain_id", brain_id)\
+        .eq("id", brain_id)\
         .execute()
     
     if response.data and len(response.data) > 0:
