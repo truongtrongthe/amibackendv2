@@ -347,8 +347,14 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                             result_id = result.get("id", "unknown")
                             if result_id not in streamed_ids:
                                 streamed_ids.add(result_id)
-                                new_results.append(result)
-                                all_results.append(result)
+                                
+                                # Add query information to each result
+                                result_with_query = result.copy()
+                                result_with_query['query'] = queries[query_idx]
+                                result_with_query['query_idx'] = query_idx
+                                
+                                new_results.append(result_with_query)
+                                all_results.append(result_with_query)
                     
                     # Yield results in a batch
                     if new_results:
@@ -373,8 +379,14 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                             result_id = result.get("id", "unknown")
                             if result_id not in streamed_ids:
                                 streamed_ids.add(result_id)
-                                new_results.append(result)
-                                all_results.append(result)
+                                
+                                # Add query information to each result
+                                result_with_query = result.copy()
+                                result_with_query['query'] = queries[query_idx]
+                                result_with_query['query_idx'] = query_idx
+                                
+                                new_results.append(result_with_query)
+                                all_results.append(result_with_query)
                     
                     # Yield results in a batch
                     if new_results:
@@ -487,36 +499,44 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         
         "# Your Task",
         """
-            You are an empathetic AI assistant helping users with their concerns. Your goal is to provide thoughtful, natural-sounding responses tailored to each user's unique situation.
+            You are an empathetic AI assistant helping users with their concerns. Your goal is to provide a thoughtful, natural-sounding response tailored to this specific situation.
             
             Follow ALL of these requirements in your response:
             
-            1. UNDERSTAND THE USER (FROM ANALYSIS): You MUST incorporate insights from the analysis section, including:
-               - The customer's exact classification and emotional state
-               - Their identified needs and pain points
-               - The precise conversation stage they're in
-               - Any knowledge gaps discovered in the analysis
+            1. IMPLEMENT THE PRIMARY OBJECTIVE: Begin with the single most important goal identified in the next actions plan.
+               
+            2. FOLLOW THE COMMUNICATION APPROACH: Your message must:
+               - Use exactly the TONE specified (formal, casual, empathetic, etc.)
+               - Match the STYLE recommended (direct/indirect, structured/flexible)
+               - Incorporate the specific CULTURAL CONSIDERATIONS mentioned
             
-            2. FOLLOW THE NEXT ACTIONS: You MUST implement the specific next actions provided, including:
-               - Using the exact questions/statements recommended when present
-               - Following the specific communication approach outlined
-               - Applying the named frameworks and techniques specified
-               - Maintaining the priority and sequence of recommended actions
+            3. APPLY THE KEY TECHNIQUES: For each technique mentioned in next actions:
+               - Implement it exactly as described in the APPLICATION section
+               - Incorporate relevant knowledge from the SOURCE quotes provided
+               - Maintain the original intent and approach of each technique
             
-            3. APPLY BOTH KNOWLEDGE SOURCES: You MUST incorporate knowledge from both retrieval phases:
-               - Use the initial knowledge for understanding the situation and classification
-               - Apply the "how-to" knowledge for implementing specific techniques
-               - When using exact wording or techniques from knowledge, maintain their integrity
-               - If contradictions exist between knowledge sources, prioritize the more specific implementation guidance
+            4. INCLUDE ALL RECOMMENDED ELEMENTS:
+               - Begin with the specific OPENING approach outlined
+               - Cover all KEY POINTS in the priority order listed
+               - Ask the exact QUESTIONS recommended (when provided)
+               - End with the suggested CLOSING approach
+
+            5. PRIORITIZE KNOWLEDGE INTEGRATION:
+               - Directly apply knowledge from the Retrieved Knowledge section
+               - Use specific facts, methods, and information from knowledge sources
+               - Reference relevant concepts or techniques mentioned in the knowledge
+               - Prioritize domain-specific knowledge that addresses user needs
+               - Maintain factual accuracy based on knowledge context
             
-            4. SOUND NATURAL: While following all requirements above, ensure your response sounds conversational:
-               - Adapt to the detected language and cultural context
-               - Blend technical approaches seamlessly into natural dialogue
-               - Maintain a tone that builds trust based on the identified classification
-               - End your messages naturally without formulaic closing statements
-               - Avoid repeating reassurances or support statements at the end of every message
+            6. PRIORITIZE ACTIONS: Implement the 3-5 specific actions listed in the PRIORITY NEXT ACTIONS section, maintaining their exact order of importance.
             
-            Craft a concise response (80-100 words) that addresses the user's concerns while following ALL the required elements above. Your response will be evaluated on how effectively you incorporate the analysis, next actions, and both phases of knowledge retrieval.
+            7. SOUND NATURAL: While following all the above requirements:
+               - Blend technical approaches and knowledge seamlessly into natural dialogue
+               - Use the correct language (English or Vietnamese) as detected
+               - Keep your response concise (80-100 words)
+               - Avoid formulaic closings or repetitive reassurances
+            
+            Your response will be evaluated based on how faithfully you implement the specific next actions plan and integrate relevant knowledge while maintaining natural conversation flow.
         """
         ])
     
@@ -854,8 +874,8 @@ async def process_llm_with_tools(
         # In the original _handle_request this would call assess_knowledge_coverage
         
         # STEP 8: Prepare and send final response prompt
-        logger.info(f"Generating final response...")
-        
+        logger.info(f"KNOWLEDGE TO APPLY FOR FINAL RESPONSE: {knowledge_context}")
+       
         # Build the final response prompt with all the components
         response_params = {
             "conversation_context": conversation_context,
