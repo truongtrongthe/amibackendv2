@@ -7,7 +7,24 @@ from typing import List, Dict, Optional, AsyncGenerator
 from langchain_openai import ChatOpenAI
 from utilities import logger
 from langchain_core.messages import HumanMessage, AIMessage
-from database import query_graph_knowledge, get_version_brain_banks, get_cached_embedding
+from database import (
+    query_knowledge, 
+    save_training, 
+    # These functions are now imported from hotbrain instead
+    # query_brain_with_embeddings_batch,
+    # get_cached_embedding,
+    # get_version_brain_banks,
+    clean_text
+)
+
+# Import the functions from hotbrain module 
+from hotbrain import (
+    query_brain_with_embeddings_batch,
+    get_cached_embedding,
+    get_version_brain_banks,
+    batch_get_embeddings
+)
+
 from analysis import (
     stream_analysis, stream_next_action, build_context_analysis_prompt,
     build_next_actions_prompt, process_analysis_result, process_next_actions_result,
@@ -729,7 +746,6 @@ class MC:
             all_results = [[] for _ in queries]
             async def process_brain_bank(brain_bank):
                 bank_name, brain_id = brain_bank["bank_name"], brain_bank["id"]
-                from database import query_brain_with_embeddings_batch
                 brain_results = await query_brain_with_embeddings_batch(query_embeddings, bank_name, brain_id, top_k)
                 for query_idx, results in brain_results.items():
                     if 0 <= query_idx < len(all_results):
@@ -782,7 +798,6 @@ class MC:
 
         async def process_brain_bank(brain_bank):
             bank_name, brain_id = brain_bank["bank_name"], brain_bank["id"]
-            from database import query_brain_with_embeddings_batch
             brain_results = await query_brain_with_embeddings_batch(query_embeddings, bank_name, brain_id, top_k)
             new_results = []
             for query_idx, results in brain_results.items():

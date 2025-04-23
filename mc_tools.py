@@ -11,7 +11,7 @@ from utilities import logger
 import json
 
 from tools import process_llm_with_tools, tool_registry
-from database import query_graph_knowledge, get_version_brain_banks
+
 from personality import PersonalityManager
 from response_optimization import ResponseFilter, ResponseProcessor
 

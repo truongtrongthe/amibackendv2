@@ -14,7 +14,12 @@ from analysis import (
     build_context_analysis_prompt,
     build_next_actions_prompt
 )
-from database import query_graph_knowledge, get_version_brain_banks, get_cached_embedding
+from hotbrain import (
+    get_cached_embedding, 
+    query_graph_knowledge,
+    query_brain_with_embeddings_batch,
+    get_version_brain_banks
+)
 from response_optimization import ResponseProcessor, ResponseFilter
 
 # Use the same LLM instances as mc.py
@@ -177,62 +182,79 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     graph_version_id = params.get("graph_version_id", "")
     additional_instructions = params.get("additional_instructions", "")
     
-    # Fetch profile information similar to mc.py
     process_instructions = additional_instructions
     
     try:
-        # Query for profile information if graph_version_id is provided
         if graph_version_id:
-            from database import query_graph_knowledge
+            # Bilingual profile query (English and Vietnamese)
+            profile_query = (
+                "techniques for building customer portraits; skills for audience profile analysis; "
+                "methods for extracting customer information on health and lifestyle; "
+                "culturally sensitive questioning techniques in Vietnam; analyzing customer emotions and behaviors; "
+                "first message analysis for customer insights; techniques for eliciting sensitive personal information; "
+                "kỹ thuật xây dựng chân dung khách hàng; kỹ năng phân tích hồ sơ đối tượng; "
+                "phương pháp thu thập thông tin khách hàng về sức khỏe và lối sống; "
+                "kỹ thuật đặt câu hỏi nhạy cảm phù hợp văn hóa Việt Nam; phân tích cảm xúc và hành vi khách hàng; "
+                "phân tích tin nhắn đầu tiên để tìm hiểu thông tin khách hàng; "
+                "kỹ thuật khai thác thông tin cá nhân nhạy cảm"
+            )
             
-            # Enhanced query focused on comprehensive contact analysis techniques including first-message analysis
-            profile_query = "kỹ năng phân tích chân dung khách hàng; phân tích tin nhắn đầu tiên; nhận diện nhanh người dùng; kỹ thuật phân tích với ít thông tin"
+            # Improved classification query with abstract terms (Vietnamese)
+            classification_query = (
+                "khung phân loại khách hàng; mô hình phân tích tâm lý; phương pháp đánh giá nhu cầu ban đầu; "
+                "nhận diện dấu hiệu tiềm năng; nguyên mẫu và tính cách khách hàng; lý thuyết động lực hành vi; "
+                "ảnh hưởng văn hóa đến hành vi khách hàng ở Việt Nam; khung sức khỏe và lối sống để phân tích"
+            )
             
-            # Classification and methodology query focused on frameworks and structured approaches
-            classification_query = "khung phân loại khách hàng; mô hình phân tích tâm lý; phương pháp đánh giá nhu cầu ban đầu; nhận diện dấu hiệu tiềm năng"
-            
-            # Run both queries and combine results
+            # Run both queries in parallel
             profile_entries_task = query_graph_knowledge(graph_version_id, profile_query, top_k=8)
             classification_entries_task = query_graph_knowledge(graph_version_id, classification_query, top_k=8)
             
-            # Gather both query results
+            # Gather results with error handling
             profile_entries, classification_entries = await asyncio.gather(
                 profile_entries_task, 
-                classification_entries_task
+                classification_entries_task,
+                return_exceptions=True
             )
+            
+            # Check for exceptions in results
+            if isinstance(profile_entries, Exception):
+                logger.error(f"Failed to fetch profile entries: {str(profile_entries)}")
+                profile_entries = []
+            if isinstance(classification_entries, Exception):
+                logger.error(f"Failed to fetch classification entries: {str(classification_entries)}")
+                classification_entries = []
             
             # Combine all entries, removing duplicates by ID
             combined_entries = []
             seen_ids = set()
-            
             for entry in profile_entries + classification_entries:
                 entry_id = entry.get("id", "unknown")
                 if entry_id not in seen_ids:
                     seen_ids.add(entry_id)
                     combined_entries.append(entry)
             
-            # Use combined results
+            # Process combined results
             if combined_entries:
-                # Format profile instructions like in mc.py
                 profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
                 process_instructions = profile_instructions
-                logger.info(f"Retrieved {len(combined_entries)} profile entries for context analysis")
+                logger.info(f"Retrieved {len(combined_entries)} entries for context analysis: {profile_instructions}")
             else:
-                logger.warning(f"No profile entries found for graph_version_id: {graph_version_id}")
+                logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
+                process_instructions = "Use general customer analysis techniques, such as first-message tone analysis and basic psychological profiling, to analyze the contact."
     except Exception as e:
-        logger.error(f"Error fetching profile information: {str(e)}")
-        # Continue with existing instructions if profile fetch fails
+        logger.error(f"Error fetching knowledge from Pinecone: {str(e)}")
+        process_instructions = "Use general customer analysis techniques, such as first-message tone analysis and basic psychological profiling, to analyze the contact."
     
-    # Build the analysis prompt with profile-enhanced instructions
+    # Build the analysis prompt
     analysis_prompt = build_context_analysis_prompt(conversation_context, process_instructions)
     
-    # Use existing stream_analysis function
-    thread_id = params.get("_thread_id")  # Internal param for WebSocket
+    # Stream the analysis
+    thread_id = params.get("_thread_id")
     use_websocket = thread_id is not None
     
     async for chunk in stream_analysis(analysis_prompt, thread_id, use_websocket):
         yield chunk
-
 
 async def next_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     """
@@ -302,9 +324,6 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
         streamed_ids = set()
         all_results = []
         
-        # Import necessary function
-        from database import query_brain_with_embeddings_batch
-        
         # Check if streaming function is available
         has_streaming = True  # Initialize has_streaming variable
                 
@@ -316,23 +335,25 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             if has_streaming:
                 # Stream results from this brain bank
                 try:
-                    # Use the streaming function if available
-                    from database import query_brain_with_embeddings_batch
-                    async for result_batch in query_brain_with_embeddings_batch(
+                    # Use the batch function but process results as if streaming
+                    batch_results = await query_brain_with_embeddings_batch(
                         query_embeddings, bank_name, brain_id, top_k
-                    ):
-                        # Filter out already streamed results
-                        new_results = []
-                        for result in result_batch:
+                    )
+                    
+                    # Process results one by one to simulate streaming
+                    new_results = []
+                    for query_idx, results in batch_results.items():
+                        for result in results:
                             result_id = result.get("id", "unknown")
                             if result_id not in streamed_ids:
                                 streamed_ids.add(result_id)
                                 new_results.append(result)
                                 all_results.append(result)
+                    
+                    # Yield results in a batch
+                    if new_results:
+                        yield {"type": "knowledge", "content": new_results, "complete": False}
                         
-                        # Only yield if we have new results
-                        if new_results:
-                            yield {"type": "knowledge", "content": new_results, "complete": False}
                 except Exception as e:
                     logger.error(f"Error in streaming knowledge query: {str(e)}")
                     # Fall back to batch query

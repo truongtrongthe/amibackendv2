@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 import re
 
 StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
+inferLLM = ChatOpenAI(model="gpt-4o-mini", streaming=False)
 
 __all__ = [
     'stream_analysis', 
@@ -56,13 +57,26 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
             # Always yield for the standard flow too
             yield analysis_event
         
-        # Process the analysis to extract search terms and structure content
+        # Process the analysis JUST ONCE to extract search terms and structure content
+        processed_result = None
         try:
-            analysis_parts = process_analysis_result(analysis_buffer)
-            processed_content = analysis_parts.get("analysis_full", analysis_buffer)
+            # Process once and store the result for reuse
+            processed_result = process_analysis_result(analysis_buffer)
+            processed_content = processed_result.get("analysis_full", analysis_buffer)
         except Exception as process_error:
             logger.error(f"Error processing analysis: {str(process_error)}")
             processed_content = analysis_buffer
+            processed_result = {
+                "english": analysis_buffer,
+                "vietnamese": "",
+                "analysis_full": analysis_buffer,
+                "search_terms": [
+                    "health and lifestyle concerns",
+                    "culturally sensitive communication in Vietnam",
+                    "information gathering stage"
+                ],
+                "next_action_full": ""
+            }
         
         # Final complete event for analysis - ensure it's a string
         if not isinstance(processed_content, str):
@@ -71,7 +85,9 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
         analysis_complete_event = {
             "type": "analysis", 
             "content": processed_content, 
-            "complete": True
+            "complete": True,
+            # Include the extracted search terms in the event
+            "search_terms": processed_result.get("search_terms", [])
         }
         
         # Send via WebSocket if configured
@@ -211,217 +227,154 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
 
 def build_context_analysis_prompt(context: str, process_instructions: str) -> str:
     """
-    Build the context analysis prompt with only parts 1-3 (without next actions).
+    Build a minimalist context analysis prompt focused on essential elements needed
+    to understand the contact and guide the conversation, including customer classification.
     
     Args:
         context: The conversation context
         process_instructions: The knowledge base instructions
         
     Returns:
-        str: The analysis prompt for parts 1-3
+        str: The simplified essential analysis prompt
     """
-    logger.info(f"[DEBUG] build_context_analysis_prompt called with context: {context}")
-    logger.info(f"[DEBUG] build_context_analysis_prompt called with process_instructions: {process_instructions}")
+    # Detect if this is the first message
+    is_first_message = "User:" in context and context.count("User:") == 1 and "AI:" not in context
+    first_message_note = "Note: This is the first message from the contact." if is_first_message else ""
     
-    # Check if this appears to be a first message
-    is_first_message = "User:" in context and context.count("User:") <= 1 and context.count("AI:") <= 0
-    first_message_instruction = """
-IMPORTANT: This appears to be the FIRST MESSAGE from this contact. Apply first-message analysis techniques from the knowledge base instructions to make initial assessments with limited information. Look for subtle signals in word choice, phrasing, and the nature of their inquiry. When confidence is low, clearly indicate assumptions versus observations.
-""" if is_first_message else ""
-    
+    # Ultra-streamlined prompt focusing only on essentials
     return (
-        f"Based on the conversation:\n{context}\n\n"
-        f"KNOWLEDGE BASE INSTRUCTIONS:\n{process_instructions}\n\n"
-        f"{first_message_instruction}"
-        f"Analyze this conversation to determine contact profile and situational context. Provide your analysis in BOTH English and Vietnamese.\n\n"
+        f"Conversation:\n{context}\n\n"
+        f"Process Instructions (Reference):\n{process_instructions}\n\n"
+        f"{first_message_note}\n\n"
         
-        f"ENGLISH ANALYSIS:\n"
-        f"1. AUDIENCE PORTRAIT:\n"
-        f"   - EMOTIONAL STATE: Identify current emotions, mood, sentiment, and emotional triggers evident in their communication\n"
-        f"   - NEEDS & GOALS: Determine objectives, immediate needs, longer-term goals, and urgency indicators\n"
-        f"   - PAIN POINTS: Identify challenges, frustrations, concerns, or obstacles they're facing\n"
-        f"   - BEHAVIORAL PATTERNS: Note patterns in decision-making, information processing, or response style\n"
-        f"   - CLASSIFICATION: Apply specific classification frameworks from the knowledge base to categorize this person\n"
-        f"   - ENGAGEMENT LEVEL: Assess their level of engagement, openness, and receptivity to information\n"
-        f"   - CONFIDENCE LEVEL: Indicate your confidence level (0-100%) in your portrait assessment\n\n"
+        f"Analyze this conversation to understand the essential elements needed to guide the interaction. "
+        f"Be concise and focus only on what's clearly evident.\n\n"
         
-        f"2. SITUATIONAL ANALYSIS:\n"
-        f"   - CONVERSATION STAGE: Identify precisely where this conversation is in its lifecycle (first contact, information gathering, solution presentation, objection handling, etc.)\n"
-        f"   - CURRENT TOPIC/FOCUS: What specific subject matter or concern is currently being discussed?\n"
-        f"   - INTENT SIGNALS: What explicit or implicit indicators of purpose, intent, or desired outcome has the contact provided?\n"
-        f"   - KNOWLEDGE GAPS: Identify key information the person is missing or has misconceptions about\n"
-        f"   - READINESS ASSESSMENT: Evaluate the contact's readiness to move forward in the conversation or decision process\n"
-        f"   - RELATIONSHIP DYNAMICS: Assess the current rapport level and relationship quality between both parties\n"
-        f"   - CONVERSATIONAL MOMENTUM: Is the conversation progressing, stalled, or regressing? What factors are driving this?\n\n"
+        f"1. CONTACT IDENTITY:\n"
+        f"   - Who is this person? (profession, role, demographics if evident)\n"
+        f"   - What is their current situation or context?\n"
+        f"   - CLASSIFY this contact (e.g., potential customer, existing client, information seeker, concerned individual)\n\n"
         
-        f"3. ACTION PREPARATION:\n"
-        f"   - INFORMATION REQUIREMENTS: What specific information is required based on the knowledge base instructions?\n"
-        f"   - INFORMATION STATUS: Which requirements have been met and which are still missing?\n"
-        f"   - INFORMATION PRIORITIES: What is the priority order for gathering missing information?\n"
-        f"   - APPROPRIATE FRAMEWORKS: Which classification frameworks or analytical models from the knowledge base are most relevant to this situation?\n"
-        f"   - RECOMMENDED APPROACH: Based on the contact's classification and situation, what general approach is most likely to be effective?\n\n"
+        f"2. CORE NEEDS & DESIRES:\n"
+        f"   - What specific problem or need does this person have?\n"
+        f"   - What outcome or solution are they seeking?\n"
+        f"   - What concerns or pain points are they expressing?\n"
+        f"   - What is their emotional state? (anxious, curious, frustrated, etc.)\n\n"
         
-        f"VIETNAMESE ANALYSIS:\n"
-        f"1. PHÂN TÍCH CHÂN DUNG ĐỐI TÁC:\n"
-        f"   - TRẠNG THÁI CẢM XÚC: Xác định cảm xúc hiện tại, tâm trạng, tình cảm và yếu tố kích hoạt cảm xúc trong giao tiếp của họ\n"
-        f"   - NHU CẦU & MỤC TIÊU: Xác định mục tiêu, nhu cầu ngay lập tức, mục tiêu dài hạn và chỉ báo tính khẩn cấp\n"
-        f"   - ĐIỂM KHÓ KHĂN: Xác định thách thức, sự thất vọng, lo ngại hoặc trở ngại mà họ đang đối mặt\n"
-        f"   - MÔ HÌNH HÀNH VI: Ghi nhận mô hình trong việc ra quyết định, xử lý thông tin hoặc phong cách phản hồi\n"
-        f"   - PHÂN LOẠI: Áp dụng các khung phân loại cụ thể từ cơ sở kiến thức để phân loại người này\n"
-        f"   - MỨC ĐỘ TƯƠNG TÁC: Đánh giá mức độ tham gia, cởi mở và khả năng tiếp nhận thông tin của họ\n"
-        f"   - MỨC ĐỘ TIN CẬY: Chỉ ra mức độ tin cậy của bạn (0-100%) trong đánh giá chân dung\n\n"
+        f"3. INTERACTION PATTERN:\n"
+        f"   - What conversation stage are we in? (first contact, information gathering, etc.)\n"
+        f"   - How do they communicate? (direct, detailed, brief, formal, indirect, etc.)\n"
+        f"   - What communication preferences can you identify?\n"
+        f"   - What cultural factors are relevant? (especially for Vietnamese context)\n\n"
         
-        f"2. PHÂN TÍCH TÌNH HUỐNG:\n"
-        f"   - GIAI ĐOẠN CUỘC TRÒ CHUYỆN: Xác định chính xác cuộc trò chuyện này đang ở giai đoạn nào (liên hệ đầu tiên, thu thập thông tin, trình bày giải pháp, xử lý phản đối, v.v.)\n"
-        f"   - CHỦ ĐỀ/TRỌNG TÂM HIỆN TẠI: Vấn đề hoặc mối quan tâm cụ thể nào đang được thảo luận?\n"
-        f"   - TÍN HIỆU VỀ Ý ĐỊNH: Người liên hệ đã cung cấp những chỉ báo rõ ràng hoặc ngầm định nào về mục đích, ý định hoặc kết quả mong muốn?\n"
-        f"   - KHOẢNG TRỐNG KIẾN THỨC: Xác định thông tin quan trọng mà người đó đang thiếu hoặc có hiểu sai\n"
-        f"   - ĐÁNH GIÁ MỨC ĐỘ SẴN SÀNG: Đánh giá mức độ sẵn sàng của người liên hệ để tiến tới trong cuộc trò chuyện hoặc quá trình ra quyết định\n"
-        f"   - ĐỘNG LỰC MỐI QUAN HỆ: Đánh giá mức độ hòa hợp và chất lượng mối quan hệ hiện tại giữa hai bên\n"
-        f"   - ĐÀ CUỘC TRÒ CHUYỆN: Cuộc trò chuyện đang tiến triển, bị đình trệ hay đang lùi lại? Những yếu tố nào đang thúc đẩy điều này?\n\n"
+        f"4. CONVERSATION FOCUS:\n"
+        f"   - What is the main topic or purpose of this conversation?\n"
+        f"   - What critical information is missing to move forward?\n"
+        f"   - What specific topics should be addressed next?\n\n"
         
-        f"3. CHUẨN BỊ HÀNH ĐỘNG:\n"
-        f"   - YÊU CẦU THÔNG TIN: Những thông tin cụ thể nào cần có dựa trên hướng dẫn của cơ sở kiến thức?\n"
-        f"   - TRẠNG THÁI THÔNG TIN: Những yêu cầu nào đã được đáp ứng và những yêu cầu nào vẫn còn thiếu?\n"
-        f"   - ƯU TIÊN THÔNG TIN: Thứ tự ưu tiên để thu thập thông tin còn thiếu là gì?\n"
-        f"   - KHUNG PHÂN TÍCH PHÙ HỢP: Những khung phân loại hoặc mô hình phân tích nào từ cơ sở kiến thức phù hợp nhất với tình huống này?\n"
-        f"   - CÁCH TIẾP CẬN ĐƯỢC KHUYẾN NGHỊ: Dựa trên phân loại và tình huống của người liên hệ, cách tiếp cận chung nào có khả năng hiệu quả nhất?\n\n"
+        f"5. SUMMARY:\n"
+        f"   - In 1-2 sentences, summarize who this person is, what they need, and how we should communicate with them.\n\n"
         
-        f"Be objective and factual, but don't hesitate to apply relevant psychological analysis frameworks from the knowledge base. Reference all applicable frameworks and classifications by name when you use them."
+        f"Be direct, factual, and objective. Focus only on what's clearly evident in the conversation. "
+        f"After completing the English analysis, provide a Vietnamese translation."
     )
 
 def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_content: str) -> str:
     """
-    Build the next actions prompt based on initial analysis and retrieved knowledge,
-    using a Chain of Thought structure to determine optimal next steps.
+    Build a next actions prompt that leverages the contact analysis data (identity, classification,
+    needs, and communication style) to plan next steps using Chain of Thought reasoning.
     
     Args:
         context: The conversation context
-        initial_analysis: The results from the initial analysis (parts 1-3)
+        initial_analysis: The results from the initial analysis
         knowledge_content: The retrieved knowledge content
         
     Returns:
-        str: The next actions prompt with Chain of Thought structure
+        str: The next actions prompt with CoT structure for effective planning
     """
     return (
-        f"Based on the following information:\n\n"
-        f"CONVERSATION:\n{context}\n\n"
-        f"INITIAL ANALYSIS:\n{initial_analysis}\n\n"
+        f"CONVERSATION CONTEXT:\n{context}\n\n"
+        f"CONTACT ANALYSIS:\n{initial_analysis}\n\n"
         f"RETRIEVED KNOWLEDGE:\n{knowledge_content}\n\n"
         
-        f"Determine the next appropriate actions using this Chain of Thought process. Provide your analysis in BOTH English and Vietnamese.\n\n"
+        f"Based on the conversation and analysis above, determine the most appropriate next actions using Chain of Thought reasoning. "
+        f"The analysis includes the contact's identity, classification, needs, and communication style. "
+        f"Use the retrieved knowledge to select the most effective approaches.\n\n"
         
-        f"ENGLISH NEXT ACTIONS THOUGHT:\n\n"
+        f"CHAIN OF THOUGHT REASONING:\n\n"
         
-        f"1. AUDIENCE UNDERSTANDING:\n"
-        f"   - Summarize the key aspects of the audience portrait (emotional state, needs/goals, pain points, classification)\n"
-        f"   - Identify the most important classification framework from the analysis that should guide your approach\n"
-        f"   - Note the engagement level and what it suggests about how receptive they'll be to different approaches\n"
-        f"   - Consider how their emotional state should influence your tone and content\n\n"
+        f"1. CONTACT UNDERSTANDING:\n"
+        f"   - Identify the contact's classification (potential customer, existing client, etc.)\n"
+        f"   - Summarize their key needs or problems based on the analysis\n"
+        f"   - Note their emotional state and how it should influence your approach\n"
+        f"   - Consider their communication style preferences (direct, indirect, formal, etc.)\n"
+        f"   - Identify cultural factors that should shape your response\n\n"
         
-        f"2. SITUATIONAL ASSESSMENT:\n"
-        f"   - Identify the exact conversation stage and what typically happens at this stage\n"
-        f"   - Recognize the knowledge gaps that need to be addressed\n"
-        f"   - Consider the conversational momentum and what might maintain or improve it\n"
-        f"   - Note the relationship dynamics and how they influence what approach will work best\n\n"
+        f"2. CONVERSATION STAGE PLANNING:\n"
+        f"   - Determine exactly where we are in the conversation journey\n"
+        f"   - Identify what's typically needed at this specific stage\n"
+        f"   - Evaluate what information is missing and must be gathered\n"
+        f"   - Decide whether to focus on rapport building, information gathering, or solution presentation\n\n"
         
-        f"3. KNOWLEDGE MAPPING:\n"
-        f"   - Identify which specific knowledge items are most relevant to this audience's classification\n"
-        f"   - Find knowledge that addresses their emotional state and needs\n"
-        f"   - Locate specific guidance for the current conversation stage\n"
-        f"   - Extract any scripts, questions, or frameworks from the knowledge that match this situation\n\n"
+        f"3. KNOWLEDGE APPLICATION:\n"
+        f"   - Identify 2-3 specific techniques from the knowledge content that apply to this situation\n"
+        f"   - For each technique, note a specific element from the knowledge that would be useful\n"
+        f"   - Find specific questions from the knowledge content that would work for this contact\n"
+        f"   - Connect each knowledge element directly to this contact's specific needs and style\n\n"
         
-        f"4. APPROACH FORMULATION:\n"
-        f"   - Based on the audience classification, determine the optimal communication approach\n"
-        f"   - Match your strategy to their emotional state and engagement level\n"
-        f"   - Decide what information needs to be gathered or provided next\n"
-        f"   - Select specific questions or statements from the knowledge content that would be most effective\n"
-        f"   - If multiple approaches exist in the knowledge, explain why you're selecting this particular one\n\n"
+        f"4. RESPONSE PLANNING:\n"
+        f"   - Based on the above reasoning, determine the primary objective for the next message\n"
+        f"   - Decide on the most appropriate tone and approach for this specific contact\n"
+        f"   - Select the most effective techniques to apply from the knowledge content\n"
+        f"   - Choose specific questions or statements that align with the contact's needs and style\n"
+        f"   - Plan for different possible responses (positive engagement or resistance)\n\n"
         
-        f"5. IMPLEMENTATION PLAN:\n"
-        f"   - Outline the specific next action(s) to take\n"
-        f"   - If suggesting questions, ONLY include questions with EXACT TEXT from the knowledge content\n"
-        f"   - If no suitable questions exist in the knowledge, state: 'No specific questions found in knowledge content for this scenario'\n"
-        f"   - Specify how to adapt tone and approach based on audience classification and emotional state\n"
-        f"   - Indicate what response patterns to anticipate based on the selected approach\n\n"
+        f"5. CLEAR NEXT ACTIONS:\n"
+        f"   - Define precisely 3-5 specific actions that must be taken next\n"
+        f"   - For each action, explain WHY it's important based on your reasoning\n"
+        f"   - Prioritize these actions in order of importance\n"
+        f"   - Connect each action directly to the contact's needs and the conversation stage\n"
+        f"   - Specify which knowledge/techniques will be applied for each action\n\n"
         
-        f"VIETNAMESE CHAIN OF THOUGHT:\n\n"
+        f"NEXT ACTIONS OUTPUT:\n"
+        f"Based on your Chain of Thought reasoning, provide the recommended next actions in this structured format:\n\n"
         
-        f"1. HIỂU VỀ ĐỐI TÁC:\n"
-        f"   - Tóm tắt các khía cạnh chính của chân dung đối tác (trạng thái cảm xúc, nhu cầu/mục tiêu, điểm khó khăn, phân loại)\n"
-        f"   - Xác định khung phân loại quan trọng nhất từ phân tích nên hướng dẫn cách tiếp cận của bạn\n"
-        f"   - Lưu ý mức độ tương tác và những gợi ý về mức độ tiếp nhận các cách tiếp cận khác nhau\n"
-        f"   - Xem xét trạng thái cảm xúc của họ nên ảnh hưởng như thế nào đến giọng điệu và nội dung của bạn\n\n"
-        
-        f"2. ĐÁNH GIÁ TÌNH HUỐNG:\n"
-        f"   - Xác định chính xác giai đoạn cuộc trò chuyện và những gì thường xảy ra ở giai đoạn này\n"
-        f"   - Nhận ra những khoảng trống kiến thức cần được giải quyết\n"
-        f"   - Xem xét đà cuộc trò chuyện và những gì có thể duy trì hoặc cải thiện nó\n"
-        f"   - Lưu ý động lực mối quan hệ và cách chúng ảnh hưởng đến cách tiếp cận nào sẽ hiệu quả nhất\n\n"
-        
-        f"3. XÁC ĐỊNH KIẾN THỨC PHÙ HỢP:\n"
-        f"   - Xác định những kiến thức cụ thể nào phù hợp nhất với phân loại đối tác này\n"
-        f"   - Tìm kiến thức giải quyết trạng thái cảm xúc và nhu cầu của họ\n"
-        f"   - Xác định hướng dẫn cụ thể cho giai đoạn hội thoại hiện tại\n"
-        f"   - Trích xuất mọi kịch bản, câu hỏi hoặc khung từ kiến thức phù hợp với tình huống này\n\n"
-        
-        f"4. XÂY DỰNG CÁCH TIẾP CẬN:\n"
-        f"   - Dựa trên phân loại đối tác, xác định cách tiếp cận giao tiếp tối ưu\n"
-        f"   - Phối hợp chiến lược của bạn với trạng thái cảm xúc và mức độ tương tác của họ\n"
-        f"   - Quyết định thông tin nào cần được thu thập hoặc cung cấp tiếp theo\n"
-        f"   - Chọn các câu hỏi hoặc phát biểu cụ thể từ nội dung kiến thức sẽ hiệu quả nhất\n"
-        f"   - Nếu có nhiều cách tiếp cận tồn tại trong kiến thức, giải thích lý do bạn chọn cách tiếp cận cụ thể này\n\n"
-        
-        f"5. KẾ HOẠCH THỰC HIỆN:\n"
-        f"   - Phác thảo (các) hành động cụ thể tiếp theo\n"
-        f"   - Nếu đề xuất câu hỏi, CHỈ bao gồm các câu hỏi có VĂN BẢN CHÍNH XÁC từ nội dung kiến thức\n"
-        f"   - Nếu không có câu hỏi phù hợp trong kiến thức, hãy nêu rõ: 'Không tìm thấy câu hỏi cụ thể trong nội dung kiến thức cho tình huống này'\n"
-        f"   - Chỉ định cách điều chỉnh giọng điệu và cách tiếp cận dựa trên phân loại và trạng thái cảm xúc của đối tác\n"
-        f"   - Chỉ ra các mẫu phản hồi nào dự đoán dựa trên cách tiếp cận đã chọn\n\n"
-        
-        f"ENGLISH NEXT ACTIONS:\n"
-        f"Based on the Chain of Thought analysis, provide SPECIFIC AND CONCRETE next actions in this structured format:\n\n"
-        
-        f"1. PRIMARY OBJECTIVE: [State the single most important goal for the next response]\n\n"
+        f"1. PRIMARY OBJECTIVE:\n"
+        f"   [Single most important goal for the next response, considering the contact's classification and needs]\n\n"
         
         f"2. COMMUNICATION APPROACH:\n"
-        f"   - TONE & STYLE: [Specify exact tone based on audience classification and emotional state]\n"
-        f"   - KEY MESSAGES: [List 1-3 key points that must be communicated]\n\n"
+        f"   - TONE: [Specific emotional tone tailored to this contact's state and style]\n"
+        f"   - STYLE: [Communication style matching the contact's preferences (direct/indirect, formal/casual, etc.)]\n"
+        f"   - CULTURAL CONSIDERATIONS: [Specific cultural elements to incorporate or be mindful of]\n\n"
         
-        f"3. SPECIFIC QUESTIONS/STATEMENTS:\n"
-        f"   [Include ONLY exact questions/statements from the knowledge content, with citations]\n"
-        f"   If no suitable questions exist in the knowledge, state: 'No specific questions found'\n\n"
+        f"3. KEY TECHNIQUES:\n"
+        f"   - TECHNIQUE 1: [Name a specific technique from the knowledge]\n"
+        f"     APPLICATION: [How to apply it to this specific contact and situation]\n"
+        f"     SOURCE: [Brief relevant quote from knowledge content]\n"
+        f"   - TECHNIQUE 2: [Name a second technique if appropriate]\n"
+        f"     APPLICATION: [How to apply it to this specific contact and situation]\n"
+        f"     SOURCE: [Brief relevant quote from knowledge content]\n\n"
         
-        f"4. KNOWLEDGE APPLICATION:\n"
-        f"   - FRAMEWORK: [Name the specific classification framework being applied]\n"
-        f"   - TECHNIQUE: [Identify the specific technique from knowledge to use]\n\n"
+        f"4. RECOMMENDED RESPONSE ELEMENTS:\n"
+        f"   - OPENING: [How to start the response effectively]\n"
+        f"   - KEY POINTS: [2-3 main points to include, aligned with contact's needs]\n"
+        f"   - QUESTIONS: [Specific questions from knowledge content, if appropriate]\n"
+        f"   - CLOSING: [How to effectively conclude this message]\n\n"
         
-        f"5. CONTINGENCY PLANNING:\n"
-        f"   - IF POSITIVE RESPONSE: [What to do next if they respond positively]\n"
-        f"   - IF NEGATIVE RESPONSE: [How to adjust if they respond negatively]\n\n"
+        f"5. ADAPTABILITY PLAN:\n"
+        f"   - IF POSITIVE ENGAGEMENT: [Next step if they respond well]\n"
+        f"   - IF RESISTANCE OR CONFUSION: [Alternative approach if needed]\n\n"
         
-        f"VIETNAMESE NEXT ACTIONS:\n"
-        f"Dựa trên phân tích Chuỗi Suy Luận, cung cấp các hành động tiếp theo CỤ THỂ VÀ RÕ RÀNG theo định dạng có cấu trúc này:\n\n"
+        f"6. PRIORITY NEXT ACTIONS:\n"
+        f"   List the 3-5 most important specific actions to take next, in priority order:\n"
+        f"   1. [Most important action] - WHY: [Brief explanation of importance]\n"
+        f"   2. [Second action] - WHY: [Brief explanation of importance]\n"
+        f"   3. [Third action] - WHY: [Brief explanation of importance]\n"
+        f"   4. [Fourth action if needed] - WHY: [Brief explanation of importance]\n"
+        f"   5. [Fifth action if needed] - WHY: [Brief explanation of importance]\n\n"
         
-        f"1. MỤC TIÊU CHÍNH: [Nêu mục tiêu quan trọng nhất cho phản hồi tiếp theo]\n\n"
-        
-        f"2. CÁCH TIẾP CẬN GIAO TIẾP:\n"
-        f"   - GIỌNG ĐIỆU & PHONG CÁCH: [Xác định giọng điệu chính xác dựa trên phân loại đối tác và trạng thái cảm xúc]\n"
-        f"   - THÔNG ĐIỆP CHÍNH: [Liệt kê 1-3 điểm chính phải được truyền đạt]\n\n"
-        
-        f"3. CÂU HỎI/PHÁT BIỂU CỤ THỂ:\n"
-        f"   [Chỉ bao gồm các câu hỏi/phát biểu chính xác từ nội dung kiến thức, kèm trích dẫn]\n"
-        f"   Nếu không có câu hỏi phù hợp trong kiến thức, hãy nêu rõ: 'Không tìm thấy câu hỏi cụ thể'\n\n"
-        
-        f"4. ÁP DỤNG KIẾN THỨC:\n"
-        f"   - KHUNG PHÂN LOẠI: [Đặt tên khung phân loại cụ thể đang được áp dụng]\n"
-        f"   - KỸ THUẬT: [Xác định kỹ thuật cụ thể từ kiến thức để sử dụng]\n\n"
-        
-        f"5. KẾ HOẠCH DỰ PHÒNG:\n"
-        f"   - NẾU PHẢN HỒI TÍCH CỰC: [Làm gì tiếp theo nếu họ phản hồi tích cực]\n"
-        f"   - NẾU PHẢN HỒI TIÊU CỰC: [Cách điều chỉnh nếu họ phản hồi tiêu cực]\n\n"
-        
-        f"IMPORTANT: This next action plan must be SPECIFIC, ACTIONABLE, and DIRECTLY BASED on the audience's classification and conversation stage. Never provide generic guidance - everything must connect to the audience's specific profile and needs."
+        f"After completing the English next actions, translate the full output to Vietnamese, maintaining the same structured format. "
+        f"The reasoning should be thorough, but the final output should be practical and directly applicable."
     )
 
 def process_analysis_result(full_analysis: str) -> Dict[str, str]:
@@ -438,18 +391,52 @@ def process_analysis_result(full_analysis: str) -> Dict[str, str]:
         # Log the input for debugging
         logger.info(f"[DEBUG] process_analysis_result called with text length: {len(full_analysis)}")
         
+        # Check if the analysis is too short to be meaningful
+        if full_analysis is None or len(full_analysis.strip()) < 100:
+            logger.warning(f"[DEBUG] Analysis text too short ({len(full_analysis) if full_analysis else 0} chars) for meaningful extraction")
+            default_search_terms = [
+                "health and lifestyle concerns",
+                "culturally sensitive communication in Vietnam",
+                "information gathering stage"
+            ]
+            return {
+                "english": full_analysis or "",
+                "vietnamese": "",
+                "analysis_full": full_analysis or "",
+                "search_terms": default_search_terms,
+                "next_action_full": ""
+            }
+        
+        # Try multiple possible delimiters for the Vietnamese section
+        vietnamese_delimiters = [
+            "VIETNAMESE ANALYSIS:",
+            "VIETNAMESE TRANSLATION",
+            "VIETNAMESE ANALYSIS",
+            "VIETNAMESE NEXT ACTIONS:",
+            "PHÂN TÍCH TIẾNG VIỆT:",
+            "BẢN DỊCH TIẾNG VIỆT",
+            "TIẾNG VIỆT:"
+        ]
+        
         # Split the analysis into English and Vietnamese parts
-        lang_sections = full_analysis.split("VIETNAMESE ANALYSIS:")
-        if len(lang_sections) == 2:
-            english_analysis = lang_sections[0].strip()
-            vietnamese_analysis = "VIETNAMESE ANALYSIS:" + lang_sections[1].strip()
-            logger.info(f"[DEBUG] Successfully split analysis into English and Vietnamese parts")
-        else:
+        english_analysis = full_analysis
+        vietnamese_analysis = ""
+        delimiter_found = False
+        
+        for delimiter in vietnamese_delimiters:
+            if delimiter in full_analysis:
+                lang_sections = full_analysis.split(delimiter, 1)
+                english_analysis = lang_sections[0].strip()
+                vietnamese_analysis = delimiter + lang_sections[1].strip()
+                logger.info(f"[DEBUG] Successfully split analysis into English and Vietnamese parts using delimiter: {delimiter}")
+                delimiter_found = True
+                break
+                
+        if not delimiter_found:
             # Fallback if split fails
             english_analysis = full_analysis
             vietnamese_analysis = full_analysis
             logger.info(f"[DEBUG] Failed to split analysis into language sections, using full text as English")
-        
         
         # Extract key information for knowledge queries
         logger.info(f"[DEBUG] Calling extract_search_terms to extract search terms from analysis")
@@ -471,10 +458,14 @@ def process_analysis_result(full_analysis: str) -> Dict[str, str]:
         import traceback
         logger.error(traceback.format_exc())
         return {
-            "english": full_analysis,
+            "english": full_analysis or "",
             "vietnamese": "",
-            "analysis_full": full_analysis,
-            "search_terms": [],
+            "analysis_full": full_analysis or "",
+            "search_terms": [
+                "health and lifestyle concerns",
+                "culturally sensitive communication in Vietnam",
+                "information gathering stage"
+            ],
             # Add an empty next_action_full to ensure this key always exists even on error
             "next_action_full": ""
         }
@@ -491,17 +482,42 @@ def process_next_actions_result(next_actions_content: str) -> dict:
         dict: Dictionary containing processed next actions parts and any warnings
     """
     try:
-        # Regular expressions to extract English and Vietnamese next actions
-        english_pattern = r"ENGLISH NEXT ACTIONS:(.*?)(?=VIETNAMESE NEXT ACTIONS:|$)"
-        vietnamese_pattern = r"VIETNAMESE NEXT ACTIONS:(.*?)(?=$)"
+        # Define multiple possible patterns for English and Vietnamese sections
+        english_section_patterns = [
+            r"ENGLISH NEXT ACTIONS:(.*?)(?=VIETNAMESE NEXT ACTIONS:|VIETNAMESE TRANSLATION:|BẢN DỊCH TIẾNG VIỆT|TIẾNG VIỆT:|$)",
+            r"ENGLISH CHAIN OF THOUGHT:(.*?)(?=ENGLISH NEXT ACTIONS:|$)",
+            r"NEXT ACTIONS:(.*?)(?=VIETNAMESE NEXT ACTIONS:|VIETNAMESE TRANSLATION:|BẢN DỊCH TIẾNG VIỆT|TIẾNG VIỆT:|$)"
+        ]
+        
+        vietnamese_section_patterns = [
+            r"VIETNAMESE NEXT ACTIONS:(.*?)(?=$)",
+            r"VIETNAMESE TRANSLATION:(.*?)(?=$)",
+            r"BẢN DỊCH TIẾNG VIỆT:(.*?)(?=$)",
+            r"(?:TIẾNG\s*VIỆT\s*:)(.*?)(?=\Z)"
+        ]
         
         # Extract English next actions
-        english_match = re.search(english_pattern, next_actions_content, re.DOTALL)
-        english_next_actions = english_match.group(1).strip() if english_match else ""
+        english_next_actions = ""
+        for pattern in english_section_patterns:
+            english_match = re.search(pattern, next_actions_content, re.DOTALL)
+            if english_match:
+                english_next_actions = english_match.group(1).strip()
+                logger.info(f"[DEBUG] Found English next actions section with pattern: {pattern[:30]}...")
+                break
         
         # Extract Vietnamese next actions
-        vietnamese_match = re.search(vietnamese_pattern, next_actions_content, re.DOTALL)
-        vietnamese_next_actions = vietnamese_match.group(1).strip() if vietnamese_match else ""
+        vietnamese_next_actions = ""
+        for pattern in vietnamese_section_patterns:
+            vietnamese_match = re.search(pattern, next_actions_content, re.DOTALL)
+            if vietnamese_match:
+                vietnamese_next_actions = vietnamese_match.group(1).strip()
+                logger.info(f"[DEBUG] Found Vietnamese next actions section with pattern: {pattern[:30]}...")
+                break
+        
+        # If no sections were found, just use the entire content as English
+        if not english_next_actions and not vietnamese_next_actions:
+            logger.warning(f"[DEBUG] Could not find English or Vietnamese sections in next actions content")
+            english_next_actions = next_actions_content
         
         # Check for unattributed questions (questions not in quotes or without citation)
         question_pattern = r'\?'
@@ -555,97 +571,157 @@ def process_next_actions_result(next_actions_content: str) -> dict:
 
 def extract_search_terms(analysis_text: str) -> List[str]:
     """
-    Extract search terms from the initial analysis to guide knowledge retrieval,
-    using LLM instead of regex patterns for better semantic understanding.
+    Extract search terms from the analysis using LLM to generate relevant queries
+    for understanding and processing the contact.
     
     Args:
-        analysis_text: The initial analysis text
+        analysis_text: The analysis text (in English or Vietnamese)
         
     Returns:
         List[str]: List of search terms for knowledge queries
     """
     try:
-        # Log the input for debugging
-        logger.info(f"[DEBUG] extract_search_terms called with analysis_text length: {len(analysis_text)}")
+        # Use a simple cache to avoid duplicate calls with the same content
+        import hashlib
+        cache_key = hashlib.md5(analysis_text.encode('utf-8')).hexdigest()
         
-        # Use existing LLM to extract search terms
-        extraction_prompt = f"""
-        Extract the most relevant search terms from the following analysis text. Return search terms in content's language.
-        Focus on extracting:
+        # Check if we have a cached result for this exact content
+        cached_terms = getattr(extract_search_terms, '_term_cache', {}).get(cache_key)
+        if cached_terms:
+            logger.info(f"Using cached search terms for analysis ({len(cached_terms)} terms)")
+            return cached_terms
         
-        1. The main topic or focus of the conversation
-        2. Specific information requirements mentioned
-        3. Missing requirements that need to be addressed
-        4. Priority information that should be gathered
-        5. The current conversation stage
+        # Log the analysis text length
+        logger.info(f"Extracting search terms using LLM from analysis (length: {len(analysis_text)})")
         
-        For each extracted term, ensure it is:
-        - A complete phrase (at least 3 words where appropriate)
-        - Directly relevant to knowledge retrieval
-        - Non-redundant with other terms
+        # Detect if Vietnamese content is present (simple check)
+        is_vietnamese = any(word in analysis_text.lower() for word in 
+                          ["của", "những", "và", "các", "là", "không", "có", "được", 
+                           "người", "trong", "để", "anh", "chị", "em", "tiếng việt"])
         
-        Format your response as a JSON array of strings, with each string being a search term.
-        Example: ["customer inquiry about pricing", "product specifications", "delivery options"]
+        # Create a focused prompt for the LLM to extract search terms
+        llm_prompt = f"""
+        The following is an analysis of a conversation with a contact. 
         
-        Here's the analysis text:
-        
+        ANALYSIS:
         {analysis_text}
+        
+        Generate 3-5 search queries that would help me find knowledge about HOW TO understand and proceed with this contact effectively.
+        
+        Focus on queries that would help me find resources about:
+        
+        1. How to understand this specific contact's situation and needs
+        2. How to communicate effectively with this person based on their style/context
+        3. How to address their expressed concerns or desires
+        4. How to gather missing information in an appropriate way
+        5. Cultural considerations relevant to interacting with this contact
+        6. The best approach for the specific conversation stage
+        7. Techniques for addressing the specific topics identified
+        
+        Each query should be specific, actionable, and directly related to this contact's unique situation.
+        
+        IMPORTANT: Generate search terms in the SAME LANGUAGE as the provided analysis. If the analysis contains Vietnamese, provide terms in Vietnamese. If it's in English, provide English terms.
+        
+        Format your response as a JSON array of strings, each being a search query.
+        Example for English: ["building rapport with anxious clients", "effective questions for health concerns", "cultural communication patterns"]
+        Example for Vietnamese: ["xây dựng mối quan hệ với khách hàng lo lắng", "câu hỏi hiệu quả về vấn đề sức khỏe", "mô hình giao tiếp văn hóa"]
+        
+        Return ONLY the JSON array, no additional text.
         """
         
-        # Use the existing LLM model
-        response = StreamLLM.invoke(extraction_prompt)
-        
-        # Check if the response is valid and extract the terms
+        # Use the LLM to generate search terms
+        response = inferLLM.invoke(llm_prompt,temperature=0.2,max_tokens=1000)
         content = response.content
-        logger.info(f"[DEBUG] LLM response for search term extraction: {content}")
-        
-        # Try to extract JSON array from the response
+        logger.info(f"LLM response for search term generation: {content}")
+        # Extract JSON array from response
         import json
         import re
         
-        # Look for JSON-like array in the response
         json_pattern = r'\[.*\]'
         json_match = re.search(json_pattern, content, re.DOTALL)
         
+        search_terms = []
         if json_match:
             try:
                 search_terms = json.loads(json_match.group(0))
-                logger.info(f"[DEBUG] Successfully extracted {search_terms} search terms from LLM response")
+                logger.info(f"Successfully extracted {len(search_terms)} search terms from LLM")
             except json.JSONDecodeError:
-                logger.warning(f"[DEBUG] Failed to parse JSON from the match: {json_match.group(0)}")
-                search_terms = []
-        else:
-            # Fallback: split by lines and look for bullet points or numbered lists
-            logger.warning("[DEBUG] No JSON array found in LLM response, trying fallback extraction")
+                logger.warning(f"Failed to parse JSON from the LLM response match: {json_match.group(0)}")
+                # Try to extract terms from the malformed JSON
+                terms_pattern = r'"([^"]+)"'
+                term_matches = re.findall(terms_pattern, json_match.group(0))
+                if term_matches:
+                    search_terms = term_matches
+                    logger.info(f"Extracted {len(search_terms)} terms using regex fallback")
+        
+        # If no JSON array was found or parsed, try to extract from the full content
+        if not search_terms:
+            logger.warning("Attempting to extract search terms from full LLM response")
             lines = content.split('\n')
-            search_terms = []
             for line in lines:
-                # Remove bullet points, numbers, etc.
-                cleaned_line = re.sub(r'^[\s-•*\d.]+\s*', '', line).strip()
-                if cleaned_line and len(cleaned_line.split()) >= 3:
-                    search_terms.append(cleaned_line)
+                line = line.strip()
+                # Look for likely search terms (phrases in quotes or numbered/bulleted items)
+                if (line.startswith('- "') or line.startswith('* "') or 
+                    re.match(r'^\d+\.\s+"', line) or '"' in line):
+                    term_match = re.search(r'"([^"]+)"', line)
+                    if term_match:
+                        search_terms.append(term_match.group(1))
         
+        # Ensure we have at least a minimum set of terms
+        if len(search_terms) < 3:
+            logger.warning("Not enough search terms extracted. Adding fallback terms.")
+            if is_vietnamese:
+                fallback_terms = [
+                    "cách hiểu ngữ cảnh của người liên hệ",
+                    "kỹ thuật giao tiếp hiệu quả trong văn hóa Việt Nam",
+                    "phương pháp đặt câu hỏi phù hợp",
+                    "xây dựng mối quan hệ với người liên hệ mới"
+                ]
+            else:
+                fallback_terms = [
+                    "understanding contact context effectively",
+                    "communication techniques for client needs",
+                    "appropriate questioning methods",
+                    "building relationship with new contacts"
+                ]
+            search_terms.extend(fallback_terms)
         
-        # Deduplicate and clean terms
-        unique_terms = []
+        # Clean and deduplicate terms
+        cleaned_terms = []
         seen = set()
         for term in search_terms:
             if not isinstance(term, str):
                 continue
+                
             term = term.strip()
-            normalized = term.lower()
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                unique_terms.append(term)
+            if term and len(term) > 5:
+                term_lower = term.lower()
+                if term_lower not in seen:
+                    seen.add(term_lower)
+                    cleaned_terms.append(term)
         
-        logger.info(f"[DEBUG] Final extracted search terms ({len(unique_terms)}): {unique_terms}")
-        return unique_terms
+        # Limit to reasonable number of terms
+        cleaned_terms = cleaned_terms[:5]
+        
+        # Store in cache
+        if not hasattr(extract_search_terms, '_term_cache'):
+            extract_search_terms._term_cache = {}
+        extract_search_terms._term_cache[cache_key] = cleaned_terms
+        
+        logger.info(f"Final search terms ({len(cleaned_terms)}): {cleaned_terms}")
+        return cleaned_terms
         
     except Exception as e:
         logger.error(f"Error extracting search terms: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        return []
+        # Fallback terms in case of error
+        logger.info("Returning fallback search terms due to error.")
+        return [
+            "understanding contact context",
+            "effective communication techniques", 
+            "relationship building strategies"
+        ]
 
 def extract_search_terms_from_next_actions(
     next_actions_text: str,
@@ -653,19 +729,27 @@ def extract_search_terms_from_next_actions(
     max_input_length: int = 10000
 ) -> List[str]:
     """
-    Extract search terms from next actions text to guide focused knowledge retrieval.
-    Enhanced to work with the Chain of Thought structure and leverage LLM for better search terms.
-    Prioritizes action-specific knowledge needs identified in the structured next actions format.
-    Preserves input language (English or Vietnamese) when extracting search terms.
-
+    Extract search terms from next actions text using LLM to generate
+    specific search queries for finding knowledge needed to perform the planned actions.
+    
     Args:
-        next_actions_text: The input text containing next actions (str).
-        min_words: Minimum number of words for a term to be included (default: 4).
-        max_input_length: Maximum allowed input length to prevent performance issues (default: 10000).
-
+        next_actions_text: The next actions output text
+        min_words: Minimum number of words for a term to be included (default: 4)
+        max_input_length: Maximum allowed input length (default: 10000)
+        
     Returns:
-        List[str]: Deduplicated list of search terms aligned with implementation needs.
+        List[str]: List of high-quality search terms for knowledge retrieval
     """
+    # Use a simple cache to avoid duplicate calls with the same content
+    import hashlib
+    cache_key = hashlib.md5(next_actions_text.encode('utf-8')).hexdigest()
+    
+    # Check if we have a cached result for this exact content
+    cached_terms = getattr(extract_search_terms_from_next_actions, '_term_cache', {}).get(cache_key)
+    if cached_terms:
+        logger.info(f"Using cached search terms for next actions ({len(cached_terms)} terms)")
+        return cached_terms
+    
     # Input validation
     if not isinstance(next_actions_text, str):
         logger.warning(f"Input must be a string, got {type(next_actions_text)}")
@@ -679,311 +763,149 @@ def extract_search_terms_from_next_actions(
     if len(next_actions_text) < 10:
         logger.warning(f"Input too short (< 10 chars): {next_actions_text}")
         return []
-
-    # Detect language in the input text
-    is_vietnamese = False
-    vietnamese_markers = ["của", "những", "và", "các", "là", "không", "có", "được", "người", "trong", "để", "anh", "chị", "em", "tiếng Việt", "VIETNAMESE"]
-    if any(marker in next_actions_text for marker in vietnamese_markers):
-        is_vietnamese = True
-        logger.info("Detected Vietnamese content in next actions")
-
-    # First, try to extract using regex patterns from the structured format
-    structured_terms = _extract_structured_next_action_terms(next_actions_text)
     
-    # If we found structured terms, use them directly
-    if structured_terms and len(structured_terms) >= 2:
-        logger.info(f"Using {len(structured_terms)} structured search terms from next actions")
-        return structured_terms
-    
-    # If structured extraction didn't yield enough results, try the LLM approach
-    try:
-        logger.info("Using LLM to extract search terms from next actions")
-        llm_terms = _extract_search_terms_with_llm(next_actions_text, is_vietnamese)
-        
-        # If we got good results from LLM, return those
-        if llm_terms and len(llm_terms) >= 2:
-            logger.info(f"Using {len(llm_terms)} LLM-generated search terms from next actions")
-            return llm_terms
-    except Exception as e:
-        logger.error(f"Error using LLM for search term extraction: {str(e)}")
-        # Continue to fallback pattern extraction
-    
-    # Fallback to pattern-based extraction if other methods failed
-    logger.info("Falling back to pattern-based extraction for next actions search terms")
-    return _extract_pattern_based_terms(next_actions_text, min_words, is_vietnamese)
+    logger.info(f"Extracting search terms from next actions: {next_actions_text}")
 
-def _extract_structured_next_action_terms(next_actions_text: str) -> List[str]:
+    # Create a focused prompt for the LLM to extract search terms
+    llm_prompt = f"""
+    The following is a "next actions plan" for a conversation with a contact.
+    
+    NEXT ACTIONS PLAN:
+    {next_actions_text}
+    
+    Generate 6-8 search queries that would help me find KNOWLEDGE needed to PERFORM these next actions effectively.
+    
+    Focus on queries that would help find resources about:
+    
+    1. HOW TO implement the specific techniques mentioned in the plan
+    2. Methods for asking the recommended questions effectively
+    3. How to create the communication approach specified in the plan
+    4. Cultural considerations needed for implementation
+    5. Specific procedures or frameworks mentioned in the techniques
+    6. Ways to adapt the communication style to match the contact's preferences
+    7. Strategies for handling potential responses from the contact
+    8. Best practices for the specific conversation stage identified
+    
+    Each query should be highly specific and focused on IMPLEMENTATION knowledge.
+    The queries should help find "how-to" guidance rather than conceptual information.
+    
+    IMPORTANT: Generate search terms in the SAME LANGUAGE as the provided next actions plan. If the plan contains Vietnamese, provide terms in Vietnamese. If it's in English, provide English terms.
+    
+    Format your response as a JSON array of strings, each being a search query.
+    Example for English: ["how to implement active listening technique with anxious clients", "effective ways to ask about health concerns indirectly", "building rapport with Vietnamese customers"]
+    Example for Vietnamese: ["cách áp dụng kỹ thuật lắng nghe chủ động với khách hàng lo lắng", "cách hỏi gián tiếp về vấn đề sức khỏe", "xây dựng mối quan hệ với khách hàng Việt Nam"]
+    
+    Return ONLY the JSON array, no additional text.
     """
-    Extract search terms from the structured next actions format based on our Chain of Thought approach.
-    Focuses on Primary Objective, Communication Approach, Knowledge Application, and Specific Questions sections.
-    Works with both English and Vietnamese sections.
     
-    Args:
-        next_actions_text: The next actions text in structured format
-        
-    Returns:
-        List[str]: Extracted search terms from structured sections
-    """
-    search_terms = []
-    
+    # Use the LLM to generate search terms
     try:
-        # Extract English and Vietnamese sections
-        english_section = ""
-        vietnamese_section = ""
+        response = inferLLM.invoke(llm_prompt, temperature=0.2, max_tokens=1000)
+        content = response.content
+        logger.info(f"LLM response for NEXT ACTION search term generation: {content}")
         
-        # Extract English section
-        english_pattern = r"(?:ENGLISH\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS|\Z))"
-        english_match = re.search(english_pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
-        if english_match:
-            english_section = english_match.group(1).strip()
-            logger.info(f"Extracted English section (length: {len(english_section)})")
+        # Extract JSON array from response
+        import json
+        import re
         
-        # Extract Vietnamese section
-        vietnamese_pattern = r"(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=\Z)"
-        vietnamese_match = re.search(vietnamese_pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
-        if vietnamese_match:
-            vietnamese_section = vietnamese_match.group(1).strip()
-            logger.info(f"Extracted Vietnamese section (length: {len(vietnamese_section)})")
+        json_pattern = r'\[.*\]'
+        json_match = re.search(json_pattern, content, re.DOTALL)
         
-        if not english_section and not vietnamese_section:
-            logger.info("No language sections found, using full text")
-            english_section = next_actions_text
+        search_terms = []
+        if json_match:
+            try:
+                search_terms = json.loads(json_match.group(0))
+                logger.info(f"Successfully extracted {len(search_terms)} search terms from LLM for next actions")
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse JSON from the LLM response match: {json_match.group(0)}")
+                # Try to extract terms from the malformed JSON
+                terms_pattern = r'"([^"]+)"'
+                term_matches = re.findall(terms_pattern, json_match.group(0))
+                if term_matches:
+                    search_terms = term_matches
+                    logger.info(f"Extracted {len(search_terms)} terms using regex fallback")
         
-        # Process both language sections
-        for lang, section in [("English", english_section), ("Vietnamese", vietnamese_section)]:
-            if not section:
-                continue
-                
-            logger.info(f"Processing {lang} section for structured terms")
+        # If no JSON array was found or parsed, try to extract from the full content
+        if not search_terms:
+            logger.warning("Attempting to extract search terms from full LLM response")
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                # Look for likely search terms (phrases in quotes or numbered/bulleted items)
+                if (line.startswith('- "') or line.startswith('* "') or 
+                    re.match(r'^\d+\.\s+"', line) or '"' in line):
+                    term_match = re.search(r'"([^"]+)"', line)
+                    if term_match:
+                        search_terms.append(term_match.group(1))
+        
+        # Ensure we have at least a minimum set of terms
+        if len(search_terms) < 2:
+            logger.warning("Not enough search terms extracted for next actions. Adding fallback terms.")
             
-            # Define section patterns based on language
-            if lang == "English":
-                sections = {
-                    "PRIMARY OBJECTIVE": r"(?:1\.\s*PRIMARY\s+OBJECTIVE\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                    "COMMUNICATION APPROACH": r"(?:2\.\s*COMMUNICATION\s+APPROACH\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                    "SPECIFIC QUESTIONS": r"(?:3\.\s*SPECIFIC\s+QUESTIONS/STATEMENTS\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                    "KNOWLEDGE APPLICATION": r"(?:4\.\s*KNOWLEDGE\s+APPLICATION\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                }
-            else:  # Vietnamese
-                sections = {
-                    "MỤC TIÊU CHÍNH": r"(?:1\.\s*MỤC\s+TIÊU\s+CHÍNH\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                    "CÁCH TIẾP CẬN GIAO TIẾP": r"(?:2\.\s*CÁCH\s+TIẾP\s+CẬN\s+GIAO\s+TIẾP\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                    "CÂU HỎI CỤ THỂ": r"(?:3\.\s*CÂU\s+HỎI/PHÁT\s+BIỂU\s+CỤ\s+THỂ\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                    "ÁP DỤNG KIẾN THỨC": r"(?:4\.\s*ÁP\s+DỤNG\s+KIẾN\s+THỨC\s*:)([^#\d]+?)(?=\d\.|\Z)",
-                }
-            
-            section_contents = {}
-            for section_name, pattern in sections.items():
-                match = re.search(pattern, section, re.IGNORECASE | re.DOTALL)
-                if match:
-                    content = match.group(1).strip()
-                    section_contents[section_name] = content
-                    logger.info(f"Found {section_name} section: {content[:50]}...")
-            
-            # Extract terms from each section
-            if lang == "English":
-                # Extract from PRIMARY OBJECTIVE
-                if "PRIMARY OBJECTIVE" in section_contents:
-                    objective = section_contents["PRIMARY OBJECTIVE"]
-                    objective = re.sub(r'\[.*?\]', '', objective).strip()
-                    if len(objective.split()) >= 4:
-                        search_terms.append(f"how to {objective}")
-                        search_terms.append(objective)
-                
-                # Extract from KNOWLEDGE APPLICATION
-                if "KNOWLEDGE APPLICATION" in section_contents:
-                    knowledge_app = section_contents["KNOWLEDGE APPLICATION"]
-                    
-                    # Extract framework
-                    framework_match = re.search(r'(?:FRAMEWORK\s*:)([^-\n]+)', knowledge_app, re.IGNORECASE)
-                    if framework_match:
-                        framework = framework_match.group(1).strip()
-                        framework = re.sub(r'\[.*?\]', '', framework).strip()
-                        if framework and len(framework.split()) >= 2:
-                            search_terms.append(framework)
-            
-                    # Extract technique
-                    technique_match = re.search(r'(?:TECHNIQUE\s*:)([^-\n]+)', knowledge_app, re.IGNORECASE)
-                    if technique_match:
-                        technique = technique_match.group(1).strip()
-                        technique = re.sub(r'\[.*?\]', '', technique).strip()
-                        if technique and len(technique.split()) >= 2:
-                            search_terms.append(f"how to use {technique}")
-                            search_terms.append(technique)
-                
-                # Extract specific questions
-                if "SPECIFIC QUESTIONS" in section_contents:
-                    specific_q = section_contents["SPECIFIC QUESTIONS"]
-                    
-                    # Extract quoted questions
-                    quoted_questions = re.findall(r'"([^"]*\?)"', specific_q)
-                    for question in quoted_questions:
-                        if len(question.split()) >= 4:
-                            search_terms.append(question)
-                
-                # Extract from COMMUNICATION APPROACH
-                if "COMMUNICATION APPROACH" in section_contents:
-                    comm_approach = section_contents["COMMUNICATION APPROACH"]
-                    
-                    # Extract key messages
-                    key_messages_match = re.search(r'(?:KEY\s+MESSAGES\s*:)([^-\n]+)', comm_approach, re.IGNORECASE | re.DOTALL)
-                    if key_messages_match:
-                        key_messages = key_messages_match.group(1).strip()
-                        message_items = re.split(r'[-•*\d+\.\s]+', key_messages)
-                        for message in message_items:
-                            message = message.strip()
-                            message = re.sub(r'\[.*?\]', '', message).strip()
-                            if message and len(message.split()) >= 4:
-                                search_terms.append(message)
-            else:  # Vietnamese
-                # Extract from MỤC TIÊU CHÍNH
-                if "MỤC TIÊU CHÍNH" in section_contents:
-                    objective = section_contents["MỤC TIÊU CHÍNH"]
-                    objective = re.sub(r'\[.*?\]', '', objective).strip()
-                    if len(objective.split()) >= 3:  # Vietnamese may need fewer words threshold
-                        search_terms.append(f"cách {objective}")
-                        search_terms.append(objective)
-                
-                # Extract from ÁP DỤNG KIẾN THỨC
-                if "ÁP DỤNG KIẾN THỨC" in section_contents:
-                    knowledge_app = section_contents["ÁP DỤNG KIẾN THỨC"]
-                    
-                    # Extract framework
-                    framework_match = re.search(r'(?:KHUNG\s+PHÂN\s+LOẠI\s*:)([^-\n]+)', knowledge_app, re.IGNORECASE)
-                    if framework_match:
-                        framework = framework_match.group(1).strip()
-                        framework = re.sub(r'\[.*?\]', '', framework).strip()
-                        if framework and len(framework.split()) >= 2:
-                            search_terms.append(framework)
-                    
-                    # Extract technique
-                    technique_match = re.search(r'(?:KỸ\s+THUẬT\s*:)([^-\n]+)', knowledge_app, re.IGNORECASE)
-                    if technique_match:
-                        technique = technique_match.group(1).strip()
-                        technique = re.sub(r'\[.*?\]', '', technique).strip()
-                        if technique and len(technique.split()) >= 2:
-                            search_terms.append(f"cách sử dụng {technique}")
-                            search_terms.append(technique)
-                
-                # Extract specific questions
-                if "CÂU HỎI CỤ THỂ" in section_contents:
-                    specific_q = section_contents["CÂU HỎI CỤ THỂ"]
-                    
-                    # Extract quoted questions
-                    quoted_questions = re.findall(r'"([^"]*\?)"', specific_q)
-                    for question in quoted_questions:
-                        if len(question.split()) >= 3:  # Vietnamese may need fewer words threshold
-                            search_terms.append(question)
-                
-                # Extract from CÁCH TIẾP CẬN GIAO TIẾP
-                if "CÁCH TIẾP CẬN GIAO TIẾP" in section_contents:
-                    comm_approach = section_contents["CÁCH TIẾP CẬN GIAO TIẾP"]
-                    
-                    # Extract key messages (THÔNG ĐIỆP CHÍNH)
-                    key_messages_match = re.search(r'(?:THÔNG\s+ĐIỆP\s+CHÍNH\s*:)([^-\n]+)', comm_approach, re.IGNORECASE | re.DOTALL)
-                    if key_messages_match:
-                        key_messages = key_messages_match.group(1).strip()
-                        message_items = re.split(r'[-•*\d+\.\s]+', key_messages)
-                        for message in message_items:
-                            message = message.strip()
-                            message = re.sub(r'\[.*?\]', '', message).strip()
-                            if message and len(message.split()) >= 3:  # Vietnamese may need fewer words threshold
-                                search_terms.append(message)
+            fallback_terms = [
+                    "cách thực hiện kỹ thuật giao tiếp hiệu quả",
+                    "phương pháp đặt câu hỏi trong cuộc trò chuyện",
+                    "cách xử lý phản ứng của khách hàng",
+                    "kỹ thuật xây dựng mối quan hệ trong văn hóa Việt Nam",
+                    "phương pháp giao tiếp phù hợp với văn hóa Việt Nam",
+                    "chiến lược thích ứng với phản hồi của khách hàng",
+                    "kỹ thuật đặt câu hỏi hiệu quả cho giai đoạn trò chuyện"
+                ]
+            search_terms.extend(fallback_terms)
         
-        # Deduplicate
-        unique_terms = []
+        # Clean and deduplicate terms
+        cleaned_terms = []
         seen = set()
         for term in search_terms:
-            normalized = term.lower().strip()
-            if normalized and normalized not in seen and len(normalized) > 0:
-                seen.add(normalized)
-                unique_terms.append(term)
-
-        logger.info(f"Extracted {len(unique_terms)} unique search terms using pattern-based approach")
-        return unique_terms
-
+            if not isinstance(term, str):
+                continue
+                
+            term = term.strip()
+            if term and len(term) > 5 and len(term.split()) >= min_words:
+                term_lower = term.lower()
+                if term_lower not in seen:
+                    seen.add(term_lower)
+                    cleaned_terms.append(term)
+        
+        # Limit to reasonable number of terms (increased from 5 to 8)
+        cleaned_terms = cleaned_terms[:8]
+        
+        # Store in cache
+        if not hasattr(extract_search_terms_from_next_actions, '_term_cache'):
+            extract_search_terms_from_next_actions._term_cache = {}
+        extract_search_terms_from_next_actions._term_cache[cache_key] = cleaned_terms
+        
+        logger.info(f"Final next actions search terms ({len(cleaned_terms)}): {cleaned_terms}")
+        return cleaned_terms
+        
     except Exception as e:
-        logger.error(f"Error extracting structured next action terms: {str(e)}", exc_info=True)
-        return []
-
-def _extract_search_terms_with_llm(next_actions_text: str, is_vietnamese: bool = False) -> List[str]:
-    """
-    Use LLM to extract search terms from next actions text.
-    This provides more intelligent extraction based on semantic understanding.
-    Supports both English and Vietnamese language.
-    
-    Args:
-        next_actions_text: The next actions text
-        is_vietnamese: Whether the text is primarily in Vietnamese
+        logger.error(f"Error extracting search terms from next actions: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         
-    Returns:
-        List[str]: Search terms extracted by LLM
-    """
-    # Build prompt with language-specific instructions
-    if is_vietnamese:
-        extraction_prompt = f"""
-        Trích xuất các từ khóa tìm kiếm tập trung vào "cách thực hiện" từ kế hoạch hành động tiếp theo này. Các từ khóa này sẽ được sử dụng để truy xuất kiến thức về CÁCH thực hiện các hành động đã lên kế hoạch.
+        # Fallback to pattern-based extraction
+        logger.info("Falling back to pattern-based extraction for next actions")
+        fallback_terms = _extract_pattern_based_terms(next_actions_text, min_words)
         
-        Tập trung vào trích xuất:
-        1. Các kỹ thuật cụ thể được đề cập cần kiến thức triển khai
-        2. Khung phân loại cần được áp dụng
-        3. Cách tiếp cận giao tiếp yêu cầu kiến thức cụ thể
-        4. Câu hỏi cụ thể nên được hỏi
-        5. Động từ hành động kết hợp với các đối tượng của chúng (ví dụ: "quản lý phản đối", "xây dựng mối quan hệ")
+        # If still no terms, use very basic fallbacks
+        if not fallback_terms or len(fallback_terms) < 3:
+           
+            fallback_terms = [
+                    "kỹ thuật giao tiếp hiệu quả",
+                    "phương pháp đặt câu hỏi",
+                    "xây dựng mối quan hệ với khách hàng"
+            ]
+           
+        # Limit number of terms
+        fallback_terms = fallback_terms[:5]
         
-        Đối với mỗi từ khóa được trích xuất, hãy tập trung vào khía cạnh "làm thế nào để làm điều đó", không chỉ xác định những gì cần làm.
+        # Store in cache
+        if not hasattr(extract_search_terms_from_next_actions, '_term_cache'):
+            extract_search_terms_from_next_actions._term_cache = {}
+        extract_search_terms_from_next_actions._term_cache[cache_key] = fallback_terms
         
-        Định dạng phản hồi của bạn dưới dạng mảng JSON các chuỗi, với mỗi chuỗi là một từ khóa tìm kiếm tập trung vào kiến thức "cách thực hiện".
-        Ví dụ: ["cách triển khai kỹ thuật đặt câu hỏi SPIN", "xây dựng mối quan hệ với các khách hàng phân tích", "kỹ thuật xử lý phản đối về giá"]
-        
-        Đây là các hành động tiếp theo:
-        
-        {next_actions_text}
-        """
-    else:
-        extraction_prompt = f"""
-        Extract "how-to" focused search terms from the following next actions plan. These search terms will be used to retrieve knowledge on HOW to implement the planned actions.
-        
-        Focus on extracting:
-        1. Specific techniques mentioned that require implementation knowledge
-        2. Frameworks that need to be applied
-        3. Communication approaches that require specific knowledge
-        4. Specific questions that should be asked
-        5. Action verbs paired with their objects (e.g., "manage objections", "build rapport")
-        
-        For each extracted term, focus on the "how to do it" aspect, not just identifying what to do.
-        
-        Format your response as a JSON array of strings, with each string being a search term focused on "how to" knowledge.
-        Example: ["how to implement SPIN questioning technique", "building rapport with analytical personalities", "techniques for managing price objections"]
-        
-        Here are the next actions:
-        
-        {next_actions_text}
-        """
-    
-    response = StreamLLM.invoke(extraction_prompt)
-    content = response.content
-    
-    # Try to extract JSON array from the response
-    import json
-    json_pattern = r'\[.*\]'
-    json_match = re.search(json_pattern, content, re.DOTALL)
-    
-    if json_match:
-        try:
-            search_terms = json.loads(json_match.group(0))
-            logger.info(f"Successfully extracted {len(search_terms)} search terms using LLM")
-            
-            # Ensure minimum quality criteria
-            filtered_terms = [term for term in search_terms if isinstance(term, str) and len(term.split()) >= 2]
-            return filtered_terms
-            
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse JSON from LLM match: {json_match.group(0)}")
-            return []
-    else:
-        logger.warning("No JSON array found in LLM response")
-        return []
+        logger.info(f"Returning fallback search terms for next actions: {fallback_terms}")
+        return fallback_terms
 
 def _extract_pattern_based_terms(next_actions_text: str, min_words: int = 4, is_vietnamese: bool = False) -> List[str]:
     """
@@ -1009,17 +931,35 @@ def _extract_pattern_based_terms(next_actions_text: str, min_words: int = 4, is_
         english_section = ""
         vietnamese_section = ""
         
-        english_pattern = r"(?:ENGLISH\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS|\Z))"
-        english_match = re.search(english_pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
-        if english_match:
-            english_section = english_match.group(1).strip()
-            logger.info(f"Extracted English section (length: {len(english_section)})")
+        # Define multiple possible patterns for English and Vietnamese sections
+        english_patterns = [
+            r"(?:ENGLISH\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS|VIETNAMESE\s*TRANSLATION|BẢN\s*DỊCH\s*TIẾNG\s*VIỆT|\Z))",
+            r"(?:ENGLISH\s*CHAIN\s*OF\s*THOUGHT\s*[:\n])(.*?)(?=(?:ENGLISH\s*NEXT\s*ACTIONS|VIETNAMESE\s*NEXT\s*ACTIONS|VIETNAMESE\s*TRANSLATION|BẢN\s*DỊCH\s*TIẾNG\s*VIỆT|\Z))",
+            r"(?:NEXT\s*ACTIONS\s*[:\n])(.*?)(?=(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS|VIETNAMESE\s*TRANSLATION|BẢN\s*DỊCH\s*TIẾNG\s*VIỆT|\Z))"
+        ]
         
-        vietnamese_pattern = r"(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=\Z)"
-        vietnamese_match = re.search(vietnamese_pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
-        if vietnamese_match:
-            vietnamese_section = vietnamese_match.group(1).strip()
-            logger.info(f"Extracted Vietnamese section (length: {len(vietnamese_section)})")
+        vietnamese_patterns = [
+            r"(?:VIETNAMESE\s*(?:NEXT\s*)*ACTIONS\s*[:\n])(.*?)(?=\Z)",
+            r"(?:VIETNAMESE\s*TRANSLATION\s*[:\n])(.*?)(?=\Z)",
+            r"(?:BẢN\s*DỊCH\s*TIẾNG\s*VIỆT\s*[:\n])(.*?)(?=\Z)",
+            r"(?:TIẾNG\s*VIỆT\s*[:\n])(.*?)(?=\Z)"
+        ]
+        
+        # Extract English section
+        for pattern in english_patterns:
+            english_match = re.search(pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
+            if english_match:
+                english_section = english_match.group(1).strip()
+                logger.info(f"Extracted English section (length: {len(english_section)}) using pattern: {pattern[:30]}...")
+                break
+        
+        # Extract Vietnamese section
+        for pattern in vietnamese_patterns:
+            vietnamese_match = re.search(pattern, next_actions_text, re.IGNORECASE | re.DOTALL)
+            if vietnamese_match:
+                vietnamese_section = vietnamese_match.group(1).strip()
+                logger.info(f"Extracted Vietnamese section (length: {len(vietnamese_section)}) using pattern: {pattern[:30]}...")
+                break
         
         if not english_section and not vietnamese_section:
             logger.info("No language sections found, using full text")

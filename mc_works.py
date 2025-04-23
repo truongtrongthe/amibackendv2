@@ -6,7 +6,24 @@ from langchain_core.messages import HumanMessage,AIMessage
 import json
 #from sentence_transformers import SentenceTransformer, util
 import numpy as np
-from database import query_graph_knowledge, get_version_brain_banks, get_cached_embedding
+from database import (
+    query_knowledge, 
+    save_training, 
+    # These functions are now imported from hotbrain instead
+    # query_brain_with_embeddings_batch,
+    # get_cached_embedding,
+    # get_version_brain_banks,
+    clean_text
+)
+
+# Import the functions from hotbrain module 
+from hotbrain import (
+    query_brain_with_embeddings_batch,
+    get_cached_embedding,
+    get_version_brain_banks,
+    batch_get_embeddings,
+    query_graph_knowledge  # Add this import
+)
 import re
 from typing import Tuple, Dict, Any
 from analysis import stream_analysis, build_context_analysis_prompt, process_analysis_result

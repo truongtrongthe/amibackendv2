@@ -1,6 +1,6 @@
 from typing import Dict, List
 from utilities import logger
-from database import query_graph_knowledge
+from hotbrain import query_graph_knowledge
 import re
 
 class PersonalityManager:
