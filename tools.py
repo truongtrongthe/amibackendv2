@@ -64,13 +64,17 @@ CONTEXT_ANALYSIS_SCHEMA = {
                 "type": "string",
                 "description": "The full conversation history to analyze"
             },
+            "graph_version_id": {
+                "type": "string",
+                "description": "The version ID of the knowledge graph to query for profile information"
+            },
             "additional_instructions": {
                 "type": "string",
                 "description": "Optional additional instructions for the analysis",
                 "default": ""
             }
         },
-        "required": ["conversation_context"]
+        "required": ["conversation_context", "graph_version_id"]
     }
 }
 
@@ -164,16 +168,63 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     Handle context analysis requests with streaming
     
     Args:
-        params: Dictionary containing conversation_context and optional additional_instructions
+        params: Dictionary containing conversation_context, graph_version_id, and optional additional_instructions
         
     Yields:
         Dict events with streaming analysis results
     """
     conversation_context = params.get("conversation_context", "")
+    graph_version_id = params.get("graph_version_id", "")
     additional_instructions = params.get("additional_instructions", "")
     
-    # Build the analysis prompt
-    analysis_prompt = build_context_analysis_prompt(conversation_context, additional_instructions)
+    # Fetch profile information similar to mc.py
+    process_instructions = additional_instructions
+    
+    try:
+        # Query for profile information if graph_version_id is provided
+        if graph_version_id:
+            from database import query_graph_knowledge
+            
+            # Enhanced query focused on comprehensive contact analysis techniques including first-message analysis
+            profile_query = "kỹ năng phân tích chân dung khách hàng; phân tích tin nhắn đầu tiên; nhận diện nhanh người dùng; kỹ thuật phân tích với ít thông tin"
+            
+            # Classification and methodology query focused on frameworks and structured approaches
+            classification_query = "khung phân loại khách hàng; mô hình phân tích tâm lý; phương pháp đánh giá nhu cầu ban đầu; nhận diện dấu hiệu tiềm năng"
+            
+            # Run both queries and combine results
+            profile_entries_task = query_graph_knowledge(graph_version_id, profile_query, top_k=8)
+            classification_entries_task = query_graph_knowledge(graph_version_id, classification_query, top_k=8)
+            
+            # Gather both query results
+            profile_entries, classification_entries = await asyncio.gather(
+                profile_entries_task, 
+                classification_entries_task
+            )
+            
+            # Combine all entries, removing duplicates by ID
+            combined_entries = []
+            seen_ids = set()
+            
+            for entry in profile_entries + classification_entries:
+                entry_id = entry.get("id", "unknown")
+                if entry_id not in seen_ids:
+                    seen_ids.add(entry_id)
+                    combined_entries.append(entry)
+            
+            # Use combined results
+            if combined_entries:
+                # Format profile instructions like in mc.py
+                profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
+                process_instructions = profile_instructions
+                logger.info(f"Retrieved {len(combined_entries)} profile entries for context analysis")
+            else:
+                logger.warning(f"No profile entries found for graph_version_id: {graph_version_id}")
+    except Exception as e:
+        logger.error(f"Error fetching profile information: {str(e)}")
+        # Continue with existing instructions if profile fetch fails
+    
+    # Build the analysis prompt with profile-enhanced instructions
+    analysis_prompt = build_context_analysis_prompt(conversation_context, process_instructions)
     
     # Use existing stream_analysis function
     thread_id = params.get("_thread_id")  # Internal param for WebSocket
@@ -255,13 +306,8 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
         from database import query_brain_with_embeddings_batch
         
         # Check if streaming function is available
-        try:
-            from database import stream_query_brain_with_embeddings
-            has_streaming = True
-        except ImportError:
-            has_streaming = False
-            logger.warning("stream_query_brain_with_embeddings not available, falling back to batch queries")
-        
+        has_streaming = True  # Initialize has_streaming variable
+                
         # Process brain banks
         for brain_bank in brain_banks:
             bank_name = brain_bank["bank_name"]
@@ -271,8 +317,8 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                 # Stream results from this brain bank
                 try:
                     # Use the streaming function if available
-                    from database import stream_query_brain_with_embeddings
-                    async for result_batch in stream_query_brain_with_embeddings(
+                    from database import query_brain_with_embeddings_batch
+                    async for result_batch in query_brain_with_embeddings_batch(
                         query_embeddings, bank_name, brain_id, top_k
                     ):
                         # Filter out already streamed results
@@ -384,17 +430,17 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     # Build language and cultural awareness instructions
     cultural_instructions = """
-Respond in the detected language with a natural and culturally aware tone. Adapt to the cultural context implied by the language by following these principles:
+        Respond in the detected language with a natural and culturally aware tone. Adapt to the cultural context implied by the language by following these principles:
 
-1. Choose forms of address or expressions that reflect the social and relational dynamics inferred from the user's communication style and context.
-2. Initiate or respond with a tone that feels appropriate to the conversation's flow, balancing respect and familiarity as needed.
-3. Incorporate linguistic nuances or conversational elements that enhance connection and align with natural speech patterns in the detected language.
-4. Adjust your tone and level of formality to match the user's style, evolving with the interaction.
-5. Present ideas or suggestions thoughtfully, respecting the user's perspective and cultural expectations.
-6. Ensure your language feels authentic and fluent, mirroring the natural rhythms and idioms of the detected language.
+        1. Choose forms of address or expressions that reflect the social and relational dynamics inferred from the user's communication style and context.
+        2. Initiate or respond with a tone that feels appropriate to the conversation's flow, balancing respect and familiarity as needed.
+        3. Incorporate linguistic nuances or conversational elements that enhance connection and align with natural speech patterns in the detected language.
+        4. Adjust your tone and level of formality to match the user's style, evolving with the interaction.
+        5. Present ideas or suggestions thoughtfully, respecting the user's perspective and cultural expectations.
+        6. Ensure your language feels authentic and fluent, mirroring the natural rhythms and idioms of the detected language.
 
-Focus on embodying the cultural values and norms associated with the detected language, fostering rapport through empathy and adaptability while personalizing your tone to the user's cues.
-"""
+        Focus on embodying the cultural values and norms associated with the detected language, fostering rapport through empathy and adaptability while personalizing your tone to the user's cues.
+        """
     
     # Build the response prompt
     prompt_parts = [
@@ -422,26 +468,34 @@ Focus on embodying the cultural values and norms associated with the detected la
         """
             You are an empathetic AI assistant helping users with their concerns. Your goal is to provide thoughtful, natural-sounding responses tailored to each user's unique situation.
             
-            Focus on three key components:
+            Follow ALL of these requirements in your response:
             
-            1. UNDERSTAND THE USER: The analysis provides insights into the user's needs, conversation stage, and information gaps. Use this understanding as your foundation.
-               - Recognize where the user is in their journey
-               - Identify what information is missing
-               - Understand the emotional context
+            1. UNDERSTAND THE USER (FROM ANALYSIS): You MUST incorporate insights from the analysis section, including:
+               - The customer's exact classification and emotional state
+               - Their identified needs and pain points
+               - The precise conversation stage they're in
+               - Any knowledge gaps discovered in the analysis
             
-            2. FOLLOW THE GUIDANCE: The next actions provide specific direction on what to do next. Follow this guidance closely.
-               - If specific phrases or questions are recommended, incorporate them naturally
-               - Maintain the suggested sequence of actions
-               - When knowledge provides exact wording for questions or statements, use them authentically
+            2. FOLLOW THE NEXT ACTIONS: You MUST implement the specific next actions provided, including:
+               - Using the exact questions/statements recommended when present
+               - Following the specific communication approach outlined
+               - Applying the named frameworks and techniques specified
+               - Maintaining the priority and sequence of recommended actions
             
-            3. SOUND NATURAL: While following the guidance, ensure your response sounds conversational and genuine.
+            3. APPLY BOTH KNOWLEDGE SOURCES: You MUST incorporate knowledge from both retrieval phases:
+               - Use the initial knowledge for understanding the situation and classification
+               - Apply the "how-to" knowledge for implementing specific techniques
+               - When using exact wording or techniques from knowledge, maintain their integrity
+               - If contradictions exist between knowledge sources, prioritize the more specific implementation guidance
+            
+            4. SOUND NATURAL: While following all requirements above, ensure your response sounds conversational:
                - Adapt to the detected language and cultural context
-               - Blend any suggested wording or phrases seamlessly into your response
-               - Maintain a tone that builds trust and connection
-               - End your messages naturally without formulaic closing statements; let conversations flow as they would between humans
+               - Blend technical approaches seamlessly into natural dialogue
+               - Maintain a tone that builds trust based on the identified classification
+               - End your messages naturally without formulaic closing statements
                - Avoid repeating reassurances or support statements at the end of every message
             
-            Craft a concise response (80-100 words) that addresses the user's concerns while following the recommended actions. Your response should feel like it's coming from a knowledgeable, empathetic human who deeply understands both the user's situation and cultural context.
+            Craft a concise response (80-100 words) that addresses the user's concerns while following ALL the required elements above. Your response will be evaluated on how effectively you incorporate the analysis, next actions, and both phases of knowledge retrieval.
         """
         ])
     
@@ -591,14 +645,24 @@ async def process_llm_with_tools(
     
     # Convert conversation history to string format
     conversation_context = ""
-    for msg in conversation_history[-100:]:  # Limit to last 10 messages
+    current_message_in_history = False
+    
+    # Check if the current message is already in the history
+    for msg in conversation_history[-100:]:
+        if msg.get("role") == "user" and msg.get("content") == user_message:
+            current_message_in_history = True
+            break
+    
+    # Format the conversation history
+    for msg in conversation_history[-100:]:
         if msg.get("role") == "user":
             conversation_context += f"User: {msg.get('content', '')}\n"
         elif msg.get("role") == "assistant":
             conversation_context += f"AI: {msg.get('content', '')}\n"
     
-    # Add current user message
-    conversation_context += f"User: {user_message}\n"
+    # Add current user message only if it's not already in the history
+    if not current_message_in_history:
+        conversation_context += f"User: {user_message}\n"
     
     use_websocket = thread_id is not None
     thread_id_for_analysis = thread_id
@@ -615,7 +679,8 @@ async def process_llm_with_tools(
         # STEP 3: Run context analysis
         logger.info(f"Starting context analysis for message: {user_message[:50]}...")
         context_params = {
-            "conversation_context": conversation_context
+            "conversation_context": conversation_context,
+            "graph_version_id": graph_version_id
         }
         if thread_id:
             context_params["_thread_id"] = thread_id
@@ -640,8 +705,8 @@ async def process_llm_with_tools(
             search_terms = [user_message]
             logger.info(f"Using fallback search term: {user_message}")
         
-        # STEP 5: Run knowledge query
-        logger.info(f"Starting knowledge query with {len(search_terms)} terms...")
+        # STEP 5: Run initial knowledge query based on analysis
+        logger.info(f"Starting initial knowledge query with {len(search_terms)} terms...")
         knowledge_params = {
             "queries": search_terms,
             "graph_version_id": graph_version_id,
@@ -661,15 +726,15 @@ async def process_llm_with_tools(
                 if isinstance(entries, list):
                     all_knowledge_entries.extend(entries)
         
-        # Format knowledge context
+        # Format initial knowledge context
         if all_knowledge_entries:
             knowledge_context = "\n\n".join(entry.get("raw", "") for entry in all_knowledge_entries)
             knowledge_found = True
-            logger.info(f"Retrieved {len(all_knowledge_entries)} knowledge entries")
+            logger.info(f"Retrieved {len(all_knowledge_entries)} initial knowledge entries")
         else:
             knowledge_context = "No relevant knowledge found."
             knowledge_found = False
-            logger.info("No knowledge entries found")
+            logger.info("No initial knowledge entries found")
         
         # STEP 6: Run next actions
         logger.info(f"Starting next actions determination...")
@@ -682,13 +747,87 @@ async def process_llm_with_tools(
             next_actions_params["_thread_id"] = thread_id
             
         next_actions_results = ""
+        next_action_error = False
         async for result in next_actions_handler(next_actions_params):
             # Pass through the next actions events directly without double-wrapping
             yield result
             
+            # Check for error flag
+            if result.get("error", False):
+                next_action_error = True
+                logger.warning(f"Received error in next action: {result.get('content', '')}")
+            
             # If this is a complete event, store the full next actions
             if isinstance(result, dict) and result.get("complete", False):
                 next_actions_results = result.get("content", "")
+        
+        # STEP 6.5: Extract search terms from next actions and retrieve additional targeted knowledge
+        additional_knowledge_entries = []
+        if not next_action_error and next_actions_results and len(next_actions_results) > 50:
+            try:
+                logger.info("Extracting search terms from next actions for targeted HOW-TO knowledge retrieval")
+                from analysis import extract_search_terms_from_next_actions, process_next_actions_result
+                
+                # First, process the next_actions_results to get structured data
+                next_actions_data = process_next_actions_result(next_actions_results)
+                
+                # Make sure we have valid data and handle potential errors
+                if not next_actions_data or not isinstance(next_actions_data, dict):
+                    logger.warning(f"Invalid next_actions_data format: {next_actions_data}")
+                    next_actions_data = {"next_action_english": "", "next_action_vietnamese": "", "next_action_full": next_actions_results}
+                
+                # Extract terms from the next actions to get more targeted "how-to" knowledge
+                # Use the full next_actions_results to preserve both languages
+                logger.info(f"Using complete next actions for targeted knowledge queries...")
+                action_search_terms = extract_search_terms_from_next_actions(next_actions_results)
+                
+                if action_search_terms:
+                    logger.info(f"Extracted {len(action_search_terms)} search terms from next actions: {action_search_terms}")
+                    
+                    # Run a secondary knowledge query with terms from next actions
+                    logger.info(f"Starting secondary knowledge query for HOW-TO knowledge...")
+                    action_knowledge_params = {
+                        "queries": action_search_terms,
+                        "graph_version_id": graph_version_id,
+                        "top_k": 3
+                    }
+                    if thread_id:
+                        action_knowledge_params["_thread_id"] = thread_id
+                    
+                    # Query for additional knowledge
+                    async for action_result in knowledge_query_handler(action_knowledge_params):
+                        # Pass through the knowledge events directly without double-wrapping
+                        yield action_result
+                        
+                        # Collect additional knowledge entries
+                        if isinstance(action_result, dict) and "content" in action_result:
+                            add_entries = action_result.get("content", [])
+                            if isinstance(add_entries, list):
+                                additional_knowledge_entries.extend(add_entries)
+                else:
+                    logger.info("No additional search terms extracted from next actions")
+            except Exception as e:
+                logger.error(f"Error in extracting search terms from next actions: {str(e)}")
+                logger.error(traceback.format_exc())
+        
+        # Combine initial and additional knowledge
+        if additional_knowledge_entries:
+            logger.info(f"Retrieved {len(additional_knowledge_entries)} additional knowledge entries from next actions")
+            
+            # Deduplicate by ID
+            all_entries_combined = all_knowledge_entries.copy()
+            seen_ids = {entry.get("id", "unknown") for entry in all_knowledge_entries}
+            
+            for entry in additional_knowledge_entries:
+                entry_id = entry.get("id", "unknown")
+                if entry_id not in seen_ids:
+                    seen_ids.add(entry_id)
+                    all_entries_combined.append(entry)
+            
+            # Format combined knowledge context
+            knowledge_context = "\n\n".join(entry.get("raw", "") for entry in all_entries_combined)
+            knowledge_found = True
+            logger.info(f"Using combined {len(all_entries_combined)} knowledge entries for response generation")
         
         # STEP 7: Assess knowledge coverage (simplified)
         # In the original _handle_request this would call assess_knowledge_coverage

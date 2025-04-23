@@ -962,7 +962,7 @@ async def get_cached_embedding(text: str, cache_collection: str = "embedding_cac
 async def query_brain_with_embeddings_batch(query_embeddings: Dict[int, List[float]], 
                                             namespace: str, 
                                             brain_id: str, 
-                                            top_k: int = 10, 
+                                            top_k: int = 5, 
                                             metadata_filter: Optional[Dict] = None) -> Dict[int, List[Dict]]:
     """
     Batch process multiple query embeddings for a single brain namespace with optimized parallelism.

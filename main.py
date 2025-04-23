@@ -30,7 +30,7 @@ recent_requests = deque(maxlen=100)
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
 #from docuhandler import process_document,summarize_document
-from training_prep import process_document,refine_document,extract_knowledge_with_llm,extract_knowledge_from_chunk
+from training_prep import process_document,refine_document
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
@@ -40,7 +40,7 @@ from contactconvo import ConversationManager
 from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created, generate_ai_response
 from contact_analysis import ContactAnalyzer
 from braingraph import (
-    create_brain_graph, get_brain_graph, create_brain_graph_version,
+    create_brain_graph, get_brain_graph,
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
     update_brain_graph_version_status, BrainGraphVersion
 )

@@ -100,7 +100,7 @@ async def extract_knowledge_with_llm(text: str, domain: str = "", max_items: int
              
         prompt = (
                 f"You are a precise knowledge extractor specialized in identifying actionable information{domain_context} while preserving cultural context and nuance.\n\n"
-                f"TASK: Extract up to 20 key knowledge elements from the text below.\n\n"
+                f"TASK: Extract key knowledge elements from the text below.\n\n"
                 f"GUIDELINES:\n"
                 f"1. Focus on FACTUAL and ACTIONABLE knowledge (e.g., procedures, requirements).\n"
                 f"2. Include all specific questions, scripts, and sequential steps EXACTLY as written.\n"
@@ -129,38 +129,6 @@ async def extract_knowledge_with_llm(text: str, domain: str = "", max_items: int
         logger.error(f"LLM knowledge extraction failed: {e}")
         return "Knowledge extraction unavailable due to processing error."
 
-async def extract_knowledge_from_chunk(chunk_text: str, chunk_context: str = "") -> str:
-    """Extract focused knowledge elements from a document chunk while preserving the original language."""
-    try:
-        prompt = (
-            f"You are a precision knowledge extractor for a document segment, specializing in cultural nuance and contextual wisdom.\n\n"
-            f"CONTEXT: This is a segment {chunk_context} from a larger document.\n\n"
-            f"TASK: Extract 3-5 key knowledge elements from this segment, ensuring all critical details are captured.\n\n"
-            f"GUIDELINES:\n"
-            f"1. Prioritize CONCRETE, ACTIONABLE information (e.g., procedures, requirements, steps).\n"
-            f"2. Include all specific questions, scripts, and sequential steps EXACTLY as written.\n"
-            f"3. Capture specific details (e.g., names, numbers, dates, technical terms).\n"
-            f"4. IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all knowledge elements MUST be in that same language. DO NOT translate to English under any circumstances.\n"
-            f"5. Preserve all technical terms, proper names, and domain-specific vocabulary exactly as written.\n"
-            f"6. Format each element as: 'KEY POINT: [concise statement]'.\n"
-            f"7. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text, including tone and perspective.\n"
-            f"8. PRIORITIZE real-life lessons, practical advice, and applied knowledge.\n"
-            f"9. Capture the underlying reasoning and implicit wisdom, but DO NOT add assumptions or enhancements beyond the text.\n"
-            f"10. Maintain the EXACT ORDER of steps and processes as they appear in the segment.\n"
-            f"11. If the segment contains partial instructions, include them verbatim and note their role in the context.\n\n"
-            f"SEGMENT TEXT:\n{chunk_text}"
-        )
-        # Log a sample of the chunk text for debugging
-        logger.debug(f"Processing chunk of length {len(chunk_text)}. First 50 chars: '{chunk_text[:50].replace(chr(10), ' ')}...'")
-        
-        response = await invoke_llm_with_retry(FAST_LLM, prompt)
-        extracted_knowledge = response.content.strip()
-        key_point_count = extracted_knowledge.count("KEY POINT")
-        logger.debug(f"Extracted {key_point_count} key points from chunk")
-        return extracted_knowledge
-    except Exception as e:
-        logger.error(f"Chunk knowledge extraction failed: {e}")
-        return "Knowledge extraction failed for this segment."
 
 
 async def refine_document(file: FileStorage = None, text: str = None, user_id: str = "", mode: str = "default", reformat_text: bool = False) -> tuple[bool, dict]:
@@ -338,43 +306,34 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
         combined_text = context_prefix + full_text
         logger.debug(f"Prepared text for summarization: prefix length {len(context_prefix)} chars, content length {len(full_text)} chars")
         
-        # Step 3: Run summarization and knowledge extraction
-        # For knowledge extraction, use just the full text without the metadata
-        summary_task = summarize_with_llm(combined_text)
-        knowledge_task = extract_knowledge_with_llm(full_text)
-        summary, knowledge = await asyncio.gather(summary_task, knowledge_task)
-
         result = {
-            "summary": summary,
-            "knowledge_elements": knowledge,
             "metadata": document_metadata,
             "text_length": len(full_text.split())
         }
 
-        # Step 4: Reformat as structured text if requested
+        # Step 3: Reformat as structured text if requested
         if reformat_text and sections:
             async def reformat_document(sections: list[tuple[str, str]]) -> str:
-                """Reformat document sections into structured text with clear sections and subsections in original language."""
+                """Reformat document sections into structured text with meticulous preservation of all knowledge items."""
                
                 # Format sections into a string
                 formatted_sections = "\n".join([f"Section: {h}\nContent: {c}" for h, c in sections])
-               
+                
                 prompt = (
-                    f"You are a document reformatter tasked with creating a structured text output from raw document sections while preserving cultural nuance and contextual wisdom.\n\n"
+                    f"You are a Copyrighting expert with task to refine the document to be more specific, instructive and actionable.\n\n"
                     f"INPUT SECTIONS:\n"
                     f"{formatted_sections}\n\n"
                     f"TASK:\n"
-                    f"1. Summarize each section concisely, keeping factual and actionable details.\n"
-                    f"2. Split mixed topics into subsections with descriptive headings.\n"
-                    f"3. Preserve VERBATIM PHRASING for all scripted instructions, questions, and sales prompts.\n"
+                    f"1. Structure the document logically while ensuring EVERY knowledge item is included verbatim.\n"
+                    f"2. ELIMINATE AMBIGUITY - clarify vague terms, define acronyms or industry jargon on first use, and ensure all instructions are precise and actionable.\n"
+                    f"3. IMPROVE LOGICAL STRUCTURE - organize content in a clear logical progression, grouping related concepts and creating a coherent narrative flow, without losing any knowledge items.\n"
                     f"4. Maintain the EXACT ORDER of steps and processes as in the original text.\n"
                     f"5. IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all content MUST be in that same language. DO NOT translate to English under any circumstances.\n"
                     f"6. Preserve all technical terms, proper names, and specific vocabulary exactly as written.\n"
-                    f"7. Use professional language, fixing informal phrases and errors only if they do not alter scripted content.\n"
+                    f"7. NEVER drop any specific details such as numbers, dates, quantities, criteria, or conditional statements.\n"
                     f"8. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text, including tone and perspective.\n"
-                    f"9. PRIORITIZE real-life lessons, practical advice, and applied knowledge.\n"
-                    f"10. Maintain the emotional tone and perspective of the original document.\n"
-                    f"11. Output as plain text with sections ('# Heading') and subsections ('## Subheading').\n\n"
+                    f"9. Explicitly highlight important knowledge items by giving them appropriate emphasis in the document structure.\n"
+                    f"10. Output as plain text with logical sections ('# Heading') and subsections ('## Subheading').\n\n"
                     f"OUTPUT FORMAT:\n"
                     f"# Section Heading\n## Subsection Heading\nContent\n## Subsection Heading\nContent\n\n"
                 )
@@ -385,7 +344,31 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
 
             reformatted_text = await reformat_document(sections)
             result["reformatted_text"] = reformatted_text
-
+            
+            # Use the reformatted text for summary and knowledge extraction if available
+            if reformatted_text and reformatted_text.strip():
+                logger.info("Using reformatted text for summary and knowledge extraction")
+                text_for_summary = context_prefix + reformatted_text
+                text_for_knowledge = reformatted_text
+            else:
+                logger.info("Using original text for summary and knowledge extraction")
+                text_for_summary = combined_text
+                text_for_knowledge = full_text
+        else:
+            # Use original text if no reformatting was done
+            text_for_summary = combined_text
+            text_for_knowledge = full_text
+            
+        # Step 4: Run summarization and knowledge extraction on the appropriate text
+        logger.info("Starting summarization and knowledge extraction tasks")
+        summary_task = summarize_with_llm(text_for_summary)
+        knowledge_task = extract_knowledge_with_llm(text_for_knowledge)
+        summary, knowledge = await asyncio.gather(summary_task, knowledge_task)
+        
+        # Add summary and knowledge to result
+        result["summary"] = summary
+        result["knowledge_elements"] = knowledge
+        
         logger.info(f"Processing complete for {document_metadata.get('filename', 'unknown')}")
         return True, result
 
@@ -396,15 +379,15 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
         if file:
             file.close()
 
-async def enrich_key_points(key_points: str, full_text: str) -> str:
+async def enrich_key_points(key_point: str, full_text: str) -> str:
     """
     Enrich key points with supporting data from the original document text.
     
-    This simplified version relies primarily on the LLM to extract supporting data
-    for key points, with minimal post-processing.
+    This function scans through the full document text to find meaningful supporting 
+    information, business nuances, practical examples, and contextual details for each key point.
     
     Args:
-        key_points: String containing key points (format: "KEY POINT: text")
+        key_point: String containing key points (format: "KEY POINT: text")
         full_text: The full document text to extract supporting data from
         
     Returns:
@@ -415,22 +398,28 @@ async def enrich_key_points(key_points: str, full_text: str) -> str:
         is_english = all(ord(c) < 128 for c in full_text[:100].replace('\n', ' ').replace(' ', ''))
         language_instruction = "IMPORTANT: You MUST use the EXACT SAME LANGUAGE as the original document. If the document is in Vietnamese or any non-English language, all content MUST be in that same language. DO NOT translate to English under any circumstances." if not is_english else "Keep the document's original language."
         
-        # Simplified prompt with clear instructions
+        # Enhanced prompt with focus on business nuance and contextual information
         prompt = (
-            f"You are a precise knowledge enhancer tasked with gathering supporting data for key points from a document, preserving cultural nuance and exact phrasing.\n\n"
-            f"TASK: For each key point below, extract clear, concise supporting data from the original document text that provides context, descriptions, or relevant details. The supporting data must include all critical facts, scripts, or steps directly related to the key point.\n\n"
+            f"You are a precise knowledge enhancer and business context analyzer tasked with gathering rich supporting data for key points from a document.\n\n"
+            f"TASK: For the key point below, thoroughly scan the document to extract comprehensive supporting data that includes:\n"
+            f"1. Contextual information explaining WHY this point matters in the business context\n"
+            f"2. Real-world examples or use cases demonstrating the point's application\n"
+            f"3. Related business impact, risks, or opportunities\n"
+            f"4. Surrounding knowledge that gives depth to understanding this point\n\n"
             f"GUIDELINES:\n"
             f"1. Extract supporting data VERBATIM from the original text, prioritizing exact scripts, questions, or instructions.\n"
             f"2. Include ALL relevant details (e.g., names, numbers, dates, sequential steps) tied to the key point, ensuring completeness.\n"
-            f"3. Keep supporting data concise, targeting 50-100 words, but include all critical information without a strict sentence limit.\n"
-            f"4. {language_instruction}\n"
-            f"5. Preserve all technical terms, proper names, and domain-specific vocabulary exactly as written.\n"
-            f"6. Maintain the EXACT ORDER of steps or processes as they appear in the original text.\n"
-            f"7. If the key point references partial instructions, include surrounding text to clarify context.\n"
-            f"8. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text, including tone and perspective.\n"
-            f"9. DO NOT add assumptions, enhancements, or inferred details beyond the original text.\n"
-            f"10. Output format: 'KEY POINT: [original key point]\nSUPPORTING DATA: [verbatim text from document]'.\n\n"
-            f"KEY POINTS:\n{key_points}\n\n"
+            f"3. DISCOVER BUSINESS NUANCE - identify specific business contexts, industry-specific implications, or organizational relevance.\n"
+            f"4. FIND PRACTICAL APPLICATIONS - include any examples, case studies, or scenarios that demonstrate how this knowledge is applied.\n"
+            f"5. {language_instruction}\n" 
+            f"6. Preserve all technical terms, proper names, and domain-specific vocabulary exactly as written.\n"
+            f"7. Maintain the EXACT ORDER of steps or processes as they appear in the original text.\n"
+            f"8. Focus on MEANINGFUL CONTEXT that would help someone understand not just WHAT the key point is, but WHY it matters and HOW it's used.\n"
+            f"9. PRESERVE the NUANCE and CULTURAL CONTEXT of the original text, including tone and perspective.\n"
+            f"10. DO NOT add assumptions, enhancements, or inferred details beyond the original text.\n"
+            f"11. IMPORTANT: The supporting data must be rich and comprehensive, providing all context needed to fully understand the key point.\n\n"
+            f"Output format: 'KEY POINT: [original key point]\nSUPPORTING DATA: [comprehensive verbatim text from document]'\n\n"
+            f"KEY POINTS:\n{key_point}\n\n"
             f"ORIGINAL TEXT:\n{full_text}"
         )
         
@@ -448,13 +437,13 @@ async def enrich_key_points(key_points: str, full_text: str) -> str:
             
             # Simple fallback approach: use key points as their own supporting data
             fallback_lines = []
-            for line in key_points.split('\n'):
+            for line in key_point.split('\n'):
                 if line.strip() and line.lower().startswith("key point:"):
                     colon_pos = line.find(':')
                     if colon_pos > 0:
-                        key_point = line[colon_pos + 1:].strip()
-                        fallback_lines.append(f"KEY POINT: {key_point}")
-                        fallback_lines.append(f"SUPPORTING DATA: {key_point}")
+                        key_point_text = line[colon_pos + 1:].strip()
+                        fallback_lines.append(f"KEY POINT: {key_point_text}")
+                        fallback_lines.append(f"SUPPORTING DATA: {key_point_text}")
             
             enriched_knowledge = '\n'.join(fallback_lines)
             logger.info(f"Created fallback enrichment with {len(fallback_lines)//2} key points")
@@ -471,7 +460,7 @@ async def enrich_key_points(key_points: str, full_text: str) -> str:
         logger.error(f"Traceback: {traceback_str}")
         
         # Return a simple error-state response that maintains the expected format
-        return f"KEY POINT: {key_points.split('KEY POINT:')[1].strip() if 'KEY POINT:' in key_points else key_points}\nSUPPORTING DATA: Error occurred during enrichment."
+        return f"KEY POINT: {key_point.split('KEY POINT:')[1].strip() if 'KEY POINT:' in key_point else key_point}\nSUPPORTING DATA: Error occurred during enrichment."
 
 async def process_document(text: str = "", file: FileStorage = None, user_id: str = "", mode: str = "default", bank: str = "", knowledge_elements: str = "") -> bool:
     """
@@ -597,7 +586,7 @@ async def process_document(text: str = "", file: FileStorage = None, user_id: st
         
         for i, (key_point, supporting_data) in enumerate(key_point_chunks):
             chunk_id = f"chunk_{doc_id}_{i}"
-            chunk_text = f"KEY POINT: {key_point}\nSUPPORTING DATA: {supporting_data}"
+            chunk_text = f"{key_point}\n: {supporting_data}"
             
             # Create a task to save the raw chunk (supporting data)
             processing_tasks.append(
