@@ -27,6 +27,27 @@ _cache_stats = {
     "node_misses": 0
 }
 
+# Helper function to safely extract vectors from Pinecone response
+def extract_vectors_from_response(response):
+    """Handle different Pinecone API response formats"""
+    try:
+        # New Pinecone API (where response is a FetchResponse object)
+        if hasattr(response, 'vectors'):
+            return response.vectors
+        # Legacy Pinecone API (where response is a dict with 'vectors' key)
+        elif hasattr(response, 'get'):
+            return response.get("vectors", {})
+        # Direct access if neither method works
+        elif isinstance(response, dict) and "vectors" in response:
+            return response["vectors"]
+        else:
+            # Last resort if no vectors attribute is found
+            logger.warning(f"Unexpected Pinecone response format: {type(response)}")
+            return {}
+    except Exception as e:
+        logger.error(f"Error extracting vectors from Pinecone response: {e}")
+        return {}
+
 # Cache TTL settings
 _node_cache_ttl = 86400  # 24 hours for node embeddings
 _brain_cache_ttl = 600   # 10 minutes for brain structure info
@@ -61,12 +82,19 @@ ent_index_name = os.getenv("ENT", "ent-index")
 
 ami_index = pc.Index(ami_index_name)
 ent_index = pc.Index(ent_index_name)
+# Store the names directly as attributes for easier access
+ami_index.display_name = ami_index_name
+ent_index.display_name = ent_index_name
 logger.info(f"Pinecone indexes initialized: {ami_index_name}, {ent_index_name}")
 
 def index_name(index) -> str:
     """Get the display name of an index"""
     try:
-        if hasattr(index, 'name'):
+        # First try our custom attribute
+        if hasattr(index, 'display_name'):
+            return index.display_name
+        # Then try standard attributes
+        elif hasattr(index, 'name'):
             return f"{index.name}"
         elif hasattr(index, '_name'):  # Check for protected name attribute
             return f"{index._name}"
@@ -104,10 +132,19 @@ async def get_cached_embedding(text: str, similarity_threshold: float = 0.70) ->
             namespace="embeddings_cache"
         )
         
-        vectors = results.get("vectors", {})
+        # Extract vectors safely using the helper function
+        vectors = extract_vectors_from_response(results)
+        
         if cache_key in vectors:
             _cache_stats["embedding_exact_hits"] += 1
-            return vectors[cache_key]["values"]
+            # Handle both dict-based and object-based vector formats
+            if isinstance(vectors[cache_key], dict) and "values" in vectors[cache_key]:
+                return vectors[cache_key]["values"]
+            elif hasattr(vectors[cache_key], "values"):
+                return vectors[cache_key].values
+            else:
+                logger.warning(f"Unexpected vector format in cache hit: {type(vectors[cache_key])}")
+                # Fall through to generate a new embedding
         
         # No exact match, check for semantic similarity
         if len(text) > 5:  # Only for non-trivial text
@@ -124,11 +161,28 @@ async def get_cached_embedding(text: str, similarity_threshold: float = 0.70) ->
                 namespace="embeddings_cache"
             )
             
-            matches = results.get("matches", [])
-            if matches and matches[0]["score"] >= similarity_threshold:
-                _cache_stats["embedding_similar_hits"] += 1
-                logger.info(f"[EMBEDDING_CACHE] Similar cache hit ({matches[0]['score']:.4f}) for: '{text[:30]}...'")
-                return matches[0]["values"]
+            # Handle both old and new Pinecone API response formats
+            matches = []
+            if hasattr(results, 'matches'):
+                matches = results.matches
+            elif hasattr(results, 'get'):
+                matches = results.get("matches", [])
+            
+            if matches and len(matches) > 0:
+                # Extract score from the match (handle both dict and object formats)
+                match_score = matches[0].get("score", 0) if isinstance(matches[0], dict) else getattr(matches[0], "score", 0)
+                
+                if match_score >= similarity_threshold:
+                    _cache_stats["embedding_similar_hits"] += 1
+                    logger.info(f"[EMBEDDING_CACHE] Similar cache hit ({match_score:.4f}) for: '{text[:30]}...'")
+                    
+                    # Extract values from the match (handle both dict and object formats)
+                    if isinstance(matches[0], dict) and "values" in matches[0]:
+                        return matches[0]["values"]
+                    elif hasattr(matches[0], "values"):
+                        return matches[0].values
+                    else:
+                        logger.warning(f"Cannot extract values from match: {type(matches[0])}")
             
             # No similar embedding found, store the newly generated one
             vector = {
@@ -207,13 +261,23 @@ async def get_version_brain_banks(version_id: str) -> List[Dict[str, str]]:
             namespace="structure_cache"
         )
         
-        vectors = results.get("vectors", {})
+        # Extract vectors safely using the helper function
+        vectors = extract_vectors_from_response(results)
+        
         if cache_key in vectors:
-            metadata = vectors[cache_key]["metadata"]
+            # Extract metadata - handling both dict and object formats
+            if isinstance(vectors[cache_key], dict) and "metadata" in vectors[cache_key]:
+                metadata = vectors[cache_key]["metadata"]
+            elif hasattr(vectors[cache_key], "metadata"):
+                metadata = vectors[cache_key].metadata
+            else:
+                logger.warning(f"Cannot extract metadata from cache entry: {type(vectors[cache_key])}")
+                metadata = {}
+                
             # Deserialize the JSON string to retrieve the original data structure
-            brain_banks_json = metadata.get("brain_banks", "[]")
+            brain_banks_json = metadata.get("brain_banks", "[]") if isinstance(metadata, dict) else getattr(metadata, "brain_banks", "[]")
             cached_data = json.loads(brain_banks_json)
-            timestamp = metadata.get("timestamp", 0)
+            timestamp = metadata.get("timestamp", 0) if isinstance(metadata, dict) else getattr(metadata, "timestamp", 0)
             
             # Check if the cache entry is still valid
             if time.time() - timestamp < _brain_cache_ttl:
@@ -591,7 +655,7 @@ async def query_brain_with_embeddings_batch(
             try:
                 # Ensure embedding has at least one non-zero value
                 if not any(embedding) or all(v == 0 for v in embedding):
-                    logger.warning(f"Zero embedding detected for query {query_idx}, using minimal values")
+                    logger.warning(f"Zero embedding detected for query {query_idx}, generating minimal non-zero values")
                     # Create a non-zero vector that will be accepted by Pinecone
                     minimal_value = 0.0001
                     embedding = [minimal_value] * len(embedding)
@@ -605,11 +669,11 @@ async def query_brain_with_embeddings_batch(
                 
                 # Validate vector dimension - Pinecone requires consistent dimensions
                 if not embedding or len(embedding) not in [768, 1536]:
-                    logger.warning(f"Invalid embedding dimension {len(embedding) if embedding else 0}, using fallback")
+                    logger.warning(f"Invalid embedding dimension {len(embedding) if embedding else 0}, creating fallback vector of 1536 dimensions")
                     embedding = [0.0001 * (i % 10 + 1) for i in range(1536)]  # Create varied fallback
 
                 # Extra logging to diagnose the issue
-                logger.info(f"Querying {index_name_str} with vector dimension {len(embedding)}")
+                logger.info(f"Querying Pinecone index '{index_name_str}' (namespace: {namespace}) with vector dimension {len(embedding)}")
                 
                 # Use to_thread for async execution since Pinecone client is synchronous 
                 try:
@@ -624,8 +688,9 @@ async def query_brain_with_embeddings_batch(
                         }
                     )
                 except Exception as query_error:
-                    logger.error(f"Error in Pinecone query for {index_name_str}: {str(query_error)}")
+                    logger.error(f"Error in Pinecone query for '{index_name_str}': {str(query_error)}")
                     # Extra retry with a more robust vector if the first attempt failed
+                    logger.info(f"Retrying with a different vector for index '{index_name_str}'")
                     embedding = [0.001 * ((i % 20) + 1) for i in range(1536)]
                     results = await asyncio.to_thread(
                         index.query,
@@ -639,6 +704,9 @@ async def query_brain_with_embeddings_batch(
                     )
                 
                 matches = results.get("matches", [])
+                if matches:
+                    logger.info(f"Found {len(matches)} matches in index '{index_name_str}' for query {query_idx}")
+                
                 query_results = []
                 for match in matches:
                     # Extract metadata safely with fallbacks
@@ -767,12 +835,26 @@ async def update_called_node(node_id: str, node_content: str, metadata: Dict[str
         )
         
         # Get current vibe_score or use default
-        vectors = results.get("vectors", {})
-        if node_id in vectors and "metadata" in vectors[node_id]:
-            current_vibe_score = vectors[node_id]["metadata"].get("vibe_score", 1.0)
+        current_vibe_score = 1.0  # Default value
+        
+        # Extract vectors safely using the helper function
+        vectors = extract_vectors_from_response(results)
+        
+        if node_id in vectors:
+            # Extract metadata - handling both dict and object formats
+            if isinstance(vectors[node_id], dict) and "metadata" in vectors[node_id]:
+                node_metadata = vectors[node_id]["metadata"]
+                if isinstance(node_metadata, dict):
+                    current_vibe_score = node_metadata.get("vibe_score", 1.0)
+                else:
+                    current_vibe_score = getattr(node_metadata, "vibe_score", 1.0)
+            elif hasattr(vectors[node_id], "metadata"):
+                node_metadata = vectors[node_id].metadata
+                current_vibe_score = getattr(node_metadata, "vibe_score", 1.0)
+            else:
+                logger.warning(f"Node {node_id} found but cannot extract metadata, using default vibe_score")
         else:
             logger.warning(f"Node {node_id} not found in fetch call, using default vibe_score")
-            current_vibe_score = 1.0
             
         vibe_score = min(current_vibe_score + 0.2, 2.0)  # Boost, cap at 2.0
         
@@ -830,11 +912,37 @@ async def recall_similar_nodes(input_text: str, namespace: str = "called_nodes",
             include_metadata=True,
             namespace=namespace
         )
+        
         nodes = []
-        for m in results.get("matches", []):
-            if m["score"] >= similarity_threshold:
-                # Get metadata and handle serialized JSON fields
-                metadata = m["metadata"]
+        
+        # Handle both old and new Pinecone API response formats
+        matches = []
+        if hasattr(results, 'matches'):
+            matches = results.matches
+        elif hasattr(results, 'get'):
+            matches = results.get("matches", [])
+        
+        for m in matches:
+            # Extract score (handle both dict and object formats)
+            score = m.get("score", 0) if isinstance(m, dict) else getattr(m, "score", 0)
+            
+            if score >= similarity_threshold:
+                # Extract id (handle both dict and object formats)
+                node_id = m.get("id", "") if isinstance(m, dict) else getattr(m, "id", "")
+                
+                # Extract metadata (handle both dict and object formats)
+                if isinstance(m, dict) and "metadata" in m:
+                    metadata = m["metadata"]
+                elif hasattr(m, "metadata"):
+                    metadata = m.metadata
+                    # Convert to dict if it's not already
+                    if not isinstance(metadata, dict):
+                        metadata = {k: getattr(metadata, k) for k in dir(metadata) 
+                                    if not k.startswith('_') and not callable(getattr(metadata, k))}
+                else:
+                    logger.warning(f"Cannot extract metadata from match: {type(m)}")
+                    continue
+                
                 processed_metadata = {}
                 
                 # Copy primitive values directly
@@ -852,12 +960,18 @@ async def recall_similar_nodes(input_text: str, namespace: str = "called_nodes",
                     else:
                         processed_metadata[key] = value
                 
+                # Get raw content
+                raw_content = metadata.get("raw", "") if isinstance(metadata, dict) else getattr(metadata, "raw", "")
+                
+                # Get vibe_score with fallback
+                vibe_score = metadata.get("vibe_score", 1.0) if isinstance(metadata, dict) else getattr(metadata, "vibe_score", 1.0)
+                
                 node = {
-                    "id": m["id"],
-                    "raw": metadata["raw"],
+                    "id": node_id,
+                    "raw": raw_content,
                     "metadata": processed_metadata,
-                    "score": m["score"],
-                    "vibe_score": metadata.get("vibe_score", 1.0)
+                    "score": score,
+                    "vibe_score": vibe_score
                 }
                 nodes.append(node)
                 
