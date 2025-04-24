@@ -3,7 +3,7 @@
 # Date: March 28, 2025
 
 import os
-from pinecone import Pinecone
+
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from utilities import EMBEDDINGS, logger
 from datetime import datetime
@@ -24,39 +24,31 @@ supabase: Client = create_client(
     spb_key
 )
 
+from pinecone import (
+    Pinecone,
+    ServerlessSpec,
+    CloudProvider,
+    AwsRegion,
+    VectorType
+)
 
 # Initialize Pinecone client with proper error handling
-try:
-    pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", "your-pinecone-key"))
-    ami_index_name = os.getenv("PRESET", "ami-index")
-    ent_index_name = os.getenv("ENT", "ent-index")
+
+
+pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", ""))
+ami_index_name = os.getenv("PRESET", "ami-index")
+ent_index_name = os.getenv("ENT", "ent-index")
     
     # Log the actual index names
-    logger.info(f"Pinecone index names: AMI_INDEX={ami_index_name}, ENT_INDEX={ent_index_name}")
+logger.info(f"Pinecone index names: AMI_INDEX={ami_index_name}, ENT_INDEX={ent_index_name}")
     
     # Create placeholder indexes if needed
-    try:
-        ami_index = pc.Index(ami_index_name)
-        ent_index = pc.Index(ent_index_name)
-        logger.info(f"Pinecone indexes initialized: {ami_index_name}, {ent_index_name}")
-    except Exception as e:
-        logger.error(f"Failed to initialize Pinecone indexes: {e}")
+try:
+    ami_index = pc.Index(ami_index_name)
+    ent_index = pc.Index(ent_index_name)
 except Exception as e:
-    logger.error(f"Failed to initialize Pinecone client: {e}")
-    # Create mock objects for testing
-    class MockIndex:
-        def __init__(self, name):
-            self.name = name
-        def query(self, **kwargs):
-            logger.warning(f"Mock query called on {self.name}")
-            return {"matches": []}
-        def upsert(self, vectors, **kwargs):
-            logger.warning(f"Mock upsert called on {self.name}")
-            return {"upserted_count": len(vectors)}
-    
-    ami_index = MockIndex("ami-index")
-    ent_index = MockIndex("ent-index")
-    logger.warning("Using mock Pinecone client and indexes for testing")
+        logger.error(f"Failed to initialize Pinecone indexes: {e}")
+
 
 inferLLM = ChatOpenAI(model="gpt-4o", streaming=False)
 

@@ -332,7 +332,7 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
                
                 # Format sections into a string
                 formatted_sections = "\n".join([f"Section: {h}\nContent: {c}" for h, c in sections])
-                prompt = (
+                prompt_OK = (
                         f"You are a Professional Copywriter and Real-Life Training Strategist. Your task is to refine the document so it becomes a high-quality, instructive, and emotionally intelligent training manual. This is designed for both AI learning and real human sales training, so accuracy, tone, and practical realism are critical.\n\n"
 
                         f"INPUT SECTIONS:\n"
@@ -353,10 +353,35 @@ async def refine_document(file: FileStorage = None, text: str = None, user_id: s
                         f"# Section Heading\n## Subsection Heading\nInstruction + Examples + Notes (if needed)\n\n"
                         f"FINAL CHECK: Before submitting your answer, verify again that you have maintained the original language. If the input is in Vietnamese, Thai, Indonesian, or any other non-English language, your output MUST be in that same language, not in English.\n\n"
                     )
-
+                prompt = (
+                    f"You are a Professional Copywriter and Real-Life Training Strategist tasked with refining a raw document into a high-quality, instructive, and emotionally intelligent training manual. This manual is for AI learning and human sales training, requiring accuracy, practical realism, and a tone that resonates with a professional audience. The output must be polished, readable, and culturally authentic.\n\n"
+                    f"INPUT SECTIONS:\n"
+                    f"{formatted_sections}\n\n"
+                    f"YOUR TASK:\n"
+                    f"1. PRESERVE ALL CONTENT — Retain every factual, instructional, and emotionally meaningful detail from the original. Do not delete or simplify data, intent, or emotional appeal.\n"
+                    f"2. ENHANCE CLARITY AND CONCISENESS — Improve sentence clarity and readability using short sentences (15-20 words), active voice, and precise language. Avoid oversimplifying nuances or subtle logic.\n"
+                    f"3. PRESERVE REAL-LIFE EXAMPLES — Retain all original examples, quotes, or scenarios, rendering them naturally and clearly labeled as 'Example:'.\n"
+                    f"4. ADD CONTEXT-MATCHED EXAMPLES — For sections lacking examples, insert realistic ones labeled 'Suggested Example:'. Ensure examples match the customer journey phase (e.g., Discovery, Diagnosis, Motivation, Objection Handling, Closing) to maintain tone and trust.\n"
+                    f"5. INCLUDE INTENT-AWARE NOTES — Add 'Note:' to explain why content matters, how it connects to human behavior, or its cultural/emotional significance. Notes should enhance instructional value.\n"
+                    f"6. RESPECT PHASE-CORRECT TONE — Ensure all additions align with the section's customer journey phase. Mismatched tones (e.g., persuasive in Discovery) will break trust.\n"
+                    f"7. ENSURE SMOOTH FLOW AND HIERARCHY — Structure content with context → purpose → instruction → illustration → emotional reinforcement. Use transitions for coherence.\n"
+                    f"8. MAINTAIN TEMPORAL CONTEXT — Contextualize results, testimonials, or feedback as time-sensitive (e.g., 'As of 2025, this approach yielded...').\n"
+                    f"9. PRESERVE ORIGINAL LANGUAGE — Detect the input language and produce output in the EXACT SAME LANGUAGE. If the input is in Vietnamese, Thai, or any non-English language, the output MUST remain in that language. DO NOT TRANSLATE to English. Use culturally native expressions.\n"
+                    f"10. PRESERVE AUTHOR'S VOICE — Maintain the author's personality, beliefs, tone, and rhythm. Do not sterilize local phrases or style, as style = identity.\n"
+                    f"11. ENHANCE READABILITY WITH VISUAL AIDS — Use bullet points, numbered lists, or tables where appropriate to break up text and highlight key points.\n"
+                    f"12. ENSURE CONSISTENT FORMATTING — Apply uniform headings, fonts, and spacing. Suggest a professional layout (e.g., 1.5 line spacing, clear section breaks).\n"
+                    f"13. SUPPORT ITERATIVE REFINEMENT — Flag areas needing human review (e.g., 'Review Suggested Example for accuracy') to facilitate feedback-driven revisions.\n"
+                    f"14. FORMAT OUTPUT — Use this structure:\n"
+                    f"# Section Heading\n## Subsection Heading\nInstruction\nExample or Suggested Example\nNote (if applicable)\n\n"
+                    f"FINAL CHECK:\n"
+                    f"- Verify the output is in the same language as the input.\n"
+                    f"- Ensure no critical content is lost.\n"
+                    f"- Confirm examples and notes align with the section's phase and cultural context.\n"
+                    f"- Double-check readability (short sentences, active voice, visual aids).\n\n"
+                )
                 logger.debug(f"Reformat document prompt length: {len(prompt)} chars")
                 logger.debug(f"Number of sections to reformat: {len(sections)}")
-                response = await invoke_llm_with_retry(LLM, prompt, temperature=0.2, max_tokens=5000)
+                response = await invoke_llm_with_retry(LLM, prompt, temperature=0.2, max_tokens=10000)
                 return response.content.strip()
             
             reformatted_text = await reformat_document(sections)
