@@ -4,7 +4,7 @@ from langchain_openai import ChatOpenAI
 import re
 
 StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
-inferLLM = ChatOpenAI(model="gpt-4o-mini", streaming=False)
+inferLLM = ChatOpenAI(model="gpt-4o", streaming=False)
 
 __all__ = [
     'stream_analysis', 
@@ -34,7 +34,7 @@ async def stream_analysis(prompt: str, thread_id_for_analysis: Optional[str] = N
     logger.info(f"Starting stream_analysis with use_websocket={use_websocket}, thread_id={thread_id_for_analysis}")
     
     try:
-        async for chunk in StreamLLM.astream(prompt):
+        async for chunk in StreamLLM.astream(prompt,temperature=0.1,max_tokens=5000):
             chunk_content = chunk.content
             analysis_buffer += chunk_content
             
@@ -145,7 +145,7 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
     """
     next_action_buffer = ""
     try:
-        async for chunk in StreamLLM.astream(prompt):
+        async for chunk in StreamLLM.astream(prompt,temperature=0.1,max_tokens=5000):
             chunk_content = chunk.content
             next_action_buffer += chunk_content
             
@@ -160,11 +160,10 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
             if use_websocket and thread_id_for_analysis:
                 try:
                     from socketio_manager import emit_next_action_event
-                    was_delivered = emit_next_action_event(thread_id_for_analysis, next_action_event)
+                    emit_next_action_event(thread_id_for_analysis, next_action_event)
                 except Exception as e:
                     logger.error(f"Error in socketio_manager websocket delivery: {str(e)}")
-                    was_delivered = False
-            
+                    
             # Always yield for the standard flow too
             yield next_action_event
         
@@ -194,7 +193,7 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
         if use_websocket and thread_id_for_analysis:
             try:
                 from socketio_manager import emit_next_action_event
-                was_delivered = emit_next_action_event(thread_id_for_analysis, next_action_complete_event)
+                __ = emit_next_action_event(thread_id_for_analysis, next_action_complete_event)
             except Exception as e:
                 logger.error(f"Error in socketio_manager delivery of complete event: {str(e)}")
         
@@ -569,6 +568,33 @@ def process_next_actions_result(next_actions_content: str) -> dict:
             "next_action_full": next_actions_content
         }
 
+import re
+import unicodedata
+def is_vietnamese_text(analysis_text):
+    # Normalize text to handle Unicode diacritics
+    normalized_text = unicodedata.normalize('NFC', analysis_text.lower())
+    
+    # Expanded list of common Vietnamese words
+    vietnamese_keywords = [
+        "của", "những", "và", "các", "là", "không", "có", "được", 
+        "người", "trong", "để", "anh", "chị", "em", "tiếng việt",
+        "cho", "này", "tôi", "bạn", "với", "phải", "muốn", "cần",
+        "khách hàng", "báo giá", "hỗ trợ", "kỹ thuật"
+    ]
+    
+    # Check for Vietnamese keywords with word boundaries
+    keyword_match = any(
+        re.search(r'\b{}\b'.format(re.escape(word)), normalized_text)
+        for word in vietnamese_keywords
+    )
+    
+    # Check for Vietnamese-specific characters
+    char_match = bool(
+        re.search(r'[ạảẫắằẳâđêếềểẹẽíìỉĩọỏốồổơớờởụủứừử]', normalized_text)
+    )
+    
+    return keyword_match or char_match
+
 def extract_search_terms(analysis_text: str) -> List[str]:
     """
     Extract search terms from the analysis using LLM to generate relevant queries
@@ -595,42 +621,43 @@ def extract_search_terms(analysis_text: str) -> List[str]:
         logger.info(f"Extracting search terms using LLM from analysis (length: {len(analysis_text)})")
         
         # Detect if Vietnamese content is present (simple check)
-        is_vietnamese = any(word in analysis_text.lower() for word in 
-                          ["của", "những", "và", "các", "là", "không", "có", "được", 
-                           "người", "trong", "để", "anh", "chị", "em", "tiếng việt"])
+        is_vietnamese = is_vietnamese_text(analysis_text)
         
         # Create a focused prompt for the LLM to extract search terms
         llm_prompt = f"""
         The following is an analysis of a conversation with a contact. 
-        
+
         ANALYSIS:
         {analysis_text}
-        
-        Generate 3-5 search queries that would help me find knowledge about HOW TO understand and proceed with this contact effectively.
-        
-        Focus on queries that would help me find resources about:
-        
-        1. How to understand this specific contact's situation and needs
-        2. How to communicate effectively with this person based on their style/context
-        3. How to address their expressed concerns or desires
-        4. How to gather missing information in an appropriate way
-        5. Cultural considerations relevant to interacting with this contact
-        6. The best approach for the specific conversation stage
-        7. Techniques for addressing the specific topics identified
-        
-        Each query should be specific, actionable, and directly related to this contact's unique situation.
-        
-        IMPORTANT: Generate search terms in the SAME LANGUAGE as the provided analysis. If the analysis contains Vietnamese, provide terms in Vietnamese. If it's in English, provide English terms.
-        
-        Format your response as a JSON array of strings, each being a search query.
+
+        Generate 6-8 search queries to find knowledge on HOW TO understand and proceed with this contact effectively.
+
+        Focus on queries that address the most relevant of the following areas, based on the analysis content:
+        1. Understanding the contact's situation and needs
+        2. Communicating effectively based on their style/context
+        3. Addressing their expressed concerns or desires
+        4. Gathering missing information appropriately
+        5. Cultural considerations relevant to the contact
+        6. Best approaches for the current conversation stage (e.g., initial outreach, trust-building, negotiation)
+        7. Techniques for handling specific topics identified
+
+        Each query should be:
+        - Specific, actionable, and tied to the contact's unique situation
+        - A concise phrase suitable for search engines (avoid full sentences)
+        - In the SAME LANGUAGE as the analysis (e.g., Vietnamese for Vietnamese analysis, English for English analysis)
+        - Prioritized based on the most prominent aspects of the analysis
+
+        If the analysis is brief (<50 words), generate 3 queries. If detailed (>50 words), generate 6-8 queries. Only include queries for gathering missing information if the analysis notes specific unknowns.
+
+        Format the response as a JSON array of strings.
         Example for English: ["building rapport with anxious clients", "effective questions for health concerns", "cultural communication patterns"]
         Example for Vietnamese: ["xây dựng mối quan hệ với khách hàng lo lắng", "câu hỏi hiệu quả về vấn đề sức khỏe", "mô hình giao tiếp văn hóa"]
-        
+
         Return ONLY the JSON array, no additional text.
         """
         
         # Use the LLM to generate search terms
-        response = inferLLM.invoke(llm_prompt,temperature=0.2,max_tokens=1000)
+        response = inferLLM.invoke(llm_prompt,temperature=0.1,max_tokens=1000)
         content = response.content
         logger.info(f"LLM response for search term generation: {content}")
         # Extract JSON array from response
@@ -701,7 +728,7 @@ def extract_search_terms(analysis_text: str) -> List[str]:
                     cleaned_terms.append(term)
         
         # Limit to reasonable number of terms
-        cleaned_terms = cleaned_terms[:5]
+        #cleaned_terms = cleaned_terms[:5]
         
         # Store in cache
         if not hasattr(extract_search_terms, '_term_cache'):
@@ -800,7 +827,7 @@ def extract_search_terms_from_next_actions(
     
     # Use the LLM to generate search terms
     try:
-        response = inferLLM.invoke(llm_prompt, temperature=0.2, max_tokens=1000)
+        response = inferLLM.invoke(llm_prompt, temperature=0.1, max_tokens=1000)
         content = response.content
         logger.info(f"LLM response for NEXT ACTION search term generation: {content}")
         

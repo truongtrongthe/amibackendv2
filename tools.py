@@ -187,24 +187,66 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     try:
         if graph_version_id:
             # Bilingual profile query (English and Vietnamese)
-            profile_query = (
-                "techniques for building customer portraits; skills for audience profile analysis; "
-                "methods for extracting customer information on health and lifestyle; "
-                "culturally sensitive questioning techniques in Vietnam; analyzing customer emotions and behaviors; "
-                "first message analysis for customer insights; techniques for eliciting sensitive personal information; "
-                "kỹ thuật xây dựng chân dung khách hàng; kỹ năng phân tích hồ sơ đối tượng; "
-                "phương pháp thu thập thông tin khách hàng về sức khỏe và lối sống; "
-                "kỹ thuật đặt câu hỏi nhạy cảm phù hợp văn hóa Việt Nam; phân tích cảm xúc và hành vi khách hàng; "
-                "phân tích tin nhắn đầu tiên để tìm hiểu thông tin khách hàng; "
-                "kỹ thuật khai thác thông tin cá nhân nhạy cảm"
-            )
+            profile_queries = [
+                {
+                    "en": "techniques for building customer portraits in Vietnam",
+                    "vi": "kỹ thuật xây dựng chân dung khách hàng Việt Nam",
+                    "purpose": "understand"
+                },
+                {
+                    "en": "culturally sensitive questioning techniques in Vietnam",
+                    "vi": "kỹ thuật đặt câu hỏi nhạy cảm phù hợp văn hóa Việt Nam",
+                    "purpose": "understand"
+                },
+                {
+                    "en": "analyzing customer emotions and behaviors in Vietnam",
+                    "vi": "phân tích cảm xúc và hành vi khách hàng Việt Nam",
+                    "purpose": "analyze"
+                },
+                {
+                    "en": "first message analysis for customer insights",
+                    "vi": "phân tích tin nhắn đầu tiên để tìm hiểu thông tin khách hàng",
+                    "purpose": "analyze"
+                },
+                {
+                    "en": "methods for collecting health and lifestyle data in Vietnam",
+                    "vi": "phương pháp thu thập thông tin sức khỏe và lối sống khách hàng Việt Nam",
+                    "purpose": "understand"
+                }
+            ]
             
-            # Improved classification query with abstract terms (Vietnamese)
-            classification_query = (
-                "khung phân loại khách hàng; mô hình phân tích tâm lý; phương pháp đánh giá nhu cầu ban đầu; "
-                "nhận diện dấu hiệu tiềm năng; nguyên mẫu và tính cách khách hàng; lý thuyết động lực hành vi; "
-                "ảnh hưởng văn hóa đến hành vi khách hàng ở Việt Nam; khung sức khỏe và lối sống để phân tích"
-            )
+            # Improved classification query with abstract terms
+            classification_queries = [
+                {
+                    "en": "customer classification frameworks",
+                    "vi": "khung phân loại khách hàng",
+                    "purpose": "classify"
+                },
+                {
+                    "en": "psychological analysis models for customers",
+                    "vi": "mô hình phân tích tâm lý khách hàng",
+                    "purpose": "classify"
+                },
+                {
+                    "en": "cultural influences on customer behavior in Vietnam",
+                    "vi": "ảnh hưởng văn hóa đến hành vi khách hàng ở Việt Nam",
+                    "purpose": "understand"
+                },
+                {
+                    "en": "methods for assessing initial customer needs",
+                    "vi": "phương pháp đánh giá nhu cầu ban đầu của khách hàng",
+                    "purpose": "understand"
+                },
+                {
+                    "en": "customer archetypes and personality analysis",
+                    "vi": "nguyên mẫu và tính cách khách hàng",
+                    "purpose": "classify"
+                }
+            ]
+            
+            # Construct multilingual queries
+            profile_query = " ".join([f"{q['en']}; {q['vi']}" for q in profile_queries])
+            classification_query = " ".join([f"{q['en']}; {q['vi']}" for q in classification_queries])
             
             # Run both queries in parallel
             profile_entries_task = query_graph_knowledge(graph_version_id, profile_query, top_k=8)
@@ -407,6 +449,7 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                 "brain_bank_count": len(brain_banks)
             }
         }
+        logger.info(f"Streamed knowledge for query {queries}. results: {all_results}")
         
     except Exception as e:
         logger.error(f"Error in knowledge query: {str(e)}")

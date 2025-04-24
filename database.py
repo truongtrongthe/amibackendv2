@@ -111,7 +111,7 @@ async def infer_categories(input: str, context: str = "") -> Dict:
     """
     
     try:
-        response = await asyncio.to_thread(inferLLM.invoke, category_prompt)
+        response = await asyncio.to_thread(inferLLM.invoke, category_prompt,temperature=0.1,max_tokens=1000)
         raw_content = response.content.strip()
         match = re.search(r"\{.*\}", raw_content, re.DOTALL)
         if match:
