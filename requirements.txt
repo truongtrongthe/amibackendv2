@@ -8,15 +8,8 @@ langchain-community
 langchain-text-splitters
 pinecone
 supabase
-pinecone-grpc
-tavily-api
 langgraph
 letta
-spacy
-maturin
-underthesea
-langdetect
-sentence_transformers
 fasttext
 fuzzywuzzy
 unidecode
@@ -24,3 +17,5 @@ pdfplumber
 eventlet 
 flask-socketio
 langchain-anthropic
+docx
+python-docx

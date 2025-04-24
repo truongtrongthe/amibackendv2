@@ -7,8 +7,11 @@ import asyncio
 import time
 import json
 import logging
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
+from pinecone import Pinecone
 import tenacity
+
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,11 +75,11 @@ else:
     logger.error("Supabase credentials not found - required for brain structure retrieval")
     raise ValueError("Missing Supabase credentials")
 
-# Initialize Pinecone client
-from pinecone import Pinecone
+
 
 # Initialize with environment variables
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+
 ami_index_name = os.getenv("PRESET", "ami-index")
 ent_index_name = os.getenv("ENT", "ent-index")
 
@@ -85,6 +88,7 @@ ent_index = pc.Index(ent_index_name)
 # Store the names directly as attributes for easier access
 ami_index.display_name = ami_index_name
 ent_index.display_name = ent_index_name
+
 logger.info(f"Pinecone indexes initialized: {ami_index_name}, {ent_index_name}")
 
 def index_name(index) -> str:
@@ -170,7 +174,7 @@ async def get_cached_embedding(text: str, similarity_threshold: float = 0.70) ->
             
             if matches and len(matches) > 0:
                 # Extract score from the match (handle both dict and object formats)
-                match_score = matches[0].get("score", 0) if isinstance(matches[0], dict) else getattr(matches[0], "score", 0)
+                match_score = getattr(matches[0], "score", None) if hasattr(matches[0], "score") else matches[0].get("score", 0) if isinstance(matches[0], dict) else 0
                 
                 if match_score >= similarity_threshold:
                     _cache_stats["embedding_similar_hits"] += 1
@@ -422,8 +426,15 @@ async def _query_brain_with_embedding(embedding, namespace: str, top_k: int = 10
                     namespace=namespace,
                     filter=filter_dict
                 )
+                logger.info(f"Results: {results}")
                 
-                matches = results.get("matches", [])
+                # Handle both old and new Pinecone API response formats
+                matches = []
+                if hasattr(results, 'matches'):
+                    matches = results.matches
+                elif hasattr(results, 'get'):
+                    matches = results.get("matches", [])
+                
                 # Only log match count if non-zero
                 if matches:
                     logger.info(f"Found {len(matches)} matches in {index_name(index)} for namespace {namespace}")
@@ -431,18 +442,46 @@ async def _query_brain_with_embedding(embedding, namespace: str, top_k: int = 10
                 for match in matches:
                     try:
                         # Extract metadata safely with fallbacks
-                        metadata = match.get("metadata", {})
+                        if hasattr(match, "metadata"):
+                            metadata = match.metadata
+                        elif isinstance(match, dict):
+                            metadata = match.get("metadata", {})
+                        else:
+                            metadata = {}
+                            
+                        # Extract ID and score with fallbacks
+                        if hasattr(match, "id"):
+                            match_id = match.id
+                        elif isinstance(match, dict):
+                            match_id = match.get("id", "")
+                        else:
+                            match_id = ""
+                            
+                        if hasattr(match, "score"):
+                            match_score = match.score
+                        elif isinstance(match, dict):
+                            match_score = match.get("score", 0.0)
+                        else:
+                            match_score = 0.0
+                        
+                        # Get metadata fields, handling both dict and object formats
+                        raw = metadata.get("raw", "") if isinstance(metadata, dict) else getattr(metadata, "raw", "")
+                        logger.info(f"Matched Raw: {raw}")  
+                        categories_primary = metadata.get("categories_primary", "unknown") if isinstance(metadata, dict) else getattr(metadata, "categories_primary", "unknown")
+                        categories_special = metadata.get("categories_special", "") if isinstance(metadata, dict) else getattr(metadata, "categories_special", "")
+                        confidence = metadata.get("confidence", 0.0) if isinstance(metadata, dict) else getattr(metadata, "confidence", 0.0)
+                        
                         result = {
-                            "id": match.get("id", ""),
+                            "id": match_id,
                             "bank_name": namespace,
                             "brain_id": brain_id,
-                            "raw": metadata.get("raw", ""),
+                            "raw": raw,
                             "categories": {
-                                "primary": metadata.get("categories_primary", "unknown"),
-                                "special": metadata.get("categories_special", "")
+                                "primary": categories_primary,
+                                "special": categories_special
                             },
-                            "confidence": metadata.get("confidence", 0.0),
-                            "score": match.get("score", 0.0)
+                            "confidence": confidence,
+                            "score": match_score
                         }
                         knowledge.append(result)
                     except Exception as e:
@@ -493,18 +532,28 @@ async def query_graph_knowledge(version_id: str, query: str, top_k: int = 10) ->
                 namespace="query_cache"
             )
             
-            vectors = results.get("vectors", {})
+            # Extract vectors safely using the helper function
+            vectors = extract_vectors_from_response(results)
+            
             if cache_key in vectors:
-                metadata = vectors[cache_key]["metadata"]
+                # Extract metadata - handling both dict and object formats
+                if isinstance(vectors[cache_key], dict) and "metadata" in vectors[cache_key]:
+                    metadata = vectors[cache_key]["metadata"]
+                elif hasattr(vectors[cache_key], "metadata"):
+                    metadata = vectors[cache_key].metadata
+                else:
+                    logger.warning(f"Cannot extract metadata from cache entry: {type(vectors[cache_key])}")
+                    metadata = {}
+                
                 # Safely deserialize the JSON string to retrieve the original results
-                results_json = metadata.get("results", "[]")
+                results_json = metadata.get("results", "[]") if isinstance(metadata, dict) else getattr(metadata, "results", "[]")
                 # Ensure we're deserializing a string, not a list
                 if isinstance(results_json, str):
                     cached_results = json.loads(results_json)
                 else:
                     # If for some reason we already have a Python object, use it directly
                     cached_results = results_json
-                timestamp = metadata.get("timestamp", 0)
+                timestamp = metadata.get("timestamp", 0) if isinstance(metadata, dict) else getattr(metadata, "timestamp", 0)
                 
                 # Use cached results if less than 60 seconds old
                 if time.time() - timestamp < 60:
@@ -531,12 +580,12 @@ async def query_graph_knowledge(version_id: str, query: str, top_k: int = 10) ->
             embedding = [0.0001] * len(embedding)
         
         # Use a shared timeout for all brain queries
-        timeout = 5.0  # 5 second timeout
+        timeout = 10.0  # 5 second timeout
         
         # Query all brains in parallel directly with the embedding
         all_results = []
         tasks = []
-        
+        logger.info(f"Querying {len(brain_banks)} brains for '{query}'")
         for brain in brain_banks:
             # Create tasks for querying each brain's namespace
             ns = brain["bank_name"]
@@ -703,40 +752,63 @@ async def query_brain_with_embeddings_batch(
                         }
                     )
                 
-                matches = results.get("matches", [])
-                if matches:
-                    logger.info(f"Found {len(matches)} matches in index '{index_name_str}' for query {query_idx}")
+                # Extract matches from response - handle different API formats
+                matches = []
+                if hasattr(results, 'matches'):
+                    matches = results.matches
+                elif hasattr(results, 'get'):
+                    matches = results.get("matches", [])
                 
-                query_results = []
+                # Process matches
+                entry_results = []
                 for match in matches:
-                    # Extract metadata safely with fallbacks
-                    metadata = match.get("metadata", {})
-                    
-                    # Create a sanitized metadata object for Pinecone compatibility
-                    sanitized_metadata = {}
-                    for key, value in metadata.items():
-                        if isinstance(value, (str, int, float, bool)) or (isinstance(value, list) and all(isinstance(x, str) for x in value)):
-                            sanitized_metadata[key] = value
+                    try:
+                        # Extract metadata safely with fallbacks
+                        if hasattr(match, "metadata"):
+                            metadata = match.metadata
+                        elif isinstance(match, dict):
+                            metadata = match.get("metadata", {})
                         else:
-                            # For complex data types, we'll keep them as is in the result
-                            # as this is not being stored in Pinecone but returned to the caller
-                            sanitized_metadata[key] = value
-                    
-                    result = {
-                        "id": match.get("id", ""),
-                        "bank_name": namespace,
-                        "brain_id": brain_id,
-                        "raw": metadata.get("raw", ""),
-                        "categories": {
-                            "primary": metadata.get("categories_primary", "unknown"),
-                            "special": metadata.get("categories_special", "")
-                        },
-                        "confidence": metadata.get("confidence", 0.0),
-                        "score": match.get("score", 0.0),
-                        "metadata": sanitized_metadata  # Include processed metadata
-                    }
-                    query_results.append(result)
-                return query_idx, query_results
+                            metadata = {}
+                            
+                        # Extract ID and score with fallbacks
+                        if hasattr(match, "id"):
+                            match_id = match.id
+                        elif isinstance(match, dict):
+                            match_id = match.get("id", "")
+                        else:
+                            match_id = ""
+                            
+                        if hasattr(match, "score"):
+                            match_score = match.score
+                        elif isinstance(match, dict):
+                            match_score = match.get("score", 0.0)
+                        else:
+                            match_score = 0.0
+                        
+                        # Get metadata fields, handling both dict and object formats
+                        raw = metadata.get("raw", "") if isinstance(metadata, dict) else getattr(metadata, "raw", "")
+                        categories_primary = metadata.get("categories_primary", "unknown") if isinstance(metadata, dict) else getattr(metadata, "categories_primary", "unknown")
+                        categories_special = metadata.get("categories_special", "") if isinstance(metadata, dict) else getattr(metadata, "categories_special", "")
+                        confidence = metadata.get("confidence", 0.0) if isinstance(metadata, dict) else getattr(metadata, "confidence", 0.0)
+                        
+                        entry = {
+                            "id": match_id,
+                            "bank_name": namespace,
+                            "brain_id": brain_id,
+                            "raw": raw,
+                            "categories": {
+                                "primary": categories_primary,
+                                "special": categories_special
+                            },
+                            "confidence": confidence,
+                            "score": match_score
+                        }
+                        entry_results.append(entry)
+                    except Exception as e:
+                        logger.error(f"Error processing match in batch query: {e}")
+                        continue
+                return query_idx, entry_results
             except Exception as e:
                 logger.error(f"Error querying {index_name_str} for query {query_idx}: {e}")
                 return query_idx, []
@@ -895,25 +967,46 @@ async def update_called_node(node_id: str, node_content: str, metadata: Dict[str
         return False
 
 async def recall_similar_nodes(input_text: str, namespace: str = "called_nodes", top_k: int = 5, similarity_threshold: float = 0.7) -> List[Dict]:
-    """Recall nodes, prioritizing high vibe_score."""
+    """
+    Recall nodes similar to input text using vector similarity
+    
+    Args:
+        input_text: Text to find similar nodes for
+        namespace: Namespace where nodes are stored
+        top_k: Maximum number of results to return
+        similarity_threshold: Minimum similarity score (0-1) to include results
+        
+    Returns:
+        List of similar nodes with content and metadata
+    """
+    global _cache_stats
+    
     try:
+        # Track seen IDs to avoid duplicates
+        seen_ids = set()
+        similar_nodes = []
+        
+        # Get embedding for input text
         embedding = await get_cached_embedding(input_text)
         
-        # Ensure we have a valid embedding with non-zero values
+        # Ensure embedding has non-zero values
         if not any(embedding):
-            logger.warning(f"Invalid zero embedding generated for input '{input_text[:30]}...'")
-            # Use a small non-zero value to avoid Pinecone errors
+            logger.warning(f"Zero embedding detected for recall query '{input_text}', using minimal values")
             embedding = [0.0001] * len(embedding)
         
+        # Filter for called nodes
+        filter_dict = {}  # No filter for called_nodes namespace
+            
+        # Query both AMI and ENT indices for similar nodes
         results = await asyncio.to_thread(
             ami_index.query,
             vector=embedding,
             top_k=top_k,
+            score_threshold=similarity_threshold,
             include_metadata=True,
-            namespace=namespace
+            namespace=namespace,
+            filter=filter_dict
         )
-        
-        nodes = []
         
         # Handle both old and new Pinecone API response formats
         matches = []
@@ -922,69 +1015,75 @@ async def recall_similar_nodes(input_text: str, namespace: str = "called_nodes",
         elif hasattr(results, 'get'):
             matches = results.get("matches", [])
         
-        for m in matches:
-            # Extract score (handle both dict and object formats)
-            score = m.get("score", 0) if isinstance(m, dict) else getattr(m, "score", 0)
-            
-            if score >= similarity_threshold:
-                # Extract id (handle both dict and object formats)
-                node_id = m.get("id", "") if isinstance(m, dict) else getattr(m, "id", "")
-                
-                # Extract metadata (handle both dict and object formats)
-                if isinstance(m, dict) and "metadata" in m:
-                    metadata = m["metadata"]
-                elif hasattr(m, "metadata"):
-                    metadata = m.metadata
-                    # Convert to dict if it's not already
-                    if not isinstance(metadata, dict):
-                        metadata = {k: getattr(metadata, k) for k in dir(metadata) 
-                                    if not k.startswith('_') and not callable(getattr(metadata, k))}
+        for match in matches:
+            try:
+                # Extract metadata, ID and score safely with fallbacks
+                if hasattr(match, "metadata"):
+                    metadata = match.metadata
+                elif isinstance(match, dict):
+                    metadata = match.get("metadata", {})
                 else:
-                    logger.warning(f"Cannot extract metadata from match: {type(m)}")
+                    metadata = {}
+                    
+                if hasattr(match, "id"):
+                    match_id = match.id
+                elif isinstance(match, dict):
+                    match_id = match.get("id", "")
+                else:
+                    match_id = ""
+                    
+                if hasattr(match, "score"):
+                    match_score = match.score
+                elif isinstance(match, dict):
+                    match_score = match.get("score", 0.0)
+                else:
+                    match_score = 0.0
+                
+                # Skip if we've already seen this ID
+                if match_id in seen_ids:
                     continue
                 
-                processed_metadata = {}
-                
-                # Copy primitive values directly
-                for key, value in metadata.items():
-                    if key != "raw" and key != "vibe_score" and key != "timestamp":
-                        # Try to parse JSON for potential serialized objects
-                        try:
-                            if isinstance(value, str) and (value.startswith('{') or value.startswith('[')):
-                                processed_metadata[key] = json.loads(value)
-                            else:
-                                processed_metadata[key] = value
-                        except (json.JSONDecodeError, TypeError):
-                            # If it's not valid JSON, keep the original value
-                            processed_metadata[key] = value
-                    else:
-                        processed_metadata[key] = value
+                seen_ids.add(match_id)
                 
                 # Get raw content
-                raw_content = metadata.get("raw", "") if isinstance(metadata, dict) else getattr(metadata, "raw", "")
+                raw_content = metadata.get("content", "") if isinstance(metadata, dict) else getattr(metadata, "content", "")
                 
                 # Get vibe_score with fallback
                 vibe_score = metadata.get("vibe_score", 1.0) if isinstance(metadata, dict) else getattr(metadata, "vibe_score", 1.0)
                 
+                # Get additional metadata that might exist
+                processed_metadata = {}
+                if isinstance(metadata, dict):
+                    for key, value in metadata.items():
+                        if key != "content" and key != "vibe_score":
+                            processed_metadata[key] = value
+                else:
+                    # Convert object attributes to dict
+                    for attr in dir(metadata):
+                        if not attr.startswith('_') and not callable(getattr(metadata, attr)):
+                            if attr != "content" and attr != "vibe_score":
+                                processed_metadata[attr] = getattr(metadata, attr)
+                
                 node = {
-                    "id": node_id,
+                    "id": match_id,
                     "raw": raw_content,
                     "metadata": processed_metadata,
-                    "score": score,
+                    "score": match_score,
                     "vibe_score": vibe_score
                 }
-                nodes.append(node)
-                
+                similar_nodes.append(node)
+            except Exception as e:
+                logger.error(f"Error processing recall match: {e}")
+                continue
+        
         # Sort by vibe_score (primary) and score (secondary)
-        nodes.sort(key=lambda x: (x["vibe_score"], x["score"]), reverse=True)
-        _cache_stats["node_hits"] += len(nodes)
-        _cache_stats["node_misses"] += 1 if not nodes else 0
-        logger.info(f"Recalled {len(nodes)} nodes for '{input_text[:30]}...'")
-        return nodes
+        similar_nodes.sort(key=lambda x: (x["vibe_score"], x["score"]), reverse=True)
+        _cache_stats["node_hits"] += len(similar_nodes)
+        _cache_stats["node_misses"] += 1 if not similar_nodes else 0
+        logger.info(f"Recalled {len(similar_nodes)} nodes for '{input_text[:30]}...'")
+        return similar_nodes
     except Exception as e:
         logger.error(f"Error recalling nodes: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return []
 
 async def recall_similar_nodes_batch(
@@ -1069,7 +1168,13 @@ async def cleanup_old_nodes(namespace: str = "called_nodes", max_age_seconds: fl
                 namespace=namespace,
                 filter={"timestamp": {"$lt": cutoff}}
             )
-            time_matches = time_results.get("matches", [])
+            
+            # Handle both old and new Pinecone API response formats
+            time_matches = []
+            if hasattr(time_results, 'matches'):
+                time_matches = time_results.matches
+            elif hasattr(time_results, 'get'):
+                time_matches = time_results.get("matches", [])
         except Exception as e:
             logger.error(f"Error querying old nodes: {e}")
             time_matches = []
@@ -1083,14 +1188,32 @@ async def cleanup_old_nodes(namespace: str = "called_nodes", max_age_seconds: fl
                 namespace=namespace,
                 filter={"vibe_score": {"$lt": min_vibe_score}}
             )
-            vibe_matches = vibe_results.get("matches", [])
+            
+            # Handle both old and new Pinecone API response formats
+            vibe_matches = []
+            if hasattr(vibe_results, 'matches'):
+                vibe_matches = vibe_results.matches
+            elif hasattr(vibe_results, 'get'):
+                vibe_matches = vibe_results.get("matches", [])
         except Exception as e:
             logger.error(f"Error querying low vibe nodes: {e}")
             vibe_matches = []
         
         # Combine the IDs from both queries
-        time_ids = [m["id"] for m in time_matches]
-        vibe_ids = [m["id"] for m in vibe_matches]
+        time_ids = []
+        for m in time_matches:
+            if hasattr(m, "id"):
+                time_ids.append(m.id)
+            elif isinstance(m, dict):
+                time_ids.append(m.get("id", ""))
+                
+        vibe_ids = []
+        for m in vibe_matches:
+            if hasattr(m, "id"):
+                vibe_ids.append(m.id)
+            elif isinstance(m, dict):
+                vibe_ids.append(m.get("id", ""))
+        
         all_ids = list(set(time_ids + vibe_ids))  # Remove duplicates
         
         if all_ids:

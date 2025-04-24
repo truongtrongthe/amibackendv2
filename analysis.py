@@ -252,7 +252,7 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
         f"1. CONTACT IDENTITY:\n"
         f"   - Who is this person? (profession, role, demographics if evident)\n"
         f"   - What is their current situation or context?\n"
-        f"   - CLASSIFY this contact (e.g., potential customer, existing client, information seeker, concerned individual)\n\n"
+        f"   - CLASSIFY this contact using categories from process instructions (use their specific classification system if provided, otherwise use examples like: potential customer, existing client, information seeker, concerned individual)\n\n"
         
         f"2. CORE NEEDS & DESIRES:\n"
         f"   - What specific problem or need does this person have?\n"

@@ -189,28 +189,13 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             # Bilingual profile query (English and Vietnamese)
             profile_queries = [
                 {
-                    "en": "techniques for building customer portraits in Vietnam",
-                    "vi": "kỹ thuật xây dựng chân dung khách hàng Việt Nam",
+                    "en": "How to build customer portraits?",
+                    "vi": "Làm sao để xây dựng chân dung khách hàng?",
                     "purpose": "understand"
                 },
                 {
-                    "en": "culturally sensitive questioning techniques in Vietnam",
-                    "vi": "kỹ thuật đặt câu hỏi nhạy cảm phù hợp văn hóa Việt Nam",
-                    "purpose": "understand"
-                },
-                {
-                    "en": "analyzing customer emotions and behaviors in Vietnam",
-                    "vi": "phân tích cảm xúc và hành vi khách hàng Việt Nam",
-                    "purpose": "analyze"
-                },
-                {
-                    "en": "first message analysis for customer insights",
-                    "vi": "phân tích tin nhắn đầu tiên để tìm hiểu thông tin khách hàng",
-                    "purpose": "analyze"
-                },
-                {
-                    "en": "methods for collecting health and lifestyle data in Vietnam",
-                    "vi": "phương pháp thu thập thông tin sức khỏe và lối sống khách hàng Việt Nam",
+                    "en": "Customer profiling techniques",
+                    "vi": "Các kỹ thuật xây dựng hồ sơ khách hàng",
                     "purpose": "understand"
                 }
             ]
@@ -219,76 +204,74 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             classification_queries = [
                 {
                     "en": "customer classification frameworks",
-                    "vi": "khung phân loại khách hàng",
+                    "vi": "Kỹ thuật phân nhóm, phân loại khách hàng",
                     "purpose": "classify"
                 },
                 {
-                    "en": "psychological analysis models for customers",
-                    "vi": "mô hình phân tích tâm lý khách hàng",
+                    "en": "How to know what category of customer is contacting me?",
+                    "vi": "Làm thế nào để biết người liên hệ với tôi thuộc loại nào?",
                     "purpose": "classify"
                 },
                 {
-                    "en": "cultural influences on customer behavior in Vietnam",
-                    "vi": "ảnh hưởng văn hóa đến hành vi khách hàng ở Việt Nam",
-                    "purpose": "understand"
-                },
-                {
-                    "en": "methods for assessing initial customer needs",
-                    "vi": "phương pháp đánh giá nhu cầu ban đầu của khách hàng",
-                    "purpose": "understand"
-                },
-                {
-                    "en": "customer archetypes and personality analysis",
-                    "vi": "nguyên mẫu và tính cách khách hàng",
+                    "en": "customer segmentation types",
+                    "vi": "Các loại phân khúc khách hàng",
                     "purpose": "classify"
                 }
             ]
             
-            # Construct multilingual queries
-            profile_query = " ".join([f"{q['en']}; {q['vi']}" for q in profile_queries])
-            classification_query = " ".join([f"{q['en']}; {q['vi']}" for q in classification_queries])
+            # Run individual queries for each profile and classification question to get better matching scores
+            query_tasks = []
             
-            # Run both queries in parallel
-            profile_entries_task = query_graph_knowledge(graph_version_id, profile_query, top_k=8)
-            classification_entries_task = query_graph_knowledge(graph_version_id, classification_query, top_k=8)
+            # Create individual queries for profile items
+            for query_item in profile_queries:
+                individual_query_eng = f"{query_item['en']}"
+                individual_query_vie = f"{query_item['vi']}"
+                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_eng, top_k=5))
+                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_vie, top_k=5))
             
-            # Gather results with error handling
-            profile_entries, classification_entries = await asyncio.gather(
-                profile_entries_task, 
-                classification_entries_task,
-                return_exceptions=True
-            )
+            # Create individual queries for classification items
+            for query_item in classification_queries:
+                individual_query_eng = f"{query_item['en']}"
+                individual_query_vie = f"{query_item['vi']}"
+                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_eng, top_k=5))
+                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_vie, top_k=5))
             
-            # Check for exceptions in results
-            if isinstance(profile_entries, Exception):
-                logger.error(f"Failed to fetch profile entries: {str(profile_entries)}")
-                profile_entries = []
-            if isinstance(classification_entries, Exception):
-                logger.error(f"Failed to fetch classification entries: {str(classification_entries)}")
-                classification_entries = []
+            # Execute all queries in parallel
+            all_results = await asyncio.gather(*query_tasks, return_exceptions=True)
             
-            # Combine all entries, removing duplicates by ID
+            # Process results and handle exceptions
             combined_entries = []
             seen_ids = set()
-            for entry in profile_entries + classification_entries:
-                entry_id = entry.get("id", "unknown")
-                if entry_id not in seen_ids:
-                    seen_ids.add(entry_id)
-                    combined_entries.append(entry)
+            
+            for result in all_results:
+                if isinstance(result, asyncio.CancelledError):
+                    logger.warning(f"Query was cancelled due to timeout")
+                    continue
+                if isinstance(result, Exception):
+                    logger.error(f"Failed to fetch knowledge entry: {str(result)}")
+                    continue
+                
+                # Add entries from this result that haven't been seen before
+                for entry in result:
+                    entry_id = entry.get("id", "unknown")
+                    if entry_id not in seen_ids:
+                        seen_ids.add(entry_id)
+                        combined_entries.append(entry)
             
             # Process combined results
             if combined_entries:
-                profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
+                profile_instructions = "\n".join(entry["raw"] for entry in combined_entries)
                 process_instructions = profile_instructions
-                logger.info(f"Retrieved {len(combined_entries)} entries for context analysis: {profile_instructions}")
+                logger.info(f"Retrieved {len(combined_entries)} entries for context analysis from {len(all_results)} individual queries")
             else:
                 logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
-                process_instructions = "Use general customer analysis techniques, such as first-message tone analysis and basic psychological profiling, to analyze the contact."
+                process_instructions = "Use general customer analysis techniques to analyze the contact."
     except Exception as e:
         logger.error(f"Error fetching knowledge from Pinecone: {str(e)}")
-        process_instructions = "Use general customer analysis techniques, such as first-message tone analysis and basic psychological profiling, to analyze the contact."
+        process_instructions = "Use general customer analysis techniques to analyze the contact."
     
     # Build the analysis prompt
+    logger.info(f"BUILDING analysis with PRESET: {process_instructions}")
     analysis_prompt = build_context_analysis_prompt(conversation_context, process_instructions)
     
     # Stream the analysis

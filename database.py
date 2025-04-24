@@ -14,7 +14,10 @@ import re
 from supabase import create_client, Client
 from typing import Dict, List
 # Import the new hotbrain module for enhanced vector operations
+from pinecone import Pinecone
+
 from hotbrain import get_cached_embedding
+
 # Initialize Supabase client
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
@@ -24,16 +27,8 @@ supabase: Client = create_client(
     spb_key
 )
 
-from pinecone import (
-    Pinecone,
-    ServerlessSpec,
-    CloudProvider,
-    AwsRegion,
-    VectorType
-)
 
 # Initialize Pinecone client with proper error handling
-
 
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", ""))
 ami_index_name = os.getenv("PRESET", "ami-index")
