@@ -19,3 +19,10 @@ flask-socketio
 langchain-anthropic
 docx
 python-docx
+sentence_transformers
+hdbscan 
+scikit-learn
+nltk
+faiss-cpu
+faiss-gpu
+faiss

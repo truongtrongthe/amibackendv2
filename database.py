@@ -14,6 +14,9 @@ import re
 from supabase import create_client, Client
 from typing import Dict, List
 # Import the new hotbrain module for enhanced vector operations
+
+from sentence_transformers import SentenceTransformer
+
 from pinecone import Pinecone
 
 from hotbrain import get_cached_embedding
@@ -213,7 +216,8 @@ async def save_training_with_chunk(
     
 ) -> bool:
     global AI_NAME
-    embedding = await get_cached_embedding(input)
+    #embedding = await get_cached_embedding(input)
+    embedding = await EMBEDDINGS.aembed_query(input)
     logger.info(f"Bank name at Save training chunk={bank_name}")
     logger.info(f"Environment variables: PRESET={os.getenv('PRESET', 'not set')}, ENT={os.getenv('ENT', 'not set')}")
     ns = bank_name 
