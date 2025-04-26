@@ -25,6 +25,9 @@ from typing import List, Optional, Dict, Any  # Added List and Optional imports
 from collections import deque
 import threading
 import queue
+from use_brain import flick_out
+from brain_singleton import load_brain_vectors
+
 
 # Keep track of recent webhook requests to detect duplicates
 recent_requests = deque(maxlen=100)
@@ -673,6 +676,9 @@ def activate_brain():
         return jsonify({"error": "graph_version_id is required"}), 400
     
     try:
+        # Import required functions from brain_singleton
+        from brain_singleton import load_brain_vectors, get_current_graph_version, is_brain_loaded
+        
         # Run the async load_brain_vectors function in a thread
         success = run_async_in_thread(load_brain_vectors, graph_version_id)
         
@@ -698,6 +704,54 @@ def activate_brain():
         logger.error(traceback.format_exc())
         return jsonify({"error": error_msg}), 500
 
+@app.route('/reload-brain', methods=['POST', 'OPTIONS'])
+def reload_brain():
+    """
+    Reload the currently active brain to refresh its vectors and metadata.
+    This endpoint forces a reload of the current graph version's vectors.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN RELOAD BRAIN request at {start_time.isoformat()} ===")
+    
+    try:
+        # Get current graph version
+        from brain_singleton import get_current_graph_version, reset_brain, load_brain_vectors
+        
+        current_version = get_current_graph_version()
+        if not current_version:
+            return jsonify({"error": "No active brain graph version found"}), 400
+            
+        # First reset the brain to clear all loaded vectors
+        reset_brain()
+        
+        # Then reload vectors for the current graph version
+        success = run_async_in_thread(load_brain_vectors, current_version)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END RELOAD BRAIN request - total time: {elapsed:.2f}s ===")
+        
+        if success:
+            return jsonify({
+                "message": "Brain reloaded successfully", 
+                "graph_version_id": current_version,
+                "reloaded": True
+            }), 200
+        else:
+            return jsonify({"error": "Failed to reload brain vectors"}), 500
+            
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in reload_brain: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": error_msg}), 500
+
 @app.route('/examine', methods=['POST', 'OPTIONS'])
 def examine_a_brain():
     """
@@ -715,11 +769,7 @@ def examine_a_brain():
     
     if not user_input:
         return jsonify({"error": "user_input is required"}), 400
-    
-    # Import needed functions
-    from use_brain import flick_out
-    # No need to import set_graph_version again as it's already imported at the top
-    
+        
     try:
         # If a graph_version_id is provided, set it at the singleton level
         if graph_version_id:

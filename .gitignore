@@ -48,3 +48,5 @@ hito_index/
 *.DS_Store
 .venv/
 faiss_index/
+.bin
+.pkl
