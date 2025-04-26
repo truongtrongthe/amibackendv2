@@ -54,6 +54,7 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from threading import Lock
 from utilities import logger
 from enrich_profile import ProfileEnricher
+from training_prep_new import understand_document,save_document_insights
 
 # Import SocketIO functionality from socketio_manager.py
 from socketio_manager import init_socketio, emit_analysis_event, emit_next_action_event
@@ -639,6 +640,52 @@ def havefun():
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
+@app.route('/examine', methods=['POST', 'OPTIONS'])
+def examine_a_brain():
+    """
+    Handle examine an active brain requests using a thread-based approach to avoid Flask/Eventlet event loop conflicts.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN EXAMINE request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    graph_version_id = data.get("graph_version_id", "")
+    
+    if not user_input:
+        return jsonify({"error": "user_input is required"}), 400
+    
+    # Import needed functions from use_brain and brain_singleton
+    from use_brain import flick_out
+    from brain_singleton import set_graph_version
+    
+    try:
+        # If a graph_version_id is provided, set it at the singleton level
+        if graph_version_id:
+            logger.info(f"Setting graph version to: {graph_version_id}")
+            set_graph_version(graph_version_id)
+        
+        # Run the async flick_out function in a separate thread
+        brain_results = run_async_in_thread(flick_out, user_input)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END EXAMINE request - total time: {elapsed:.2f}s ===")
+        
+        # Return results as JSON
+        return jsonify(brain_results), 200
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in examine_a_brain: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": error_msg}), 500
+
 @app.route('/labels', methods=['GET', 'OPTIONS'])
 def get_labels():
     print(f"Received request: {request.method} {request.path}")
@@ -787,6 +834,170 @@ def process_document_endpoint():
         logger.error(f"Error in process_document: {str(e)}")
         return jsonify({
             "error": f"Error processing document: {str(e)}"
+        }), 500
+
+@app.route('/understand-document', methods=['POST', 'OPTIONS'])
+def understand_document_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    if 'file' not in request.files:
+        return jsonify({"success": False, "error": "Missing file"}), 400
+
+    file = request.files['file']
+
+    if not file.filename:
+        return jsonify({"success": False, "error": "No file selected"}), 400
+        
+    # Determine file type from extension
+    file_extension = file.filename.split('.')[-1].lower()
+    if file_extension not in ['docx', 'pdf']:
+        return jsonify({"success": False, "error": f"Unsupported file type: {file_extension}. Only DOCX and PDF files are supported."}), 400
+
+    # Use the thread-based approach instead of the global event loop
+    try:
+        # Read file content into BytesIO
+        file_content = file.read()
+        if not file_content:
+            logger.warning(f"Empty file content for {file.filename}")
+            return jsonify({"success": False, "error": "Empty file content."}), 400
+            
+        # Create BytesIO object from file content
+        from io import BytesIO
+        file_bytes = BytesIO(file_content)
+        
+        # Log file info for debugging
+        logger.info(f"Processing file '{file.filename}' ({len(file_content)} bytes) as {file_extension}")
+        
+        # Run the async understand_document function in a separate thread
+        result = run_async_in_thread(
+            understand_document, 
+            input_source=file_bytes,  # Pass BytesIO object
+            file_type=file_extension  # Pass detected file type
+        )
+        
+        # Validate result structure
+        if not isinstance(result, dict):
+            logger.error(f"Invalid result type from understand_document: {type(result)}")
+            return jsonify({
+                "success": False,
+                "error": "Document processing returned invalid data structure",
+                "error_type": "ProcessingError"
+            }), 500
+        
+        # Check for success
+        if result.get("success", False):
+            # Validate presence of document_insights
+            if "document_insights" not in result:
+                logger.warning("Missing document_insights in successful result")
+                result["document_insights"] = {}
+                
+            # Log success statistics
+            insights = result["document_insights"]
+            logger.info(f"Document processed successfully: {insights.get('metadata', {}).get('sentence_count', 0)} sentences, "
+                        f"{insights.get('metadata', {}).get('cluster_count', 0)} clusters")
+            
+            # Return the document insights with proper structure
+            return jsonify(result), 200
+        else:
+            error_msg = result.get("error", "Failed to process document")
+            error_type = result.get("error_type", "UnknownError")
+            logger.error(f"Document processing failed: {error_type}: {error_msg}")
+            return jsonify({
+                "success": False,
+                "error": error_msg,
+                "error_type": error_type
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in understand_document: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": f"Error processing document: {str(e)}",
+            "error_type": type(e).__name__
+        }), 500
+
+@app.route('/save-document-insights', methods=['POST', 'OPTIONS'])
+def save_document_insights_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    # Check for data in JSON format or form data
+    if request.is_json:
+        # Process JSON request
+        if 'document_insight' not in request.json:
+            return jsonify({"success": False, "error": "Missing document_insight in request body"}), 400
+            
+        if 'user_id' not in request.json:
+            return jsonify({"success": False, "error": "Missing user_id in request body"}), 400
+            
+        if 'bank_name' not in request.json:
+            return jsonify({"success": False, "error": "Missing bank_name in request body"}), 400
+            
+        document_insight = request.json['document_insight']
+        user_id = request.json['user_id']
+        bank_name = request.json['bank_name']
+        mode = request.json.get('mode', 'default')
+    else:
+        # Process form data
+        if 'document_insight' not in request.form:
+            return jsonify({"success": False, "error": "Missing document_insight in form data"}), 400
+            
+        if 'user_id' not in request.form:
+            return jsonify({"success": False, "error": "Missing user_id in form data"}), 400
+            
+        if 'bank_name' not in request.form:
+            return jsonify({"success": False, "error": "Missing bank_name in form data"}), 400
+            
+        document_insight = request.form['document_insight']
+        user_id = request.form['user_id']
+        bank_name = request.form['bank_name']
+        mode = request.form.get('mode', 'default')
+
+    # Ensure document_insight is a JSON string
+    if isinstance(document_insight, dict):
+        document_insight = json.dumps(document_insight)
+    elif not isinstance(document_insight, str):
+        return jsonify({
+            "success": False, 
+            "error": f"Invalid document_insight format. Expected JSON object or string, got {type(document_insight).__name__}"
+        }), 400
+
+    # Log request details
+    logger.info(f"Saving document insights to bank '{bank_name}' for user '{user_id}'")
+    
+    # Use the thread-based approach to call the async function
+    try:
+        # Run the async save_document_insights function in a separate thread
+        success = run_async_in_thread(
+            save_document_insights, 
+            document_insight=document_insight, 
+            user_id=user_id, 
+            mode=mode, 
+            bank=bank_name
+        )
+
+        if success:
+            logger.info(f"Document insights saved successfully to bank '{bank_name}'")
+            return jsonify({
+                "success": True,
+                "message": "Document insights saved successfully"
+            }), 200
+        else:
+            logger.error(f"Failed to save document insights to bank '{bank_name}'")
+            return jsonify({
+                "success": False, 
+                "error": "Failed to save document insights"
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in save_document_insights endpoint: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False, 
+            "error": f"Error saving document insights: {str(e)}",
+            "error_type": type(e).__name__
         }), 500
 
 @app.route('/brains', methods=['GET', 'OPTIONS'])
@@ -2936,8 +3147,8 @@ def batch_enrich_profiles_endpoint():
                 logger.info(f"Batch profile enrichment completed. Updated {len(profiles)} profiles.")
             except Exception as e:
                 logger.error(f"Error in batch profile enrichment: {str(e)}")
-                import traceback
-                logger.error(traceback.format_exc())
+            import traceback
+            logger.error(traceback.format_exc())
         
         # Start enrichment in background thread
         import threading
