@@ -1068,7 +1068,7 @@ class ActiveBrain:
             logger.error(traceback.format_exc())
             raise RuntimeError(f"Failed to perform similarity search: {e}")
     
-    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 5, threshold: float = 0.2) -> List[Tuple[str, np.ndarray, Dict]]:
+    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 5, threshold: float = 0.1) -> List[Tuple[str, np.ndarray, Dict]]:
         
         query_vector = await EMBEDDINGS.aembed_query(query_text)
         

@@ -10,7 +10,8 @@ import nest_asyncio
 nest_asyncio.apply()  # Apply patch to allow nested event loops
 
 # Import brain singleton functions first to ensure they're available
-from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version
+from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version,get_brain
+
 
 # Then other imports
 from flask import Flask, Response, request, jsonify, stream_with_context, copy_current_request_context
@@ -27,7 +28,6 @@ import threading
 import queue
 from use_brain import flick_out
 from brain_singleton import load_brain_vectors
-
 
 # Keep track of recent webhook requests to detect duplicates
 recent_requests = deque(maxlen=100)
@@ -240,6 +240,11 @@ except Exception as e:
     logger.warning("Using mock Supabase client in main.py for testing")
 
 app = Flask(__name__)
+
+# Add numpy and json imports (needed elsewhere)
+import numpy as np
+import json
+
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max file size
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'ami_secret_key')
 
@@ -678,37 +683,19 @@ def activate_brain():
     
     try:
         # Import required functions from brain_singleton
-        from brain_singleton import load_brain_vectors, get_current_graph_version, is_brain_loaded, reset_brain
         
-        # Always reset the brain first to ensure a clean state
-        logger.info(f"Resetting brain before loading new vectors for graph version {graph_version_id}")
-        reset_brain()
         
-        # Manually check and log if files exist before loading
-        if os.path.exists("faiss_index.bin"):
-            logger.info("Found existing faiss_index.bin file before loading")
-        else:
-            logger.info("No existing faiss_index.bin file found")
-            
-        if os.path.exists("metadata.pkl"):
-            logger.info("Found existing metadata.pkl file before loading")
-        else:
-            logger.info("No existing metadata.pkl file found")
         
         # Run the async load_brain_vectors function in a thread with force_delete=True
         logger.info(f"Starting vector loading for graph version {graph_version_id} with force_delete={force_delete}")
         success = run_async_in_thread(load_brain_vectors, graph_version_id, force_delete)
         
-        # Verify file deletion after loading
-        if os.path.exists("faiss_index.bin"):
-            logger.info("faiss_index.bin exists after loading (expected)")
+        brain = get_brain()
+        if brain and hasattr(brain, 'faiss_index'):
+            vector_count = brain.faiss_index.ntotal
+            logger.info(f"FAISS index contains {vector_count} vectors after activation")
         else:
-            logger.warning("No faiss_index.bin file found after loading (unexpected)")
-            
-        if os.path.exists("metadata.pkl"):
-            logger.info("metadata.pkl exists after loading (expected)")
-        else:
-            logger.warning("No metadata.pkl file found after loading (unexpected)")
+            logger.warning("Brain not properly initialized after activation")
         
         # Log completion
         end_time = datetime.now()
@@ -720,7 +707,9 @@ def activate_brain():
                 "message": "Brain activated successfully", 
                 "graph_version_id": get_current_graph_version(),
                 "loaded": is_brain_loaded(),
-                "elapsed_seconds": elapsed
+                "elapsed_seconds": elapsed,
+                "worker_id": "",
+                "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
             }), 200
         else:
             return jsonify({"error": "Failed to load brain vectors"}), 500
@@ -747,23 +736,39 @@ def reload_brain():
     
     try:
         # Get current graph version
-        from brain_singleton import get_current_graph_version, reset_brain, load_brain_vectors
+        from brain_singleton import get_current_graph_version, reset_brain, load_brain_vectors, get_brain
         
         current_version = get_current_graph_version()
         if not current_version:
             return jsonify({"error": "No active brain graph version found"}), 400
+        
+        # Check for index files on disk
+        index_path = "faiss_index.bin"
+        metadata_path = "metadata.pkl"
+        worker_id = os.getpid()
+        logger.info(f"Worker {worker_id} processing reload-brain request")
+        
+        if os.path.exists(index_path):
+            logger.info(f"Found FAISS index file on disk: {index_path}, size: {os.path.getsize(index_path)}")
+        else:
+            logger.info("No FAISS index file found on disk")
+            
+        if os.path.exists(metadata_path):
+            logger.info(f"Found metadata file on disk: {metadata_path}, size: {os.path.getsize(metadata_path)}")
+        else:
+            logger.info("No metadata file found on disk")
         
         # First reset the brain to clear all loaded vectors
         logger.info(f"Resetting brain before reloading vectors for graph version {current_version}")
         reset_brain()
         
         # Manually check and log if files exist before loading
-        if os.path.exists("faiss_index.bin"):
+        if os.path.exists(index_path):
             logger.info("Found existing faiss_index.bin file before reloading")
         else:
             logger.info("No existing faiss_index.bin file found")
             
-        if os.path.exists("metadata.pkl"):
+        if os.path.exists(metadata_path):
             logger.info("Found existing metadata.pkl file before reloading")
         else:
             logger.info("No existing metadata.pkl file found")
@@ -773,15 +778,23 @@ def reload_brain():
         success = run_async_in_thread(load_brain_vectors, current_version, True)
         
         # Verify file existence after loading
-        if os.path.exists("faiss_index.bin"):
-            logger.info("faiss_index.bin exists after reloading (expected)")
+        if os.path.exists(index_path):
+            logger.info(f"faiss_index.bin exists after reloading (expected), size: {os.path.getsize(index_path)}")
         else:
             logger.warning("No faiss_index.bin file found after reloading (unexpected)")
             
-        if os.path.exists("metadata.pkl"):
-            logger.info("metadata.pkl exists after reloading (expected)")
+        if os.path.exists(metadata_path):
+            logger.info(f"metadata.pkl exists after reloading (expected), size: {os.path.getsize(metadata_path)}")
         else:
             logger.warning("No metadata.pkl file found after reloading (unexpected)")
+        
+        # Double-check that the brain was properly loaded
+        brain = get_brain()
+        if brain and hasattr(brain, 'faiss_index'):
+            vector_count = brain.faiss_index.ntotal
+            logger.info(f"FAISS index contains {vector_count} vectors after reload")
+        else:
+            logger.warning("Brain not properly initialized after reload")
         
         # Log completion
         end_time = datetime.now()
@@ -793,7 +806,9 @@ def reload_brain():
                 "message": "Brain reloaded successfully", 
                 "graph_version_id": current_version,
                 "reloaded": True,
-                "elapsed_seconds": elapsed
+                "elapsed_seconds": elapsed,
+                "worker_id": worker_id,
+                "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
             }), 200
         else:
             return jsonify({"error": "Failed to reload brain vectors"}), 500
@@ -819,18 +834,13 @@ def examine_a_brain():
     
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
-    graph_version_id = data.get("graph_version_id", "")
     
     if not user_input:
         return jsonify({"error": "user_input is required"}), 400
         
     try:
-        # If a graph_version_id is provided, set it at the singleton level
-        if graph_version_id:
-            logger.info(f"Setting graph version to: {graph_version_id}")
-            set_graph_version(graph_version_id)
-        
-        # Run the async flick_out function in a separate thread
+        # Import additional functions
+        # Verify the FAISS index has vectors
         brain_results = run_async_in_thread(flick_out, user_input)
         
         # Log completion
@@ -838,8 +848,9 @@ def examine_a_brain():
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[SESSION_TRACE] === END EXAMINE request - total time: {elapsed:.2f}s ===")
         
-        # Return results as JSON
-        return jsonify(brain_results), 200
+        # Add elapsed time and worker info to results
+        
+        return Response(json.dumps(brain_results), mimetype='application/json'), 200
     except Exception as e:
         # Handle any errors
         error_msg = f"Error in examine_a_brain: {str(e)}"
