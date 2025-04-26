@@ -61,6 +61,19 @@ def get_brain():
         
         # Try to load from disk if available
         try_load_from_disk()
+    
+    # Ensure metadata is always a dictionary
+    if hasattr(_brain_instance, 'metadata'):
+        if not isinstance(_brain_instance.metadata, dict):
+            print("Converting metadata from list to dictionary")
+            # Convert list to dictionary using vector_ids as keys if available
+            if hasattr(_brain_instance, 'vector_ids') and len(_brain_instance.vector_ids) == len(_brain_instance.metadata):
+                _brain_instance.metadata = dict(zip(_brain_instance.vector_ids, _brain_instance.metadata))
+            else:
+                # Fallback: create dictionary with numeric keys
+                _brain_instance.metadata = {str(i): meta for i, meta in enumerate(_brain_instance.metadata)}
+    else:
+        _brain_instance.metadata = {}
         
     return _brain_instance
 
@@ -272,7 +285,7 @@ def try_load_from_disk():
                 metadata = pickle.load(f)
                 _brain_instance.vector_ids = metadata.get('vector_ids', [])
                 _brain_instance.vectors = metadata.get('vectors', None)
-                _brain_instance.metadata = metadata.get('metadata', [])
+                _brain_instance.metadata = metadata.get('metadata', {})
             
             print(f"Successfully loaded {_brain_instance.faiss_index.ntotal} vectors from disk")
             _brain_loaded = True
@@ -316,12 +329,24 @@ def save_to_disk():
             print(f"Saving FAISS index to {FAISS_INDEX_PATH}")
             faiss.write_index(_brain_instance.faiss_index, FAISS_INDEX_PATH)
             
+            # Handle metadata conversion if it's a list instead of a dictionary
+            brain_metadata = getattr(_brain_instance, 'metadata', {})
+            if isinstance(brain_metadata, list):
+                print("Converting metadata from list to dictionary before saving")
+                # Convert list to dictionary using vector_ids as keys if available
+                vector_ids = getattr(_brain_instance, 'vector_ids', [])
+                if len(vector_ids) == len(brain_metadata):
+                    brain_metadata = dict(zip(vector_ids, brain_metadata))
+                else:
+                    # Fallback: create dictionary with numeric keys
+                    brain_metadata = {str(i): meta for i, meta in enumerate(brain_metadata)}
+            
             # Save metadata
             print(f"Saving metadata to {METADATA_PATH}")
             metadata = {
                 'vector_ids': getattr(_brain_instance, 'vector_ids', []),
                 'vectors': getattr(_brain_instance, 'vectors', None),
-                'metadata': getattr(_brain_instance, 'metadata', [])
+                'metadata': brain_metadata
             }
             with open(METADATA_PATH, 'wb') as f:
                 pickle.dump(metadata, f)
