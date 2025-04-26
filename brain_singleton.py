@@ -87,13 +87,14 @@ def get_current_graph_version():
         return _current_config["graph_version_ids"][0]
     return None
 
-async def load_brain_vectors(graph_version_id=None):
+async def load_brain_vectors(graph_version_id=None, force_delete=True):
     """
     Load vectors into the brain from the specified graph version.
     If no graph_version_id is provided, use the current one.
     
     Args:
         graph_version_id: Optional graph version ID to use (will set if different)
+        force_delete: Force deletion of existing index files even if brain is already loaded
         
     Returns:
         bool: True if vectors were loaded successfully, False otherwise
@@ -115,26 +116,40 @@ async def load_brain_vectors(graph_version_id=None):
             version_changed = set_graph_version(graph_version_id)
             print(f"Version changed: {version_changed}")
     
-    # If already loaded and version didn't change, just return success
-    if _brain_loaded and not version_changed:
+    # If already loaded and version didn't change, we might still need to clean files
+    if _brain_loaded and not version_changed and not force_delete:
         print("Brain already loaded with current version, skipping reload")
         return True
     
     # Clean up existing files if they exist - always remove when loading
     # to ensure we have a clean state
+    delete_success = True
     if os.path.exists("faiss_index.bin"):
         try:
+            print("Attempting to remove faiss_index.bin file")
             os.remove("faiss_index.bin")
-            print("Removed existing faiss_index.bin file")
+            print("Successfully removed existing faiss_index.bin file")
         except Exception as e:
-            print(f"Warning: Could not remove faiss_index.bin: {e}")
+            delete_success = False
+            print(f"ERROR: Could not remove faiss_index.bin: {e}")
+            import traceback
+            print(traceback.format_exc())
+            # Still continue to try with a warning
             
     if os.path.exists("metadata.pkl"):
         try:
+            print("Attempting to remove metadata.pkl file")
             os.remove("metadata.pkl")
-            print("Removed existing metadata.pkl file")
+            print("Successfully removed existing metadata.pkl file")
         except Exception as e:
-            print(f"Warning: Could not remove metadata.pkl: {e}")
+            delete_success = False
+            print(f"ERROR: Could not remove metadata.pkl: {e}")
+            import traceback
+            print(traceback.format_exc())
+            # Still continue to try with a warning
+    
+    if not delete_success:
+        print("WARNING: Failed to delete one or more existing index files. This may cause stale data to be used.")
     
     # Ensure brain instance exists
     brain = get_brain()

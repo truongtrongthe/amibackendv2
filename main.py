@@ -671,16 +671,44 @@ def activate_brain():
     
     data = request.get_json() or {}
     graph_version_id = data.get("graph_version_id", "")
+    force_delete = data.get("force_delete", True)  # Default to force deletion
     
     if not graph_version_id:
         return jsonify({"error": "graph_version_id is required"}), 400
     
     try:
         # Import required functions from brain_singleton
-        from brain_singleton import load_brain_vectors, get_current_graph_version, is_brain_loaded
+        from brain_singleton import load_brain_vectors, get_current_graph_version, is_brain_loaded, reset_brain
         
-        # Run the async load_brain_vectors function in a thread
-        success = run_async_in_thread(load_brain_vectors, graph_version_id)
+        # Always reset the brain first to ensure a clean state
+        logger.info(f"Resetting brain before loading new vectors for graph version {graph_version_id}")
+        reset_brain()
+        
+        # Manually check and log if files exist before loading
+        if os.path.exists("faiss_index.bin"):
+            logger.info("Found existing faiss_index.bin file before loading")
+        else:
+            logger.info("No existing faiss_index.bin file found")
+            
+        if os.path.exists("metadata.pkl"):
+            logger.info("Found existing metadata.pkl file before loading")
+        else:
+            logger.info("No existing metadata.pkl file found")
+        
+        # Run the async load_brain_vectors function in a thread with force_delete=True
+        logger.info(f"Starting vector loading for graph version {graph_version_id} with force_delete={force_delete}")
+        success = run_async_in_thread(load_brain_vectors, graph_version_id, force_delete)
+        
+        # Verify file deletion after loading
+        if os.path.exists("faiss_index.bin"):
+            logger.info("faiss_index.bin exists after loading (expected)")
+        else:
+            logger.warning("No faiss_index.bin file found after loading (unexpected)")
+            
+        if os.path.exists("metadata.pkl"):
+            logger.info("metadata.pkl exists after loading (expected)")
+        else:
+            logger.warning("No metadata.pkl file found after loading (unexpected)")
         
         # Log completion
         end_time = datetime.now()
@@ -691,7 +719,8 @@ def activate_brain():
             return jsonify({
                 "message": "Brain activated successfully", 
                 "graph_version_id": get_current_graph_version(),
-                "loaded": is_brain_loaded()
+                "loaded": is_brain_loaded(),
+                "elapsed_seconds": elapsed
             }), 200
         else:
             return jsonify({"error": "Failed to load brain vectors"}), 500
@@ -723,12 +752,36 @@ def reload_brain():
         current_version = get_current_graph_version()
         if not current_version:
             return jsonify({"error": "No active brain graph version found"}), 400
-            
+        
         # First reset the brain to clear all loaded vectors
+        logger.info(f"Resetting brain before reloading vectors for graph version {current_version}")
         reset_brain()
         
-        # Then reload vectors for the current graph version
-        success = run_async_in_thread(load_brain_vectors, current_version)
+        # Manually check and log if files exist before loading
+        if os.path.exists("faiss_index.bin"):
+            logger.info("Found existing faiss_index.bin file before reloading")
+        else:
+            logger.info("No existing faiss_index.bin file found")
+            
+        if os.path.exists("metadata.pkl"):
+            logger.info("Found existing metadata.pkl file before reloading")
+        else:
+            logger.info("No existing metadata.pkl file found")
+        
+        # Then reload vectors for the current graph version with force_delete=True
+        logger.info(f"Starting vector reloading for graph version {current_version}")
+        success = run_async_in_thread(load_brain_vectors, current_version, True)
+        
+        # Verify file existence after loading
+        if os.path.exists("faiss_index.bin"):
+            logger.info("faiss_index.bin exists after reloading (expected)")
+        else:
+            logger.warning("No faiss_index.bin file found after reloading (unexpected)")
+            
+        if os.path.exists("metadata.pkl"):
+            logger.info("metadata.pkl exists after reloading (expected)")
+        else:
+            logger.warning("No metadata.pkl file found after reloading (unexpected)")
         
         # Log completion
         end_time = datetime.now()
@@ -739,7 +792,8 @@ def reload_brain():
             return jsonify({
                 "message": "Brain reloaded successfully", 
                 "graph_version_id": current_version,
-                "reloaded": True
+                "reloaded": True,
+                "elapsed_seconds": elapsed
             }), 200
         else:
             return jsonify({"error": "Failed to reload brain vectors"}), 500
@@ -3329,7 +3383,8 @@ if __name__ == '__main__':
         asyncio.set_event_loop(loop)
         try:
             logger.info("Starting brain vector loading...")
-            result = loop.run_until_complete(load_brain_vectors())
+            # Always force deletion of existing files
+            result = loop.run_until_complete(load_brain_vectors(force_delete=True))
             if result:
                 logger.info("Successfully loaded brain vectors")
             else:

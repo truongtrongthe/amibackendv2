@@ -39,9 +39,18 @@ async def load_brain():
     """
     # Clean up existing files if they exist
     if os.path.exists("faiss_index.bin"):
-        os.remove("faiss_index.bin")
+        try:
+            os.remove("faiss_index.bin")
+            print("Removed existing faiss_index.bin file")
+        except Exception as e:
+            print(f"ERROR: Could not remove faiss_index.bin: {e}")
+    
     if os.path.exists("metadata.pkl"):
-        os.remove("metadata.pkl")
+        try:
+            os.remove("metadata.pkl")
+            print("Removed existing metadata.pkl file")
+        except Exception as e:
+            print(f"ERROR: Could not remove metadata.pkl: {e}")
     
     # Check for Pinecone API key
     pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -49,8 +58,8 @@ async def load_brain():
         print("ERROR: PINECONE_API_KEY environment variable is required")
         return False
     
-    # Use the singleton's loading method
-    return await load_brain_vectors(get_current_graph_version())
+    # Use the singleton's loading method with force_delete=True
+    return await load_brain_vectors(get_current_graph_version(), force_delete=True)
 
 async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
     """Return vectors from brain without printing results."""
