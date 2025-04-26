@@ -14,17 +14,16 @@ from analysis import (
     build_context_analysis_prompt,
     build_next_actions_prompt
 )
-from hotbrain import (
-    get_cached_embedding, 
-    query_graph_knowledge,
-    query_brain_with_embeddings_batch,
-    get_version_brain_banks
-)
+from brain_singleton import get_brain, set_graph_version, is_brain_loaded, load_brain_vectors, get_current_graph_version
+
 from response_optimization import ResponseProcessor, ResponseFilter
 
 # Use the same LLM instances as mc.py
 LLM = ChatOpenAI(model="gpt-4o", streaming=False)
 StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
+
+# Access the brain singleton once
+brain = get_brain()
 
 class ToolRegistry:
     """Registry for all available tools"""
@@ -186,88 +185,122 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     
     try:
         if graph_version_id:
+            # Ensure the brain is loaded with the right version
+            if graph_version_id != get_current_graph_version():
+                logger.info(f"Setting graph version to: {graph_version_id}")
+                version_changed = set_graph_version(graph_version_id)
+                if version_changed and not is_brain_loaded():
+                    logger.info(f"Loading vectors for graph version: {graph_version_id}")
+                    await load_brain_vectors()
+            
+            # Make sure brain is loaded
+            if not is_brain_loaded():
+                logger.info("Brain not loaded. Loading vectors...")
+                await load_brain_vectors()
+            
+            # Get brain instance
+            global brain
+            brain = get_brain()
+                
             # Bilingual profile query (English and Vietnamese)
             profile_queries = [
-                {
-                    "en": "How to build customer portraits?",
-                    "vi": "Làm sao để xây dựng chân dung khách hàng?",
-                    "purpose": "understand"
-                },
-                {
-                    "en": "Customer profiling techniques",
-                    "vi": "Các kỹ thuật xây dựng hồ sơ khách hàng",
-                    "purpose": "understand"
-                }
+                "How to build customer portraits?",
+                "Làm sao để xây dựng chân dung khách hàng?",
+                "Customer profiling techniques",
+                "Các kỹ thuật xây dựng hồ sơ khách hàng"
             ]
             
             # Improved classification query with abstract terms
             classification_queries = [
-                {
-                    "en": "customer classification frameworks",
-                    "vi": "Kỹ thuật phân nhóm, phân loại khách hàng",
-                    "purpose": "classify"
-                },
-                {
-                    "en": "How to know what category of customer is contacting me?",
-                    "vi": "Làm thế nào để biết người liên hệ với tôi thuộc loại nào?",
-                    "purpose": "classify"
-                },
-                {
-                    "en": "customer segmentation types",
-                    "vi": "Các loại phân khúc khách hàng",
-                    "purpose": "classify"
-                }
+                "customer classification frameworks",
+                "Kỹ thuật phân nhóm, phân loại khách hàng",
+                "How to know what category of customer is contacting me?",
+                "Làm thế nào để biết người liên hệ với tôi thuộc loại nào?",
+                "customer segmentation types",
+                "Các loại phân khúc khách hàng"
             ]
             
-            # Run individual queries for each profile and classification question to get better matching scores
-            query_tasks = []
+            # Combine queries for batch processing
+            all_queries = profile_queries + classification_queries
             
-            # Create individual queries for profile items
-            for query_item in profile_queries:
-                individual_query_eng = f"{query_item['en']}"
-                individual_query_vie = f"{query_item['vi']}"
-                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_eng, top_k=5))
-                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_vie, top_k=5))
-            
-            # Create individual queries for classification items
-            for query_item in classification_queries:
-                individual_query_eng = f"{query_item['en']}"
-                individual_query_vie = f"{query_item['vi']}"
-                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_eng, top_k=5))
-                query_tasks.append(query_graph_knowledge(graph_version_id, individual_query_vie, top_k=5))
-            
-            # Execute all queries in parallel
-            all_results = await asyncio.gather(*query_tasks, return_exceptions=True)
-            
-            # Process results and handle exceptions
-            combined_entries = []
-            seen_ids = set()
-            
-            for result in all_results:
-                if isinstance(result, asyncio.CancelledError):
-                    logger.warning(f"Query was cancelled due to timeout")
-                    continue
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to fetch knowledge entry: {str(result)}")
-                    continue
+            # Execute batch search with simplified approach
+            try:
+                # Use batch similarity search for all queries at once
+                batch_results = await brain.batch_similarity_search(all_queries, top_k=5)
                 
-                # Add entries from this result that haven't been seen before
-                for entry in result:
-                    entry_id = entry.get("id", "unknown")
-                    if entry_id not in seen_ids:
-                        seen_ids.add(entry_id)
-                        combined_entries.append(entry)
+                # Process results
+                combined_entries = []
+                seen_ids = set()
+                
+                # Process each query's results
+                for query in all_queries:
+                    if query in batch_results:
+                        results = batch_results[query]
+                        
+                        for vector_id, vector, metadata, similarity in results:
+                            if vector_id not in seen_ids:
+                                seen_ids.add(vector_id)
+                                
+                                # Create an entry with the necessary information
+                                entry = {
+                                    "id": vector_id,
+                                    "raw": metadata.get("raw", ""),
+                                    "similarity": float(similarity)
+                                }
+                                combined_entries.append(entry)
+                
+                # Process combined results
+                if combined_entries:
+                    # Sort by similarity score for highest relevance first
+                    combined_entries.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+                    profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
+                    process_instructions = profile_instructions
+                    logger.info(f"Retrieved {len(combined_entries)} entries for context analysis")
+                else:
+                    logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
+                    process_instructions = "Use general customer analysis techniques to analyze the contact."
             
-            # Process combined results
-            if combined_entries:
-                profile_instructions = "\n".join(entry["raw"] for entry in combined_entries)
-                process_instructions = profile_instructions
-                logger.info(f"Retrieved {len(combined_entries)} entries for context analysis from {len(all_results)} individual queries")
-            else:
-                logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
-                process_instructions = "Use general customer analysis techniques to analyze the contact."
+            except Exception as batch_error:
+                logger.warning(f"Batch search failed: {batch_error}. Falling back to individual queries.")
+                
+                # Fall back to individual queries if batch search fails
+                combined_entries = []
+                seen_ids = set()
+                
+                for query in all_queries:
+                    try:
+                        results = await brain.get_similar_vectors_by_text(query, top_k=5)
+                        
+                        for vector_id, vector, metadata, similarity in results:
+                            if vector_id not in seen_ids:
+                                seen_ids.add(vector_id)
+                                
+                                # Create an entry with the necessary information
+                                entry = {
+                                    "id": vector_id,
+                                    "raw": metadata.get("raw", ""),
+                                    "similarity": float(similarity)
+                                }
+                                combined_entries.append(entry)
+                                
+                    except Exception as query_error:
+                        logger.error(f"Individual query failed for '{query}': {query_error}")
+                
+                # Process combined results from individual queries
+                if combined_entries:
+                    # Sort by similarity score for highest relevance first
+                    combined_entries.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+                    profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
+                    process_instructions = profile_instructions
+                    logger.info(f"Retrieved {len(combined_entries)} entries for context analysis from individual queries")
+                else:
+                    logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
+                    process_instructions = "Use general customer analysis techniques to analyze the contact."
+    
     except Exception as e:
-        logger.error(f"Error fetching knowledge from Pinecone: {str(e)}")
+        logger.error(f"Error fetching knowledge from brain: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         process_instructions = "Use general customer analysis techniques to analyze the contact."
     
     # Build the analysis prompt
@@ -312,7 +345,7 @@ async def next_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
 
 async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     """
-    Handle knowledge query requests with streaming
+    Handle knowledge query requests with direct brain access
     
     Args:
         params: Dictionary containing queries, graph_version_id, and optional top_k
@@ -331,97 +364,106 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
         return
     
     try:
-        # Get brain banks
-        brain_banks = await get_version_brain_banks(graph_version_id)
+        # Set graph version if provided and different from current
+        if graph_version_id and graph_version_id != get_current_graph_version():
+            logger.info(f"Setting graph version to: {graph_version_id}")
+            version_changed = set_graph_version(graph_version_id)
+            if version_changed and not is_brain_loaded():
+                # Need to load vectors for new version
+                logger.info(f"Loading vectors for graph version: {graph_version_id}")
+                success = await load_brain_vectors()
+                if not success:
+                    logger.error(f"Failed to load vectors for graph version {graph_version_id}")
+                    yield {"type": "knowledge", "content": [], "complete": True, 
+                           "error": f"Failed to load vectors for graph version {graph_version_id}"}
+                    return
         
-        if not brain_banks:
-            yield {"type": "knowledge", "content": [], "complete": True, "error": "No brain banks found"}
-            return
+        # Ensure brain is loaded
+        if not is_brain_loaded():
+            logger.info("Brain not loaded. Loading vectors...")
+            success = await load_brain_vectors()
+            if not success:
+                logger.error("Failed to load brain vectors")
+                yield {"type": "knowledge", "content": [], "complete": True, 
+                       "error": "Brain not loaded. Please activate brain first."}
+                return
         
-        # Generate embeddings
-        embedding_tasks = [get_cached_embedding(query) for query in queries]
-        embeddings = await asyncio.gather(*embedding_tasks)
+        # Get global brain instance
+        global brain
+        brain = get_brain()
         
-        # Create mapping of query index to embedding
-        query_embeddings = {i: embedding for i, embedding in enumerate(embeddings)}
-        
-        # Store already streamed result IDs to avoid duplicates
-        streamed_ids = set()
+        # Process queries and collect results
         all_results = []
+        seen_ids = set()
         
-        # Check if streaming function is available
-        has_streaming = True  # Initialize has_streaming variable
-                
-        # Process brain banks
-        for brain_bank in brain_banks:
-            bank_name = brain_bank["bank_name"]
-            brain_id = brain_bank["id"]
+        try:
+            # Use batch_similarity_search for efficient querying
+            logger.info(f"Running batch similarity search for {len(queries)} queries")
+            batch_results = await brain.batch_similarity_search(queries, top_k=top_k)
             
-            if has_streaming:
-                # Stream results from this brain bank
-                try:
-                    # Use the batch function but process results as if streaming
-                    batch_results = await query_brain_with_embeddings_batch(
-                        query_embeddings, bank_name, brain_id, top_k
-                    )
-                    
-                    # Process results one by one to simulate streaming
+            # Process and stream results
+            for query_idx, query in enumerate(queries):
+                if query in batch_results:
+                    results = batch_results[query]
                     new_results = []
-                    for query_idx, results in batch_results.items():
-                        for result in results:
-                            result_id = result.get("id", "unknown")
-                            if result_id not in streamed_ids:
-                                streamed_ids.add(result_id)
-                                
-                                # Add query information to each result
-                                result_with_query = result.copy()
-                                result_with_query['query'] = queries[query_idx]
-                                result_with_query['query_idx'] = query_idx
-                                
-                                new_results.append(result_with_query)
-                                all_results.append(result_with_query)
                     
-                    # Yield results in a batch
+                    for vector_id, vector, metadata, similarity in results:
+                        if vector_id not in seen_ids:
+                            seen_ids.add(vector_id)
+                            
+                            # Format the result
+                            result = {
+                                "id": vector_id,
+                                "similarity": float(similarity),  # Ensure JSON serializable
+                                "metadata": metadata,
+                                "vector_preview": vector[:10].tolist() if hasattr(vector, "tolist") else vector[:10],
+                                "raw": metadata.get("raw", ""),
+                                "query": query,
+                                "query_idx": query_idx
+                            }
+                            
+                            new_results.append(result)
+                            all_results.append(result)
+                    
+                    # Stream this batch of results
+                    if new_results:
+                        yield {"type": "knowledge", "content": new_results, "complete": False}
+        
+        except Exception as batch_error:
+            logger.warning(f"Batch search failed: {batch_error}. Falling back to individual queries.")
+            
+            # Fall back to individual queries
+            for query_idx, query in enumerate(queries):
+                try:
+                    results = await brain.get_similar_vectors_by_text(query, top_k=top_k)
+                    new_results = []
+                    
+                    for vector_id, vector, metadata, similarity in results:
+                        if vector_id not in seen_ids:
+                            seen_ids.add(vector_id)
+                            
+                            # Format the result
+                            result = {
+                                "id": vector_id,
+                                "similarity": float(similarity),
+                                "metadata": metadata,
+                                "vector_preview": vector[:10].tolist() if hasattr(vector, "tolist") else vector[:10],
+                                "raw": metadata.get("raw", ""),
+                                "query": query,
+                                "query_idx": query_idx
+                            }
+                            
+                            new_results.append(result)
+                            all_results.append(result)
+                    
+                    # Stream this query's results
                     if new_results:
                         yield {"type": "knowledge", "content": new_results, "complete": False}
                         
                 except Exception as e:
-                    logger.error(f"Error in streaming knowledge query: {str(e)}")
-                    # Fall back to batch query
-                    has_streaming = False
-            
-            if not has_streaming:
-                # Use batch query as fallback
-                try:
-                    batch_results = await query_brain_with_embeddings_batch(
-                        query_embeddings, bank_name, brain_id, top_k
-                    )
-                    
-                    # Process results
-                    new_results = []
-                    for query_idx, results in batch_results.items():
-                        for result in results:
-                            result_id = result.get("id", "unknown")
-                            if result_id not in streamed_ids:
-                                streamed_ids.add(result_id)
-                                
-                                # Add query information to each result
-                                result_with_query = result.copy()
-                                result_with_query['query'] = queries[query_idx]
-                                result_with_query['query_idx'] = query_idx
-                                
-                                new_results.append(result_with_query)
-                                all_results.append(result_with_query)
-                    
-                    # Yield results in a batch
-                    if new_results:
-                        yield {"type": "knowledge", "content": new_results, "complete": False}
-                
-                except Exception as e:
-                    logger.error(f"Error in batch knowledge query: {str(e)}")
-                    # Just continue to the next brain bank
+                    logger.error(f"Individual query failed for '{query}': {e}")
         
-        # Final complete event
+        # Final complete event with stats
         yield {
             "type": "knowledge", 
             "content": all_results, 
@@ -429,10 +471,10 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             "stats": {
                 "total_results": len(all_results),
                 "query_count": len(queries),
-                "brain_bank_count": len(brain_banks)
+                "graph_version": get_current_graph_version()
             }
         }
-        logger.info(f"Streamed knowledge for query {queries}. results: {all_results}")
+        logger.info(f"Completed knowledge search with {len(all_results)} total results")
         
     except Exception as e:
         logger.error(f"Error in knowledge query: {str(e)}")
@@ -706,6 +748,7 @@ async def process_llm_with_tools(
         Tool results and final response as they become available
     """
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+    import traceback
     
     # Prepare messages for LLM context
     messages = []
@@ -772,7 +815,7 @@ async def process_llm_with_tools(
             search_terms = [user_message]
             logger.info(f"Using fallback search term: {user_message}")
         
-        # STEP 5: Run initial knowledge query based on analysis
+        # STEP 5: Run initial knowledge query based on analysis using new approach
         logger.info(f"Starting initial knowledge query with {len(search_terms)} terms...")
         knowledge_params = {
             "queries": search_terms,
@@ -784,7 +827,7 @@ async def process_llm_with_tools(
             
         all_knowledge_entries = []
         async for result in knowledge_query_handler(knowledge_params):
-            # Pass through the knowledge events directly without double-wrapping
+            # Pass through the knowledge events directly
             yield result
             
             # Collect knowledge entries
@@ -835,23 +878,22 @@ async def process_llm_with_tools(
                 logger.info("Extracting search terms from next actions for targeted HOW-TO knowledge retrieval")
                 from analysis import extract_search_terms_from_next_actions, process_next_actions_result
                 
-                # First, process the next_actions_results to get structured data
+                # Process the next_actions_results
                 next_actions_data = process_next_actions_result(next_actions_results)
                 
-                # Make sure we have valid data and handle potential errors
+                # Make sure we have valid data
                 if not next_actions_data or not isinstance(next_actions_data, dict):
                     logger.warning(f"Invalid next_actions_data format: {next_actions_data}")
                     next_actions_data = {"next_action_english": "", "next_action_vietnamese": "", "next_action_full": next_actions_results}
                 
-                # Extract terms from the next actions to get more targeted "how-to" knowledge
-                # Use the full next_actions_results to preserve both languages
+                # Extract terms from the next actions
                 logger.info(f"Using complete next actions for targeted knowledge queries...")
                 action_search_terms = extract_search_terms_from_next_actions(next_actions_results)
                 
                 if action_search_terms:
                     logger.info(f"Extracted {len(action_search_terms)} search terms from next actions: {action_search_terms}")
                     
-                    # Run a secondary knowledge query with terms from next actions
+                    # Run a secondary knowledge query with terms from next actions - use the same handler
                     logger.info(f"Starting secondary knowledge query for HOW-TO knowledge...")
                     action_knowledge_params = {
                         "queries": action_search_terms,
@@ -861,9 +903,9 @@ async def process_llm_with_tools(
                     if thread_id:
                         action_knowledge_params["_thread_id"] = thread_id
                     
-                    # Query for additional knowledge
+                    # Query using the same improved handler
                     async for action_result in knowledge_query_handler(action_knowledge_params):
-                        # Pass through the knowledge events directly without double-wrapping
+                        # Pass through the knowledge events directly
                         yield action_result
                         
                         # Collect additional knowledge entries
@@ -930,6 +972,5 @@ async def process_llm_with_tools(
         
     except Exception as e:
         logger.error(f"Error in LLM tool calling: {str(e)}")
-        import traceback
         logger.error(traceback.format_exc())
         yield "I encountered an issue while processing your request. Please try again." 

@@ -227,8 +227,21 @@ async def get_cached_embedding(text: str, similarity_threshold: float = 0.70) ->
         return embedding
     except Exception as e:
         logger.error(f"Error generating embedding: {e}")
-        # Return a zero vector as fallback
-        return [0.0] * 1536
+        # Don't return a zero vector as fallback, instead generate a deterministic random vector
+        import numpy as np
+        
+        # Use text hash to seed the random generator for deterministic output
+        hash_val = int(text_hash[:16], 16)  # Take first 16 chars of hash
+        np.random.seed(hash_val)
+        
+        # Generate a random vector with normal distribution
+        fallback_vector = np.random.normal(0, 0.1, 1536).astype(np.float32)
+        
+        # Normalize the vector to unit length for cosine similarity
+        fallback_vector = fallback_vector / np.linalg.norm(fallback_vector)
+        
+        logger.warning(f"Generated fallback vector for '{text[:30]}...' after embedding error")
+        return fallback_vector.tolist()
 
 def calculate_cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     """Calculate cosine similarity between two vectors"""
