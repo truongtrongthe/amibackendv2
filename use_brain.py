@@ -4,7 +4,7 @@ import asyncio
 import time
 import random
 from active_brain import ActiveBrain
-from brain_singleton import init_brain, get_brain, reset_brain, set_graph_version, get_current_graph_version
+from brain_singleton import init_brain, get_brain, reset_brain, set_graph_version, get_current_graph_version, load_brain_vectors, is_brain_loaded
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -32,18 +32,12 @@ init_brain(
 # Get reference to the global brain instance
 brain = get_brain()
 
-# Flag to track if brain has been loaded
-brain_loaded = False
-
 async def load_brain():
-    global brain_loaded
-    
-    # Skip loading if already loaded
-    if brain_loaded:
-        print("Brain already loaded, skipping load...")
-        return True
-    
-    # Clean up existing files
+    """
+    Legacy function that uses the brain_singleton to load vectors.
+    This maintains compatibility with existing code.
+    """
+    # Clean up existing files if they exist
     if os.path.exists("faiss_index.bin"):
         os.remove("faiss_index.bin")
     if os.path.exists("metadata.pkl"):
@@ -55,45 +49,24 @@ async def load_brain():
         print("ERROR: PINECONE_API_KEY environment variable is required")
         return False
     
-    try:
-        start_time = time.time()
-        current_graph_version = get_current_graph_version() or GRAPH_VERSION_ID
-        await brain.load_all_vectors_from_graph_version(current_graph_version)
-        
-        # Print FAISS index details after loading
-        vector_count = brain.faiss_index.ntotal
-        
-        if vector_count == 0:
-            print("No vectors loaded. Skipping remaining tests.")
-            return False
-        
-        # Set the flag to indicate brain is loaded
-        brain_loaded = True
-        return True
-            
-    except Exception as e:
-        print(f"ERROR loading vectors: {e}")
-        import traceback
-        print(traceback.format_exc())
-        return False
+    # Use the singleton's loading method
+    return await load_brain_vectors(get_current_graph_version())
 
 async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
     """Return vectors from brain without printing results."""
-    global brain_loaded, brain
+    global brain
     
     # If a new graph version is requested, update the configuration
     if graph_version_id and graph_version_id != get_current_graph_version():
         # Set the new graph version which will reset the brain if needed
         version_changed = set_graph_version(graph_version_id)
         if version_changed:
-            # Reset brain_loaded flag since we're using a new brain
-            brain_loaded = False
             # Get the updated brain reference
             brain = get_brain()
     
     # Ensure brain is loaded before querying
-    if not brain_loaded:
-        success = await load_brain()
+    if not is_brain_loaded():
+        success = await load_brain_vectors()
         if not success:
             print("Failed to load brain. Cannot proceed with query.")
             return {"error": "Failed to load brain"}
@@ -117,9 +90,10 @@ async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
     }
 
 async def query_queries(input_text:str=""):
+    """Query the brain with the provided input text or run batch queries."""
     # Ensure brain is loaded before querying
-    if not brain_loaded:
-        success = await load_brain()
+    if not is_brain_loaded():
+        success = await load_brain_vectors()
         if not success:
             print("Failed to load brain. Cannot proceed with query.")
             return
@@ -195,7 +169,6 @@ async def query_queries(input_text:str=""):
                         print(f"{field}: {metadata[field]}")
                 
                 print("-" * 50)  # Separator between results
-    
 
 if __name__ == "__main__":
     # Initial load of brain 

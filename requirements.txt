@@ -21,6 +21,7 @@ docx
 python-docx
 sentence_transformers
 hdbscan 
+psutil
 scikit-learn
 nltk
 faiss-cpu

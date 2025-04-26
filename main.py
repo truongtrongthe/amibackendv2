@@ -1,7 +1,5 @@
-#!/usr/bin/env python
-# main.py
-# Purpose: Flask app with /pilot, /training, /havefun, /labels, and /label-details endpoints
-# Date: March 23, 2025 (Updated April 01, 2025)
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 # Apply eventlet monkey patch before any other imports
 import eventlet
@@ -11,7 +9,11 @@ eventlet.monkey_patch()
 import nest_asyncio
 nest_asyncio.apply()  # Apply patch to allow nested event loops
 
-from flask import Flask, Response, request, jsonify
+# Import brain singleton functions first to ensure they're available
+from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version
+
+# Then other imports
+from flask import Flask, Response, request, jsonify, stream_with_context, copy_current_request_context
 import json
 from uuid import UUID, uuid4
 from datetime import datetime
@@ -44,6 +46,7 @@ from braingraph import (
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
     update_brain_graph_version_status, BrainGraphVersion
 )
+from use_brain import load_brain
 from org_integrations import (
     create_integration, get_org_integrations, get_integration_by_id,
     update_integration, delete_integration, toggle_integration, OrganizationIntegration
@@ -258,6 +261,17 @@ contact_analyzer = ContactAnalyzer()
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
+# Initialize the brain with default configuration at startup
+DEFAULT_PINECONE_INDEX = "9well"
+DEFAULT_GRAPH_VERSION = "bd5b8bc1-d0cb-4e3e-9cd7-68a8563366fc"
+
+# Initialize the brain singleton
+init_brain(
+    dim=1536, 
+    namespace="", 
+    graph_version_ids=[DEFAULT_GRAPH_VERSION],
+    pinecone_index_name=DEFAULT_PINECONE_INDEX
+)
 
 def handle_options():
     """Common OPTIONS handler for all endpoints."""
@@ -640,6 +654,50 @@ def havefun():
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
+@app.route('/activate-brain', methods=['POST', 'OPTIONS'])
+def activate_brain():
+    """
+    Activate the brain with a specific graph version ID.
+    This endpoint will load vectors for the specified graph version.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN ACTIVATE BRAIN request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    graph_version_id = data.get("graph_version_id", "")
+    
+    if not graph_version_id:
+        return jsonify({"error": "graph_version_id is required"}), 400
+    
+    try:
+        # Run the async load_brain_vectors function in a thread
+        success = run_async_in_thread(load_brain_vectors, graph_version_id)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END ACTIVATE BRAIN request - total time: {elapsed:.2f}s ===")
+        
+        if success:
+            return jsonify({
+                "message": "Brain activated successfully", 
+                "graph_version_id": get_current_graph_version(),
+                "loaded": is_brain_loaded()
+            }), 200
+        else:
+            return jsonify({"error": "Failed to load brain vectors"}), 500
+            
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in activate_brain: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": error_msg}), 500
+
 @app.route('/examine', methods=['POST', 'OPTIONS'])
 def examine_a_brain():
     """
@@ -658,9 +716,9 @@ def examine_a_brain():
     if not user_input:
         return jsonify({"error": "user_input is required"}), 400
     
-    # Import needed functions from use_brain and brain_singleton
+    # Import needed functions
     from use_brain import flick_out
-    from brain_singleton import set_graph_version
+    # No need to import set_graph_version again as it's already imported at the top
     
     try:
         # If a graph_version_id is provided, set it at the singleton level
@@ -3215,6 +3273,30 @@ def batch_analyze_contacts_endpoint():
 
 # Run the server when executed directly
 if __name__ == '__main__':
+    # Start the brain loading in a background thread
+    def load_brain_task():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            logger.info("Starting brain vector loading...")
+            result = loop.run_until_complete(load_brain_vectors())
+            if result:
+                logger.info("Successfully loaded brain vectors")
+            else:
+                logger.warning("Failed to load brain vectors")
+        except Exception as e:
+            logger.error(f"Error loading brain vectors: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            loop.close()
+    
+    # Launch brain loading thread
+    logger.info("Starting brain initialization thread...")
+    brain_thread = threading.Thread(target=load_brain_task)
+    brain_thread.daemon = True
+    brain_thread.start()
+    
     # Get port from environment or use default
     port = int(os.environ.get('PORT', 5001))
     host = os.environ.get('HOST', '0.0.0.0')
@@ -3225,4 +3307,10 @@ else:
     # For production WSGI servers
     # Make sure to use eventlet workers with gunicorn
     # e.g.: gunicorn -k eventlet -w 1 main:app
-    print("Running as imported module - SocketIO needs eventlet worker")
+    
+    # Initialize brain on module load for production mode
+    # This allows gunicorn workers to have the brain ready
+    print("Running in production mode - initializing brain for WSGI workers")
+    
+    # Note: We can't run this directly here as we need an event loop
+    # The first request will initialize the brain via /activate-brain endpoint
