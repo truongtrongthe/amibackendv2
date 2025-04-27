@@ -888,24 +888,6 @@ async def save_document_insights(document_insight: str = "", user_id: str = "", 
                 )
             )
             
-            # Also save the takeaways with connections for more cohesive retrieval
-            combined_takeaways = (
-                f"{cluster_takeaways}\n\n"
-                f"Related Context: {connections}"
-            )
-            
-            processing_tasks.append(
-                save_training_with_chunk(
-                    input=combined_takeaways,
-                    user_id=user_id,
-                    mode=mode,
-                    doc_id=doc_id,
-                    chunk_id=f"{chunk_id}_takeaways_with_context",
-                    bank_name=bank,
-                    is_raw=True
-                )
-            )
-        
         # Process all save tasks
         logger.info(f"Executing {len(processing_tasks)} save tasks")
         results = await asyncio.gather(*processing_tasks, return_exceptions=True)
