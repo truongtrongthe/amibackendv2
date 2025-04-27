@@ -246,36 +246,38 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
         f"Process Instructions (Reference):\n{process_instructions}\n\n"
         f"{first_message_note}\n\n"
         
-        f"Analyze this conversation to understand the essential elements needed to guide the interaction. "
-        f"Be concise and focus only on what's clearly evident.\n\n"
+        f"Analyze this conversation using customer profiling techniques found in the process instructions. "
+        f"Be concise and focus on evidence-based observations.\n\n"
         
         f"1. CONTACT IDENTITY:\n"
-        f"   - Who is this person? (profession, role, demographics if evident)\n"
-        f"   - What is their current situation or context?\n"
-        f"   - CLASSIFY this contact using categories from process instructions (use their specific classification system if provided, otherwise use examples like: potential customer, existing client, information seeker, concerned individual)\n\n"
+        f"   - DIRECTLY REFERENCE the customer classification frameworks from process instructions\n" 
+        f"   - Who is this person? Identify demographics (age group, profession, role) using profiling techniques from process instructions\n"
+        f"   - Apply both demographic AND psychographic profiling methods mentioned in process instructions\n"
+        f"   - What is their current situation or context? Consider behavioral indicators mentioned in process instructions\n"
+        f"   - CLASSIFY this contact using EXACTLY the categories/system provided in process instructions\n"
+        f"   - If industry-specific classifications exist in process instructions, apply those frameworks\n\n"
         
         f"2. CORE NEEDS & DESIRES:\n"
-        f"   - What specific problem or need does this person have?\n"
-        f"   - What outcome or solution are they seeking?\n"
-        f"   - What concerns or pain points are they expressing?\n"
-        f"   - What is their emotional state? (anxious, curious, frustrated, etc.)\n\n"
+        f"   - What specific problem or need does this person have? Consider both explicit statements and implicit signals\n"
+        f"   - What outcome or solution are they seeking? Identify both practical and emotional objectives\n"
+        f"   - What concerns or pain points are they expressing? Note priority and urgency signals\n"
+        f"   - Assess their emotional state using the emotional assessment techniques referenced in process instructions\n\n"
         
         f"3. INTERACTION PATTERN:\n"
-        f"   - What conversation stage are we in? (first contact, information gathering, etc.)\n"
+        f"   - What conversation stage are we in? Apply context-aware profiling techniques from process instructions\n"
         f"   - How do they communicate? (direct, detailed, brief, formal, indirect, etc.)\n"
-        f"   - What communication preferences can you identify?\n"
-        f"   - What cultural factors are relevant? (especially for Vietnamese context)\n\n"
+        f"   - What communication preferences and channel preferences can you identify?\n"
+        f"   - What cultural factors are relevant? Apply cultural assessment techniques from process instructions, especially for Vietnamese context\n\n"
         
         f"4. CONVERSATION FOCUS:\n"
-        f"   - What is the main topic or purpose of this conversation?\n"
-        f"   - What critical information is missing to move forward?\n"
-        f"   - What specific topics should be addressed next?\n\n"
+        f"   - What is the main topic or purpose of this conversation? Prioritize based on customer type\n"
+        f"   - What critical information is missing to move forward? Consider both stated and implied needs\n"
+        f"   - What specific topics should be addressed next? Align with the customer profile you've identified\n\n"
         
         f"5. SUMMARY:\n"
-        f"   - In 1-2 sentences, summarize who this person is, what they need, and how we should communicate with them.\n\n"
-        
+        f"   - In 1-2 sentences, summarize who this person is, their classification according to process instructions, what they need, and how we should communicate with them.\n\n"
         f"Be direct, factual, and objective. Focus only on what's clearly evident in the conversation. "
-        f"After completing the English analysis, provide a Vietnamese translation."
+        f"After completing the English analysis, provide a Vietnamese translation using terminology consistent with process instructions."
     )
 
 def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_content: str) -> str:
