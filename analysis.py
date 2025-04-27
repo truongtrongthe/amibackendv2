@@ -244,10 +244,20 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
     return (
         f"Conversation:\n{context}\n\n"
         f"Process Instructions (Reference):\n{process_instructions}\n\n"
-        f"PRIORITIZATION GUIDANCE: First identify the MOST RELEVANT knowledge frameworks for this specific conversation. Focus on applying the 2-3 most applicable frameworks deeply rather than covering all concepts equally. Adapt your analysis based on conversation context and customer signals.\n\n"
+        
+        f"CRITICAL FRAMEWORK SELECTION: Evaluate all knowledge frameworks in the process instructions based on these relevance criteria:\n"
+        f"   1. DIRECT MATCH: Does the framework directly address the customer's explicit statements or questions? (highest relevance)\n"
+        f"   2. CONTEXTUAL MATCH: Does the framework apply to the customer's implied needs, demographics, or situation?\n"
+        f"   3. CONVERSATION STAGE: Is the framework appropriate for the current stage of conversation (initial contact, follow-up, etc.)?\n"
+        f"   4. CULTURAL/LINGUISTIC RELEVANCE: Does the framework address cultural or language elements present in the conversation?\n"
+        f"   5. PROBLEM-SOLUTION FIT: Does the framework provide actionable solutions to the customer's specific problems?\n\n"
+        f"Score each framework 1-5 based on these criteria. SELECT ONLY the 2-3 highest-scoring frameworks (scoring 4-5) for your analysis. COMPLETELY IGNORE frameworks scoring below 3.\n\n"
+        
+        f"PRIORITIZATION GUIDANCE: Focus on deeply applying the most relevant knowledge frameworks rather than covering all concepts equally. Adapt your analysis based on conversation context and customer signals. Irrelevant frameworks should be completely omitted from your analysis.\n\n"
+        
         f"{first_message_note}\n\n"
         
-        f"IMPORTANT: Pay close attention to the structure of the process instructions. For each knowledge item, extract and use:"
+        f"IMPORTANT: Pay close attention to the structure of the process instructions. For each RELEVANT knowledge item, extract and use:"
         f"- The TITLE to understand the general topic"
         f"- The DESCRIPTION to grasp the purpose and context"
         f"- The TAKEAWAYS section containing specific APPLICATION METHODS with step-by-step instructions"
