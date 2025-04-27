@@ -246,6 +246,12 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
         f"Process Instructions (Reference):\n{process_instructions}\n\n"
         f"{first_message_note}\n\n"
         
+        f"IMPORTANT: Pay close attention to the structure of the process instructions. For each knowledge item, extract and use:"
+        f"- The TITLE to understand the general topic"
+        f"- The DESCRIPTION to grasp the purpose and context"
+        f"- The TAKEAWAYS section containing specific APPLICATION METHODS with step-by-step instructions"
+        f"- The CROSS-CLUSTER CONNECTIONS to understand how this knowledge relates to other concepts\n\n"
+        
         f"Analyze this conversation using customer profiling techniques found in the process instructions. "
         f"Be concise and focus on evidence-based observations.\n\n"
         
@@ -302,6 +308,19 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
         f"The analysis includes the contact's identity, classification, needs, and communication style. "
         f"Use the retrieved knowledge to select the most effective approaches.\n\n"
         
+        f"IMPORTANT: Pay close attention to the structure of the retrieved knowledge. For each knowledge item, extract and use:"
+        f"- The TITLE to understand the general topic"
+        f"- The DESCRIPTION to grasp the purpose and context"
+        f"- The TAKEAWAYS section containing specific APPLICATION METHODS with step-by-step instructions"
+        f"- The CROSS-CLUSTER CONNECTIONS to understand how this knowledge relates to other concepts"
+        f"These sections provide valuable structure and context for your recommendations.\n\n"
+        
+        f"Use the retrieved knowledge, build Chain of Thought reasoning: "
+        f"1. Identify the appropriate knowledge elements relevant to this situation"
+        f"2. Extract the specific value and application methods from the Takeaways section"
+        f"3. Determine how to apply these methods in your conversation flow"
+        f"4. Reference concrete examples from the knowledge to guide implementation\n\n"
+        
         f"CHAIN OF THOUGHT REASONING:\n\n"
         
         f"1. CONTACT UNDERSTANDING:\n"
@@ -319,8 +338,8 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
         
         f"3. KNOWLEDGE APPLICATION:\n"
         f"   - Identify 2-3 specific techniques from the knowledge content that apply to this situation\n"
-        f"   - For each technique, note a specific element from the knowledge that would be useful\n"
-        f"   - Find specific questions from the knowledge content that would work for this contact\n"
+        f"   - For each technique, extract specific methods from the Takeaways section\n"
+        f"   - Reference step-by-step application instructions from the knowledge\n"
         f"   - Connect each knowledge element directly to this contact's specific needs and style\n\n"
         
         f"4. RESPONSE PLANNING:\n"
