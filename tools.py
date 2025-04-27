@@ -107,7 +107,7 @@ NEXT_ACTIONS_SCHEMA = {
 
 KNOWLEDGE_QUERY_SCHEMA = {
     "name": "knowledge_query_tool",
-    "description": "Query the knowledge base for information relevant to the user's request",
+    "description": "Query the knowledge base for information relevant to the user's request with intent-aware search capabilities",
     "parameters": {
         "type": "object",
         "properties": {
@@ -124,6 +124,22 @@ KNOWLEDGE_QUERY_SCHEMA = {
                 "type": "integer",
                 "description": "Number of results to return per query",
                 "default": 3
+            },
+            "bank_name": {
+                "type": "string",
+                "description": "Optional namespace (bank name) to query against",
+                "default": ""
+            },
+            "use_intent_aware": {
+                "type": "boolean",
+                "description": "Whether to use intent-aware search capabilities",
+                "default": true
+            },
+            "query_intent": {
+                "type": "string",
+                "description": "Optional explicit intent classification: 'conceptual', 'actionable', 'descriptive', or 'relational'",
+                "enum": ["conceptual", "actionable", "descriptive", "relational", null],
+                "default": null
             }
         },
         "required": ["queries", "graph_version_id"]
@@ -163,6 +179,96 @@ RESPONSE_GENERATION_SCHEMA = {
             }
         },
         "required": ["conversation_context", "analysis", "next_actions", "personality_instructions","knowledge_context"]
+    }
+}
+
+CLUSTER_MANAGEMENT_SCHEMA = {
+    "name": "cluster_management_tool",
+    "description": "Create, update, link, or unlink knowledge clusters with relationship-aware capabilities",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "description": "The operation to perform on the cluster",
+                "enum": ["create", "update", "link", "unlink", "get"]
+            },
+            "cluster_data": {
+                "type": "object",
+                "description": "Data for the cluster operation",
+                "properties": {
+                    "cluster_id": {
+                        "type": "string",
+                        "description": "Unique identifier for the cluster (required except for create)"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content of the cluster (required for create)"
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Optional document ID this cluster is associated with"
+                    },
+                    "standalone": {
+                        "type": "boolean",
+                        "description": "Whether this cluster can exist independently",
+                        "default": true
+                    },
+                    "primary_concepts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Primary concepts associated with this cluster"
+                    },
+                    "semantic_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Semantic tags for categorization"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Knowledge domain for this cluster"
+                    },
+                    "related_clusters": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "IDs of related clusters"
+                    },
+                    "relationship_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Types of relationships with related clusters (same order as related_clusters)"
+                    },
+                    "source_cluster_id": {
+                        "type": "string",
+                        "description": "For link/unlink operations, the source cluster ID"
+                    },
+                    "target_cluster_id": {
+                        "type": "string",
+                        "description": "For link/unlink operations, the target cluster ID"
+                    },
+                    "relationship": {
+                        "type": "string",
+                        "description": "For link operation, the type of relationship",
+                        "enum": ["complements", "elaborates", "contrasts_with", "prerequisite", "consequence", "example", "generic"]
+                    },
+                    "bidirectional": {
+                        "type": "boolean",
+                        "description": "For link/unlink operations, whether to create/remove relationship in both directions",
+                        "default": true
+                    }
+                }
+            },
+            "graph_version_id": {
+                "type": "string",
+                "description": "The version ID of the knowledge graph to use"
+            },
+            "include_vectors": {
+                "type": "boolean",
+                "description": "Whether to include vector data in the response",
+                "default": false
+            }
+        },
+        "required": ["operation", "cluster_data", "graph_version_id"]
     }
 }
 
@@ -409,7 +515,7 @@ async def next_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
 
 async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     """
-    Handle knowledge query requests with direct brain access
+    Handle knowledge query requests with intent-aware vector targeting
     
     Args:
         params: Dictionary containing queries, graph_version_id, and optional top_k
@@ -421,6 +527,9 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     graph_version_id = params.get("graph_version_id", "")
     top_k = params.get("top_k", 3)
     thread_id = params.get("_thread_id")  # Internal param for WebSocket
+    bank_name = params.get("bank_name", "")  # Support for bank_name parameter
+    use_intent_aware = params.get("use_intent_aware", True)  # Default to intent-aware querying
+    query_intent = params.get("query_intent", None)  # Optional explicit intent
     
     # Handle empty queries
     if not queries:
@@ -460,6 +569,198 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
         all_results = []
         seen_ids = set()
         
+        # First check if intent-aware search is available and preferred
+        if use_intent_aware:
+            try:
+                logger.info(f"Using intent-aware search")
+                
+                # If we have multiple queries, use batch search with intent
+                if len(queries) > 1:
+                    logger.info(f"Running batch intent-aware search for {len(queries)} queries")
+                    batch_results = await brain.batch_similarity_search_with_intent(
+                        queries=queries,
+                        top_k=top_k,
+                        threshold=0.05,
+                        intent=query_intent  # Pass explicit intent if provided
+                    )
+                    
+                    # Process and stream batch results
+                    for query_idx, query in enumerate(queries):
+                        if query in batch_results:
+                            results = batch_results[query]
+                            intent_results = []
+                            
+                            for vector_id, vector, metadata, similarity, is_related in results:
+                                if vector_id not in seen_ids:
+                                    seen_ids.add(vector_id)
+                                    
+                                    # Format for tool response
+                                    formatted_result = {
+                                        "id": vector_id,
+                                        "similarity": float(similarity),
+                                        "metadata": {
+                                            "vector_type": metadata.get("vector_type", "unknown"),
+                                            "cluster_id": metadata.get("cluster_id", ""),
+                                            "doc_id": metadata.get("doc_id", ""),
+                                            "categories_primary": metadata.get("categories_primary", "unknown"),
+                                            "categories_special": metadata.get("categories_special", ""),
+                                            "is_related": is_related
+                                        },
+                                        "raw": metadata.get("raw", ""),
+                                        "query": query,
+                                        "query_idx": query_idx
+                                    }
+                                    intent_results.append(formatted_result)
+                            
+                            # Stream results for this query
+                            if intent_results:
+                                all_results.extend(intent_results)
+                                yield {"type": "knowledge", "content": intent_results, "complete": False, "using": "intent_batch"}
+                
+                # For single queries or if batch search didn't yield enough results, use individual intent-aware search
+                else:
+                    # Process each query using intent-aware search
+                    for query_idx, query in enumerate(queries):
+                        logger.info(f"Using intent-aware search for query: {query}")
+                        results = await brain.get_similar_vectors_by_text_with_intent(
+                            query_text=query,
+                            top_k=top_k,
+                            threshold=0.05,
+                            vector_types=None,  # Let the method auto-detect intent
+                            include_relationships=True
+                        )
+                        
+                        intent_results = []
+                        for vector_id, vector, metadata, similarity, is_related in results:
+                            if vector_id not in seen_ids:
+                                seen_ids.add(vector_id)
+                                
+                                # Format for tool response
+                                formatted_result = {
+                                    "id": vector_id,
+                                    "similarity": float(similarity),
+                                    "metadata": {
+                                        "vector_type": metadata.get("vector_type", "unknown"),
+                                        "cluster_id": metadata.get("cluster_id", ""),
+                                        "doc_id": metadata.get("doc_id", ""),
+                                        "categories_primary": metadata.get("categories_primary", "unknown"),
+                                        "categories_special": metadata.get("categories_special", ""),
+                                        "is_related": is_related
+                                    },
+                                    "raw": metadata.get("raw", ""),
+                                    "query": query,
+                                    "query_idx": query_idx
+                                }
+                                intent_results.append(formatted_result)
+                        
+                        # Stream results for this query
+                        if intent_results:
+                            all_results.extend(intent_results)
+                            yield {"type": "knowledge", "content": intent_results, "complete": False, "using": "intent_individual"}
+                
+                # If we got results from intent-aware queries, return them
+                if all_results:
+                    # Final complete event with stats
+                    yield {
+                        "type": "knowledge", 
+                        "content": all_results, 
+                        "complete": True, 
+                        "stats": {
+                            "total_results": len(all_results),
+                            "query_count": len(queries),
+                            "graph_version": get_current_graph_version(),
+                            "using": "intent_aware"
+                        }
+                    }
+                    logger.info(f"Completed intent-aware search with {len(all_results)} results")
+                    return
+                
+                # If no results, fall through to traditional methods
+                logger.info("Intent-aware search returned no results, falling back to traditional methods")
+            
+            except Exception as e:
+                logger.error(f"Intent-aware search failed: {e}")
+                logger.info("Falling back to traditional methods")
+                # Fall through to traditional methods
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        # Fall back 1: If bank_name is provided, try using enhanced_query_knowledge directly
+        if bank_name:
+            try:
+                logger.info(f"Using enhanced_query_knowledge with bank={bank_name}")
+                from database import enhanced_query_knowledge
+                # Process each query using enhanced_query_knowledge
+                for query_idx, query in enumerate(queries):
+                    # Try with different intents for better coverage
+                    intents = ["conceptual", "actionable", "descriptive", "relational"]
+                    intent_results = []
+                    
+                    for intent in intents:
+                        enhanced_results = await enhanced_query_knowledge(
+                            query=query,
+                            bank_name=bank_name,
+                            top_k=max(3, top_k // len(intents)),  # Distribute results across intents
+                            query_intent=intent,
+                            include_relationships=True,
+                            threshold=0.05
+                        )
+                        
+                        # Add results
+                        for result in enhanced_results:
+                            result_id = result["id"]
+                            if result_id not in seen_ids:
+                                seen_ids.add(result_id)
+                                # Format for tool response
+                                formatted_result = {
+                                    "id": result_id,
+                                    "similarity": result["score"],
+                                    "metadata": {
+                                        "vector_type": result.get("vector_type", "unknown"),
+                                        "cluster_id": result.get("metadata", {}).get("cluster_id", ""),
+                                        "doc_id": result.get("metadata", {}).get("doc_id", ""),
+                                        "categories_primary": result.get("categories", {}).get("primary", "unknown"),
+                                        "categories_special": result.get("categories", {}).get("special", ""),
+                                        "is_related": result.get("metadata", {}).get("is_related", False)
+                                    },
+                                    "raw": result["raw"],
+                                    "query": query,
+                                    "query_idx": query_idx,
+                                    "intent": intent
+                                }
+                                intent_results.append(formatted_result)
+                    
+                    # Stream results for this query
+                    if intent_results:
+                        all_results.extend(intent_results)
+                        yield {"type": "knowledge", "content": intent_results, "complete": False, "using": "enhanced_direct"}
+                
+                # If we got results, return them
+                if all_results:
+                    # Final complete event with stats
+                    yield {
+                        "type": "knowledge", 
+                        "content": all_results, 
+                        "complete": True, 
+                        "stats": {
+                            "total_results": len(all_results),
+                            "query_count": len(queries),
+                            "graph_version": get_current_graph_version(),
+                            "using": "enhanced_direct"
+                        }
+                    }
+                    logger.info(f"Completed enhanced_direct search with {len(all_results)} results")
+                    return
+                
+                # Fall through to traditional methods if no results
+                logger.info("Enhanced direct query returned no results, falling back to traditional methods")
+            
+            except Exception as e:
+                logger.error(f"Enhanced direct query failed: {e}")
+                logger.info("Falling back to traditional methods")
+                # Fall through to traditional methods
+        
+        # Fall back 2: Traditional query methods - first try batch, then individual
         try:
             # Use batch_similarity_search for efficient querying
             logger.info(f"Running batch similarity search for {len(queries)} queries")
@@ -480,7 +781,7 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                                 "id": vector_id,
                                 "similarity": float(similarity),  # Ensure JSON serializable
                                 "metadata": metadata,
-                                "vector_preview": vector[:10].tolist() if hasattr(vector, "tolist") else vector[:10],
+                                "vector_preview": vector[:5].tolist() if hasattr(vector, "tolist") else vector[:5],
                                 "raw": metadata.get("raw", ""),
                                 "query": query,
                                 "query_idx": query_idx
@@ -491,12 +792,12 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                     
                     # Stream this batch of results
                     if new_results:
-                        yield {"type": "knowledge", "content": new_results, "complete": False}
+                        yield {"type": "knowledge", "content": new_results, "complete": False, "using": "batch"}
         
         except Exception as batch_error:
             logger.warning(f"Batch search failed: {batch_error}. Falling back to individual queries.")
             
-            # Fall back to individual queries
+            # Fall back 3: Individual queries
             for query_idx, query in enumerate(queries):
                 try:
                     results = await brain.get_similar_vectors_by_text(query, top_k=top_k)
@@ -511,7 +812,7 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                                 "id": vector_id,
                                 "similarity": float(similarity),
                                 "metadata": metadata,
-                                "vector_preview": vector[:10].tolist() if hasattr(vector, "tolist") else vector[:10],
+                                "vector_preview": vector[:5].tolist() if hasattr(vector, "tolist") else vector[:5],
                                 "raw": metadata.get("raw", ""),
                                 "query": query,
                                 "query_idx": query_idx
@@ -522,7 +823,7 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                     
                     # Stream this query's results
                     if new_results:
-                        yield {"type": "knowledge", "content": new_results, "complete": False}
+                        yield {"type": "knowledge", "content": new_results, "complete": False, "using": "individual"}
                         
                 except Exception as e:
                     logger.error(f"Individual query failed for '{query}': {e}")
@@ -535,7 +836,8 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             "stats": {
                 "total_results": len(all_results),
                 "query_count": len(queries),
-                "graph_version": get_current_graph_version()
+                "graph_version": get_current_graph_version(),
+                "using": "traditional"
             }
         }
         logger.info(f"Completed knowledge search with {len(all_results)} total results")
@@ -1038,3 +1340,133 @@ async def process_llm_with_tools(
         logger.error(f"Error in LLM tool calling: {str(e)}")
         logger.error(traceback.format_exc())
         yield "I encountered an issue while processing your request. Please try again." 
+
+async def cluster_management_handler(params: Dict) -> AsyncGenerator[Dict, None]:
+    """
+    Handle cluster management operations with relationship awareness
+    
+    Args:
+        params: Dictionary containing operation, cluster_data, graph_version_id, and include_vectors
+        
+    Yields:
+        Dict events with operation results
+    """
+    operation = params.get("operation", "")
+    cluster_data = params.get("cluster_data", {})
+    graph_version_id = params.get("graph_version_id", "")
+    include_vectors = params.get("include_vectors", False)
+    
+    try:
+        # Set graph version if provided and different from current
+        if graph_version_id and graph_version_id != get_current_graph_version():
+            logger.info(f"Setting graph version to: {graph_version_id}")
+            version_changed = set_graph_version(graph_version_id)
+            if version_changed and not is_brain_loaded():
+                # Need to load vectors for new version
+                logger.info(f"Loading vectors for graph version: {graph_version_id}")
+                success = await load_brain_vectors()
+                if not success:
+                    logger.error(f"Failed to load vectors for graph version {graph_version_id}")
+                    yield {"type": "cluster_management", "content": {
+                        "success": False,
+                        "error": f"Failed to load vectors for graph version {graph_version_id}"
+                    }, "complete": True}
+                    return
+        
+        # Ensure brain is loaded
+        if not is_brain_loaded():
+            logger.info("Brain not loaded. Loading vectors...")
+            success = await load_brain_vectors()
+            if not success:
+                logger.error("Failed to load brain vectors")
+                yield {"type": "cluster_management", "content": {
+                    "success": False,
+                    "error": "Brain not loaded. Please activate brain first."
+                }, "complete": True}
+                return
+        
+        # Get global brain instance
+        global brain
+        brain = get_brain()
+        
+        # Validate operation
+        if operation not in ["create", "update", "link", "unlink", "get"]:
+            yield {"type": "cluster_management", "content": {
+                "success": False,
+                "error": f"Invalid operation: {operation}"
+            }, "complete": True}
+            return
+        
+        # Handle "get" operation separately
+        if operation == "get":
+            cluster_id = cluster_data.get("cluster_id", "")
+            if not cluster_id:
+                yield {"type": "cluster_management", "content": {
+                    "success": False,
+                    "error": "cluster_id is required for get operation"
+                }, "complete": True}
+                return
+            
+            # Get cluster vectors
+            vectors = brain.get_vectors_by_metadata(
+                filter_metadata={"cluster_id": cluster_id}
+            )
+            
+            if not vectors:
+                yield {"type": "cluster_management", "content": {
+                    "success": False,
+                    "error": f"Cluster not found: {cluster_id}"
+                }, "complete": True}
+                return
+            
+            # Extract metadata from the first vector
+            metadata = vectors[0][2]
+            
+            # Format response
+            response = {
+                "success": True,
+                "cluster_id": cluster_id,
+                "metadata": metadata,
+                "vector_count": len(vectors)
+            }
+            
+            # Include vectors if requested
+            if include_vectors:
+                vector_data = []
+                for vector_id, vector, vector_metadata, score in vectors:
+                    vector_data.append({
+                        "id": vector_id,
+                        "vector_type": vector_metadata.get("vector_type", "unknown"),
+                        "vector_preview": vector[:5].tolist() if hasattr(vector, "tolist") else vector[:5]
+                    })
+                response["vectors"] = vector_data
+            
+            yield {"type": "cluster_management", "content": response, "complete": True}
+            return
+        
+        # For other operations, use the brain's process_cluster_operation method
+        logger.info(f"Processing cluster {operation} operation")
+        result = await brain.process_cluster_operation(
+            operation=operation,
+            cluster_data=cluster_data,
+            include_vectors=include_vectors
+        )
+        
+        # Return the result
+        yield {"type": "cluster_management", "content": result, "complete": True}
+        
+    except Exception as e:
+        logger.error(f"Error in cluster management: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        yield {"type": "cluster_management", "content": {
+            "success": False,
+            "error": str(e)
+        }, "complete": True}
+
+# Register the cluster management tool
+tool_registry.register_tool(
+    "cluster_management_tool", 
+    cluster_management_handler, 
+    CLUSTER_MANAGEMENT_SCHEMA
+) 

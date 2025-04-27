@@ -13,6 +13,8 @@ from supabase import create_client, Client
 from pinecone import Pinecone, Index
 import traceback
 from utilities import EMBEDDINGS
+from sklearn.metrics.pairwise import cosine_similarity
+import uuid
 
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
@@ -1488,3 +1490,1069 @@ class ActiveBrain:
                     results_dict[query] = []
                 
             return results_dict 
+
+    async def get_similar_vectors_by_text_with_intent(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        threshold: float = 0.05,
+        vector_types: List[str] = None,
+        include_relationships: bool = True
+    ) -> List[Tuple[str, np.ndarray, Dict, float, bool]]:
+        """
+        Get similar vectors with intent-aware filtering and relationship traversal.
+        
+        Args:
+            query_text: The text query to find similar vectors for
+            top_k: Maximum number of results to return
+            threshold: Minimum similarity score to include results
+            vector_types: Optional list of vector types to filter by
+            include_relationships: Whether to include related clusters via relationships
+            
+        Returns:
+            List of tuples containing (id, vector, metadata, score, is_related)
+        """
+        try:
+            # Get query embedding
+            query_embedding = await self.get_query_embedding(query_text)
+            if query_embedding is None:
+                logger.error("Failed to get embedding for query")
+                return []
+
+            # Auto-detect intent if vector_types not provided
+            if not vector_types:
+                # Detect intent and map to preferred vector types
+                query_intent = await self._detect_query_intent(query_text)
+                vector_types = self._get_vector_types_for_intent(query_intent)
+                logger.info(f"Auto-detected intent: {query_intent}, using vector types: {vector_types}")
+            
+            # Query for similar vectors with vector_type filter
+            results = []
+            
+            # Main query with vector type filter
+            if vector_types:
+                filter_metadata = {"vector_type": {"$in": vector_types}}
+                main_results = self.get_similar_vectors(
+                    query_vector=query_embedding,
+                    top_k=top_k,
+                    threshold=threshold,
+                    filter_metadata=filter_metadata
+                )
+                results.extend(main_results)
+            else:
+                # Fallback to no filter
+                results = self.get_similar_vectors(
+                    query_vector=query_embedding,
+                    top_k=top_k,
+                    threshold=threshold
+                )
+            
+            # Process related clusters if needed
+            if include_relationships and results:
+                related_results = await self._process_related_clusters(
+                    results=results[:min(3, len(results))],
+                    query_embedding=query_embedding,
+                    threshold=threshold
+                )
+                # Add related results with a flag indicating they are related
+                results.extend(related_results)
+            
+            # Sort by score and limit to top_k
+            results = sorted(results, key=lambda x: x[3], reverse=True)[:top_k]
+            
+            # Mark results as related or not
+            final_results = []
+            for result in results:
+                id, vector, metadata, score = result
+                # Check if this is from the related results
+                is_related = metadata.get("is_related", False)
+                final_results.append((id, vector, metadata, score, is_related))
+            
+            return final_results
+            
+        except Exception as e:
+            logger.error(f"Intent-based vector search failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            return []
+
+    async def batch_similarity_search_with_intent(
+        self,
+        queries: List[str],
+        top_k: int = 5,
+        threshold: float = 0.0,
+        intent: str = None
+    ) -> Dict[str, List[Tuple[str, np.ndarray, Dict, float, bool]]]:
+        """
+        Perform batch similarity search with intent-based filtering.
+        
+        Args:
+            queries: List of text queries
+            top_k: Maximum number of results to return per query
+            threshold: Minimum similarity score to include results
+            intent: Optional intent classification to use for all queries
+            
+        Returns:
+            Dictionary mapping each query to its search results
+        """
+        embeddings = await self.batch_embed_queries(queries)
+        results = {}
+        
+        for i, query in enumerate(queries):
+            if query in embeddings:
+                query_embedding = embeddings[query]
+                
+                # Detect intent for this specific query if not provided
+                query_intent = intent
+                if not query_intent:
+                    query_intent = await self._detect_query_intent(query)
+                
+                # Get vector types for this intent
+                vector_types = self._get_vector_types_for_intent(query_intent)
+                
+                # Filter by vector types if available
+                if vector_types:
+                    filter_metadata = {"vector_type": {"$in": vector_types}}
+                    query_results = self.get_similar_vectors(
+                        query_vector=query_embedding,
+                        top_k=top_k,
+                        threshold=threshold,
+                        filter_metadata=filter_metadata
+                    )
+                else:
+                    query_results = self.get_similar_vectors(
+                        query_vector=query_embedding,
+                        top_k=top_k,
+                        threshold=threshold
+                    )
+                
+                # Process and mark results (not including relationships in batch mode)
+                marked_results = []
+                for result in query_results:
+                    id, vector, metadata, score = result
+                    marked_results.append((id, vector, metadata, score, False))
+                
+                results[query] = marked_results
+        
+        return results
+
+    async def _detect_query_intent(self, query: str) -> str:
+        """
+        Analyze the query to detect its intent automatically.
+        
+        Args:
+            query: The user query
+            
+        Returns:
+            String indicating query intent: "conceptual", "actionable", "descriptive", or "relational"
+        """
+        # Simple rule-based intent detection
+        query_lower = query.lower()
+        
+        # Actionable queries typically ask how to do something
+        if any(phrase in query_lower for phrase in [
+            "how to", "how do i", "steps to", "guide for", "instructions", "process for",
+            "method for", "procedure", "implement", "execute", "perform", "do", "achieve"
+        ]):
+            return "actionable"
+        
+        # Conceptual queries typically ask about what something is
+        if any(phrase in query_lower for phrase in [
+            "what is", "meaning of", "definition of", "explain", "concept of", "understand",
+            "describe", "tell me about"
+        ]):
+            return "conceptual"
+        
+        # Descriptive queries typically ask for details or elaboration
+        if any(phrase in query_lower for phrase in [
+            "details about", "information on", "tell me more", "describe", "elaborate on", 
+            "characteristics", "features of", "properties of", "aspects of"
+        ]):
+            return "descriptive"
+        
+        # Relational queries typically ask about connections or comparisons
+        if any(phrase in query_lower for phrase in [
+            "related to", "connection between", "relationship", "compare", "versus", "vs",
+            "difference between", "similarity"
+        ]):
+            return "relational"
+        
+        # Default to descriptive for general queries
+        return "descriptive"
+
+    def _get_vector_types_for_intent(self, intent: str) -> List[str]:
+        """
+        Map intent to preferred vector types.
+        
+        Args:
+            intent: The query intent
+            
+        Returns:
+            List of vector types to prioritize
+        """
+        if intent == "conceptual":
+            return ["concept", "document_summary"]
+        elif intent == "actionable":
+            return ["insights", "actionable"]
+        elif intent == "descriptive":
+            return ["description", "sentences"]
+        elif intent == "relational":
+            return ["connections", "document_summary"]
+        else:
+            # Default to all types
+            return ["concept", "insights", "description", "sentences", "connections", "document_summary", "actionable"]
+
+    async def _process_related_clusters(
+        self,
+        results: List[Tuple[str, np.ndarray, Dict, float]],
+        query_embedding: np.ndarray,
+        threshold: float
+    ) -> List[Tuple[str, np.ndarray, Dict, float]]:
+        """
+        Process related clusters with enhanced relationship awareness.
+        
+        Args:
+            results: Current result set (limited to top results)
+            query_embedding: Query embedding for scoring
+            threshold: Similarity threshold
+            
+        Returns:
+            List of related results with proper scoring
+        """
+        if not results:
+            return []
+            
+        # Get all related cluster IDs with relationship types
+        related_data = []
+        for result in results:
+            metadata = result[2]
+            associations = metadata.get("associations", {})
+            
+            # Extract relationship data
+            if associations:
+                # Get related clusters
+                related_clusters = associations.get("related_clusters", [])
+                relationship_types = associations.get("relationship_types", [])
+                
+                # Ensure relationship_types matches the length of related_clusters
+                if len(relationship_types) < len(related_clusters):
+                    relationship_types.extend(["generic"] * (len(related_clusters) - len(relationship_types)))
+                
+                # Collect related cluster data with relationship type
+                for i, cluster_id in enumerate(related_clusters):
+                    relationship = relationship_types[i] if i < len(relationship_types) else "generic"
+                    related_data.append({
+                        "cluster_id": cluster_id,
+                        "relationship": relationship,
+                        "source_id": metadata.get("cluster_id", "")
+                    })
+        
+        # Remove duplicates while preserving relationship info
+        seen_clusters = set()
+        unique_related_data = []
+        
+        for item in related_data:
+            cluster_id = item["cluster_id"]
+            if cluster_id not in seen_clusters:
+                seen_clusters.add(cluster_id)
+                unique_related_data.append(item)
+        
+        if not unique_related_data:
+            return []
+            
+        logger.info(f"Processing {len(unique_related_data)} related clusters with relationship types")
+        
+        # Process each relationship type with appropriate weighting
+        related_results = []
+        
+        # Weights for different relationship types
+        relationship_weights = {
+            "complements": 0.95,  # Highly relevant
+            "elaborates": 0.9,    # Provides additional details
+            "contrasts_with": 0.85,  # Shows alternative viewpoint
+            "prerequisite": 0.9,  # Important background
+            "consequence": 0.9,   # Important outcome
+            "example": 0.85,      # Illustrative
+            "generic": 0.8        # Default relationship
+        }
+        
+        # Group related clusters by relationship type for batch processing
+        relationship_groups = {}
+        for item in unique_related_data:
+            rel_type = item["relationship"]
+            if rel_type not in relationship_groups:
+                relationship_groups[rel_type] = []
+            relationship_groups[rel_type].append(item["cluster_id"])
+        
+        # Process each relationship group
+        for rel_type, cluster_ids in relationship_groups.items():
+            # Apply appropriate weight based on relationship type
+            rel_weight = relationship_weights.get(rel_type, 0.8)
+            
+            # Query for this batch of related clusters by relationship type
+            filter_metadata = {
+                "cluster_id": {"$in": cluster_ids},
+                "vector_type": {"$in": ["concept", "insights"]}  # Focus on key concepts and insights
+            }
+            
+            # Get clusters for this relationship type
+            rel_results = self.get_similar_vectors(
+                query_vector=query_embedding,
+                top_k=len(cluster_ids),
+                threshold=threshold * 0.75,  # Lower threshold for related items
+                filter_metadata=filter_metadata
+            )
+            
+            # Apply relationship-specific weighting and metadata
+            for i, result in enumerate(rel_results):
+                id, vector, metadata, score = result
+                
+                # Create a copy of metadata to avoid modifying original
+                new_metadata = metadata.copy()
+                
+                # Enhance metadata with relationship info
+                new_metadata["is_related"] = True
+                new_metadata["relationship_type"] = rel_type
+                new_metadata["relationship_weight"] = rel_weight
+                
+                # Get source cluster if available
+                source_id = next((item["source_id"] for item in unique_related_data 
+                                if item["cluster_id"] == metadata.get("cluster_id", "")), None)
+                if source_id:
+                    new_metadata["related_from"] = source_id
+                
+                # Apply relationship-specific weight adjustment
+                related_results.append((id, vector, new_metadata, score * rel_weight))
+        
+        # If we have results from multiple relationship types, sort them
+        if related_results:
+            related_results.sort(key=lambda x: x[3], reverse=True)
+        
+        return related_results
+
+    async def process_cluster_operation(
+        self,
+        operation: str,
+        cluster_data: Dict,
+        include_vectors: bool = True
+    ) -> Dict:
+        """
+        Process operations on clusters (create, update, link, etc.).
+        
+        Args:
+            operation: Operation type ('create', 'update', 'link', 'unlink')
+            cluster_data: Data for the cluster operation
+            include_vectors: Whether to include vector data in response
+            
+        Returns:
+            Dictionary with operation results
+        """
+        try:
+            if operation == "create":
+                return await self._create_cluster(cluster_data, include_vectors)
+            elif operation == "update":
+                return await self._update_cluster(cluster_data, include_vectors)
+            elif operation == "link":
+                return await self._link_clusters(cluster_data)
+            elif operation == "unlink":
+                return await self._unlink_clusters(cluster_data)
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+        except Exception as e:
+            logger.error(f"Error in process_cluster_operation: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _create_cluster(self, cluster_data: Dict, include_vectors: bool) -> Dict:
+        """Create a new knowledge cluster with multiple vector types."""
+        try:
+            # Extract cluster information
+            content = cluster_data.get("content", "")
+            if not content:
+                return {"success": False, "error": "No content provided for cluster"}
+            
+            # Generate a unique cluster ID if not provided
+            cluster_id = cluster_data.get("cluster_id", f"cluster_{uuid.uuid4()}")
+            doc_id = cluster_data.get("doc_id", "")
+            standalone = cluster_data.get("standalone", True)
+            primary_concepts = cluster_data.get("primary_concepts", [])
+            semantic_tags = cluster_data.get("semantic_tags", [])
+            domain = cluster_data.get("domain", "general")
+            
+            # Get base metadata for all vectors in this cluster
+            base_metadata = {
+                "cluster_id": cluster_id,
+                "standalone": standalone,
+                "origin": {
+                    "doc_id": doc_id,
+                    "extraction_date": datetime.now().isoformat()
+                },
+                "associations": {
+                    "related_clusters": cluster_data.get("related_clusters", []),
+                    "relationship_types": cluster_data.get("relationship_types", [])
+                },
+                "content_metadata": {
+                    "primary_concepts": primary_concepts,
+                    "semantic_tags": semantic_tags,
+                    "domain": domain
+                },
+                "raw": content
+            }
+            
+            # Create all vector types for this cluster
+            vector_results = {}
+            
+            # Get embedding for the content
+            embedding = await self.get_query_embedding(content)
+            if embedding is None:
+                return {"success": False, "error": "Failed to generate embedding for content"}
+            
+            # Create vectors for different aspects of the cluster
+            vector_types = ["concept", "insights", "description", "sentences", "connections"]
+            vectors_to_add = []
+            
+            for vector_type in vector_types:
+                # Create a unique ID for this vector
+                vector_id = f"{cluster_id}_{vector_type}"
+                
+                # Create metadata for this vector type
+                vector_metadata = base_metadata.copy()
+                vector_metadata["vector_type"] = vector_type
+                
+                # Store in results
+                if include_vectors:
+                    vector_results[vector_type] = {
+                        "id": vector_id,
+                        "metadata": vector_metadata
+                    }
+                
+                # Add to vectors to be added to index
+                vectors_to_add.append((vector_id, embedding, vector_metadata))
+            
+            # Add all vectors to the index
+            self.add_vectors_batch(vectors_to_add)
+            
+            return {
+                "success": True,
+                "cluster_id": cluster_id,
+                "vectors": vector_results if include_vectors else {},
+                "message": f"Created cluster with {len(vector_types)} vector types"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in _create_cluster: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _update_cluster(self, cluster_data: Dict, include_vectors: bool) -> Dict:
+        """Update an existing knowledge cluster."""
+        try:
+            # Extract cluster information
+            cluster_id = cluster_data.get("cluster_id")
+            if not cluster_id:
+                return {"success": False, "error": "No cluster_id provided for update"}
+            
+            # Find existing vectors for this cluster
+            existing_vectors = self.get_vectors_by_metadata(
+                filter_metadata={"cluster_id": cluster_id}
+            )
+            
+            if not existing_vectors:
+                return {"success": False, "error": f"No vectors found for cluster {cluster_id}"}
+            
+            # Extract existing metadata from first vector (they should all share common metadata)
+            existing_metadata = existing_vectors[0][2] if existing_vectors else {}
+            
+            # Update content if provided
+            content = cluster_data.get("content")
+            update_embedding = content is not None
+            
+            # Update metadata fields
+            updated_metadata = existing_metadata.copy()
+            
+            # Update standalone status if provided
+            if "standalone" in cluster_data:
+                updated_metadata["standalone"] = cluster_data["standalone"]
+            
+            # Update doc_id if provided
+            if "doc_id" in cluster_data:
+                if "origin" not in updated_metadata:
+                    updated_metadata["origin"] = {}
+                updated_metadata["origin"]["doc_id"] = cluster_data["doc_id"]
+                updated_metadata["origin"]["updated_date"] = datetime.now().isoformat()
+            
+            # Update associations if provided
+            if "related_clusters" in cluster_data or "relationship_types" in cluster_data:
+                if "associations" not in updated_metadata:
+                    updated_metadata["associations"] = {}
+                
+                if "related_clusters" in cluster_data:
+                    updated_metadata["associations"]["related_clusters"] = cluster_data["related_clusters"]
+                
+                if "relationship_types" in cluster_data:
+                    updated_metadata["associations"]["relationship_types"] = cluster_data["relationship_types"]
+            
+            # Update content metadata if provided
+            if "primary_concepts" in cluster_data or "semantic_tags" in cluster_data or "domain" in cluster_data:
+                if "content_metadata" not in updated_metadata:
+                    updated_metadata["content_metadata"] = {}
+                
+                if "primary_concepts" in cluster_data:
+                    updated_metadata["content_metadata"]["primary_concepts"] = cluster_data["primary_concepts"]
+                
+                if "semantic_tags" in cluster_data:
+                    updated_metadata["content_metadata"]["semantic_tags"] = cluster_data["semantic_tags"]
+                
+                if "domain" in cluster_data:
+                    updated_metadata["content_metadata"]["domain"] = cluster_data["domain"]
+            
+            # If content provided, update the raw content and regenerate embedding
+            if update_embedding:
+                updated_metadata["raw"] = content
+                embedding = await self.get_query_embedding(content)
+                if embedding is None:
+                    return {"success": False, "error": "Failed to generate embedding for updated content"}
+            
+            # Update all vectors for this cluster
+            vectors_to_update = []
+            updated_vector_ids = []
+            
+            for vector_id, vector, metadata, score in existing_vectors:
+                # Make a copy of the updated metadata for this specific vector
+                vector_metadata = updated_metadata.copy()
+                
+                # Preserve the vector_type of this specific vector
+                vector_metadata["vector_type"] = metadata.get("vector_type", "unknown")
+                
+                # Add to vectors to be updated
+                if update_embedding:
+                    vectors_to_update.append((vector_id, embedding, vector_metadata))
+                else:
+                    vectors_to_update.append((vector_id, vector, vector_metadata))
+                
+                updated_vector_ids.append(vector_id)
+            
+            # Update vectors in the index
+            if vectors_to_update:
+                self.update_vectors_batch(vectors_to_update)
+            
+            return {
+                "success": True,
+                "cluster_id": cluster_id,
+                "updated_vectors": updated_vector_ids,
+                "embedding_updated": update_embedding,
+                "message": f"Updated cluster with {len(updated_vector_ids)} vector types"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in _update_cluster: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _link_clusters(self, link_data: Dict) -> Dict:
+        """Link two clusters with a specified relationship type."""
+        try:
+            source_id = link_data.get("source_cluster_id")
+            target_id = link_data.get("target_cluster_id")
+            relationship = link_data.get("relationship", "generic")
+            bidirectional = link_data.get("bidirectional", False)
+            
+            if not source_id or not target_id:
+                return {"success": False, "error": "Source and target cluster IDs are required"}
+            
+            # Get source cluster vectors
+            source_vectors = self.get_vectors_by_metadata(
+                filter_metadata={"cluster_id": source_id}
+            )
+            
+            if not source_vectors:
+                return {"success": False, "error": f"Source cluster {source_id} not found"}
+            
+            # Get target cluster to verify it exists
+            target_vectors = self.get_vectors_by_metadata(
+                filter_metadata={"cluster_id": target_id}
+            )
+            
+            if not target_vectors:
+                return {"success": False, "error": f"Target cluster {target_id} not found"}
+            
+            # Update source cluster's associations
+            updated_source_vectors = []
+            
+            for vector_id, vector, metadata, score in source_vectors:
+                # Create a copy of metadata
+                updated_metadata = metadata.copy()
+                
+                # Ensure associations structure exists
+                if "associations" not in updated_metadata:
+                    updated_metadata["associations"] = {}
+                if "related_clusters" not in updated_metadata["associations"]:
+                    updated_metadata["associations"]["related_clusters"] = []
+                if "relationship_types" not in updated_metadata["associations"]:
+                    updated_metadata["associations"]["relationship_types"] = []
+                
+                # Check if relationship already exists
+                related_clusters = updated_metadata["associations"]["related_clusters"]
+                relationship_types = updated_metadata["associations"]["relationship_types"]
+                
+                if target_id in related_clusters:
+                    # Update existing relationship
+                    idx = related_clusters.index(target_id)
+                    if idx < len(relationship_types):
+                        relationship_types[idx] = relationship
+                else:
+                    # Add new relationship
+                    related_clusters.append(target_id)
+                    relationship_types.append(relationship)
+                
+                # Update the metadata
+                updated_source_vectors.append((vector_id, vector, updated_metadata))
+            
+            # Update source vectors in the index
+            self.update_vectors_batch(updated_source_vectors)
+            
+            # If bidirectional, update target cluster's associations too
+            if bidirectional:
+                # Determine reverse relationship type
+                reverse_relationship_map = {
+                    "complements": "complements",  # Symmetric
+                    "elaborates": "context_for",
+                    "prerequisite": "enables",
+                    "consequence": "caused_by",
+                    "contrasts_with": "contrasts_with",  # Symmetric
+                    "example": "exemplifies",
+                    "generic": "generic"  # Symmetric
+                }
+                reverse_relationship = reverse_relationship_map.get(relationship, "generic")
+                
+                # Update target cluster's associations
+                updated_target_vectors = []
+                
+                for vector_id, vector, metadata, score in target_vectors:
+                    # Create a copy of metadata
+                    updated_metadata = metadata.copy()
+                    
+                    # Ensure associations structure exists
+                    if "associations" not in updated_metadata:
+                        updated_metadata["associations"] = {}
+                    if "related_clusters" not in updated_metadata["associations"]:
+                        updated_metadata["associations"]["related_clusters"] = []
+                    if "relationship_types" not in updated_metadata["associations"]:
+                        updated_metadata["associations"]["relationship_types"] = []
+                    
+                    # Check if relationship already exists
+                    related_clusters = updated_metadata["associations"]["related_clusters"]
+                    relationship_types = updated_metadata["associations"]["relationship_types"]
+                    
+                    if source_id in related_clusters:
+                        # Update existing relationship
+                        idx = related_clusters.index(source_id)
+                        if idx < len(relationship_types):
+                            relationship_types[idx] = reverse_relationship
+                    else:
+                        # Add new relationship
+                        related_clusters.append(source_id)
+                        relationship_types.append(reverse_relationship)
+                    
+                    # Update the metadata
+                    updated_target_vectors.append((vector_id, vector, updated_metadata))
+                
+                # Update target vectors in the index
+                self.update_vectors_batch(updated_target_vectors)
+            
+            return {
+                "success": True,
+                "source_cluster_id": source_id,
+                "target_cluster_id": target_id,
+                "relationship": relationship,
+                "bidirectional": bidirectional,
+                "message": f"Linked clusters with relationship: {relationship}"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in _link_clusters: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _unlink_clusters(self, unlink_data: Dict) -> Dict:
+        """Remove relationship between two clusters."""
+        try:
+            source_id = unlink_data.get("source_cluster_id")
+            target_id = unlink_data.get("target_cluster_id")
+            bidirectional = unlink_data.get("bidirectional", True)
+            
+            if not source_id or not target_id:
+                return {"success": False, "error": "Source and target cluster IDs are required"}
+            
+            # Get source cluster vectors
+            source_vectors = self.get_vectors_by_metadata(
+                filter_metadata={"cluster_id": source_id}
+            )
+            
+            if not source_vectors:
+                return {"success": False, "error": f"Source cluster {source_id} not found"}
+            
+            # Remove relationship from source cluster
+            updated_source_vectors = []
+            relationship_removed = False
+            
+            for vector_id, vector, metadata, score in source_vectors:
+                # Create a copy of metadata
+                updated_metadata = metadata.copy()
+                
+                # Check if associations exist
+                if "associations" in updated_metadata and "related_clusters" in updated_metadata["associations"]:
+                    related_clusters = updated_metadata["associations"]["related_clusters"]
+                    relationship_types = updated_metadata["associations"].get("relationship_types", [])
+                    
+                    # Find and remove the relationship
+                    if target_id in related_clusters:
+                        idx = related_clusters.index(target_id)
+                        related_clusters.remove(target_id)
+                        relationship_removed = True
+                        
+                        # Also remove the corresponding relationship type if it exists
+                        if idx < len(relationship_types):
+                            relationship_types.pop(idx)
+                
+                # Update the metadata
+                updated_source_vectors.append((vector_id, vector, updated_metadata))
+            
+            # Update source vectors in the index
+            if relationship_removed:
+                self.update_vectors_batch(updated_source_vectors)
+            
+            # If bidirectional, also remove relationship from target cluster
+            target_relationship_removed = False
+            if bidirectional:
+                # Get target cluster vectors
+                target_vectors = self.get_vectors_by_metadata(
+                    filter_metadata={"cluster_id": target_id}
+                )
+                
+                if target_vectors:
+                    # Remove relationship from target cluster
+                    updated_target_vectors = []
+                    
+                    for vector_id, vector, metadata, score in target_vectors:
+                        # Create a copy of metadata
+                        updated_metadata = metadata.copy()
+                        
+                        # Check if associations exist
+                        if "associations" in updated_metadata and "related_clusters" in updated_metadata["associations"]:
+                            related_clusters = updated_metadata["associations"]["related_clusters"]
+                            relationship_types = updated_metadata["associations"].get("relationship_types", [])
+                            
+                            # Find and remove the relationship
+                            if source_id in related_clusters:
+                                idx = related_clusters.index(source_id)
+                                related_clusters.remove(source_id)
+                                target_relationship_removed = True
+                                
+                                # Also remove the corresponding relationship type if it exists
+                                if idx < len(relationship_types):
+                                    relationship_types.pop(idx)
+                        
+                        # Update the metadata
+                        updated_target_vectors.append((vector_id, vector, updated_metadata))
+                    
+                    # Update target vectors in the index
+                    if target_relationship_removed:
+                        self.update_vectors_batch(updated_target_vectors)
+            
+            return {
+                "success": True,
+                "source_cluster_id": source_id,
+                "target_cluster_id": target_id,
+                "source_relationship_removed": relationship_removed,
+                "target_relationship_removed": target_relationship_removed if bidirectional else None,
+                "message": "Removed relationship between clusters"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in _unlink_clusters: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_vectors_by_metadata(
+        self,
+        filter_metadata: Dict,
+        top_k: int = 100
+    ) -> List[Tuple[str, np.ndarray, Dict, float]]:
+        """
+        Get vectors that match specific metadata criteria.
+        
+        Args:
+            filter_metadata: Metadata filter dictionary
+            top_k: Maximum number of vectors to return
+            
+        Returns:
+            List of tuples containing (id, vector, metadata, score=1.0)
+        """
+        try:
+            if self.index is None or not self.vectors or not self.ids or not self.metadata:
+                logger.warning("Vector index is not initialized or empty")
+                return []
+            
+            results = []
+            count = 0
+            
+            # Scan through all vectors
+            for i, vector_id in enumerate(self.ids):
+                if i >= len(self.vectors) or vector_id not in self.metadata:
+                    continue
+                
+                metadata = self.metadata[vector_id]
+                
+                # Check if metadata matches filter criteria
+                if self._matches_filter(metadata, filter_metadata):
+                    vector = self.vectors[i]
+                    
+                    # Add to results with a score of 1.0 (exact match)
+                    results.append((vector_id, vector, metadata, 1.0))
+                    
+                    count += 1
+                    if count >= top_k:
+                        break
+            
+            return results
+        
+        except Exception as e:
+            logger.error(f"Error in get_vectors_by_metadata: {e}")
+            return []
+
+    def add_vectors_batch(self, vectors: List[Tuple[str, np.ndarray, Dict]]) -> bool:
+        """
+        Add multiple vectors to the index in a batch.
+        
+        Args:
+            vectors: List of tuples containing (id, vector, metadata)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if self.index is None:
+                logger.warning("Vector index is not initialized")
+                return False
+            
+            # Split into components
+            ids = [v[0] for v in vectors]
+            vector_array = np.array([v[1] for v in vectors]).astype('float32')
+            metadata_list = [v[2] for v in vectors]
+            
+            # Add to index
+            self.add_vectors(ids, vector_array, metadata_list)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in add_vectors_batch: {e}")
+            return False
+
+    def update_vectors_batch(self, vectors: List[Tuple[str, np.ndarray, Dict]]) -> bool:
+        """
+        Update multiple vectors in the index in a batch.
+        
+        Args:
+            vectors: List of tuples containing (id, vector, metadata)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if self.index is None:
+                logger.warning("Vector index is not initialized")
+                return False
+            
+            # Split into components
+            ids = [v[0] for v in vectors]
+            vector_array = np.array([v[1] for v in vectors]).astype('float32')
+            metadata_list = [v[2] for v in vectors]
+            
+            # Update in index
+            self.update_vectors(ids, vector_array, metadata_list)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in update_vectors_batch: {e}")
+            return False
+
+    def get_similar_vectors(
+        self, 
+        query_vector: np.ndarray, 
+        top_k: int = 10, 
+        threshold: float = 0.0,
+        filter_metadata: Dict = None
+    ) -> List[Tuple[str, np.ndarray, Dict, float]]:
+        """
+        Get similar vectors to a query vector with optional metadata filtering.
+        
+        Args:
+            query_vector: The query embedding vector
+            top_k: Maximum number of results to return
+            threshold: Minimum similarity score to include results
+            filter_metadata: Optional metadata filter dictionary
+            
+        Returns:
+            List of tuples containing (id, vector, metadata, score)
+        """
+        # Original implementation
+        if filter_metadata is None:
+            return self._get_similar_vectors_without_filter(query_vector, top_k, threshold)
+        
+        # Enhanced implementation with metadata filtering
+        return self._get_similar_vectors_with_filter(query_vector, top_k, threshold, filter_metadata)
+    
+    def _get_similar_vectors_without_filter(
+        self, 
+        query_vector: np.ndarray, 
+        top_k: int = 10, 
+        threshold: float = 0.0
+    ) -> List[Tuple[str, np.ndarray, Dict, float]]:
+        """Original get_similar_vectors implementation without filtering."""
+        try:
+            if self.index is None or not self.vectors or not self.ids or not self.metadata:
+                logger.warning("Vector index is not initialized or empty")
+                return []
+
+            # Add a small amount of noise to query vector to ensure uniqueness
+            noise = np.random.normal(0, 0.00001, query_vector.shape)
+            noisy_query = query_vector + noise
+            noisy_query = noisy_query / np.linalg.norm(noisy_query)
+
+            # Normalize query vector
+            query_vector = query_vector / np.linalg.norm(query_vector)
+
+            # Search in the index
+            D, I = self.index.search(np.array([query_vector]).astype('float32'), top_k * 2)
+            
+            results = []
+            for i, (distance, idx) in enumerate(zip(D[0], I[0])):
+                if idx < 0 or idx >= len(self.ids):
+                    continue
+                
+                # Convert distance to similarity score (cosine similarity)
+                # Faiss returns L2 distance, convert to similarity
+                similarity = 1 - distance / 2
+                
+                # Filter by threshold
+                if similarity < threshold:
+                    continue
+                
+                vector_id = self.ids[idx]
+                vector = self.vectors[idx]
+                metadata = self.metadata.get(vector_id, {})
+                
+                results.append((vector_id, vector, metadata, similarity))
+                
+                # Break if we have enough results
+                if len(results) >= top_k:
+                    break
+                    
+            return results
+        except Exception as e:
+            logger.error(f"Error in get_similar_vectors: {e}")
+            return []
+    
+    def _get_similar_vectors_with_filter(
+        self, 
+        query_vector: np.ndarray, 
+        top_k: int = 10, 
+        threshold: float = 0.0,
+        filter_metadata: Dict = None
+    ) -> List[Tuple[str, np.ndarray, Dict, float]]:
+        """Enhanced implementation with metadata filtering."""
+        try:
+            if self.index is None or not self.vectors or not self.ids or not self.metadata:
+                logger.warning("Vector index is not initialized or empty")
+                return []
+
+            # Add a small amount of noise to query vector to ensure uniqueness
+            noise = np.random.normal(0, 0.00001, query_vector.shape)
+            noisy_query = query_vector + noise
+            noisy_query = noisy_query / np.linalg.norm(noisy_query)
+
+            # Normalize query vector
+            query_vector = query_vector / np.linalg.norm(query_vector)
+
+            # Search in the index - get a larger number of results to account for filtering
+            D, I = self.index.search(np.array([query_vector]).astype('float32'), min(top_k * 4, len(self.ids)))
+            
+            results = []
+            for i, (distance, idx) in enumerate(zip(D[0], I[0])):
+                if idx < 0 or idx >= len(self.ids):
+                    continue
+                
+                # Convert distance to similarity score (cosine similarity)
+                similarity = 1 - distance / 2
+                
+                # Skip results below threshold
+                if similarity < threshold:
+                    continue
+                
+                vector_id = self.ids[idx]
+                vector = self.vectors[idx]
+                metadata = self.metadata.get(vector_id, {})
+                
+                # Apply metadata filtering
+                if filter_metadata and not self._matches_filter(metadata, filter_metadata):
+                    continue
+                
+                results.append((vector_id, vector, metadata, similarity))
+                
+                # Break if we have enough results
+                if len(results) >= top_k:
+                    break
+                    
+            return results
+        except Exception as e:
+            logger.error(f"Error in get_similar_vectors with filter: {e}")
+            return []
+    
+    def _matches_filter(self, metadata: Dict, filter_metadata: Dict) -> bool:
+        """
+        Check if metadata matches filter criteria.
+        
+        Args:
+            metadata: Item metadata to check
+            filter_metadata: Filter criteria
+            
+        Returns:
+            True if metadata matches filter, False otherwise
+        """
+        try:
+            for key, filter_value in filter_metadata.items():
+                if key not in metadata:
+                    return False
+                
+                metadata_value = metadata[key]
+                
+                # Handle $in operator
+                if isinstance(filter_value, dict) and "$in" in filter_value:
+                    allowed_values = filter_value["$in"]
+                    if metadata_value not in allowed_values:
+                        return False
+                # Handle $eq operator
+                elif isinstance(filter_value, dict) and "$eq" in filter_value:
+                    if metadata_value != filter_value["$eq"]:
+                        return False
+                # Handle direct value comparison
+                elif metadata_value != filter_value:
+                    return False
+            
+            # All filter conditions passed
+            return True
+        except Exception as e:
+            logger.error(f"Error in _matches_filter: {e}")
+            return False
+
+    def get_query_embedding(self, query: str) -> np.ndarray:
+        """
+        Get embedding for a query text.
+        
+        Args:
+            query: The text query
+            
+        Returns:
+            Embedding vector for the query
+        """
+        try:
+            # Use the existing get_similar_vectors method to get the embedding
+            return self.get_similar_vectors(query_vector=np.array([0.0] * self.dim), top_k=1, threshold=0.0)[0][1]
+        except Exception as e:
+            logger.error(f"Error getting query embedding: {e}")
+            return None

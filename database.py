@@ -212,8 +212,8 @@ async def save_training_with_chunk(
     doc_id: str = None,
     chunk_id: str = None,
     bank_name: str ="",
-    is_raw: bool = False
-    
+    is_raw: bool = False,
+    custom_metadata: Dict = None
 ) -> bool:
     global AI_NAME
     #embedding = await get_cached_embedding(input)
@@ -243,6 +243,14 @@ async def save_training_with_chunk(
             "categories_primary": "raw",
             "categories_special": "document"
         }
+        
+        # Add custom metadata if provided
+        if custom_metadata:
+            # Update metadata with custom fields, avoiding overwriting critical fields
+            for key, value in custom_metadata.items():
+                if key not in ["created_at", "raw", "user_id", "doc_id", "chunk_id"]:
+                    metadata[key] = value
+        
         convo_id = f"{user_id}_{chunk_id}"
         try:
             logger.info(f"Upserting raw chunk with convo_id={convo_id} to {index_name_str}")
@@ -301,6 +309,14 @@ async def save_training_with_chunk(
         "doc_id": doc_id or "unknown",
         "chunk_id": chunk_id
     }
+    
+    # Add custom metadata if provided
+    if custom_metadata:
+        # Update metadata with custom fields, avoiding overwriting critical fields
+        for key, value in custom_metadata.items():
+            if key not in ["created_at", "raw", "user_id", "doc_id", "chunk_id"]:
+                metadata[key] = value
+                
     if categories["primary"] == "name":
         metadata["name"] = AI_NAME
 
@@ -605,4 +621,403 @@ def clean_text(raw: str) -> str:
         return raw
     except Exception:
         return raw  # Fallback to original if cleaning fails
+
+async def enhanced_query_knowledge(
+    query: str, 
+    bank_name: str = "", 
+    top_k: int = 10,
+    query_intent: str = None,  # Optional intent classification
+    include_relationships: bool = True,  # Whether to include related clusters
+    threshold: float = 0.05,  # Similarity threshold
+    intent_confidence_threshold: float = 0.7,  # Threshold for intent confidence
+    max_intent_recalibrations: int = 1  # Max number of intent recalibrations
+) -> List[Dict]:
+    """
+    Enhanced knowledge query with intent-specific vector targeting and relationship traversal.
+    
+    Args:
+        query: The search query
+        bank_name: Optional namespace (bank name) to query
+        top_k: Maximum number of results to return
+        query_intent: Optional intent classification ("conceptual", "actionable", "descriptive", "relational")
+        include_relationships: Whether to include related clusters via relationships
+        threshold: Minimum similarity score to include results
+        intent_confidence_threshold: Threshold for intent confidence
+        max_intent_recalibrations: Maximum number of intent recalibrations to perform
+        
+    Returns:
+        List of knowledge entries with enhanced relationship data
+    """
+    embedding = await get_cached_embedding(query)
+    ns = bank_name
+    knowledge = []
+    intent_recalibrations = 0
+    original_intent = query_intent
+    
+    logger.info(f"Enhanced query with intent={query_intent} in namespace={ns}")
+    
+    # Automatically detect query intent if not provided
+    if not query_intent:
+        query_intent = await detect_query_intent(query)
+        logger.info(f"Auto-detected query intent: {query_intent}")
+    
+    # Intent-based query loop with recalibration
+    while intent_recalibrations <= max_intent_recalibrations:
+        # Map intent to preferred vector types with confidence weights
+        vector_types_with_weights = get_vector_types_for_intent(query_intent)
+        
+        # Query both indexes using intent-specific vector types
+        current_knowledge = await _query_with_intent(
+            embedding=embedding,
+            query=query,
+            ns=ns, 
+            top_k=top_k,
+            threshold=threshold,
+            vector_types_with_weights=vector_types_with_weights
+        )
+        
+        # Sort by weighted score
+        current_knowledge = sorted(current_knowledge, key=lambda x: x["score"], reverse=True)
+        
+        # If we have enough quality results, or we've reached max recalibrations, exit the loop
+        if len(current_knowledge) >= min(3, top_k) or intent_recalibrations >= max_intent_recalibrations:
+            knowledge = current_knowledge
+            break
+        
+        # Recalibrate intent based on initial results
+        if len(current_knowledge) > 0:
+            # Use a different intent for next iteration
+            new_intent = recalibrate_intent(query_intent, query)
+            
+            # Only change intent if it's different
+            if new_intent != query_intent:
+                logger.info(f"Recalibrating intent from {query_intent} to {new_intent}")
+                query_intent = new_intent
+                intent_recalibrations += 1
+            else:
+                # No change in intent, exit the loop
+                knowledge = current_knowledge
+                break
+        else:
+            # No results, try with default approach
+            logger.info(f"No results with intent {query_intent}, trying default approach")
+            query_intent = "default"
+            intent_recalibrations += 1
+    
+    # Process related clusters if needed
+    if include_relationships and knowledge:
+        knowledge = await _process_related_clusters(
+            knowledge=knowledge,
+            embedding=embedding, 
+            ns=ns,
+            threshold=threshold
+        )
+    
+    # Ensure we only return up to top_k results
+    knowledge = knowledge[:top_k]
+    
+    # Add intent information to metadata
+    for item in knowledge:
+        if "metadata" not in item:
+            item["metadata"] = {}
+        item["metadata"]["query_intent"] = query_intent
+        item["metadata"]["original_intent"] = original_intent
+    
+    logger.info(f"Enhanced query returned {len(knowledge)} items for '{query}' with final intent={query_intent}")
+    return knowledge
+
+def get_vector_types_for_intent(intent: str) -> List[Dict[str, float]]:
+    """
+    Get vector types with confidence weights based on intent.
+    
+    Args:
+        intent: The query intent
+        
+    Returns:
+        List of dictionaries with vector_type and weight
+    """
+    # Default weights for each intent type
+    if intent == "conceptual":
+        return [
+            {"type": "concept", "weight": 1.0},
+            {"type": "document_summary", "weight": 0.9},
+            {"type": "description", "weight": 0.7},
+            {"type": "connections", "weight": 0.5}
+        ]
+    elif intent == "actionable":
+        return [
+            {"type": "insights", "weight": 1.0},
+            {"type": "actionable", "weight": 1.0},
+            {"type": "sentences", "weight": 0.7},
+            {"type": "concept", "weight": 0.5}
+        ]
+    elif intent == "descriptive":
+        return [
+            {"type": "description", "weight": 1.0},
+            {"type": "sentences", "weight": 0.9},
+            {"type": "document_summary", "weight": 0.7},
+            {"type": "concept", "weight": 0.5}
+        ]
+    elif intent == "relational":
+        return [
+            {"type": "connections", "weight": 1.0},
+            {"type": "document_summary", "weight": 0.8},
+            {"type": "concept", "weight": 0.7},
+            {"type": "description", "weight": 0.5}
+        ]
+    else:
+        # Default to all types with equal weights
+        return [
+            {"type": "concept", "weight": 1.0},
+            {"type": "insights", "weight": 1.0},
+            {"type": "description", "weight": 1.0},
+            {"type": "sentences", "weight": 1.0},
+            {"type": "connections", "weight": 1.0},
+            {"type": "document_summary", "weight": 1.0},
+            {"type": "actionable", "weight": 1.0}
+        ]
+
+def recalibrate_intent(current_intent: str, query: str) -> str:
+    """
+    Recalibrate the intent based on current intent and query.
+    
+    Args:
+        current_intent: Current query intent
+        query: The user query
+        
+    Returns:
+        Recalibrated intent
+    """
+    # Simple recalibration strategy - cycle through intents
+    intent_cycle = {
+        "conceptual": "descriptive",
+        "descriptive": "actionable",
+        "actionable": "relational",
+        "relational": "conceptual",
+        "default": "conceptual"
+    }
+    
+    return intent_cycle.get(current_intent, "descriptive")
+
+async def _query_with_intent(
+    embedding: List[float],
+    query: str,
+    ns: str,
+    top_k: int,
+    threshold: float,
+    vector_types_with_weights: List[Dict[str, float]]
+) -> List[Dict]:
+    """
+    Execute a query with intent-specific vector types and weights.
+    
+    Args:
+        embedding: Query embedding
+        query: Original query string
+        ns: Namespace
+        top_k: Maximum results to return
+        threshold: Similarity threshold
+        vector_types_with_weights: List of vector types with weights
+        
+    Returns:
+        List of weighted knowledge entries
+    """
+    knowledge = []
+    vector_types = [item["type"] for item in vector_types_with_weights]
+    
+    # Query both indexes
+    for index in [ami_index, ent_index]:
+        try:
+            # Use vector_type filter when querying
+            results = await asyncio.to_thread(
+                index.query,
+                vector=embedding,
+                top_k=top_k,
+                include_metadata=True,
+                namespace=ns,
+                filter={"vector_type": {"$in": vector_types}} if vector_types else {}
+            )
+            
+            matches = results.get("matches", [])
+            
+            # Process matches, applying intent-specific weights
+            for match in matches:
+                if match["score"] < threshold:
+                    continue
+                
+                # Apply weight based on vector type
+                vector_type = match["metadata"].get("vector_type", "unknown")
+                weight = 1.0  # Default weight
+                
+                for vt_info in vector_types_with_weights:
+                    if vt_info["type"] == vector_type:
+                        weight = vt_info["weight"]
+                        break
+                
+                # Apply weighted score
+                weighted_score = match["score"] * weight
+                
+                knowledge.append({
+                    "id": match["id"],
+                    "raw": match["metadata"]["raw"],
+                    "vector_type": vector_type,
+                    "categories": {
+                        "primary": match["metadata"].get("categories_primary", "unknown"),
+                        "special": match["metadata"].get("categories_special", "")
+                    },
+                    "metadata": {
+                        "cluster_id": match["metadata"].get("cluster_id", ""),
+                        "doc_id": match["metadata"].get("doc_id", ""),
+                        "standalone": match["metadata"].get("standalone", True),
+                        "associations": match["metadata"].get("associations", {}),
+                        "intent_weight": weight  # Store the weight
+                    },
+                    "confidence": match["metadata"].get("confidence", 0.0),
+                    "score": weighted_score,  # Use weighted score
+                    "original_score": match["score"]  # Keep original for reference
+                })
+        except Exception as e:
+            logger.error(f"Enhanced knowledge query failed in {index_name(index)}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    return knowledge
+
+async def _process_related_clusters(
+    knowledge: List[Dict],
+    embedding: List[float],
+    ns: str,
+    threshold: float
+) -> List[Dict]:
+    """
+    Process related clusters for the knowledge results.
+    
+    Args:
+        knowledge: Current knowledge results
+        embedding: Query embedding
+        ns: Namespace
+        threshold: Similarity threshold
+        
+    Returns:
+        Updated knowledge list with related clusters
+    """
+    if not knowledge:
+        return knowledge
+        
+    # Limit to top results first to avoid too many relationship queries
+    top_results = knowledge[:min(3, len(knowledge))]
+    
+    # Get all related cluster IDs
+    related_cluster_ids = []
+    for result in top_results:
+        associations = result.get("metadata", {}).get("associations", {})
+        if associations and "related_clusters" in associations:
+            related_cluster_ids.extend(associations["related_clusters"])
+    
+    # Remove duplicates
+    related_cluster_ids = list(set(related_cluster_ids))
+    
+    if related_cluster_ids:
+        logger.info(f"Fetching {len(related_cluster_ids)} related clusters")
+        
+        # Batch the related clusters into groups of 10 to avoid overloading the query
+        related_knowledge = []
+        for i in range(0, len(related_cluster_ids), 10):
+            batch_ids = related_cluster_ids[i:i+10]
+            
+            # Query for related clusters by ID
+            for index in [ami_index, ent_index]:
+                try:
+                    # Only query for concept and insights vector types for relationships
+                    # to get a concise representation
+                    rel_results = await asyncio.to_thread(
+                        index.query,
+                        vector=embedding,  # Still use the original query vector for ranking
+                        top_k=len(batch_ids),
+                        include_metadata=True,
+                        namespace=ns,
+                        filter={
+                            "chunk_id": {"$in": [id.split("_")[0] + "_" + id.split("_")[1] + "_" + id.split("_")[2] for id in batch_ids]},
+                            "vector_type": {"$in": ["concept", "insights"]}
+                        }
+                    )
+                    
+                    for match in rel_results.get("matches", []):
+                        if match["score"] < threshold * 0.8:  # Lower threshold for related items
+                            continue
+                            
+                        # Mark as a related item
+                        related_knowledge.append({
+                            "id": match["id"],
+                            "raw": match["metadata"]["raw"],
+                            "vector_type": match["metadata"].get("vector_type", "unknown"),
+                            "categories": {
+                                "primary": match["metadata"].get("categories_primary", "unknown"),
+                                "special": match["metadata"].get("categories_special", "")
+                            },
+                            "metadata": {
+                                "cluster_id": match["metadata"].get("cluster_id", ""),
+                                "doc_id": match["metadata"].get("doc_id", ""),
+                                "standalone": match["metadata"].get("standalone", True),
+                                "is_related": True  # Mark as related
+                            },
+                            "confidence": match["metadata"].get("confidence", 0.0),
+                            "score": match["score"] * 0.9,  # Slightly lower the score to prioritize direct matches
+                            "original_score": match["score"]  # Keep original for reference
+                        })
+                except Exception as e:
+                    logger.error(f"Related knowledge query failed in {index_name(index)}: {e}")
+            
+        # Add related knowledge to results
+        knowledge.extend(related_knowledge)
+        
+        # Re-sort with related items included
+        knowledge = sorted(knowledge, key=lambda x: x["score"], reverse=True)
+    
+    return knowledge
+
+async def detect_query_intent(query: str) -> str:
+    """
+    Analyze the query to detect its intent automatically.
+    
+    Args:
+        query: The user query
+        
+    Returns:
+        String indicating query intent: "conceptual", "actionable", "descriptive", or "relational"
+    """
+    # Simple rule-based intent detection
+    query_lower = query.lower()
+    
+    # Actionable queries typically ask how to do something
+    if any(phrase in query_lower for phrase in [
+        "how to", "how do i", "steps to", "guide for", "instructions", "process for",
+        "method for", "procedure", "implement", "execute", "perform", "do", "achieve",
+        "làm thế nào", "cách làm", "thực hiện", "hướng dẫn", "thủ tục", "quy trình"
+    ]):
+        return "actionable"
+    
+    # Conceptual queries typically ask about what something is
+    if any(phrase in query_lower for phrase in [
+        "what is", "meaning of", "definition of", "explain", "concept of", "understand",
+        "describe", "tell me about", "là gì", "định nghĩa", "khái niệm", "giải thích"
+    ]):
+        return "conceptual"
+    
+    # Descriptive queries typically ask for details or elaboration
+    if any(phrase in query_lower for phrase in [
+        "details about", "information on", "tell me more", "describe", "elaborate on", 
+        "characteristics", "features of", "properties of", "aspects of",
+        "chi tiết", "mô tả", "đặc điểm", "tính chất", "khía cạnh"
+    ]):
+        return "descriptive"
+    
+    # Relational queries typically ask about connections or comparisons
+    if any(phrase in query_lower for phrase in [
+        "related to", "connection between", "relationship", "compare", "versus", "vs",
+        "difference between", "similarity", "liên quan", "mối quan hệ", "so sánh", "khác nhau"
+    ]):
+        return "relational"
+    
+    # Default to descriptive for general queries
+    return "descriptive"
 
