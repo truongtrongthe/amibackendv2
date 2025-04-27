@@ -6,6 +6,7 @@ import time
 import fcntl
 import pickle
 import faiss
+import json
 
 # Global brain instance - initially None
 _brain_instance = None
@@ -17,7 +18,8 @@ _default_config = {
     "dim": 1536,
     "namespace": "",
     "graph_version_ids": [],
-    "pinecone_index_name": "9well"  # Default index name
+    "pinecone_index_name": "9well",  # Default index name
+    "_skip_disk_load": False
 }
 
 # Current configuration
@@ -59,8 +61,22 @@ def get_brain():
             pinecone_index_name=_current_config["pinecone_index_name"]
         )
         
-        # Try to load from disk if available
-        try_load_from_disk()
+        # Try to load from disk if available and not in active loading mode
+        if not hasattr(_current_config, "_skip_disk_load") or not _current_config["_skip_disk_load"]:
+            try_load_from_disk()
+    
+    # Ensure metadata is always a dictionary
+    if hasattr(_brain_instance, 'metadata'):
+        if not isinstance(_brain_instance.metadata, dict):
+            print("Converting metadata from list to dictionary")
+            # Convert list to dictionary using vector_ids as keys if available
+            if hasattr(_brain_instance, 'vector_ids') and len(_brain_instance.vector_ids) == len(_brain_instance.metadata):
+                _brain_instance.metadata = dict(zip(_brain_instance.vector_ids, _brain_instance.metadata))
+            else:
+                # Fallback: create dictionary with numeric keys
+                _brain_instance.metadata = {str(i): meta for i, meta in enumerate(_brain_instance.metadata)}
+    else:
+        _brain_instance.metadata = {}
         
     return _brain_instance
 
@@ -254,6 +270,11 @@ def try_load_from_disk():
     if not os.path.exists(FAISS_INDEX_PATH) or not os.path.exists(METADATA_PATH):
         return False
     
+    # Check if we should skip disk loading (e.g., during active vector loading)
+    if hasattr(_current_config, "_skip_disk_load") and _current_config["_skip_disk_load"]:
+        print("Skipping load from disk due to active vector loading")
+        return False
+    
     try:
         # Acquire lock for reading
         lock_file = acquire_lock(INDEX_LOCK_PATH)
@@ -272,7 +293,7 @@ def try_load_from_disk():
                 metadata = pickle.load(f)
                 _brain_instance.vector_ids = metadata.get('vector_ids', [])
                 _brain_instance.vectors = metadata.get('vectors', None)
-                _brain_instance.metadata = metadata.get('metadata', [])
+                _brain_instance.metadata = metadata.get('metadata', {})
             
             print(f"Successfully loaded {_brain_instance.faiss_index.ntotal} vectors from disk")
             _brain_loaded = True
@@ -316,12 +337,24 @@ def save_to_disk():
             print(f"Saving FAISS index to {FAISS_INDEX_PATH}")
             faiss.write_index(_brain_instance.faiss_index, FAISS_INDEX_PATH)
             
+            # Handle metadata conversion if it's a list instead of a dictionary
+            brain_metadata = getattr(_brain_instance, 'metadata', {})
+            if isinstance(brain_metadata, list):
+                print("Converting metadata from list to dictionary before saving")
+                # Convert list to dictionary using vector_ids as keys if available
+                vector_ids = getattr(_brain_instance, 'vector_ids', [])
+                if len(vector_ids) == len(brain_metadata):
+                    brain_metadata = dict(zip(vector_ids, brain_metadata))
+                else:
+                    # Fallback: create dictionary with numeric keys
+                    brain_metadata = {str(i): meta for i, meta in enumerate(brain_metadata)}
+            
             # Save metadata
             print(f"Saving metadata to {METADATA_PATH}")
             metadata = {
                 'vector_ids': getattr(_brain_instance, 'vector_ids', []),
                 'vectors': getattr(_brain_instance, 'vectors', None),
-                'metadata': getattr(_brain_instance, 'metadata', [])
+                'metadata': brain_metadata
             }
             with open(METADATA_PATH, 'wb') as f:
                 pickle.dump(metadata, f)
@@ -354,13 +387,16 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
     Returns:
         bool: True if vectors were loaded successfully, False otherwise
     """
-    global _brain_instance, _brain_loaded
+    global _brain_instance, _brain_loaded, _current_config
     import time
     import numpy as np
     
     start_time = time.time()
     
     print(f"Starting brain vector loading process [time: {start_time}]")
+    
+    # Add a flag to skip loading from disk during active vector loading
+    _current_config["_skip_disk_load"] = True
     
     # Set the graph version if provided and different from current
     version_changed = False
@@ -371,9 +407,44 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
             version_changed = set_graph_version(graph_version_id)
             print(f"Version changed: {version_changed}")
     
+    # Always ensure we have a clean state before loading vectors
+    # This prevents old vectors from being used if the load fails
+    if _brain_instance is not None:
+        print("Clearing the brain state before loading new vectors")
+        # Explicitly release large data structures if they exist
+        if hasattr(_brain_instance, 'vectors') and _brain_instance.vectors is not None:
+            print(f"Clearing existing vectors array with shape: {_brain_instance.vectors.shape if hasattr(_brain_instance.vectors, 'shape') else 'unknown'}")
+            _brain_instance.vectors = None
+        
+        if hasattr(_brain_instance, 'metadata') and _brain_instance.metadata is not None:
+            print(f"Clearing existing metadata (size: {len(_brain_instance.metadata) if isinstance(_brain_instance.metadata, dict) else 'unknown'})")
+            _brain_instance.metadata = {}
+        
+        if hasattr(_brain_instance, 'vector_ids') and _brain_instance.vector_ids is not None:
+            print(f"Clearing existing vector IDs (count: {len(_brain_instance.vector_ids)})")
+            _brain_instance.vector_ids = []
+        
+        # Reset the FAISS index if it exists
+        if hasattr(_brain_instance, 'faiss_index') and _brain_instance.faiss_index is not None:
+            try:
+                print(f"Resetting existing FAISS index with {_brain_instance.faiss_index.ntotal} vectors")
+                _brain_instance.faiss_index.reset()
+                print("FAISS index has been reset")
+            except Exception as reset_error:
+                print(f"Error resetting FAISS index: {reset_error}")
+                # If we can't reset, try to recreate it
+                try:
+                    import faiss
+                    print("Creating new FAISS index")
+                    _brain_instance.faiss_index = faiss.IndexFlatIP(_brain_instance.dim)
+                except Exception as create_error:
+                    print(f"Error creating new FAISS index: {create_error}")
+    
     # If already loaded and version didn't change, we might still need to clean files
     if _brain_loaded and not version_changed and not force_delete:
         print("Brain already loaded with current version, skipping reload")
+        # Remove disk load skip flag
+        _current_config["_skip_disk_load"] = False
         return True
     
     # Clean up existing files if they exist - always remove when loading
@@ -384,6 +455,8 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
     lock_file = acquire_lock(INDEX_LOCK_PATH)
     if not lock_file:
         print("Could not acquire lock for deleting index files")
+        # Remove disk load skip flag
+        _current_config["_skip_disk_load"] = False
         return False
         
     try:
@@ -453,10 +526,15 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
     if not delete_success:
         print("WARNING: Failed to delete one or more existing index files. This may cause stale data to be used.")
     
+    # Set _brain_loaded to False to avoid using cached data
+    _brain_loaded = False
+    
     # Ensure brain instance exists
     brain = get_brain()
     if brain is None:
         print("Failed to initialize brain instance")
+        # Remove disk load skip flag
+        _current_config["_skip_disk_load"] = False
         return False
     
     try:
@@ -464,6 +542,8 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
         current_version = get_current_graph_version()
         if not current_version:
             print("No graph version set, cannot load vectors")
+            # Remove disk load skip flag
+            _current_config["_skip_disk_load"] = False
             return False
             
         print(f"Loading vectors for graph version: {current_version}")
@@ -476,17 +556,37 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
             await asyncio.wait_for(load_task, timeout=300)  # 5 minute timeout
         except asyncio.TimeoutError:
             print("Vector loading timed out after 5 minutes")
+            # Remove disk load skip flag
+            _current_config["_skip_disk_load"] = False
             return False
         except Exception as e:
             import traceback
             print(f"ERROR during vector loading: {e}")
             print(traceback.format_exc())
+            # Remove disk load skip flag
+            _current_config["_skip_disk_load"] = False
             return False
         
         # Check if vectors were loaded
         vector_count = brain.faiss_index.ntotal if hasattr(brain, 'faiss_index') else 0
         if vector_count == 0:
             print("No vectors loaded into FAISS index")
+            
+            # Set _brain_loaded to False as we have no vectors
+            _brain_loaded = False
+            
+            # Save the empty state to disk
+            try:
+                import faiss
+                faiss.write_index(brain.faiss_index, FAISS_INDEX_PATH)
+                with open(METADATA_PATH, 'wb') as f:
+                    pickle.dump({}, f)
+                print("Saved empty state to disk")
+            except Exception as save_error:
+                print(f"Error saving empty state: {save_error}")
+            
+            # Remove disk load skip flag
+            _current_config["_skip_disk_load"] = False    
             return False
         
         # Validate the loaded vectors
@@ -567,7 +667,7 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
             faiss.normalize_L2(test_vector.reshape(1, -1))
             
             # Run a test query with zero threshold to ensure we get results
-            results = brain.get_similar_vectors(test_vector, top_k=3, threshold=0.0)
+            results = brain.get_similar_vectors(test_vector, top_k=10, threshold=0.0)
             print(f"Test query returned {len(results)} results")
             
             if len(results) > 0:
@@ -602,11 +702,16 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
         
         # Set loaded flag
         _brain_loaded = True
+        
+        # Remove disk load skip flag
+        _current_config["_skip_disk_load"] = False
         return True
     except Exception as e:
         import traceback
         print(f"ERROR loading vectors: {e}")
         print(traceback.format_exc())
+        # Remove disk load skip flag
+        _current_config["_skip_disk_load"] = False
         return False
 
 def is_brain_loaded():
@@ -628,4 +733,147 @@ def is_brain_loaded():
     if try_load_from_disk():
         return True
         
-    return False 
+    return False
+
+async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
+    """
+    Return vectors from brain without printing results.
+    
+    Args:
+        input_text: Text to search for similar vectors
+        graph_version_id: Optional graph version to use
+        
+    Returns:
+        A dictionary with query results, ready for JSON serialization
+    """
+    # If a new graph version is requested, update the configuration
+    if graph_version_id and graph_version_id != get_current_graph_version():
+        # Set the new graph version which will reset the brain if needed
+        set_graph_version(graph_version_id)
+    
+    # Get the brain instance
+    brain = get_brain()
+    
+    # Ensure brain is loaded before querying
+    if not is_brain_loaded() or not hasattr(brain, 'faiss_index') or (hasattr(brain, 'faiss_index') and brain.faiss_index.ntotal == 0):
+        # Try to load the brain
+        success = await load_brain_vectors(get_current_graph_version(), force_delete=True)
+        if not success:
+            return {
+                "error": "Failed to load brain",
+                "query": input_text,
+                "graph_version_id": get_current_graph_version()
+            }
+    
+    # Now perform the query
+    try:
+        results = await brain.get_similar_vectors_by_text(input_text, top_k=10)
+        
+        # Convert results to a serializable format
+        formatted_results = []
+        for vector_id, vector, metadata, similarity in results:
+            formatted_results.append({
+                "vector_id": vector_id,
+                "similarity": similarity,
+                "metadata": metadata,
+                "vector_preview": vector[:10] if hasattr(vector, '__getitem__') else []
+            })
+        
+        response = {
+            "query": input_text,
+            "graph_version_id": get_current_graph_version(),
+            "vector_count": brain.faiss_index.ntotal if hasattr(brain, 'faiss_index') else 0,
+            "results": formatted_results
+        }
+        
+        # Make sure everything is JSON serializable
+        return json_serialize_for_brain(response)
+    except Exception as e:
+        import traceback
+        print(f"Error in flick_out: {e}")
+        print(traceback.format_exc())
+        return {
+            "error": f"Error processing query: {str(e)}",
+            "query": input_text,
+            "graph_version_id": get_current_graph_version()
+        }
+
+async def activate_brain_with_version(graph_version_id):
+    """
+    Activate the brain with a specific graph version ID.
+    This performs a full reset and reload of vectors for the specified graph version.
+    
+    Args:
+        graph_version_id: The graph version ID to activate
+        
+    Returns:
+        dict: A dictionary with activation results including success status and stats
+    """
+    global _brain_instance, _brain_loaded
+    
+    # Always perform a full reset first
+    reset_brain()
+    
+    # Then load the vectors
+    success = await load_brain_vectors(graph_version_id, force_delete=True)
+    
+    if success:
+        # Get updated brain instance
+        brain = get_brain()
+        
+        # Return stats for verification
+        return {
+            "success": True,
+            "graph_version_id": get_current_graph_version(),
+            "loaded": is_brain_loaded(),
+            "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
+        }
+    else:
+        return {
+            "success": False,
+            "error": "Failed to load brain vectors"
+        }
+
+def json_serialize_for_brain(obj):
+    """
+    Recursively convert an object and its nested contents to be JSON serializable.
+    Handles NumPy types, lists, dictionaries, and other common types.
+    
+    Args:
+        obj: Any Python object to make JSON serializable
+        
+    Returns:
+        JSON serializable version of the object
+    """
+    if obj is None:
+        return None
+        
+    # Handle NumPy types
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.int32, np.int64, np.uint32, np.uint64)):
+        return int(obj)
+    if isinstance(obj, (np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.bool_)):
+        return bool(obj)
+        
+    # Handle iterables
+    if isinstance(obj, list) or isinstance(obj, tuple):
+        return [json_serialize_for_brain(item) for item in obj]
+        
+    # Handle dictionaries
+    if isinstance(obj, dict):
+        return {str(key): json_serialize_for_brain(value) for key, value in obj.items()}
+        
+    # Special handling for custom objects with __dict__
+    if hasattr(obj, '__dict__'):
+        return {key: json_serialize_for_brain(value) for key, value in obj.__dict__.items() 
+                if not key.startswith('_')}
+                
+    # Try to make it JSON serializable, or convert to string as last resort
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, OverflowError):
+        return str(obj) 
