@@ -202,6 +202,7 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             global brain
             brain = get_brain()
                 
+            # Enhanced profiling instructions - Expanded query categories
             # Bilingual profile query (English and Vietnamese)
             profile_queries = [
                 "How to build customer portraits?",
@@ -220,8 +221,71 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                 "Các loại phân khúc khách hàng"
             ]
             
-            # Combine queries for batch processing
-            all_queries = profile_queries + classification_queries
+            # Demographic profiling queries
+            demographic_queries = [
+                "techniques for identifying customer demographic information",
+                "cách xác định thông tin nhân khẩu học của khách hàng",
+                "how to determine customer age groups and professional background",
+                "phương pháp phân loại khách hàng theo độ tuổi và nghề nghiệp"
+            ]
+            
+            # Psychographic profiling queries
+            psychographic_queries = [
+                "methods to identify customer values and interests",
+                "cách xác định giá trị và sở thích của khách hàng",
+                "identifying customer lifestyle and personality traits",
+                "kỹ thuật nhận biết phong cách sống và tính cách khách hàng"
+            ]
+            
+            # Behavioral profiling queries
+            behavioral_queries = [
+                "techniques to analyze customer purchase behavior",
+                "phương pháp phân tích hành vi mua hàng của khách hàng",
+                "how to identify customer buying patterns and preferences",
+                "cách nhận diện kiểu mẫu và sở thích mua hàng của khách hàng"
+            ]
+            
+            # Industry-specific customer types
+            industry_specific_queries = [
+                "common customer types in retail industry",
+                "các loại khách hàng phổ biến trong ngành bán lẻ",
+                "financial services customer personas",
+                "chân dung khách hàng trong lĩnh vực dịch vụ tài chính",
+                "technology product customer profiles",
+                "mẫu khách hàng điển hình cho sản phẩm công nghệ"
+            ]
+            
+            # Context-aware profiling techniques
+            context_aware_queries = [
+                "profiling techniques for first contact with customer",
+                "kỹ thuật xây dựng hồ sơ trong lần tiếp xúc đầu tiên với khách hàng",
+                "how to update customer profiles in ongoing relationships",
+                "cách cập nhật thông tin khách hàng trong mối quan hệ dài hạn",
+                "customer profiling based on communication channels",
+                "phân loại khách hàng dựa trên kênh giao tiếp"
+            ]
+            
+            # Emotional and cultural assessment
+            emotional_cultural_queries = [
+                "techniques to assess customer emotional state",
+                "phương pháp đánh giá trạng thái cảm xúc của khách hàng",
+                "cultural nuances in Vietnamese customer communication",
+                "đặc điểm văn hóa trong giao tiếp với khách hàng Việt Nam",
+                "identifying customer satisfaction signals",
+                "nhận biết dấu hiệu hài lòng của khách hàng"
+            ]
+            
+            # Combine all queries for batch processing - prioritizing the most relevant categories first
+            all_queries = (
+                profile_queries + 
+                classification_queries + 
+                psychographic_queries + 
+                behavioral_queries + 
+                emotional_cultural_queries + 
+                context_aware_queries + 
+                demographic_queries + 
+                industry_specific_queries
+            )
             
             # Execute batch search with simplified approach
             try:

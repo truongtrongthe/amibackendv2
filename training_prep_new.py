@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize the LLM client with timeout
 LLM = ChatOpenAI(model="gpt-4o", streaming=False, request_timeout=60)
-
+model = SentenceTransformer('sentence-transformers/LaBSE')
 # Retry decorator for LLM calls
 @retry(
     stop=stop_after_attempt(3),
@@ -148,7 +148,7 @@ def generate_sentence_embeddings(sentences: List[str]) -> np.ndarray:
         numpy array of embeddings
     """
     try:
-        model = SentenceTransformer('sentence-transformers/LaBSE')
+        
         embeddings = model.encode(sentences, show_progress_bar=True)
         return embeddings
     except Exception as e:
@@ -632,7 +632,7 @@ async def generate_cluster_connections(clusters_list: List[Dict], sentences: Lis
             f"You are a knowledge integration expert who can see connections and relationships between different topics.\n\n"
             f"DOCUMENT OVERVIEW:\nThe document contains {len(clusters_list)} main clusters or topics.\n\n"
             f"CLUSTERS:\n{clusters_text}\n\n"
-            f"TASK: Generate 1-2 paragraphs that connect these clusters together into a cohesive whole. "
+            f"TASK: Generate one paragraph that connect these clusters together into a cohesive whole. "
             f"Explain how these topics relate to each other and how they contribute to a unified understanding.\n\n"
             f"REQUIREMENTS:\n"
             f"1. The connections should be substantive, specific, and insightful, not just vague generalities\n"
@@ -933,121 +933,3 @@ async def save_document_insights(document_insight: str = "", user_id: str = "", 
         logger.error(traceback.format_exc())
         return False
 
-if __name__ == "__main__":
-    # Example usage - file path
-    async def test_file_path():
-        try:
-            input_file = "input.docx"  # Change this to your test file
-            if os.path.exists(input_file):
-                result = await process_document(input_file)
-                print(f"Successfully processed {input_file}")
-                print(f"Generated {len(result['clusters'])} clusters")
-            else:
-                print(f"Test file {input_file} not found")
-        except Exception as e:
-            print(f"Error in test_file_path: {type(e).__name__}: {str(e)}")
-    
-    async def test_bytes_io():
-        try:
-            # This example shows how to use with BytesIO
-            input_file = "input.docx"  # Change this to your test file
-            if os.path.exists(input_file):
-                # Read file into BytesIO
-                with open(input_file, "rb") as f:
-                    file_bytes = BytesIO(f.read())
-                
-                # Process using BytesIO
-                result = await process_document(file_bytes, file_type="docx")
-                print(f"Successfully processed BytesIO content")
-                print(f"Generated {len(result['clusters'])} clusters")
-            else:
-                print(f"Test file {input_file} not found")
-        except Exception as e:
-            print(f"Error in test_bytes_io: {type(e).__name__}: {str(e)}")
-    
-    async def test_understand_document():
-        try:
-            print("\nTesting understand_document function with BytesIO only...")
-            input_file = "input.docx"  # Change this to your test file
-            
-            if not os.path.exists(input_file):
-                print(f"Test file {input_file} not found")
-                return
-            
-            # Test only with BytesIO
-            print(f"Reading file {input_file} into BytesIO...")
-            with open(input_file, "rb") as f:
-                file_content = f.read()
-                print(f"Read {len(file_content)} bytes from file")
-                file_bytes = BytesIO(file_content)
-            
-            print(f"Calling understand_document with BytesIO content, file_type=docx")
-            result = await understand_document(file_bytes, file_type="docx")
-            
-            # Detailed validation and output
-            print("\n--- PROCESSING RESULTS ---")
-            
-            if not isinstance(result, dict):
-                print(f"ERROR: Result is not a dictionary. Got {type(result)} instead.")
-                return
-            
-            if result.get("success", False):
-                print("✓ SUCCESS: Document processed successfully")
-                
-                if "document_insights" not in result:
-                    print("ERROR: Missing document_insights in successful result")
-                    return
-                
-                insights = result["document_insights"]
-                metadata = insights.get("metadata", {})
-                
-                # Print metadata
-                print("\n--- DOCUMENT METADATA ---")
-                print(f"Language: {metadata.get('language', 'Unknown')}")
-                print(f"Sentences: {metadata.get('sentence_count', 'Unknown')}")
-                print(f"Clusters: {metadata.get('cluster_count', 'Unknown')}")
-                print(f"Noise points: {metadata.get('noise_points', 'Unknown')}")
-                print(f"Processing level: {metadata.get('processing_level', 'Unknown')}")
-                
-                # Print summary
-                print("\n--- DOCUMENT SUMMARY ---")
-                print(insights.get("summary", "No summary generated"))
-                
-                # Print cluster information
-                clusters = insights.get("clusters", [])
-                print(f"\n--- CLUSTERS ({len(clusters)}) ---")
-                for i, cluster in enumerate(clusters):
-                    print(f"\nCLUSTER {i+1}: {cluster.get('title', 'Unnamed')}")
-                    print(f"Sentences: {cluster.get('sentence_count', 'Unknown')}")
-                    print(f"Description: {cluster.get('description', 'No description')[:100]}...")
-                    print(f"First sentence: {cluster.get('sentences', [''])[0][:100]}..." if cluster.get('sentences') else "No sentences")
-                
-                # Print connections
-                print("\n--- CONNECTIONS BETWEEN CLUSTERS ---")
-                connections = insights.get("connections", "No connections generated")
-                print(f"{connections[:200]}..." if len(connections) > 200 else connections)
-                
-                # Save full result to file
-                result_file = "document_insights_bytesio_test.json"
-                with open(result_file, "w", encoding="utf-8") as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-                print(f"\nFull results saved to {result_file}")
-                
-            else:
-                print("✗ ERROR: Document processing failed")
-                print(f"Error message: {result.get('error', 'Unknown error')}")
-                print(f"Error type: {result.get('error_type', 'Unknown')}")
-            
-        except Exception as e:
-            print(f"EXCEPTION in test_understand_document: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-    
-    # Select which tests to run
-    async def run_tests():
-        # Comment out tests you don't want to run
-        # await test_file_path()  
-        # await test_bytes_io()
-        await test_understand_document()  # Test the new function
-    
-    asyncio.run(run_tests())

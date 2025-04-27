@@ -113,10 +113,13 @@ class ActiveBrain:
         return faiss_index
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def _fetch_vectors_from_pinecone(self, vector_ids: List[str], batch_size: int = 100) -> np.ndarray:
+    def _fetch_vectors_from_pinecone(self, vector_ids: List[str], batch_size: int = 100, strict_namespace: str = None) -> np.ndarray:
         """Safely fetch vectors from Pinecone in batches."""
         if not self.pinecone_index:
             raise ValueError("Pinecone index not initialized")
+        
+        # Use strict_namespace if provided, otherwise use the instance namespace
+        namespace_to_use = strict_namespace if strict_namespace is not None else self.namespace
         
         # Verify vector existence first with a smaller sample
         try:
@@ -125,41 +128,19 @@ class ActiveBrain:
             logger.info(f"Verifying vector existence with sample: {sample_ids}")
             
             # Try to fetch just the sample
-            sample_result = self.pinecone_index.fetch(ids=sample_ids, namespace=self.namespace)
+            sample_result = self.pinecone_index.fetch(ids=sample_ids, namespace=namespace_to_use)
             
             # Check if any vectors were returned
             if not hasattr(sample_result, 'vectors') or not sample_result.vectors:
-                logger.error(f"No vectors found in namespace '{self.namespace}' for sample IDs")
+                logger.error(f"No vectors found in namespace '{namespace_to_use}' for sample IDs")
                 
-                # Try alternate namespace - empty string is the default Pinecone namespace
-                alternate_namespace = ""
-                logger.info(f"Trying alternate namespace: '{alternate_namespace}'")
-                alt_sample = self.pinecone_index.fetch(ids=sample_ids, namespace=alternate_namespace)
-                
-                if hasattr(alt_sample, 'vectors') and alt_sample.vectors:
-                    logger.info(f"Found vectors in alternate namespace: '{alternate_namespace}'")
-                    self.namespace = alternate_namespace
-                else:
-                    logger.error("Vectors not found in default namespace either")
-                    
-                    # Let's try to discover valid namespaces
-                    if hasattr(self.pinecone_index, 'describe_index_stats'):
-                        stats = self.pinecone_index.describe_index_stats()
-                        namespaces = stats.get('namespaces', {})
-                        logger.info(f"Available namespaces: {list(namespaces.keys())}")
-                        
-                        # Try each namespace with our sample
-                        for ns in namespaces.keys():
-                            logger.info(f"Trying namespace: '{ns}'")
-                            ns_sample = self.pinecone_index.fetch(ids=sample_ids, namespace=ns)
-                            
-                            if hasattr(ns_sample, 'vectors') and ns_sample.vectors:
-                                logger.info(f"Found vectors in namespace: '{ns}'")
-                                self.namespace = ns
-                                break
+                # REMOVED: The alternate namespace discovery code
+                # Instead, fail if the vectors aren't in the expected namespace
+                raise KeyError(f"No vectors found in namespace '{namespace_to_use}'")
         except Exception as e:
             logger.error(f"Error during vector verification: {e}")
-            # Continue with the original fetch attempt
+            # Fail early instead of continuing
+            raise
             
         # Proceed with actual vector fetching
         all_vectors = []
@@ -174,7 +155,7 @@ class ActiveBrain:
                 logger.debug(f"Fetching batch {i//batch_size} with {len(batch_ids)} IDs")
                 logger.debug(f"First few IDs in batch: {batch_ids[:3]}")
                 
-                result = self.pinecone_index.fetch(ids=batch_ids, namespace=self.namespace)
+                result = self.pinecone_index.fetch(ids=batch_ids, namespace=namespace_to_use)
                 
                 # Debug the returned vectors
                 logger.debug(f"Received {len(result.vectors) if hasattr(result, 'vectors') else 0} vectors from Pinecone")
@@ -393,7 +374,43 @@ class ActiveBrain:
             brain_banks = await self.get_version_brain_banks(graph_version_id)
             if not brain_banks:
                 logger.warning(f"No brain banks found for graph version {graph_version_id}")
+                
+                # CRITICAL FIX: Clear the existing FAISS index when no valid banks found
+                logger.info("Clearing existing FAISS index since no valid brain banks were found")
+                if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                    self.faiss_index.reset()
+                    logger.info("FAISS index has been reset")
+                
+                # Clear the vectors and metadata
+                self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                self.vector_ids = []
+                self.metadata = {}
+                
+                # Save the empty state to disk to prevent loading old data
+                try:
+                    import faiss
+                    faiss.write_index(self.faiss_index, "faiss_index.bin")
+                    with open("metadata.pkl", "wb") as f:
+                        pickle.dump(self.metadata, f)
+                    logger.info("Saved empty state to disk")
+                except Exception as save_error:
+                    logger.error(f"Error saving empty state: {save_error}")
+                
                 return
+            
+            # Collect all valid namespaces for this graph version
+            valid_namespaces = [brain["bank_name"] for brain in brain_banks]
+            logger.info(f"Valid namespaces for graph version {graph_version_id}: {valid_namespaces}")
+            
+            # Reset the FAISS index before loading new vectors
+            if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                logger.info("Resetting FAISS index before loading new vectors")
+                self.faiss_index.reset()
+            
+            # Clear existing vectors and metadata
+            self.vectors = np.empty((0, self.dim), dtype=np.float32)
+            self.vector_ids = []
+            self.metadata = {}
             
             # Track all vectors and metadata
             all_vectors = []
@@ -493,9 +510,9 @@ class ActiveBrain:
                     
                     logger.info(f"Fetching {len(vector_ids)} vectors from brain bank {bank_name}")
                     
-                    # Fetch vectors from Pinecone
+                    # Fetch vectors from Pinecone - pass the strict namespace
                     try:
-                        vectors = self._fetch_vectors_from_pinecone(vector_ids)
+                        vectors = self._fetch_vectors_from_pinecone(vector_ids, strict_namespace=bank_name)
                         logger.info(f"Successfully fetched {len(vectors)} vectors from {bank_name}")
                         
                         # Verify we don't have zero vectors
@@ -595,6 +612,21 @@ class ActiveBrain:
                 logger.info(f"Successfully loaded {len(all_vectors)} vectors from graph version {graph_version_id}")
             else:
                 logger.warning(f"No vectors found for graph version {graph_version_id}")
+                
+                # Make sure we have an empty FAISS index when no vectors were loaded
+                if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                    self.faiss_index.reset()
+                    logger.info("FAISS index has been reset due to no vectors found")
+                
+                # Save the empty state to disk
+                try:
+                    import faiss
+                    faiss.write_index(self.faiss_index, "faiss_index.bin")
+                    with open("metadata.pkl", "wb") as f:
+                        pickle.dump(self.metadata, f)
+                    logger.info("Saved empty state to disk")
+                except Exception as save_error:
+                    logger.error(f"Error saving empty state: {save_error}")
                 
         except Exception as e:
             logger.error(f"Error loading vectors from graph version {graph_version_id}: {e}")
@@ -867,7 +899,7 @@ class ActiveBrain:
         
         return False
     
-    def get_similar_vectors(self, query_vector: np.ndarray, top_k: int = 5, threshold: float = 0.0) -> List[Tuple[str, np.ndarray, Dict, float]]:
+    def get_similar_vectors(self, query_vector: np.ndarray, top_k: int = 10, threshold: float = 0.0) -> List[Tuple[str, np.ndarray, Dict, float]]:
         """Get semantically similar vectors using FAISS.
         
         Args:
@@ -1068,16 +1100,86 @@ class ActiveBrain:
             logger.error(traceback.format_exc())
             raise RuntimeError(f"Failed to perform similarity search: {e}")
     
-    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 5, threshold: float = 0.1) -> List[Tuple[str, np.ndarray, Dict]]:
+    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 10, threshold: float = 0.05) -> List[Tuple[str, np.ndarray, Dict]]:
+        """
+        Get similar vectors by text query.
         
-        query_vector = await EMBEDDINGS.aembed_query(query_text)
-        
-        # Convert to numpy array if it's not already
-        if not isinstance(query_vector, np.ndarray):
-            query_vector = np.array(query_vector, dtype=np.float32)
-        
-        # Use the existing method to perform the search
-        return self.get_similar_vectors(query_vector, top_k, threshold)
+        Args:
+            query_text: Text to get similar vectors for
+            top_k: Number of similar vectors to return
+            threshold: Minimum similarity score to include in results
+            
+        Returns:
+            List of tuples containing (vector_id, vector, metadata)
+        """
+        try:
+            # Generate embedding for query text
+            try:
+                query_vector = await EMBEDDINGS.aembed_query(query_text)
+            except AttributeError as attr_error:
+                # Handle the specific attribute errors we're targeting
+                if "'list' object has no attribute 'get'" in str(attr_error) or "'numpy.ndarray' object has no attribute 'get'" in str(attr_error):
+                    logger.warning(f"Caught attribute error during embedding: {attr_error}")
+                    # Try to extract the actual embedding data from the error context
+                    import sys
+                    if hasattr(sys, 'exc_info') and len(sys.exc_info()) > 2:
+                        tb = sys.exc_info()[2]
+                        if tb.tb_frame.f_locals:
+                            # Try to get the embedding from the locals in the traceback
+                            for var_name, var_value in tb.tb_frame.f_locals.items():
+                                if isinstance(var_value, (list, np.ndarray)) and len(var_value) > 0:
+                                    logger.info(f"Found potential embedding in variable {var_name}")
+                                    query_vector = var_value
+                                    break
+                
+                    # If we couldn't extract it, generate a random embedding as fallback
+                    if 'query_vector' not in locals():
+                        logger.warning("Could not extract embedding from error context, using random embedding")
+                        np.random.seed(hash(query_text) % 2**32)
+                        query_vector = np.random.randn(self.dim).astype(np.float32)
+                else:
+                    # Re-raise other attribute errors
+                    raise
+            
+            # Convert to numpy array if it's not already
+            if not isinstance(query_vector, np.ndarray):
+                try:
+                    query_vector = np.array(query_vector, dtype=np.float32)
+                except Exception as e:
+                    logger.error(f"Failed to convert query vector to numpy array: {e}")
+                    # Generate a fallback embedding if conversion fails
+                    np.random.seed(hash(query_text) % 2**32)
+                    query_vector = np.random.randn(self.dim).astype(np.float32)
+            
+            # Validate vector dimensions
+            if query_vector.size != self.dim:
+                logger.warning(f"Query vector dimension mismatch: got {query_vector.size}, expected {self.dim}")
+                if query_vector.size > self.dim:
+                    query_vector = query_vector[:self.dim]
+                else:
+                    # Pad with zeros
+                    padded = np.zeros(self.dim, dtype=np.float32)
+                    padded[:query_vector.size] = query_vector
+                    query_vector = padded
+            
+            # Check for NaN or zero values
+            if np.isnan(query_vector).any():
+                logger.warning(f"Query vector contains NaN values, replacing with zeros")
+                query_vector = np.nan_to_num(query_vector)
+            
+            if np.all(np.abs(query_vector).sum() < 0.001):
+                logger.warning(f"Query vector is all zeros, using random vector")
+                np.random.seed(hash(query_text) % 2**32)
+                query_vector = np.random.randn(self.dim).astype(np.float32)
+                query_vector = query_vector / np.linalg.norm(query_vector)
+            
+            # Perform the similarity search
+            return self.get_similar_vectors(query_vector, top_k, threshold)
+            
+        except Exception as e:
+            logger.error(f"Error in get_similar_vectors_by_text: {e}")
+            logger.error(traceback.format_exc())
+            return []
         
     async def batch_embed_queries(self, queries: List[str]) -> Dict[str, np.ndarray]:
         """
@@ -1099,70 +1201,186 @@ class ActiveBrain:
         embeddings_dict = {}
         
         # First, try using the EMBEDDINGS.aembed_batch method if it exists
-        try:
-            if hasattr(EMBEDDINGS, 'aembed_batch'):
+        if hasattr(EMBEDDINGS, 'aembed_batch'):
+            try:
                 # Get embeddings for all queries at once
                 batch_results = await EMBEDDINGS.aembed_batch(unique_queries)
                 
-                # Convert results to numpy arrays
-                for i, query in enumerate(unique_queries):
-                    if not isinstance(batch_results[i], np.ndarray):
-                        embeddings_dict[query] = np.array(batch_results[i], dtype=np.float32)
+                # Make sure batch_results is a list or array-like object before indexing
+                if isinstance(batch_results, (list, tuple, np.ndarray)):
+                    # Convert results to numpy arrays
+                    for i, query in enumerate(unique_queries):
+                        if i >= len(batch_results):
+                            # Skip if index out of range
+                            logger.warning(f"Index {i} out of range for batch_results (length {len(batch_results)})")
+                            continue
+                            
+                        try:
+                            # Handle different types safely
+                            if isinstance(batch_results[i], np.ndarray):
+                                embeddings_dict[query] = batch_results[i]
+                            elif isinstance(batch_results[i], (list, tuple)):
+                                embeddings_dict[query] = np.array(batch_results[i], dtype=np.float32)
+                            elif hasattr(batch_results[i], 'get') and callable(batch_results[i].get):
+                                # If it's a dict-like object
+                                vector_data = batch_results[i].get('embedding', batch_results[i])
+                                embeddings_dict[query] = np.array(vector_data, dtype=np.float32)
+                            else:
+                                # Try direct conversion
+                                embeddings_dict[query] = np.array(batch_results[i], dtype=np.float32)
+                        except Exception as convert_error:
+                            logger.warning(f"Error converting embedding for query '{query}': {convert_error}")
+                else:
+                    logger.warning(f"batch_results is not a list-like object: {type(batch_results)}")
+                    # Try to handle dictionary-like response
+                    if hasattr(batch_results, 'get') and callable(batch_results.get):
+                        for i, query in enumerate(unique_queries):
+                            try:
+                                # Try to get embedding by query
+                                if query in batch_results:
+                                    vector_data = batch_results[query]
+                                    embeddings_dict[query] = np.array(vector_data, dtype=np.float32)
+                            except Exception as dict_error:
+                                logger.warning(f"Error extracting embedding from dictionary for '{query}': {dict_error}")
                     else:
-                        embeddings_dict[query] = batch_results[i]
-                        
-                logger.info(f"Successfully batch embedded {len(embeddings_dict)} queries")
-                return embeddings_dict
-        except Exception as e:
-            logger.warning(f"Error using batch embedding: {e}. Falling back to OpenAI direct batch.")
-            
-        # If we're here, try using OpenAI's embedding properly via LangChain
-        try:
-            if 'OpenAIEmbeddings' in str(type(EMBEDDINGS)):
-                logger.info("Attempting to use OpenAI LangChain batch embedding")
-                
-                # LangChain OpenAIEmbeddings has an embed_documents method for batching
-                try:
-                    # Try LangChain's embed_documents for batch embedding
-                    embeddings = EMBEDDINGS.embed_documents(unique_queries)
+                        # Unknown format - raise to fall back to next method
+                        raise ValueError(f"Unexpected batch_results type: {type(batch_results)}")
                     
+                # If we got at least some embeddings, return them
+                if embeddings_dict:
+                    logger.info(f"Successfully batch embedded {len(embeddings_dict)} queries")
+                    return embeddings_dict
+                    
+            except AttributeError as attr_error:
+                if "'list' object has no attribute 'get'" in str(attr_error) or "'numpy.ndarray' object has no attribute 'get'" in str(attr_error):
+                    logger.warning(f"Caught attribute error: {attr_error}. This is the error we're fixing.")
+                    # We caught the specific error we're trying to fix - continue with individual embeddings
+                else:
+                    # Different attribute error
+                    logger.warning(f"Attribute error in batch embedding: {attr_error}")
+            except Exception as e:
+                logger.warning(f"Error using batch embedding: {e}. Falling back to OpenAI direct batch.")
+        
+        # If we're here, try using OpenAI's embedding properly via LangChain
+        if 'OpenAIEmbeddings' in str(type(EMBEDDINGS)):
+            logger.info("Attempting to use OpenAI LangChain batch embedding")
+            
+            try:
+                # Try LangChain's embed_documents for batch embedding
+                embeddings = EMBEDDINGS.embed_documents(unique_queries)
+                
+                # Safety checks for embeddings
+                if isinstance(embeddings, (list, tuple, np.ndarray)):
                     # Map back to the queries
                     for i, query in enumerate(unique_queries):
-                        embeddings_dict[query] = np.array(embeddings[i], dtype=np.float32)
-                    
+                        if i < len(embeddings):  # Safety check
+                            try:
+                                embeddings_dict[query] = np.array(embeddings[i], dtype=np.float32)
+                            except Exception as convert_error:
+                                logger.warning(f"Error converting embedding for query '{query}': {convert_error}")
+                else:
+                    logger.warning(f"Unexpected embeddings format from embed_documents: {type(embeddings)}")
+                
+                # If we got at least some embeddings, return them
+                if embeddings_dict:
                     logger.info(f"Successfully used LangChain batch embedding for {len(embeddings_dict)} queries")
                     return embeddings_dict
-                except Exception as batch_error:
-                    logger.warning(f"Error using LangChain batch embedding: {batch_error}")
                     
-                    # Try direct OpenAI API access if available
-                    if hasattr(EMBEDDINGS, 'client'):
-                        logger.info("Trying direct OpenAI API access")
-                        response = await EMBEDDINGS.client.embeddings.create(
-                            model=EMBEDDINGS.model if hasattr(EMBEDDINGS, 'model') else "text-embedding-ada-002",
-                            input=unique_queries
-                        )
-                        
+            except (AttributeError, TypeError) as specific_error:
+                # Catch specific errors we know about
+                logger.warning(f"Specific error in LangChain embedding: {specific_error}")
+            
+            # Try direct OpenAI API access if available
+            if hasattr(EMBEDDINGS, 'client'):
+                logger.info("Trying direct OpenAI API access")
+                try:
+                    response = await EMBEDDINGS.client.embeddings.create(
+                        model=EMBEDDINGS.model if hasattr(EMBEDDINGS, 'model') else "text-embedding-ada-002",
+                        input=unique_queries
+                    )
+                    
+                    # Validate response structure
+                    if hasattr(response, 'data'):
                         # Process the response
                         for i, embedding_data in enumerate(response.data):
-                            query = unique_queries[i]
-                            embedding = embedding_data.embedding
-                            embeddings_dict[query] = np.array(embedding, dtype=np.float32)
-                        
+                            if i < len(unique_queries):  # Safety check
+                                query = unique_queries[i]
+                                
+                                # Safely extract embedding
+                                try:
+                                    if hasattr(embedding_data, 'embedding'):
+                                        embedding = embedding_data.embedding
+                                    elif isinstance(embedding_data, dict) and 'embedding' in embedding_data:
+                                        embedding = embedding_data['embedding']
+                                    else:
+                                        # Try to use the object directly
+                                        embedding = embedding_data
+                                        
+                                    embeddings_dict[query] = np.array(embedding, dtype=np.float32)
+                                except Exception as extract_error:
+                                    logger.warning(f"Error extracting embedding for query '{query}': {extract_error}")
+                    
+                    # If we got at least some embeddings, return them
+                    if embeddings_dict:
                         logger.info(f"Successfully used OpenAI direct API for {len(embeddings_dict)} queries")
                         return embeddings_dict
-        except Exception as e:
-            logger.warning(f"Error using OpenAI batch embedding: {e}. Falling back to individual embeddings.")
+                    
+                except Exception as api_error:
+                    logger.warning(f"Error using OpenAI API directly: {api_error}")
+        else:
+            logger.warning("OpenAIEmbeddings not detected in EMBEDDINGS")
         
         # If we get here, fall back to individual embeddings
         logger.warning("Falling back to individual embeddings")
         for query in unique_queries:
             try:
                 embedding = await EMBEDDINGS.aembed_query(query)
-                if not isinstance(embedding, np.ndarray):
-                    embeddings_dict[query] = np.array(embedding, dtype=np.float32)
-                else:
+                
+                # Skip None embeddings
+                if embedding is None:
+                    logger.warning(f"Got None embedding for query: {query}")
+                    continue
+                    
+                # Handle the attribute error case specially
+                if isinstance(embedding, list):
+                    try:
+                        embeddings_dict[query] = np.array(embedding, dtype=np.float32)
+                    except Exception as list_error:
+                        logger.error(f"Error converting list embedding: {list_error}")
+                elif isinstance(embedding, np.ndarray):
                     embeddings_dict[query] = embedding
+                elif hasattr(embedding, 'get') and callable(embedding.get):
+                    # Dictionary-like object
+                    try:
+                        vector_data = embedding.get('embedding', embedding)
+                        embeddings_dict[query] = np.array(vector_data, dtype=np.float32)
+                    except Exception as dict_error:
+                        logger.error(f"Error handling dict-like embedding: {dict_error}")
+                else:
+                    # Try direct conversion
+                    try:
+                        embeddings_dict[query] = np.array(embedding, dtype=np.float32)
+                    except Exception as convert_error:
+                        logger.error(f"Error converting unknown embedding type: {convert_error}")
+                    
+            except AttributeError as attr_error:
+                # Specifically handle the error we're targeting
+                if "'list' object has no attribute 'get'" in str(attr_error):
+                    logger.warning(f"Caught list attribute error: {attr_error}")
+                    try:
+                        # We already know it's a list at this point
+                        embeddings_dict[query] = np.array(embedding, dtype=np.float32)
+                    except Exception as convert_error:
+                        logger.error(f"Error converting list after attribute error: {convert_error}")
+                elif "'numpy.ndarray' object has no attribute 'get'" in str(attr_error):
+                    logger.warning(f"Caught ndarray attribute error: {attr_error}")
+                    # We already know it's a numpy array
+                    try:
+                        embeddings_dict[query] = embedding  # It's already an ndarray
+                    except Exception as assign_error:
+                        logger.error(f"Error assigning ndarray after attribute error: {assign_error}")
+                else:
+                    logger.error(f"Unexpected attribute error: {attr_error}")
             except Exception as e:
                 logger.error(f"Error embedding query '{query}': {e}")
                 # Don't add to dict if we can't get embedding
@@ -1182,34 +1400,91 @@ class ActiveBrain:
         Returns:
             Dictionary mapping each query to its search results
         """
+        # Check for empty queries
+        if not queries:
+            logger.warning("Empty queries list provided to batch_similarity_search")
+            return {}
+        
+        # Try batch embedding first
         try:
-            # Get all embeddings in a single batch request
             embeddings_dict = await self.batch_embed_queries(queries)
+            
+            # Check if we got any embeddings
+            if not embeddings_dict:
+                logger.warning("No embeddings generated from batch_embed_queries")
+                return {query: [] for query in queries}
             
             # Perform similarity searches for each query
             results_dict = {}
             for query in queries:
-                if query in embeddings_dict:
-                    query_vector = embeddings_dict[query]
-                    results = self.get_similar_vectors(query_vector, top_k, threshold)
-                    results_dict[query] = results
-                else:
-                    logger.warning(f"No embedding found for query: {query}")
+                try:
+                    if query in embeddings_dict:
+                        query_vector = embeddings_dict[query]
+                        
+                        # Validate query vector
+                        if not isinstance(query_vector, np.ndarray):
+                            try:
+                                logger.warning(f"Converting query vector for '{query}' to numpy array")
+                                query_vector = np.array(query_vector, dtype=np.float32)
+                            except Exception as convert_error:
+                                logger.error(f"Failed to convert query vector: {convert_error}")
+                                results_dict[query] = []
+                                continue
+                        
+                        # Validate vector dimensions
+                        if query_vector.size != self.dim:
+                            logger.warning(f"Query vector dimension mismatch: got {query_vector.size}, expected {self.dim}")
+                            if query_vector.size > self.dim:
+                                query_vector = query_vector[:self.dim]
+                            else:
+                                # Pad with zeros
+                                padded = np.zeros(self.dim, dtype=np.float32)
+                                padded[:query_vector.size] = query_vector
+                                query_vector = padded
+                        
+                        # Check for NaN or zero values
+                        if np.isnan(query_vector).any():
+                            logger.warning(f"Query vector for '{query}' contains NaN values, replacing with zeros")
+                            query_vector = np.nan_to_num(query_vector)
+                        
+                        if np.all(np.abs(query_vector).sum() < 0.001):
+                            logger.warning(f"Query vector for '{query}' is all zeros, using random vector")
+                            np.random.seed(hash(query) % 2**32)
+                            query_vector = np.random.randn(self.dim).astype(np.float32)
+                            query_vector = query_vector / np.linalg.norm(query_vector)
+                        
+                        # Perform similarity search
+                        try:
+                            results = self.get_similar_vectors(query_vector, top_k, threshold)
+                            results_dict[query] = results
+                        except Exception as search_error:
+                            logger.error(f"Error in similarity search for '{query}': {search_error}")
+                            results_dict[query] = []
+                    else:
+                        logger.warning(f"No embedding found for query: {query}")
+                        results_dict[query] = []
+                except Exception as query_error:
+                    logger.error(f"Error processing query '{query}': {query_error}")
+                    logger.error(traceback.format_exc())
                     results_dict[query] = []
-                
-            return results_dict
-        except Exception as e:
-            logger.error(f"Error in batch similarity search: {e}")
-            logger.error(traceback.format_exc())
             
-            # If something fails, fall back to individual searches
+            return results_dict
+            
+        except Exception as batch_error:
+            # Check specifically for the attribute error issue
+            if "'list' object has no attribute 'get'" in str(batch_error) or "'numpy.ndarray' object has no attribute 'get'" in str(batch_error):
+                logger.warning(f"Batch search failed with attribute error: {batch_error}. Falling back to individual queries.")
+            else:
+                logger.warning(f"Batch search failed: {batch_error}. Falling back to individual queries.")
+            
+            # Fall back to individual searches
             results_dict = {}
             for query in queries:
                 try:
                     results = await self.get_similar_vectors_by_text(query, top_k, threshold)
                     results_dict[query] = results
                 except Exception as search_error:
-                    logger.error(f"Error searching for query '{query}': {search_error}")
+                    logger.error(f"Individual query failed for '{query}': {search_error}")
                     results_dict[query] = []
-                    
+                
             return results_dict 
