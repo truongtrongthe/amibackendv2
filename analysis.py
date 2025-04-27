@@ -244,6 +244,7 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
     return (
         f"Conversation:\n{context}\n\n"
         f"Process Instructions (Reference):\n{process_instructions}\n\n"
+        f"PRIORITIZATION GUIDANCE: First identify the MOST RELEVANT knowledge frameworks for this specific conversation. Focus on applying the 2-3 most applicable frameworks deeply rather than covering all concepts equally. Adapt your analysis based on conversation context and customer signals.\n\n"
         f"{first_message_note}\n\n"
         
         f"IMPORTANT: Pay close attention to the structure of the process instructions. For each knowledge item, extract and use:"
@@ -303,6 +304,8 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
         f"CONVERSATION CONTEXT:\n{context}\n\n"
         f"CONTACT ANALYSIS:\n{initial_analysis}\n\n"
         f"RETRIEVED KNOWLEDGE:\n{knowledge_content}\n\n"
+        
+        f"DYNAMIC PRIORITIZATION: Identify the 2-3 MOST RELEVANT knowledge frameworks that directly address this customer's specific situation. Focus on depth of application rather than breadth. Choose techniques that best match the customer's profile, communication style, and expressed needs.\n\n"
         
         f"Based on the conversation and analysis above, determine the most appropriate next actions using Chain of Thought reasoning. "
         f"The analysis includes the contact's identity, classification, needs, and communication style. "
