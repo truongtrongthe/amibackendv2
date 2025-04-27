@@ -46,7 +46,7 @@ wheels/
 *.DS_Store
 hito_index/
 *.DS_Store
-.venv/
+*.venv/
 faiss_index/
-.bin
-.pkl
+*.bin
+*.pkl

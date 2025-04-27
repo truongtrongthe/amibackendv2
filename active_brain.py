@@ -113,10 +113,13 @@ class ActiveBrain:
         return faiss_index
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    def _fetch_vectors_from_pinecone(self, vector_ids: List[str], batch_size: int = 100) -> np.ndarray:
+    def _fetch_vectors_from_pinecone(self, vector_ids: List[str], batch_size: int = 100, strict_namespace: str = None) -> np.ndarray:
         """Safely fetch vectors from Pinecone in batches."""
         if not self.pinecone_index:
             raise ValueError("Pinecone index not initialized")
+        
+        # Use strict_namespace if provided, otherwise use the instance namespace
+        namespace_to_use = strict_namespace if strict_namespace is not None else self.namespace
         
         # Verify vector existence first with a smaller sample
         try:
@@ -125,41 +128,19 @@ class ActiveBrain:
             logger.info(f"Verifying vector existence with sample: {sample_ids}")
             
             # Try to fetch just the sample
-            sample_result = self.pinecone_index.fetch(ids=sample_ids, namespace=self.namespace)
+            sample_result = self.pinecone_index.fetch(ids=sample_ids, namespace=namespace_to_use)
             
             # Check if any vectors were returned
             if not hasattr(sample_result, 'vectors') or not sample_result.vectors:
-                logger.error(f"No vectors found in namespace '{self.namespace}' for sample IDs")
+                logger.error(f"No vectors found in namespace '{namespace_to_use}' for sample IDs")
                 
-                # Try alternate namespace - empty string is the default Pinecone namespace
-                alternate_namespace = ""
-                logger.info(f"Trying alternate namespace: '{alternate_namespace}'")
-                alt_sample = self.pinecone_index.fetch(ids=sample_ids, namespace=alternate_namespace)
-                
-                if hasattr(alt_sample, 'vectors') and alt_sample.vectors:
-                    logger.info(f"Found vectors in alternate namespace: '{alternate_namespace}'")
-                    self.namespace = alternate_namespace
-                else:
-                    logger.error("Vectors not found in default namespace either")
-                    
-                    # Let's try to discover valid namespaces
-                    if hasattr(self.pinecone_index, 'describe_index_stats'):
-                        stats = self.pinecone_index.describe_index_stats()
-                        namespaces = stats.get('namespaces', {})
-                        logger.info(f"Available namespaces: {list(namespaces.keys())}")
-                        
-                        # Try each namespace with our sample
-                        for ns in namespaces.keys():
-                            logger.info(f"Trying namespace: '{ns}'")
-                            ns_sample = self.pinecone_index.fetch(ids=sample_ids, namespace=ns)
-                            
-                            if hasattr(ns_sample, 'vectors') and ns_sample.vectors:
-                                logger.info(f"Found vectors in namespace: '{ns}'")
-                                self.namespace = ns
-                                break
+                # REMOVED: The alternate namespace discovery code
+                # Instead, fail if the vectors aren't in the expected namespace
+                raise KeyError(f"No vectors found in namespace '{namespace_to_use}'")
         except Exception as e:
             logger.error(f"Error during vector verification: {e}")
-            # Continue with the original fetch attempt
+            # Fail early instead of continuing
+            raise
             
         # Proceed with actual vector fetching
         all_vectors = []
@@ -174,7 +155,7 @@ class ActiveBrain:
                 logger.debug(f"Fetching batch {i//batch_size} with {len(batch_ids)} IDs")
                 logger.debug(f"First few IDs in batch: {batch_ids[:3]}")
                 
-                result = self.pinecone_index.fetch(ids=batch_ids, namespace=self.namespace)
+                result = self.pinecone_index.fetch(ids=batch_ids, namespace=namespace_to_use)
                 
                 # Debug the returned vectors
                 logger.debug(f"Received {len(result.vectors) if hasattr(result, 'vectors') else 0} vectors from Pinecone")
@@ -393,7 +374,43 @@ class ActiveBrain:
             brain_banks = await self.get_version_brain_banks(graph_version_id)
             if not brain_banks:
                 logger.warning(f"No brain banks found for graph version {graph_version_id}")
+                
+                # CRITICAL FIX: Clear the existing FAISS index when no valid banks found
+                logger.info("Clearing existing FAISS index since no valid brain banks were found")
+                if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                    self.faiss_index.reset()
+                    logger.info("FAISS index has been reset")
+                
+                # Clear the vectors and metadata
+                self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                self.vector_ids = []
+                self.metadata = {}
+                
+                # Save the empty state to disk to prevent loading old data
+                try:
+                    import faiss
+                    faiss.write_index(self.faiss_index, "faiss_index.bin")
+                    with open("metadata.pkl", "wb") as f:
+                        pickle.dump(self.metadata, f)
+                    logger.info("Saved empty state to disk")
+                except Exception as save_error:
+                    logger.error(f"Error saving empty state: {save_error}")
+                
                 return
+            
+            # Collect all valid namespaces for this graph version
+            valid_namespaces = [brain["bank_name"] for brain in brain_banks]
+            logger.info(f"Valid namespaces for graph version {graph_version_id}: {valid_namespaces}")
+            
+            # Reset the FAISS index before loading new vectors
+            if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                logger.info("Resetting FAISS index before loading new vectors")
+                self.faiss_index.reset()
+            
+            # Clear existing vectors and metadata
+            self.vectors = np.empty((0, self.dim), dtype=np.float32)
+            self.vector_ids = []
+            self.metadata = {}
             
             # Track all vectors and metadata
             all_vectors = []
@@ -493,9 +510,9 @@ class ActiveBrain:
                     
                     logger.info(f"Fetching {len(vector_ids)} vectors from brain bank {bank_name}")
                     
-                    # Fetch vectors from Pinecone
+                    # Fetch vectors from Pinecone - pass the strict namespace
                     try:
-                        vectors = self._fetch_vectors_from_pinecone(vector_ids)
+                        vectors = self._fetch_vectors_from_pinecone(vector_ids, strict_namespace=bank_name)
                         logger.info(f"Successfully fetched {len(vectors)} vectors from {bank_name}")
                         
                         # Verify we don't have zero vectors
@@ -595,6 +612,21 @@ class ActiveBrain:
                 logger.info(f"Successfully loaded {len(all_vectors)} vectors from graph version {graph_version_id}")
             else:
                 logger.warning(f"No vectors found for graph version {graph_version_id}")
+                
+                # Make sure we have an empty FAISS index when no vectors were loaded
+                if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                    self.faiss_index.reset()
+                    logger.info("FAISS index has been reset due to no vectors found")
+                
+                # Save the empty state to disk
+                try:
+                    import faiss
+                    faiss.write_index(self.faiss_index, "faiss_index.bin")
+                    with open("metadata.pkl", "wb") as f:
+                        pickle.dump(self.metadata, f)
+                    logger.info("Saved empty state to disk")
+                except Exception as save_error:
+                    logger.error(f"Error saving empty state: {save_error}")
                 
         except Exception as e:
             logger.error(f"Error loading vectors from graph version {graph_version_id}: {e}")
@@ -867,7 +899,7 @@ class ActiveBrain:
         
         return False
     
-    def get_similar_vectors(self, query_vector: np.ndarray, top_k: int = 5, threshold: float = 0.0) -> List[Tuple[str, np.ndarray, Dict, float]]:
+    def get_similar_vectors(self, query_vector: np.ndarray, top_k: int = 10, threshold: float = 0.0) -> List[Tuple[str, np.ndarray, Dict, float]]:
         """Get semantically similar vectors using FAISS.
         
         Args:
@@ -1068,7 +1100,7 @@ class ActiveBrain:
             logger.error(traceback.format_exc())
             raise RuntimeError(f"Failed to perform similarity search: {e}")
     
-    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 5, threshold: float = 0.1) -> List[Tuple[str, np.ndarray, Dict]]:
+    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 10, threshold: float = 0.05) -> List[Tuple[str, np.ndarray, Dict]]:
         """
         Get similar vectors by text query.
         

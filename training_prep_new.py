@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize the LLM client with timeout
 LLM = ChatOpenAI(model="gpt-4o", streaming=False, request_timeout=60)
-
+model = SentenceTransformer('sentence-transformers/LaBSE')
 # Retry decorator for LLM calls
 @retry(
     stop=stop_after_attempt(3),
@@ -148,7 +148,7 @@ def generate_sentence_embeddings(sentences: List[str]) -> np.ndarray:
         numpy array of embeddings
     """
     try:
-        model = SentenceTransformer('sentence-transformers/LaBSE')
+        
         embeddings = model.encode(sentences, show_progress_bar=True)
         return embeddings
     except Exception as e:

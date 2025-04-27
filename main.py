@@ -9,12 +9,13 @@ eventlet.monkey_patch()
 import nest_asyncio
 nest_asyncio.apply()  # Apply patch to allow nested event loops
 
-# Import brain singleton functions first to ensure they're available
-from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version,get_brain
-
+# SentenceTransformer has to be imported before FAISS
+from training_prep import process_document,refine_document
+#FAISS importing here
+from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version, get_brain, flick_out, activate_brain_with_version
 
 # Then other imports
-from flask import Flask, Response, request, jsonify, stream_with_context, copy_current_request_context
+from flask import Flask, Response, request, jsonify
 import json
 from uuid import UUID, uuid4
 from datetime import datetime
@@ -26,30 +27,28 @@ from typing import List, Optional, Dict, Any  # Added List and Optional imports
 from collections import deque
 import threading
 import queue
-from use_brain import flick_out
-from brain_singleton import load_brain_vectors
+
 
 # Keep track of recent webhook requests to detect duplicates
-recent_requests = deque(maxlen=100)
+recent_requests = deque(maxlen=1000)
 
 # Assuming these are in a module called 'data_fetch.py' - adjust as needed
 from database import get_all_labels, get_raw_data_by_label, clean_text
 #from docuhandler import process_document,summarize_document
-from training_prep import process_document,refine_document
+
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
 from contact import ContactManager
-from fbMessenger import get_sender_text, send_message, parse_fb_message, save_fb_message_to_conversation, process_facebook_webhook,send_text_to_facebook_user, verify_webhook_token
+from fbMessenger import get_sender_text, process_facebook_webhook,send_text_to_facebook_user, verify_webhook_token
 from contactconvo import ConversationManager
-from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created, generate_ai_response
+from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created
 from contact_analysis import ContactAnalyzer
 from braingraph import (
     create_brain_graph, get_brain_graph,
     add_brains_to_version, remove_brains_from_version, get_brain_graph_versions,
     update_brain_graph_version_status, BrainGraphVersion
 )
-from use_brain import load_brain
 from org_integrations import (
     create_integration, get_org_integrations, get_integration_by_id,
     update_integration, delete_integration, toggle_integration, OrganizationIntegration
@@ -63,7 +62,7 @@ from enrich_profile import ProfileEnricher
 from training_prep_new import understand_document,save_document_insights
 
 # Import SocketIO functionality from socketio_manager.py
-from socketio_manager import init_socketio, emit_analysis_event, emit_next_action_event
+from socketio_manager import init_socketio
 from socketio_manager import (
     socketio, ws_sessions, session_lock, 
     undelivered_messages, message_lock,
@@ -676,146 +675,34 @@ def activate_brain():
     
     data = request.get_json() or {}
     graph_version_id = data.get("graph_version_id", "")
-    force_delete = data.get("force_delete", True)  # Default to force deletion
     
     if not graph_version_id:
         return jsonify({"error": "graph_version_id is required"}), 400
     
     try:
-        # Import required functions from brain_singleton
-        
-        
-        
-        # Run the async load_brain_vectors function in a thread with force_delete=True
-        logger.info(f"Starting vector loading for graph version {graph_version_id} with force_delete={force_delete}")
-        success = run_async_in_thread(load_brain_vectors, graph_version_id, force_delete)
-        
-        brain = get_brain()
-        if brain and hasattr(brain, 'faiss_index'):
-            vector_count = brain.faiss_index.ntotal
-            logger.info(f"FAISS index contains {vector_count} vectors after activation")
-        else:
-            logger.warning("Brain not properly initialized after activation")
+        # Call the centralized activate_brain_with_version function
+        result = run_async_in_thread(activate_brain_with_version, graph_version_id)
         
         # Log completion
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[SESSION_TRACE] === END ACTIVATE BRAIN request - total time: {elapsed:.2f}s ===")
         
-        if success:
+        if result["success"]:
             return jsonify({
                 "message": "Brain activated successfully", 
-                "graph_version_id": get_current_graph_version(),
-                "loaded": is_brain_loaded(),
+                "graph_version_id": result["graph_version_id"],
+                "loaded": result["loaded"],
                 "elapsed_seconds": elapsed,
                 "worker_id": "",
-                "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
+                "vector_count": result["vector_count"]
             }), 200
         else:
-            return jsonify({"error": "Failed to load brain vectors"}), 500
+            return jsonify({"error": result["error"]}), 500
             
     except Exception as e:
         # Handle any errors
         error_msg = f"Error in activate_brain: {str(e)}"
-        logger.error(error_msg)
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify({"error": error_msg}), 500
-
-@app.route('/reload-brain', methods=['POST', 'OPTIONS'])
-def reload_brain():
-    """
-    Reload the currently active brain to refresh its vectors and metadata.
-    This endpoint forces a reload of the current graph version's vectors.
-    """
-    if request.method == 'OPTIONS':
-        return handle_options()
-    
-    start_time = datetime.now()
-    logger.info(f"[SESSION_TRACE] === BEGIN RELOAD BRAIN request at {start_time.isoformat()} ===")
-    
-    try:
-        # Get current graph version
-        from brain_singleton import get_current_graph_version, reset_brain, load_brain_vectors, get_brain
-        
-        current_version = get_current_graph_version()
-        if not current_version:
-            return jsonify({"error": "No active brain graph version found"}), 400
-        
-        # Check for index files on disk
-        index_path = "faiss_index.bin"
-        metadata_path = "metadata.pkl"
-        worker_id = os.getpid()
-        logger.info(f"Worker {worker_id} processing reload-brain request")
-        
-        if os.path.exists(index_path):
-            logger.info(f"Found FAISS index file on disk: {index_path}, size: {os.path.getsize(index_path)}")
-        else:
-            logger.info("No FAISS index file found on disk")
-            
-        if os.path.exists(metadata_path):
-            logger.info(f"Found metadata file on disk: {metadata_path}, size: {os.path.getsize(metadata_path)}")
-        else:
-            logger.info("No metadata file found on disk")
-        
-        # First reset the brain to clear all loaded vectors
-        logger.info(f"Resetting brain before reloading vectors for graph version {current_version}")
-        reset_brain()
-        
-        # Manually check and log if files exist before loading
-        if os.path.exists(index_path):
-            logger.info("Found existing faiss_index.bin file before reloading")
-        else:
-            logger.info("No existing faiss_index.bin file found")
-            
-        if os.path.exists(metadata_path):
-            logger.info("Found existing metadata.pkl file before reloading")
-        else:
-            logger.info("No existing metadata.pkl file found")
-        
-        # Then reload vectors for the current graph version with force_delete=True
-        logger.info(f"Starting vector reloading for graph version {current_version}")
-        success = run_async_in_thread(load_brain_vectors, current_version, True)
-        
-        # Verify file existence after loading
-        if os.path.exists(index_path):
-            logger.info(f"faiss_index.bin exists after reloading (expected), size: {os.path.getsize(index_path)}")
-        else:
-            logger.warning("No faiss_index.bin file found after reloading (unexpected)")
-            
-        if os.path.exists(metadata_path):
-            logger.info(f"metadata.pkl exists after reloading (expected), size: {os.path.getsize(metadata_path)}")
-        else:
-            logger.warning("No metadata.pkl file found after reloading (unexpected)")
-        
-        # Double-check that the brain was properly loaded
-        brain = get_brain()
-        if brain and hasattr(brain, 'faiss_index'):
-            vector_count = brain.faiss_index.ntotal
-            logger.info(f"FAISS index contains {vector_count} vectors after reload")
-        else:
-            logger.warning("Brain not properly initialized after reload")
-        
-        # Log completion
-        end_time = datetime.now()
-        elapsed = (end_time - start_time).total_seconds()
-        logger.info(f"[SESSION_TRACE] === END RELOAD BRAIN request - total time: {elapsed:.2f}s ===")
-        
-        if success:
-            return jsonify({
-                "message": "Brain reloaded successfully", 
-                "graph_version_id": current_version,
-                "reloaded": True,
-                "elapsed_seconds": elapsed,
-                "worker_id": worker_id,
-                "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
-            }), 200
-        else:
-            return jsonify({"error": "Failed to reload brain vectors"}), 500
-            
-    except Exception as e:
-        # Handle any errors
-        error_msg = f"Error in reload_brain: {str(e)}"
         logger.error(error_msg)
         import traceback
         logger.error(traceback.format_exc())
@@ -839,17 +726,13 @@ def examine_a_brain():
         return jsonify({"error": "user_input is required"}), 400
         
     try:
-        # Import additional functions
-        # Verify the FAISS index has vectors
+        # Use the flick_out function now directly from brain_singleton
         brain_results = run_async_in_thread(flick_out, user_input)
         
         # Log completion
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[SESSION_TRACE] === END EXAMINE request - total time: {elapsed:.2f}s ===")
-        
-        # Add elapsed time and worker info to results
-        
         return Response(json.dumps(brain_results), mimetype='application/json'), 200
     except Exception as e:
         # Handle any errors
@@ -3420,13 +3303,6 @@ if __name__ == '__main__':
     print(f"Starting SocketIO server on {host}:{port}")
     socketio.run(app, host=host, port=port, debug=True)
 else:
-    # For production WSGI servers
-    # Make sure to use eventlet workers with gunicorn
-    # e.g.: gunicorn -k eventlet -w 1 main:app
     
-    # Initialize brain on module load for production mode
-    # This allows gunicorn workers to have the brain ready
     print("Running in production mode - initializing brain for WSGI workers")
     
-    # Note: We can't run this directly here as we need an event loop
-    # The first request will initialize the brain via /activate-brain endpoint
