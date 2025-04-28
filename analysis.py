@@ -224,14 +224,14 @@ async def stream_next_action(prompt: str, thread_id_for_analysis: Optional[str] 
         # Yield error event
         yield error_event
 
-def build_context_analysis_prompt(context: str, process_instructions: str) -> str:
+def build_context_analysis_prompt(context: str, profiling_instructions_dict: dict = None) -> str:
     """
     Build a minimalist context analysis prompt focused on essential elements needed
     to understand the contact and guide the conversation, including customer classification.
     
     Args:
         context: The conversation context
-        process_instructions: The knowledge base instructions
+        profiling_instructions_dict: Structured profiling instructions dictionary
         
     Returns:
         str: The simplified essential analysis prompt
@@ -240,62 +240,203 @@ def build_context_analysis_prompt(context: str, process_instructions: str) -> st
     is_first_message = "User:" in context and context.count("User:") == 1 and "AI:" not in context
     first_message_note = "Note: This is the first message from the contact." if is_first_message else ""
     
-    # Ultra-streamlined prompt focusing only on essentials
-    return (
+    # Detect language
+    vietnamese_markers = ["của", "những", "và", "các", "là", "không", "có", "được", "người", "trong", "để", "anh", "chị", "em", "ơi", "nhé"]
+    context_lower = context.lower()
+    has_vietnamese = any(marker in context_lower for marker in vietnamese_markers)
+    language_note = "Note: This conversation contains Vietnamese. Prioritize Vietnamese cultural context and communication patterns." if has_vietnamese else ""
+    
+    # Prepare structured frameworks section from profiling instructions
+    structured_frameworks = ""
+    framework_count = 0
+    available_framework_names = []
+    classification_frameworks = []
+    
+    if profiling_instructions_dict and len(profiling_instructions_dict) > 0:
+        # Get entries and sort by relevance (assuming already sorted by similarity)
+        sorted_entries = list(profiling_instructions_dict.values())
+        framework_count = len(sorted_entries)
+        
+        # Create a structured frameworks section with the most relevant techniques
+        structured_frameworks = "AVAILABLE ANALYSIS FRAMEWORKS:\n\n"
+        
+        # Include up to 5 most relevant frameworks
+        for idx, entry in enumerate(sorted_entries[:5]):
+            title = entry.get("title", "Untitled Framework")
+            application_method = entry.get("application_method", "")
+            content = entry.get("content", "")
+            description = entry.get("description", "")
+            
+            # Track framework names for later use
+            available_framework_names.append(title)
+            
+            # Check if this framework could contain classification info using semantic indicators
+            # Look for patterns that typically indicate classification systems across languages
+            content_lower = content.lower() if content else ""
+            description_lower = description.lower() if description else ""
+            title_lower = title.lower() if title else ""
+            application_method_lower = application_method.lower() if application_method else ""
+            
+            # Combined text for comprehensive pattern matching
+            combined_text = f"{content_lower} {description_lower} {title_lower} {application_method_lower}"
+            
+            # Pattern indicators that suggest a classification framework
+            classification_indicators = [
+                # Classification terms across all fields
+                any(term in combined_text for term in ["classif", "categor", "segment", "profil", "type", "group", "class"]),
+                any(term in combined_text for term in ["phân loại", "phân nhóm", "chân dung", "loại", "nhóm"]),
+                
+                # Structure patterns that often indicate classification systems
+                ":" in content and any(group_word in content_lower for group_word in ["group", "type", "category", "class", "nhóm", "loại", "phân"]),
+                
+                # Application method specific indicators
+                "segment" in application_method_lower or "classif" in application_method_lower,
+                "identify customer type" in application_method_lower or "determine user category" in application_method_lower,
+                "xác định loại khách hàng" in application_method_lower or "phân loại" in application_method_lower,
+                
+                # Description specific indicators
+                "framework for categorizing" in description_lower or "system to classify" in description_lower,
+                "phương pháp phân loại" in description_lower or "cách phân nhóm" in description_lower,
+                
+                # Content specific pattern detection
+                bool(re.search(r'\d+[\.\)]\s*\w+\s*(?:type|group|category|class|nhóm|loại|khách hàng)', content_lower)),
+                bool(re.search(r'[-•*]\s*\w+\s*(?:type|group|category|class|nhóm|loại|khách hàng)', content_lower)),
+                
+                # Headers or sections about classification
+                bool(re.search(r'(?:customer|client|user|khách hàng)\s*(?:type|group|category|class|segment|nhóm|loại|phân)', combined_text)),
+                
+                # Check for enumeration patterns that suggest classification
+                content.count("\n1.") > 0 and content.count("\n2.") > 0,
+                bool(re.search(r'(?:type|group|category|class|nhóm|loại)\s*\d+\s*[:\.]', combined_text)),
+                
+                # Check for comparative terms that often appear in classifications
+                bool(re.search(r'(?:vs\.?|versus|compared to|so với|đối với)', combined_text)) and bool(re.search(r'(?:type|group|category|class|nhóm|loại)', combined_text))
+            ]
+            
+            if any(classification_indicators):
+                classification_frameworks.append({"title": title, "index": idx+1})
+            
+            structured_frameworks += f"FRAMEWORK {idx+1}: {title}\n"
+            
+            if description:
+                desc_preview = description[:150] + "..." if len(description) > 150 else description
+                structured_frameworks += f"PURPOSE: {desc_preview}\n"
+                
+            if application_method:
+                structured_frameworks += f"APPLICATION METHOD: {application_method}\n"
+            
+            if content:
+                # Extract key instructions from content
+                content_lines = content.split('\n')
+                key_steps = [line for line in content_lines if re.search(r'(step|bước|\d+[\.\)]|[-•*])\s*', line, re.IGNORECASE) and ":" in line]
+                if key_steps:
+                    structured_frameworks += "KEY STEPS:\n"
+                    for step in key_steps[:5]:  # Limit to first 5 steps
+                        structured_frameworks += f"- {step.strip()}\n"
+                else:
+                    # If no steps found, include a condensed version of the content
+                    content_preview = content[:250] + "..." if len(content) > 250 else content
+                    structured_frameworks += f"CONTENT SUMMARY: {content_preview}\n"
+            
+            structured_frameworks += "\n"
+    else:
+        # Fallback message if no profiling instructions are available
+        structured_frameworks = "USE GENERAL CUSTOMER ANALYSIS TECHNIQUES:\n\n" + \
+            "Since no specific profiling frameworks are available, use these general approaches:\n" + \
+            "- Identify the customer's demographic information from explicit or implicit signals\n" + \
+            "- Assess their communication style (formal/informal, direct/indirect)\n" + \
+            "- Determine their primary needs or concerns based on their messages\n" + \
+            "- Evaluate their knowledge level about the subject matter\n" + \
+            "- Consider cultural context cues, especially for Vietnamese communication\n" + \
+            "- Note emotional signals that indicate their state of mind\n\n"
+    
+    # Build classification guidance based on detected frameworks
+    classification_guidance = ""
+    if classification_frameworks:
+        classification_guidance = "CLASSIFICATION REQUIREMENT: You MUST classify this contact using a system from the frameworks\n"
+        for cf in classification_frameworks:
+            classification_guidance += f"   - In FRAMEWORK {cf['index']} ('{cf['title']}'), look for customer classification categories and apply if they match\n"
+    else:
+        classification_guidance = "CLASSIFICATION REQUIREMENT: Classify this contact based on the available frameworks\n"
+    
+    classification_guidance += "   - If explicit categories are found in any framework, use EXACTLY those categories without modification\n"
+    classification_guidance += "   - Only if NO explicit classification categories exist in ANY framework, use general categories\n"
+    
+    # Build the base prompt
+    base_prompt = (
         f"Conversation:\n{context}\n\n"
-        f"Process Instructions (Reference):\n{process_instructions}\n\n"
         
-        f"CRITICAL FRAMEWORK SELECTION: Evaluate all knowledge frameworks in the process instructions based on these relevance criteria:\n"
-        f"   1. DIRECT MATCH: Does the framework directly address the customer's explicit statements or questions? (highest relevance)\n"
-        f"   2. CONTEXTUAL MATCH: Does the framework apply to the customer's implied needs, demographics, or situation?\n"
-        f"   3. CONVERSATION STAGE: Is the framework appropriate for the current stage of conversation (initial contact, follow-up, etc.)?\n"
-        f"   4. CULTURAL/LINGUISTIC RELEVANCE: Does the framework address cultural or language elements present in the conversation?\n"
-        f"   5. PROBLEM-SOLUTION FIT: Does the framework provide actionable solutions to the customer's specific problems?\n\n"
-        f"Score each framework 1-5 based on these criteria. SELECT ONLY the 2-3 highest-scoring frameworks (scoring 4-5) for your analysis. COMPLETELY IGNORE frameworks scoring below 3.\n\n"
+        f"ANALYSIS TASK: Analyze this conversation to understand the contact and guide effective communication. "
+        f"This system operates in the health education domain, providing consultation and personalized guidance. "
+        f"Treat all topics professionally and objectively, including sensitive health-related subjects. "
+        f"Your analysis should maintain a clinically professional stance while respecting cultural nuances.\n\n"
         
-        f"PRIORITIZATION GUIDANCE: Focus on deeply applying the most relevant knowledge frameworks rather than covering all concepts equally. Adapt your analysis based on conversation context and customer signals. Irrelevant frameworks should be completely omitted from your analysis.\n\n"
+        f"IMPORTANT: Notice that in some conversations, there may be repeated AI messages. "
+        f"This is a technical artifact - treat repeated identical messages as a single response. "
+        f"Focus your analysis on the unique content and the latest user message.\n\n"
+        
+        f"{language_note}\n\n"
+        
+        f"FRAMEWORK SELECTION GUIDANCE:\n"
+        f"1. Evaluate the available frameworks against these relevance criteria:\n"
+        f"   - DIRECT MATCH: Framework directly addresses the contact's explicit statements or questions\n"
+        f"   - CONTEXTUAL MATCH: Framework applies to their implied needs, demographics, or situation\n"
+        f"   - CONVERSATION STAGE: Framework is appropriate for the current conversation stage\n"
+        f"   - CULTURAL RELEVANCE: Framework addresses cultural elements present in the conversation\n"
+        f"   - PROBLEM-SOLUTION FIT: Framework provides actionable solutions to their specific problems\n\n"
+        
+        f"2. Selection rules:\n"
+        f"   - If {framework_count} frameworks are available, select ONLY 1-3 most relevant frameworks\n"
+        f"   - If fewer than 3 frameworks are available, only use those that are truly relevant\n"
+        f"   - DO NOT invent or assume frameworks that aren't provided\n"
+        f"   - DO NOT try to apply irrelevant frameworks just to reach a quota\n"
+        f"   - COMPLETELY IGNORE frameworks that don't apply to this specific conversation\n\n"
         
         f"{first_message_note}\n\n"
+        f"{structured_frameworks}\n"
         
-        f"IMPORTANT: Pay close attention to the structure of the process instructions. For each RELEVANT knowledge item, extract and use:"
-        f"- The TITLE to understand the general topic"
-        f"- The DESCRIPTION to grasp the purpose and context"
-        f"- The TAKEAWAYS section containing specific APPLICATION METHODS with step-by-step instructions"
-        f"- The CROSS-CLUSTER CONNECTIONS to understand how this knowledge relates to other concepts\n\n"
-        
-        f"Analyze this conversation using customer profiling techniques found in the process instructions. "
-        f"Be concise and focus on evidence-based observations.\n\n"
+        f"ANALYSIS INSTRUCTIONS:\n"
+        f"Using ONLY the most relevant frameworks from above, analyze this conversation with evidence-based observations. "
+        f"Approach all health-related topics professionally and objectively. "
+        f"For each section, EXPLICITLY MENTION which framework you're applying.\n\n"
         
         f"1. CONTACT IDENTITY:\n"
-        f"   - DIRECTLY REFERENCE the customer classification frameworks from process instructions\n" 
-        f"   - Who is this person? Identify demographics (age group, profession, role) using profiling techniques from process instructions\n"
-        f"   - Apply both demographic AND psychographic profiling methods mentioned in process instructions\n"
-        f"   - What is their current situation or context? Consider behavioral indicators mentioned in process instructions\n"
-        f"   - CLASSIFY this contact using EXACTLY the categories/system provided in process instructions\n"
-        f"   - If industry-specific classifications exist in process instructions, apply those frameworks\n\n"
+        f"   - Who is this person? Identify demographics (age group, profession, role) using specific framework techniques\n" 
+        f"   - Apply both demographic AND psychographic profiling methods, citing the framework by name\n"
+        f"   - What is their current situation or context? Consider behavioral indicators\n"
+        f"{classification_guidance}\n"
         
         f"2. CORE NEEDS & DESIRES:\n"
-        f"   - What specific problem or need does this person have? Consider both explicit statements and implicit signals\n"
+        f"   - What specific problem or need does this person have? Separate explicit statements from implicit signals\n"
         f"   - What outcome or solution are they seeking? Identify both practical and emotional objectives\n"
         f"   - What concerns or pain points are they expressing? Note priority and urgency signals\n"
-        f"   - Assess their emotional state using the emotional assessment techniques referenced in process instructions\n\n"
+        f"   - Assess their emotional state using emotional assessment techniques from relevant frameworks\n\n"
         
         f"3. INTERACTION PATTERN:\n"
-        f"   - What conversation stage are we in? Apply context-aware profiling techniques from process instructions\n"
+        f"   - What conversation stage are we in? Apply context-aware techniques from relevant frameworks\n"
         f"   - How do they communicate? (direct, detailed, brief, formal, indirect, etc.)\n"
-        f"   - What communication preferences and channel preferences can you identify?\n"
-        f"   - What cultural factors are relevant? Apply cultural assessment techniques from process instructions, especially for Vietnamese context\n\n"
+        f"   - What communication preferences can you identify? (channel, style, formality)\n"
+        f"   - What cultural factors are relevant? Pay special attention to Vietnamese cultural elements if present\n\n"
         
         f"4. CONVERSATION FOCUS:\n"
-        f"   - What is the main topic or purpose of this conversation? Prioritize based on customer type\n"
-        f"   - What critical information is missing to move forward? Consider both stated and implied needs\n"
+        f"   - What is the main topic or purpose of this conversation?\n"
+        f"   - What critical information is missing to move forward? List specific information gaps\n"
         f"   - What specific topics should be addressed next? Align with the customer profile you've identified\n\n"
         
         f"5. SUMMARY:\n"
-        f"   - In 1-2 sentences, summarize who this person is, their classification according to process instructions, what they need, and how we should communicate with them.\n\n"
-        f"Be direct, factual, and objective. Focus only on what's clearly evident in the conversation. "
-        f"After completing the English analysis, provide a Vietnamese translation using terminology consistent with process instructions."
+        f"   - In 1-2 sentences, summarize who this person is, their classification according to relevant frameworks, what they need, and how we should communicate with them.\n\n"
+        
+        f"OUTPUT FORMAT:\n"
+        f"- Label each section with its heading (e.g., '1. CONTACT IDENTITY:')\n"
+        f"- When citing a framework, use the exact framework title in quotes\n"
+        f"- Be concise, factual, and evidence-based\n"
+        f"- Stay focused on what's clearly evident in the conversation\n"
+        f"- Avoid speculation beyond what the frameworks and conversation support\n"
+        f"- After completing the English analysis, include a section labeled 'VIETNAMESE TRANSLATION:' with the full analysis translated to Vietnamese"
     )
+    
+    logger.info(f"Context analysis PROMPT: {base_prompt}")
+    return base_prompt
 
 def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_content: str) -> str:
     """

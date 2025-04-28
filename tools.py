@@ -4,6 +4,7 @@ This file defines the tool schemas and handlers for LLM tool calling.
 """
 
 import json
+import re
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union
 import asyncio
 from langchain_openai import ChatOpenAI
@@ -24,6 +25,55 @@ StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True)
 
 # Access the brain singleton once
 brain = get_brain()
+
+def extract_structured_data_from_raw(raw_text: str) -> Dict[str, str]:
+    """
+    Extract structured data from raw text using regex patterns.
+    
+    Args:
+        raw_text: The raw text from a knowledge entry
+        
+    Returns:
+        Dictionary with extracted fields (title, description, content, takeaways, etc.)
+    """
+    structured_data = {}
+    
+    # Extract title
+    title_match = re.search(r'Title:\s*(.*?)(?:\n|$)', raw_text)
+    if title_match:
+        structured_data["title"] = title_match.group(1).strip()
+    
+    # Extract description
+    desc_match = re.search(r'Description:\s*(.*?)(?:\nContent:|\nTakeaways:|\nDocument Summary:|\n\n|$)', raw_text, re.DOTALL)
+    if desc_match:
+        structured_data["description"] = desc_match.group(1).strip()
+    
+    # Extract content
+    content_match = re.search(r'Content:\s*(.*?)(?:\nTakeaways:|\nDocument Summary:|\n\n|$)', raw_text, re.DOTALL)
+    if content_match:
+        structured_data["content"] = content_match.group(1).strip()
+    
+    # Extract application method from takeaways
+    takeaways_match = re.search(r'Takeaways:\s*(.*?)(?:\nDocument Summary:|\n\n|$)', raw_text, re.DOTALL)
+    if takeaways_match:
+        takeaways_text = takeaways_match.group(1).strip()
+        app_method_match = re.search(r'Application Method:\s*(.*?)(?:\n\n\d|\n\n$|$)', takeaways_text, re.DOTALL)
+        if app_method_match:
+            structured_data["application_method"] = app_method_match.group(1).strip()
+        else:
+            structured_data["takeaways"] = takeaways_text
+    
+    # Extract document summary
+    summary_match = re.search(r'Document Summary:\s*(.*?)(?:\nCross-Cluster Connections:|\n\n|$)', raw_text, re.DOTALL)
+    if summary_match:
+        structured_data["document_summary"] = summary_match.group(1).strip()
+    
+    # Extract cross-cluster connections
+    connections_match = re.search(r'Cross-Cluster Connections:\s*(.*?)(?:\n\n|$)', raw_text, re.DOTALL)
+    if connections_match:
+        structured_data["cross_cluster_connections"] = connections_match.group(1).strip()
+    
+    return structured_data
 
 class ToolRegistry:
     """Registry for all available tools"""
@@ -182,6 +232,7 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     additional_instructions = params.get("additional_instructions", "")
     
     process_instructions = additional_instructions
+    profiling_instructions = {}  # New structured instructions dictionary
     
     try:
         if graph_version_id:
@@ -290,7 +341,7 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
             # Execute batch search with simplified approach
             try:
                 # Use batch similarity search for all queries at once
-                batch_results = await brain.batch_similarity_search(all_queries, top_k=5)
+                batch_results = await brain.batch_similarity_search(all_queries, top_k=10)
                 
                 # Process results
                 combined_entries = []
@@ -312,17 +363,19 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                                     "similarity": float(similarity)
                                 }
                                 combined_entries.append(entry)
+                                
+                                # Extract structured data for profiling_instructions
+                                raw_text = metadata.get("raw", "")
+                                if raw_text:
+                                    structured_data = extract_structured_data_from_raw(raw_text)
+                                    if structured_data:
+                                        profiling_instructions[vector_id] = structured_data
                 
-                # Process combined results
+                # Log the number of retrieved entries
                 if combined_entries:
-                    # Sort by similarity score for highest relevance first
-                    combined_entries.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-                    profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
-                    process_instructions = profile_instructions
                     logger.info(f"Retrieved {len(combined_entries)} entries for context analysis")
                 else:
-                    logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
-                    process_instructions = "Use general customer analysis techniques to analyze the contact."
+                    logger.warning(f"No entries found for graph_version_id: {graph_version_id}.")
             
             except Exception as batch_error:
                 logger.warning(f"Batch search failed: {batch_error}. Falling back to individual queries.")
@@ -333,7 +386,7 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                 
                 for query in all_queries:
                     try:
-                        results = await brain.get_similar_vectors_by_text(query, top_k=5)
+                        results = await brain.get_similar_vectors_by_text(query, top_k=10)
                         
                         for vector_id, vector, metadata, similarity in results:
                             if vector_id not in seen_ids:
@@ -347,29 +400,31 @@ async def context_analysis_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                                 }
                                 combined_entries.append(entry)
                                 
+                                # Extract structured data for profiling_instructions
+                                raw_text = metadata.get("raw", "")
+                                if raw_text:
+                                    structured_data = extract_structured_data_from_raw(raw_text)
+                                    if structured_data:
+                                        profiling_instructions[vector_id] = structured_data
+                                
                     except Exception as query_error:
                         logger.error(f"Individual query failed for '{query}': {query_error}")
                 
-                # Process combined results from individual queries
+                # Log the number of retrieved entries from individual queries
                 if combined_entries:
-                    # Sort by similarity score for highest relevance first
-                    combined_entries.sort(key=lambda x: x.get("similarity", 0), reverse=True)
-                    profile_instructions = "\n\n".join(entry["raw"] for entry in combined_entries)
-                    process_instructions = profile_instructions
                     logger.info(f"Retrieved {len(combined_entries)} entries for context analysis from individual queries")
                 else:
-                    logger.warning(f"No entries found for graph_version_id: {graph_version_id}. Falling back to default instructions.")
-                    process_instructions = "Use general customer analysis techniques to analyze the contact."
+                    logger.warning(f"No entries found for graph_version_id: {graph_version_id}.")
     
     except Exception as e:
         logger.error(f"Error fetching knowledge from brain: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
-        process_instructions = "Use general customer analysis techniques to analyze the contact."
     
-    # Build the analysis prompt
-    logger.info(f"BUILDING analysis with PRESET: {process_instructions}")
-    analysis_prompt = build_context_analysis_prompt(conversation_context, process_instructions)
+    # Store profiling_instructions in params for potential later use
+    params["profiling_instructions"] = profiling_instructions
+    logger.info(f"Profiling instructions: {profiling_instructions}")
+    analysis_prompt = build_context_analysis_prompt(conversation_context, profiling_instructions)
     
     # Stream the analysis
     thread_id = params.get("_thread_id")
@@ -485,7 +540,6 @@ async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
                                 "query": query,
                                 "query_idx": query_idx
                             }
-                            
                             new_results.append(result)
                             all_results.append(result)
                     
@@ -828,11 +882,19 @@ async def process_llm_with_tools(
             break
     
     # Format the conversation history
+    prev_ai_msg = None
     for msg in conversation_history[-100:]:
         if msg.get("role") == "user":
             conversation_context += f"User: {msg.get('content', '')}\n"
+            prev_ai_msg = None
         elif msg.get("role") == "assistant":
-            conversation_context += f"AI: {msg.get('content', '')}\n"
+            # Skip duplicate consecutive AI messages
+            current_content = msg.get('content', '')
+            if prev_ai_msg == current_content:
+                logger.info("Skipping duplicate consecutive AI message")
+                continue
+            conversation_context += f"AI: {current_content}\n"
+            prev_ai_msg = current_content
     
     # Add current user message only if it's not already in the history
     if not current_message_in_history:
