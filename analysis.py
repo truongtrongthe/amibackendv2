@@ -548,79 +548,44 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
         f"RETRIEVED KNOWLEDGE:{rich_knowledge_content}\n\n"
         f"{cross_cluster_section}\n"
         
-        f"TASK: Determine the most appropriate next actions based on the contact analysis and available knowledge. "
-        f"Select 2-3 techniques that directly address this customer's specific situation, matching their profile, communication style, and expressed needs.\n\n"
+        f"TASK: Based on the contact analysis and available knowledge, determine the most appropriate next actions.\n\n"
         
-        f"REASONING FRAMEWORK:\n\n"
-        
-        f"1. KNOWLEDGE PRIORITIZATION:\n"
-        f"   - Review the contact analysis carefully\n"
-        f"   - For each knowledge section, assess its relevance using this scoring system:\n"
-        f"     * RELEVANCE TO CUSTOMER TYPE (0-3): How well does this knowledge match the customer's classification?\n"
-        f"     * RELEVANCE TO NEEDS (0-3): How well does this address the customer's expressed needs?\n"
-        f"     * RELEVANCE TO SITUATION (0-3): How applicable is this to the current situation?\n"
-        f"     * ACTIONABILITY (0-3): How clear and actionable are the techniques described?\n"
-        f"   - Calculate total score for each section (0-12)\n"
-        f"   - Rank sections by total score\n"
-        f"   - Note any cross-cluster connections that enhance understanding\n\n"
-        
-        f"2. TECHNIQUE SELECTION:\n"
-        f"   - From the highest scoring knowledge sections:\n"
-        f"     * Extract specific techniques that match the customer's needs\n"
-        f"     * Consider application methods and takeaways\n"
-        f"     * Look for examples that fit the situation\n"
-        f"   - Select 2-3 most appropriate techniques\n"
-        f"   - Explain why each technique is suitable for this specific case\n\n"
-        
-        f"3. ACTION PLANNING:\n"
-        f"   - For each selected technique:\n"
-        f"     * Break down the application steps\n"
-        f"     * Adapt to the customer's communication style\n"
-        f"     * Consider cultural nuances\n"
-        f"     * Plan for potential challenges\n"
-        f"   - Sequence the actions logically\n"
-        f"   - Prepare alternative approaches\n\n"
+        f"REASONING STEPS:\n"
+        f"1. Review the contact analysis to understand their profile, needs, and communication style\n"
+        f"2. Evaluate the knowledge items for relevance to this specific case\n"
+        f"3. Select 2-3 most applicable techniques from the knowledge\n"
+        f"4. Plan how to adapt these techniques to the contact's situation\n\n"
         
         f"OUTPUT FORMAT:\n"
-        f"Based on your reasoning, provide the recommended next actions in this structured format:\n\n"
+        f"Provide your recommendations in this structure:\n\n"
         
         f"1. PRIMARY OBJECTIVE:\n"
-        f"   [Single most important goal for this specific contact and situation]\n\n"
+        f"   [Main goal for this contact]\n\n"
         
         f"2. COMMUNICATION APPROACH:\n"
-        f"   - TONE: [Specific emotional tone tailored to this contact's state and style]\n"
-        f"   - STYLE: [Communication style matching their preferences (direct/indirect, formal/casual)]\n"
-        f"   - CULTURAL CONSIDERATIONS: [Specific cultural elements to incorporate]\n\n"
+        f"   - TONE: [Emotional tone]\n"
+        f"   - STYLE: [Communication style]\n"
+        f"   - CULTURAL CONSIDERATIONS: [Cultural elements]\n\n"
         
         f"3. KEY TECHNIQUES:\n"
-        f"   - TECHNIQUE 1: [Specific technique from knowledge item ID]\n"
-        f"     APPLICATION: [How to apply it to this contact - be specific]\n"
-        f"     SOURCE: [Brief quote from knowledge showing steps]\n"
-        f"     CROSS-CLUSTER: [How this technique connects to other knowledge items]\n"
-        f"     RELEVANCE SCORE: [Total score from prioritization step]\n"
-        f"   - TECHNIQUE 2: [If appropriate - from knowledge item ID]\n"
-        f"     APPLICATION: [How to apply it to this contact - be specific]\n"
-        f"     SOURCE: [Brief quote from knowledge showing steps]\n"
-        f"     CROSS-CLUSTER: [How this technique connects to other knowledge items]\n"
-        f"     RELEVANCE SCORE: [Total score from prioritization step]\n\n"
+        f"   - TECHNIQUE 1: [From knowledge item ID]\n"
+        f"     APPLICATION: [How to apply it]\n"
+        f"     SOURCE: [Relevant quote]\n"
+        f"   - TECHNIQUE 2: [If needed]\n"
+        f"     APPLICATION: [How to apply it]\n"
+        f"     SOURCE: [Relevant quote]\n\n"
         
-        f"4. RECOMMENDED RESPONSE ELEMENTS:\n"
-        f"   - OPENING: [Specific opening approach]\n"
-        f"   - KEY POINTS: [2-3 main points aligned with needs]\n"
-        f"   - QUESTIONS: [Specific questions from knowledge]\n"
-        f"   - CLOSING: [Effective conclusion approach]\n\n"
+        f"4. RESPONSE ELEMENTS:\n"
+        f"   - OPENING: [First message]\n"
+        f"   - KEY POINTS: [Main points]\n"
+        f"   - QUESTIONS: [Key questions]\n"
+        f"   - CLOSING: [Conclusion]\n\n"
         
-        f"5. ADAPTABILITY PLAN:\n"
-        f"   - IF POSITIVE ENGAGEMENT: [Next step if they respond well]\n"
-        f"   - IF RESISTANCE OR CONFUSION: [Alternative approach]\n\n"
-        
-        f"6. PRIORITY NEXT ACTIONS:\n"
-        f"   List the 3-5 most important specific actions in priority order:\n"
-        f"   1. [Most important action] - WHY: [Brief explanation]\n"
-        f"   2. [Second action] - WHY: [Brief explanation]\n"
-        f"   3. [Third action] - WHY: [Brief explanation]\n"
-        f"   4. [Fourth action if needed] - WHY: [Brief explanation]\n"
-        f"   5. [Fifth action if needed] - WHY: [Brief explanation]\n\n"
+        f"5. NEXT ACTIONS:\n"
+        f"   List 3-5 priority actions:\n"
+        f"   1. [Action] - WHY: [Reason]\n"
+        f"   2. [Action] - WHY: [Reason]\n"
+        f"   3. [Action] - WHY: [Reason]\n\n"
         
         f"After completing the English next actions, translate the full output to Vietnamese, maintaining the same structured format."
     )
@@ -720,16 +685,108 @@ def process_analysis_result(full_analysis: str) -> Dict[str, str]:
 
 def process_next_actions_result(next_actions_content: str) -> dict:
     """
-    Process the next actions result to extract English and Vietnamese parts.
-    Also checks for unattributed questions (questions not directly from knowledge).
+    Process the next actions result to extract key components and prepare knowledge queries.
     
     Args:
         next_actions_content: The next actions content string
         
     Returns:
-        dict: Dictionary containing processed next actions parts and any warnings
+        dict: Dictionary containing processed next actions parts, knowledge queries, and any warnings
     """
+    result = {
+        "next_action_english": "",
+        "next_action_vietnamese": "",
+        "next_action_full": next_actions_content,
+        "knowledge_queries": [],
+        "cross_cluster_connections": [],
+        "primary_objective": "",
+        "key_techniques": [],
+        "communication_approach": {
+            "tone": "",
+            "style": "",
+            "cultural_considerations": ""
+        },
+        "response_elements": {
+            "opening": "",
+            "key_points": "",
+            "questions": "",
+            "closing": ""
+        },
+        "next_actions": [],
+        "unattributed_questions": [],
+        "warning": "",
+        "has_warning": False
+    }
+    
     try:
+        # Extract primary objective
+        objective_match = re.search(r'PRIMARY OBJECTIVE:\s*(.+?)(?:\n\n|\n\d\.|\Z)', next_actions_content, re.DOTALL)
+        if objective_match:
+            result["primary_objective"] = objective_match.group(1).strip()
+            result["knowledge_queries"].append(result["primary_objective"])
+        
+        # Extract communication approach
+        comm_match = re.search(r'COMMUNICATION APPROACH:(.*?)(?:\n\d\.|\Z)', next_actions_content, re.DOTALL)
+        if comm_match:
+            comm_text = comm_match.group(1)
+            tone_match = re.search(r'TONE:\s*(.+?)(?:\n|$)', comm_text)
+            style_match = re.search(r'STYLE:\s*(.+?)(?:\n|$)', comm_text)
+            cultural_match = re.search(r'CULTURAL CONSIDERATIONS:\s*(.+?)(?:\n|$)', comm_text)
+            
+            if tone_match:
+                result["communication_approach"]["tone"] = tone_match.group(1).strip()
+            if style_match:
+                result["communication_approach"]["style"] = style_match.group(1).strip()
+            if cultural_match:
+                result["communication_approach"]["cultural_considerations"] = cultural_match.group(1).strip()
+        
+        # Extract key techniques
+        techniques_section = re.search(r'KEY TECHNIQUES:(.*?)(?:\n\d\.|RESPONSE ELEMENTS|\Z)', 
+                                     next_actions_content, re.DOTALL)
+        if techniques_section:
+            techniques_text = techniques_section.group(1)
+            technique_matches = re.findall(r'TECHNIQUE \d+:\s*(.+?)(?:\n\s*APPLICATION|\n\s*SOURCE|\n\n|\Z)', 
+                                         techniques_text, re.DOTALL)
+            result["key_techniques"] = [t.strip() for t in technique_matches]
+            result["knowledge_queries"].extend(result["key_techniques"])
+        
+        # Extract response elements
+        response_section = re.search(r'RESPONSE ELEMENTS:(.*?)(?:\n\d\.|NEXT ACTIONS|\Z)', 
+                                   next_actions_content, re.DOTALL)
+        if response_section:
+            response_text = response_section.group(1)
+            opening_match = re.search(r'OPENING:\s*(.+?)(?:\n|$)', response_text)
+            points_match = re.search(r'KEY POINTS:\s*(.+?)(?:\n|$)', response_text)
+            questions_match = re.search(r'QUESTIONS:\s*(.+?)(?:\n|$)', response_text)
+            closing_match = re.search(r'CLOSING:\s*(.+?)(?:\n|$)', response_text)
+            
+            if opening_match:
+                result["response_elements"]["opening"] = opening_match.group(1).strip()
+            if points_match:
+                result["response_elements"]["key_points"] = points_match.group(1).strip()
+            if questions_match:
+                result["response_elements"]["questions"] = questions_match.group(1).strip()
+            if closing_match:
+                result["response_elements"]["closing"] = closing_match.group(1).strip()
+        
+        # Extract next actions
+        actions_section = re.search(r'NEXT ACTIONS:(.*?)(?:\nVIETNAMESE|\Z)', next_actions_content, re.DOTALL)
+        if actions_section:
+            actions_text = actions_section.group(1)
+            action_matches = re.findall(r'\d+\.\s*(.+?)\s*-\s*WHY:\s*(.+?)(?=\n\d+\.|\Z)', actions_text, re.DOTALL)
+            for action, reason in action_matches:
+                result["next_actions"].append({
+                    "action": action.strip(),
+                    "reason": reason.strip()
+                })
+        
+        # Extract cross-cluster connections
+        connections_match = re.search(r'CROSS-CLUSTER CONNECTIONS:(.*?)(?:\n\n|\Z)', next_actions_content, re.DOTALL)
+        if connections_match:
+            connections_text = connections_match.group(1)
+            result["cross_cluster_connections"] = [c.strip() for c in connections_text.split("\n") if c.strip()]
+            result["knowledge_queries"].extend(result["cross_cluster_connections"])
+        
         # Define multiple possible patterns for English and Vietnamese sections
         english_section_patterns = [
             r"ENGLISH NEXT ACTIONS:(.*?)(?=VIETNAMESE NEXT ACTIONS:|VIETNAMESE TRANSLATION:|BẢN DỊCH TIẾNG VIỆT|TIẾNG VIỆT:|$)",
@@ -745,40 +802,31 @@ def process_next_actions_result(next_actions_content: str) -> dict:
         ]
         
         # Extract English next actions
-        english_next_actions = ""
         for pattern in english_section_patterns:
             english_match = re.search(pattern, next_actions_content, re.DOTALL)
             if english_match:
-                english_next_actions = english_match.group(1).strip()
-                logger.info(f"[DEBUG] Found English next actions section with pattern: {pattern[:30]}...")
+                result["next_action_english"] = english_match.group(1).strip()
                 break
         
         # Extract Vietnamese next actions
-        vietnamese_next_actions = ""
         for pattern in vietnamese_section_patterns:
             vietnamese_match = re.search(pattern, next_actions_content, re.DOTALL)
             if vietnamese_match:
-                vietnamese_next_actions = vietnamese_match.group(1).strip()
-                logger.info(f"[DEBUG] Found Vietnamese next actions section with pattern: {pattern[:30]}...")
+                result["next_action_vietnamese"] = vietnamese_match.group(1).strip()
                 break
         
         # If no sections were found, just use the entire content as English
-        if not english_next_actions and not vietnamese_next_actions:
-            logger.warning(f"[DEBUG] Could not find English or Vietnamese sections in next actions content")
-            english_next_actions = next_actions_content
+        if not result["next_action_english"] and not result["next_action_vietnamese"]:
+            result["next_action_english"] = next_actions_content
         
-        # Check for unattributed questions (questions not in quotes or without citation)
+        # Check for unattributed questions
         question_pattern = r'\?'
         quoted_question_pattern = r'"([^"]*\?)"'
         citation_pattern = r'from|in|according to|based on|cited in|as stated in|as mentioned in|as referenced in'
         
         # Find all questions (sentences ending with '?')
         questions = []
-        unattributed_questions = []
-        has_warning = False
-        warning_message = ""
-        
-        for line in english_next_actions.split('\n'):
+        for line in result["next_action_english"].split('\n'):
             if '?' in line:
                 # Check if the line contains a question
                 questions_in_line = re.findall(r'[^.!;]*\?', line)
@@ -790,32 +838,31 @@ def process_next_actions_result(next_actions_content: str) -> dict:
                     has_citation = bool(re.search(citation_pattern, line, re.IGNORECASE))
                     
                     if not (is_quoted and has_citation):
-                        unattributed_questions.append(question.strip())
+                        result["unattributed_questions"].append(question.strip())
         
         # Check for statements indicating no questions were found
         no_questions_pattern = r'no (specific|suitable) questions found|no questions (exist|are available)|couldn\'t find (specific|suitable|any) questions'
-        has_no_questions_statement = bool(re.search(no_questions_pattern, english_next_actions, re.IGNORECASE))
+        has_no_questions_statement = bool(re.search(no_questions_pattern, result["next_action_english"], re.IGNORECASE))
         
         # Set warning if unattributed questions were found
-        if unattributed_questions and not has_no_questions_statement:
-            has_warning = True
-            warning_message = "Found questions that may not be directly from knowledge content"
+        if result["unattributed_questions"] and not has_no_questions_statement:
+            result["has_warning"] = True
+            result["warning"] = "Found questions that may not be directly from knowledge content"
         
-        return {
-            "next_action_english": english_next_actions,
-            "next_action_vietnamese": vietnamese_next_actions,
-            "next_action_full": next_actions_content,
-            "unattributed_questions": unattributed_questions,
-            "warning": warning_message if has_warning else "",
-            "has_warning": has_warning
-        }
+        # Add technique-specific queries
+        for technique in result["key_techniques"]:
+            result["knowledge_queries"].append(f"how to apply {technique}")
+            result["knowledge_queries"].append(f"best practices for {technique}")
+        
+        # Deduplicate queries
+        result["knowledge_queries"] = list(set(result["knowledge_queries"]))
+        
     except Exception as e:
         logger.error(f"Error processing next actions: {str(e)}")
-        return {
-            "next_action_english": "",
-            "next_action_vietnamese": "",
-            "next_action_full": next_actions_content
-        }
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    return result
 
 import re
 import unicodedata

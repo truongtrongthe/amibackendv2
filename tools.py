@@ -13,7 +13,8 @@ from analysis import (
     stream_analysis, 
     stream_next_action,
     build_context_analysis_prompt,
-    build_next_actions_prompt
+    build_next_actions_prompt,
+    process_next_actions_result
 )
 from brain_singleton import get_brain, set_graph_version, is_brain_loaded, load_brain_vectors, get_current_graph_version
 
@@ -633,6 +634,9 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     next_actions_data = process_next_actions_result(next_actions)
     primary_objective = next_actions_data.get("primary_objective", "")
     key_techniques = next_actions_data.get("key_techniques", [])
+    communication_approach = next_actions_data.get("communication_approach", {})
+    response_elements = next_actions_data.get("response_elements", {})
+    next_actions_list = next_actions_data.get("next_actions", [])
     cross_cluster_connections = next_actions_data.get("cross_cluster_connections", [])
     
     # Build rich knowledge representation
@@ -728,15 +732,26 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         2. Apply the KEY TECHNIQUES:
            {chr(10).join(f'- {t}' for t in key_techniques)}
         
-        3. Integrate CROSS-CLUSTER CONNECTIONS:
+        3. Use the COMMUNICATION APPROACH:
+           - TONE: {communication_approach.get('tone', '')}
+           - STYLE: {communication_approach.get('style', '')}
+           - CULTURAL CONSIDERATIONS: {communication_approach.get('cultural_considerations', '')}
+        
+        4. Structure the response using these elements:
+           - OPENING: {response_elements.get('opening', '')}
+           - KEY POINTS: {response_elements.get('key_points', '')}
+           - QUESTIONS: {response_elements.get('questions', '')}
+           - CLOSING: {response_elements.get('closing', '')}
+        
+        5. Integrate CROSS-CLUSTER CONNECTIONS:
            {chr(10).join(f'- {c}' for c in cross_cluster_connections)}
         
-        4. Use the KNOWLEDGE ITEMS to:
+        6. Use the KNOWLEDGE ITEMS to:
            - Follow the APPLICATION METHODS exactly
            - Extract relevant examples from CONTENT
            - Apply knowledge in a practical way
         
-        5. Keep the response concise (80-100 words) and natural.
+        7. Keep the response concise (80-100 words) and natural.
         """
     ]
     
@@ -1105,77 +1120,3 @@ async def process_llm_with_tools(
         logger.error(f"Error in LLM tool calling: {str(e)}")
         logger.error(traceback.format_exc())
         yield "I encountered an issue while processing your request. Please try again." 
-
-def process_next_actions_result(next_actions_content: str) -> Dict[str, Any]:
-    """
-    Process next actions content to extract key components and prepare knowledge queries.
-    
-    Args:
-        next_actions_content: Raw next actions content from LLM
-        
-    Returns:
-        Dictionary containing processed next actions data and knowledge queries
-    """
-    result = {
-        "next_action_english": "",
-        "next_action_vietnamese": "",
-        "next_action_full": next_actions_content,
-        "knowledge_queries": [],
-        "cross_cluster_connections": [],
-        "primary_objective": "",
-        "key_techniques": []
-    }
-    
-    try:
-        # Extract primary objective
-        objective_match = re.search(r'PRIMARY OBJECTIVE:\s*(.+?)(?:\n\n|\n\d\.|\Z)', next_actions_content, re.DOTALL)
-        if objective_match:
-            result["primary_objective"] = objective_match.group(1).strip()
-            result["knowledge_queries"].append(result["primary_objective"])
-        
-        # Extract key techniques
-        techniques_section = re.search(r'KEY TECHNIQUES:(.*?)(?:\d+\.|RECOMMENDED RESPONSE|ADAPTABILITY PLAN|\Z)', 
-                                     next_actions_content, re.DOTALL)
-        if techniques_section:
-            techniques_text = techniques_section.group(1)
-            technique_matches = re.findall(r'TECHNIQUE \d+:\s*(.+?)(?:\n\s*APPLICATION|\n\s*SOURCE|\n\n|\Z)', 
-                                         techniques_text, re.DOTALL)
-            result["key_techniques"] = [t.strip() for t in technique_matches]
-            result["knowledge_queries"].extend(result["key_techniques"])
-        
-        # Extract cross-cluster connections
-        connections_match = re.search(r'CROSS-CLUSTER CONNECTIONS:(.*?)(?:\n\n|\Z)', next_actions_content, re.DOTALL)
-        if connections_match:
-            connections_text = connections_match.group(1)
-            result["cross_cluster_connections"] = [c.strip() for c in connections_text.split("\n") if c.strip()]
-            result["knowledge_queries"].extend(result["cross_cluster_connections"])
-        
-        # Extract English and Vietnamese sections
-        english_match = re.search(r'ENGLISH RESPONSE:(.*?)(?:\nVIETNAMESE RESPONSE|\Z)', next_actions_content, re.DOTALL)
-        if english_match:
-            result["next_action_english"] = english_match.group(1).strip()
-        
-        vietnamese_match = re.search(r'VIETNAMESE RESPONSE:(.*?)(?:\n\n|\Z)', next_actions_content, re.DOTALL)
-        if vietnamese_match:
-            result["next_action_vietnamese"] = vietnamese_match.group(1).strip()
-        
-        # Check for unattributed questions
-        if "?" in next_actions_content and not any(section in next_actions_content 
-                                                  for section in ["ENGLISH RESPONSE:", "VIETNAMESE RESPONSE:"]):
-            logger.warning("Found unattributed questions in next actions content")
-            result["warnings"] = ["Found unattributed questions in next actions content"]
-        
-        # Add technique-specific queries
-        for technique in result["key_techniques"]:
-            result["knowledge_queries"].append(f"how to apply {technique}")
-            result["knowledge_queries"].append(f"best practices for {technique}")
-        
-        # Deduplicate queries
-        result["knowledge_queries"] = list(set(result["knowledge_queries"]))
-        
-    except Exception as e:
-        logger.error(f"Error processing next actions result: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-    
-    return result 
