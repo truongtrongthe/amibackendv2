@@ -487,17 +487,10 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
         str: The next actions prompt with CoT structure for effective planning
     """
     # Build rich knowledge content from knowledge_sets if available
-    rich_knowledge_content = ""
-    knowledge_usage_guide = ""
+    rich_knowledge_sections = []
+    cross_cluster_connections = []
     
     if knowledge_sets and isinstance(knowledge_sets, dict) and len(knowledge_sets) > 0:
-        rich_knowledge_sections = []
-        
-        # Track categories of content to provide tailored usage guidance
-        has_application_methods = False
-        has_examples = False
-        has_classifications = False
-        
         for vector_id, data in knowledge_sets.items():
             section = []
             
@@ -512,95 +505,81 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
             # Prioritize application method - this is the most actionable part
             if "application_method" in data and data["application_method"]:
                 section.append(f"APPLICATION METHOD: {data['application_method']}")
-                has_application_methods = True
             elif "takeaways" in data and data["takeaways"]:
                 section.append(f"TAKEAWAYS: {data['takeaways']}")
-                has_application_methods = True
             
             # Process content with enhanced extraction
             if "content" in data and data["content"]:
                 content = data["content"]
-                
-                # Look for examples in content
-                content_lines = content.split('\n')
-                examples = [line for line in content_lines if re.search(r'(example|ví dụ|for instance|as seen in|such as|như là)', line, re.IGNORECASE)]
-                if examples:
-                    has_examples = True
-                
-                # Look for classifications or categories
-                classifications = [line for line in content_lines if re.search(r'(type|category|class|group|classification|phân loại|nhóm|loại)', line, re.IGNORECASE) and ":" in line]
-                if classifications:
-                    has_classifications = True
-                
-                # Trim content if it's very long to keep prompt focused
-                if len(content) > 1000:
-                    content = content[:1000] + "...[content truncated for brevity]"
                 section.append(f"CONTENT: {content}")
             
             # Add document summary if available
             if "document_summary" in data and data["document_summary"]:
                 section.append(f"DOCUMENT SUMMARY: {data['document_summary']}")
             
-            # Add cross-cluster connections if available
+            # Collect cross-cluster connections
             if "cross_cluster_connections" in data and data["cross_cluster_connections"]:
-                section.append(f"CROSS-CLUSTER CONNECTIONS: {data['cross_cluster_connections']}")
+                cross_cluster_connections.append({
+                    "source_id": vector_id[:8],
+                    "connections": data["cross_cluster_connections"]
+                })
             
             # Add the formatted section to the list
             if section:
                 rich_knowledge_sections.append("\n".join(section))
-        
-        # Combine all knowledge sections with clear separation
-        if rich_knowledge_sections:
-            rich_knowledge_content = "\n\n" + "\n\n---\n\n".join(rich_knowledge_sections)
-            
-            # Create tailored knowledge usage guide based on available content types
-            knowledge_usage_guide = "KNOWLEDGE USAGE GUIDE:\n"
-            
-            if has_application_methods:
-                knowledge_usage_guide += "- APPLICATION METHOD/TAKEAWAYS: Follow these specific steps and techniques directly\n"
-            
-            knowledge_usage_guide += "- CONTENT: Extract context, examples, and detailed understanding to apply techniques\n"
-            
-            if has_examples:
-                knowledge_usage_guide += "- EXAMPLES: Reference these in your plan to illustrate how techniques apply\n"
-            
-            if has_classifications:
-                knowledge_usage_guide += "- CLASSIFICATIONS: Use these to tailor your approach to this specific contact type\n"
-            
-            knowledge_usage_guide += "- KNOWLEDGE ITEM IDs: Cite these when referencing specific techniques or methods\n"
-            knowledge_usage_guide += "\nWhen applying knowledge, focus on APPLICATION METHODS first, then extract relevant insights from CONTENT to enhance understanding.\n\n"
-            
+    
+    # Format cross-cluster connections for the prompt
+    cross_cluster_section = ""
+    if cross_cluster_connections:
+        cross_cluster_section = "\nCROSS-CLUSTER CONNECTIONS:\n"
+        for conn in cross_cluster_connections:
+            cross_cluster_section += f"\nKnowledge Item [{conn['source_id']}] connects to:\n{conn['connections']}\n"
+    
+    # Combine all knowledge sections with clear separation
+    rich_knowledge_content = ""
+    if rich_knowledge_sections:
+        rich_knowledge_content = "\n\n" + "\n\n---\n\n".join(rich_knowledge_sections)
     elif knowledge_content:
-        # Fallback to original knowledge_content if knowledge_sets is not available
         rich_knowledge_content = knowledge_content
     
     return (
         f"CONVERSATION CONTEXT:\n{context}\n\n"
         f"CONTACT ANALYSIS:\n{initial_analysis}\n\n"
         f"RETRIEVED KNOWLEDGE:{rich_knowledge_content}\n\n"
-        f"{knowledge_usage_guide}"
+        f"{cross_cluster_section}\n"
         
         f"TASK: Determine the most appropriate next actions based on the contact analysis and available knowledge. "
         f"Select 2-3 techniques that directly address this customer's specific situation, matching their profile, communication style, and expressed needs.\n\n"
         
         f"REASONING FRAMEWORK:\n\n"
         
-        f"1. CONTACT PROFILE (Keep brief):\n"
-        f"   - Classification (from analysis): [customer type]\n"
-        f"   - Primary needs: [1-2 key needs]\n"
-        f"   - Communication style: [formal/informal, direct/indirect]\n"
-        f"   - Cultural factors: [key cultural elements]\n\n"
+        f"1. KNOWLEDGE PRIORITIZATION:\n"
+        f"   - Review the contact analysis carefully\n"
+        f"   - For each knowledge section, assess its relevance using this scoring system:\n"
+        f"     * RELEVANCE TO CUSTOMER TYPE (0-3): How well does this knowledge match the customer's classification?\n"
+        f"     * RELEVANCE TO NEEDS (0-3): How well does this address the customer's expressed needs?\n"
+        f"     * RELEVANCE TO SITUATION (0-3): How applicable is this to the current situation?\n"
+        f"     * ACTIONABILITY (0-3): How clear and actionable are the techniques described?\n"
+        f"   - Calculate total score for each section (0-12)\n"
+        f"   - Rank sections by total score\n"
+        f"   - Note any cross-cluster connections that enhance understanding\n\n"
         
-        f"2. KNOWLEDGE SELECTION (Be specific):\n"
-        f"   - Select most relevant techniques from knowledge\n"
-        f"   - Explain why each technique applies to this contact\n"
-        f"   - For each technique, identify specific application steps\n\n"
+        f"2. TECHNIQUE SELECTION:\n"
+        f"   - From the highest scoring knowledge sections:\n"
+        f"     * Extract specific techniques that match the customer's needs\n"
+        f"     * Consider application methods and takeaways\n"
+        f"     * Look for examples that fit the situation\n"
+        f"   - Select 2-3 most appropriate techniques\n"
+        f"   - Explain why each technique is suitable for this specific case\n\n"
         
-        f"3. RESPONSE STRATEGY (Be concrete):\n"
-        f"   - Primary objective: [single clear goal]\n"
-        f"   - Tone and approach: [specific communication style]\n"
-        f"   - Key points to address: [2-3 points maximum]\n"
-        f"   - Specific questions to ask: [1-2 questions from knowledge]\n\n"
+        f"3. ACTION PLANNING:\n"
+        f"   - For each selected technique:\n"
+        f"     * Break down the application steps\n"
+        f"     * Adapt to the customer's communication style\n"
+        f"     * Consider cultural nuances\n"
+        f"     * Plan for potential challenges\n"
+        f"   - Sequence the actions logically\n"
+        f"   - Prepare alternative approaches\n\n"
         
         f"OUTPUT FORMAT:\n"
         f"Based on your reasoning, provide the recommended next actions in this structured format:\n\n"
@@ -617,9 +596,13 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
         f"   - TECHNIQUE 1: [Specific technique from knowledge item ID]\n"
         f"     APPLICATION: [How to apply it to this contact - be specific]\n"
         f"     SOURCE: [Brief quote from knowledge showing steps]\n"
+        f"     CROSS-CLUSTER: [How this technique connects to other knowledge items]\n"
+        f"     RELEVANCE SCORE: [Total score from prioritization step]\n"
         f"   - TECHNIQUE 2: [If appropriate - from knowledge item ID]\n"
         f"     APPLICATION: [How to apply it to this contact - be specific]\n"
-        f"     SOURCE: [Brief quote from knowledge showing steps]\n\n"
+        f"     SOURCE: [Brief quote from knowledge showing steps]\n"
+        f"     CROSS-CLUSTER: [How this technique connects to other knowledge items]\n"
+        f"     RELEVANCE SCORE: [Total score from prioritization step]\n\n"
         
         f"4. RECOMMENDED RESPONSE ELEMENTS:\n"
         f"   - OPENING: [Specific opening approach]\n"

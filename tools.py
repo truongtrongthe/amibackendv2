@@ -625,251 +625,131 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     conversation_context = params.get("conversation_context", "")
     analysis = params.get("analysis", "")
     next_actions = params.get("next_actions", "")
-    knowledge_context = params.get("knowledge_context", "")  # Keep for backwards compatibility
     knowledge_sets = params.get("knowledge_sets", {})
     personality_instructions = params.get("personality_instructions", "")
     knowledge_found = params.get("knowledge_found", False)
     
-    # Detect language from analysis or conversation context
-    detected_language = "unknown"
-    if "Vietnamese" in analysis or "tiếng Việt" in analysis:
-        detected_language = "vietnamese"
-    elif "English" in analysis:
-        detected_language = "english"
-    else:
-        # Simple language detection based on common Vietnamese words
-        vietnamese_markers = ["của", "những", "và", "các", "là", "không", "có", "được", "người", "trong", "để", "anh", "chị", "em", "ơi", "nhé"]
-        english_markers = ["the", "and", "is", "in", "to", "of", "that", "for", "you", "with", "have", "this", "are"]
-        
-        vietnamese_count = sum(1 for marker in vietnamese_markers if f" {marker} " in f" {conversation_context} ")
-        english_count = sum(1 for marker in english_markers if f" {marker} " in f" {conversation_context} ")
-        
-        if vietnamese_count > english_count:
-            detected_language = "vietnamese"
-        else:
-            detected_language = "english"
+    # Process next actions to get structured data
+    next_actions_data = process_next_actions_result(next_actions)
+    primary_objective = next_actions_data.get("primary_objective", "")
+    key_techniques = next_actions_data.get("key_techniques", [])
+    cross_cluster_connections = next_actions_data.get("cross_cluster_connections", [])
     
-    # Extract primary objective and key techniques from next_actions
-    primary_objective = ""
-    key_techniques = []
-    
-    if next_actions:
-        # Extract primary objective
-        objective_match = re.search(r'PRIMARY OBJECTIVE:\s*(.+?)(?:\n\n|\n\d\.|\Z)', next_actions, re.DOTALL)
-        if objective_match:
-            primary_objective = objective_match.group(1).strip()
-        
-        # Extract key techniques
-        techniques_section = re.search(r'KEY TECHNIQUES:(.*?)(?:\d+\.|RECOMMENDED RESPONSE|ADAPTABILITY PLAN|\Z)', next_actions, re.DOTALL)
-        if techniques_section:
-            techniques_text = techniques_section.group(1)
-            technique_matches = re.findall(r'TECHNIQUE \d+:\s*(.+?)(?:\n\s*APPLICATION|\n\s*SOURCE|\n\n|\Z)', techniques_text, re.DOTALL)
-            key_techniques = [t.strip() for t in technique_matches]
-    
-    # Build rich knowledge representation from knowledge_sets
+    # Build rich knowledge representation
     rich_knowledge = ""
-    if knowledge_sets and isinstance(knowledge_sets, dict) and len(knowledge_sets) > 0:
-        # Extract the most relevant knowledge items based on key techniques
-        relevant_knowledge = []
-        
-        # First try to match knowledge with the identified techniques
-        technique_keywords = []
-        for technique in key_techniques:
-            keywords = [word for word in technique.lower().split() if len(word) > 4]
-            technique_keywords.extend(keywords)
-        
-        # Filter and prioritize knowledge items
-        prioritized_items = []
+    if knowledge_sets:
+        # Score knowledge items based on relevance
+        scored_items = []
         for vector_id, data in knowledge_sets.items():
-            relevance_score = 0
+            score = 0
             title = data.get("title", "").lower()
-            application = data.get("application_method", "")
-            content = data.get("content", "")
+            application = data.get("application_method", "").lower()
+            content = data.get("content", "").lower()
             
-            # Check for technique relevance
-            for keyword in technique_keywords:
-                if keyword in title:
-                    relevance_score += 3
-                if application and keyword in application.lower():
-                    relevance_score += 5
-                if content and keyword in content.lower():
-                    relevance_score += 2
+            # Score based on primary objective
+            if primary_objective and primary_objective.lower() in title:
+                score += 3
+            if primary_objective and primary_objective.lower() in content:
+                score += 2
             
-            if relevance_score > 0:
-                prioritized_items.append((vector_id, data, relevance_score))
+            # Score based on key techniques
+            for technique in key_techniques:
+                if technique.lower() in title:
+                    score += 3
+                if technique.lower() in application:
+                    score += 5
+                if technique.lower() in content:
+                    score += 2
+            
+            # Score based on cross-cluster connections
+            for connection in cross_cluster_connections:
+                if connection.lower() in title:
+                    score += 2
+                if connection.lower() in content:
+                    score += 1
+            
+            if score > 0:
+                scored_items.append((vector_id, data, score))
         
-        # Sort by relevance score
-        prioritized_items.sort(key=lambda x: x[2], reverse=True)
+        # Sort by score and take top 3
+        scored_items.sort(key=lambda x: x[2], reverse=True)
+        top_items = scored_items[:3]
         
-        # Take top 3 most relevant items or all if fewer than 3
-        for vector_id, data, score in prioritized_items[:3]:
-            item_content = []
+        # Build rich knowledge content
+        knowledge_parts = []
+        for vector_id, data, score in top_items:
+            item_parts = []
             
-            # Add title with knowledge item ID for reference
+            # Add title with ID
             if "title" in data and data["title"]:
-                item_content.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
+                item_parts.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
             
-            # Prioritize application method - this is the most actionable part
+            # Add application method
             if "application_method" in data and data["application_method"]:
-                item_content.append(f"APPLICATION METHOD: {data['application_method']}")
-            elif "takeaways" in data and data["takeaways"]:
-                item_content.append(f"TAKEAWAYS: {data['takeaways']}")
+                item_parts.append(f"APPLICATION METHOD: {data['application_method']}")
             
-            # Include content - this provides context and details
+            # Add content
             if "content" in data and data["content"]:
-                # Indicate the content's purpose without truncating
-                item_content.append(f"CONTENT: {data['content']}")
+                item_parts.append(f"CONTENT: {data['content']}")
             
-            # Add the formatted item
-            if item_content:
-                relevant_knowledge.append("\n".join(item_content))
+            # Add cross-cluster connections if present
+            if "cross_cluster_connections" in data and data["cross_cluster_connections"]:
+                item_parts.append(f"CROSS-CLUSTER CONNECTIONS: {data['cross_cluster_connections']}")
+            
+            if item_parts:
+                knowledge_parts.append("\n".join(item_parts))
         
-        # Combine all relevant knowledge with clear separation
-        if relevant_knowledge:
-            rich_knowledge = "\n\n" + "\n\n---\n\n".join(relevant_knowledge)
-        else:
-            # Fallback: include 2 random knowledge items if no relevance found
-            sample_items = []
-            for vector_id, data in list(knowledge_sets.items())[:2]:
-                item_content = []
-                if "title" in data and data["title"]:
-                    item_content.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
-                if "application_method" in data and data["application_method"]:
-                    item_content.append(f"APPLICATION METHOD: {data['application_method']}")
-                elif "takeaways" in data and data["takeaways"]:
-                    item_content.append(f"TAKEAWAYS: {data['takeaways']}")
-                if "content" in data and data["content"]:
-                    item_content.append(f"CONTENT: {data['content']}")
-                if item_content:
-                    sample_items.append("\n".join(item_content))
-            
-            if sample_items:
-                rich_knowledge = "\n\n" + "\n\n---\n\n".join(sample_items)
+        if knowledge_parts:
+            rich_knowledge = "\n\n---\n\n".join(knowledge_parts)
     
-    # If no structured knowledge or extraction failed, fall back to knowledge_context
-    if not rich_knowledge and knowledge_context:
-        rich_knowledge = knowledge_context
-    
-    # Build concise cultural guidelines based on detected language
-    cultural_guide = f"LANGUAGE GUIDE: Respond in {detected_language}. "
-    if detected_language == "vietnamese":
-        cultural_guide += "Use Vietnamese communication patterns, appropriate pronouns, and cultural nuances. Match the user's level of formality."
-    else:
-        cultural_guide += "Use natural, flowing English. Match the user's tone and level of formality."
-    
-    # Build the concise response prompt
+    # Build the prompt
     prompt_parts = [
-        "# Conversation",
+        "# Conversation Context",
         conversation_context,
         
         "# Next Actions Plan",
-        next_actions
-    ]
-    
-    if rich_knowledge:
-        prompt_parts.extend([
-            "# Relevant Knowledge",
-            rich_knowledge
-        ])
-    
-    # Extract personality core from verbose instructions
-    personality_core = personality_instructions
-    if len(personality_instructions) > 200:
-        # Try to extract just the core personality traits
-        core_match = re.search(r'(personality|character|tone):\s*(.+?)(?:\n\n|\.\s|\Z)', personality_instructions, re.IGNORECASE | re.DOTALL)
-        if core_match:
-            personality_core = core_match.group(2).strip()
-        else:
-            # Fallback: just take the first 200 chars
-            personality_core = personality_instructions[:200] + "..."
-    
-    # Update the instructions to guide LLM on using content
-    prompt_parts.extend([
+        f"PRIMARY OBJECTIVE: {primary_objective}",
+        f"KEY TECHNIQUES: {', '.join(key_techniques)}",
+        f"CROSS-CLUSTER CONNECTIONS: {', '.join(cross_cluster_connections)}",
+        next_actions,
+        
+        "# Relevant Knowledge",
+        rich_knowledge,
+        
         "# Instructions",
         f"""
-        PERSONALITY: {personality_core}
-        
-        {cultural_guide}
+        PERSONALITY: {personality_instructions}
         
         YOUR TASK: Generate a response that implements the Next Actions Plan using the Relevant Knowledge.
         
-        KNOWLEDGE USAGE GUIDE:
-        - APPLICATION METHOD/TAKEAWAYS: Use these sections for specific steps and techniques
-        - CONTENT: Extract context, examples, and nuanced understanding that help apply the techniques
-        - Focus on parts of CONTENT that directly relate to the specific techniques and objective
-        
         REQUIREMENTS:
-        1. DIRECT IMPLEMENTATION: Start by addressing the PRIMARY OBJECTIVE: {primary_objective}
+        1. Start by addressing the PRIMARY OBJECTIVE: {primary_objective}
         
-        2. FOLLOW THE EXACT APPROACH specified in the plan:
-           - Use the TONE and STYLE indicated
-           - Apply the TECHNIQUES: {', '.join(key_techniques) if key_techniques else 'as specified'}
-           - Include all RECOMMENDED ELEMENTS in order
+        2. Apply the KEY TECHNIQUES:
+           {chr(10).join(f'- {t}' for t in key_techniques)}
         
-        3. INTELLIGENT KNOWLEDGE INTEGRATION:
-           - Follow the application methods exactly
-           - Use context from CONTENT to enhance your understanding
-           - Extract relevant examples or explanations from CONTENT that help apply techniques
-           - Apply knowledge in a practical way that addresses the specific situation
+        3. Integrate CROSS-CLUSTER CONNECTIONS:
+           {chr(10).join(f'- {c}' for c in cross_cluster_connections)}
         
-        4. NATURAL CONVERSATION:
-           - Sound human and conversational, not like you're following a template
-           - Keep your response concise (80-100 words)
-           - Avoid formulaic closing phrases
+        4. Use the KNOWLEDGE ITEMS to:
+           - Follow the APPLICATION METHODS exactly
+           - Extract relevant examples from CONTENT
+           - Apply knowledge in a practical way
         
-        Your response must exactly follow the Next Actions Plan while sounding completely natural.
+        5. Keep the response concise (80-100 words) and natural.
         """
-    ])
+    ]
     
     prompt = "\n\n".join(prompt_parts)
     
-    # Response optimization components
-    response_processor = ResponseProcessor()
-    response_filter = ResponseFilter()
-    
-    # Check if this is the first message
-    is_first_message = "User:" in conversation_context and conversation_context.count("User:") <= 1
-    
-    # Collect the full response first
-    full_response = ""
-    buffer = ""
-    
     try:
         async for chunk in StreamLLM.astream(prompt):
-            content = chunk.content
-            buffer += content
-            full_response += content
-            
-            # Only yield periodically to reduce overhead
-            if len(buffer) >= 20 or content.endswith((".", "!", "?", "\n")):
-                yield buffer
-                buffer = ""
-        
-        # Yield any remaining buffer
-        if buffer:
-            yield buffer
-        
-        # Process the full response for optimization
-        processed_response = response_processor.process_response(
-            full_response, 
-            {"messages": conversation_context.split("\n")},
-            conversation_context.split("\n")[-1] if conversation_context.split("\n") else "",
-            knowledge_found
-        )
-        
-        # Apply greeting filter if needed
-        if not is_first_message:
-            processed_response = response_filter.remove_greeting(processed_response)
-        
-        # We've already yielded the raw response, so we don't need to yield again
-        
+            yield chunk
     except Exception as e:
         logger.error(f"Error in response generation: {str(e)}")
-        # Fall back to language-specific error messages
-        if detected_language == "vietnamese":
-            yield "Xin lỗi, tôi đang gặp sự cố khi xử lý yêu cầu của bạn. Vui lòng thử lại."
-        else:
-            yield "I encountered an issue while generating a response. Let me try again."
+        import traceback
+        logger.error(traceback.format_exc())
+        yield "I encountered an issue while generating a response. Please try again."
 
 # Register the tools
 tool_registry.register_tool(
@@ -1225,3 +1105,77 @@ async def process_llm_with_tools(
         logger.error(f"Error in LLM tool calling: {str(e)}")
         logger.error(traceback.format_exc())
         yield "I encountered an issue while processing your request. Please try again." 
+
+def process_next_actions_result(next_actions_content: str) -> Dict[str, Any]:
+    """
+    Process next actions content to extract key components and prepare knowledge queries.
+    
+    Args:
+        next_actions_content: Raw next actions content from LLM
+        
+    Returns:
+        Dictionary containing processed next actions data and knowledge queries
+    """
+    result = {
+        "next_action_english": "",
+        "next_action_vietnamese": "",
+        "next_action_full": next_actions_content,
+        "knowledge_queries": [],
+        "cross_cluster_connections": [],
+        "primary_objective": "",
+        "key_techniques": []
+    }
+    
+    try:
+        # Extract primary objective
+        objective_match = re.search(r'PRIMARY OBJECTIVE:\s*(.+?)(?:\n\n|\n\d\.|\Z)', next_actions_content, re.DOTALL)
+        if objective_match:
+            result["primary_objective"] = objective_match.group(1).strip()
+            result["knowledge_queries"].append(result["primary_objective"])
+        
+        # Extract key techniques
+        techniques_section = re.search(r'KEY TECHNIQUES:(.*?)(?:\d+\.|RECOMMENDED RESPONSE|ADAPTABILITY PLAN|\Z)', 
+                                     next_actions_content, re.DOTALL)
+        if techniques_section:
+            techniques_text = techniques_section.group(1)
+            technique_matches = re.findall(r'TECHNIQUE \d+:\s*(.+?)(?:\n\s*APPLICATION|\n\s*SOURCE|\n\n|\Z)', 
+                                         techniques_text, re.DOTALL)
+            result["key_techniques"] = [t.strip() for t in technique_matches]
+            result["knowledge_queries"].extend(result["key_techniques"])
+        
+        # Extract cross-cluster connections
+        connections_match = re.search(r'CROSS-CLUSTER CONNECTIONS:(.*?)(?:\n\n|\Z)', next_actions_content, re.DOTALL)
+        if connections_match:
+            connections_text = connections_match.group(1)
+            result["cross_cluster_connections"] = [c.strip() for c in connections_text.split("\n") if c.strip()]
+            result["knowledge_queries"].extend(result["cross_cluster_connections"])
+        
+        # Extract English and Vietnamese sections
+        english_match = re.search(r'ENGLISH RESPONSE:(.*?)(?:\nVIETNAMESE RESPONSE|\Z)', next_actions_content, re.DOTALL)
+        if english_match:
+            result["next_action_english"] = english_match.group(1).strip()
+        
+        vietnamese_match = re.search(r'VIETNAMESE RESPONSE:(.*?)(?:\n\n|\Z)', next_actions_content, re.DOTALL)
+        if vietnamese_match:
+            result["next_action_vietnamese"] = vietnamese_match.group(1).strip()
+        
+        # Check for unattributed questions
+        if "?" in next_actions_content and not any(section in next_actions_content 
+                                                  for section in ["ENGLISH RESPONSE:", "VIETNAMESE RESPONSE:"]):
+            logger.warning("Found unattributed questions in next actions content")
+            result["warnings"] = ["Found unattributed questions in next actions content"]
+        
+        # Add technique-specific queries
+        for technique in result["key_techniques"]:
+            result["knowledge_queries"].append(f"how to apply {technique}")
+            result["knowledge_queries"].append(f"best practices for {technique}")
+        
+        # Deduplicate queries
+        result["knowledge_queries"] = list(set(result["knowledge_queries"]))
+        
+    except Exception as e:
+        logger.error(f"Error processing next actions result: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    return result 
