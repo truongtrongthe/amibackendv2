@@ -1,4 +1,4 @@
-from typing import Dict, AsyncGenerator, Optional, Tuple, List
+from typing import Dict, AsyncGenerator, Optional, Tuple, List, Any, Union
 from utilities import logger
 from langchain_openai import ChatOpenAI
 import re
@@ -438,7 +438,7 @@ def build_context_analysis_prompt(context: str, profiling_instructions_dict: dic
     logger.info(f"Context analysis PROMPT: {base_prompt}")
     return base_prompt
 
-def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_content: str) -> str:
+def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_content: str = None, knowledge_sets: Dict = None) -> str:
     """
     Build a next actions prompt that leverages the contact analysis data (identity, classification,
     needs, and communication style) to plan next steps using Chain of Thought reasoning.
@@ -446,109 +446,137 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
     Args:
         context: The conversation context
         initial_analysis: The results from the initial analysis
-        knowledge_content: The retrieved knowledge content
+        knowledge_content: The retrieved knowledge content (deprecated, use knowledge_sets instead)
+        knowledge_sets: Structured knowledge data organized by vector_id
         
     Returns:
         str: The next actions prompt with CoT structure for effective planning
     """
+    # Build rich knowledge content from knowledge_sets if available
+    rich_knowledge_content = ""
+    if knowledge_sets and isinstance(knowledge_sets, dict) and len(knowledge_sets) > 0:
+        rich_knowledge_sections = []
+        for vector_id, data in knowledge_sets.items():
+            section = []
+            
+            # Add title with clear heading
+            if "title" in data and data["title"]:
+                section.append(f"TITLE: {data['title']}")
+            
+            # Add description
+            if "description" in data and data["description"]:
+                section.append(f"DESCRIPTION: {data['description']}")
+            
+            # Add content (only if not too long)
+            if "content" in data and data["content"]:
+                content = data["content"]
+                # Trim content if it's very long to keep prompt focused
+                if len(content) > 1000:
+                    content = content[:1000] + "...[content truncated for brevity]"
+                section.append(f"CONTENT: {content}")
+            
+            # Prioritize application method - this is the most actionable part
+            if "application_method" in data and data["application_method"]:
+                section.append(f"APPLICATION METHOD: {data['application_method']}")
+            elif "takeaways" in data and data["takeaways"]:
+                section.append(f"TAKEAWAYS: {data['takeaways']}")
+            
+            # Add document summary if available (useful for context)
+            if "document_summary" in data and data["document_summary"]:
+                section.append(f"DOCUMENT SUMMARY: {data['document_summary']}")
+            
+            # Add cross-cluster connections if available (useful for integration)
+            if "cross_cluster_connections" in data and data["cross_cluster_connections"]:
+                section.append(f"CROSS-CLUSTER CONNECTIONS: {data['cross_cluster_connections']}")
+            
+            # Add the formatted section to the list with clear vector_id reference
+            if section:
+                rich_knowledge_sections.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]:\n" + "\n".join(section))
+        
+        # Combine all knowledge sections with clear separation
+        if rich_knowledge_sections:
+            rich_knowledge_content = "\n\n" + "\n\n---\n\n".join(rich_knowledge_sections)
+    elif knowledge_content:
+        # Fallback to original knowledge_content if knowledge_sets is not available
+        rich_knowledge_content = knowledge_content
+    
+    # Short instruction for knowledge usage instead of lengthy structured knowledge info
+    knowledge_usage_guide = ""
+    if knowledge_sets and isinstance(knowledge_sets, dict) and len(knowledge_sets) > 0:
+        knowledge_usage_guide = (
+            "KNOWLEDGE USAGE GUIDE:\n"
+            "1. Each knowledge item is clearly labeled with headings\n"
+            "2. For each relevant item, extract specific techniques and application methods\n"
+            "3. When referencing knowledge, cite the specific knowledge item ID\n"
+            "4. Focus on APPLICATION METHODS and TAKEAWAYS for actionable steps\n\n"
+        )
+    
     return (
         f"CONVERSATION CONTEXT:\n{context}\n\n"
         f"CONTACT ANALYSIS:\n{initial_analysis}\n\n"
-        f"RETRIEVED KNOWLEDGE:\n{knowledge_content}\n\n"
+        f"RETRIEVED KNOWLEDGE:{rich_knowledge_content}\n\n"
+        f"{knowledge_usage_guide}"
         
-        f"DYNAMIC PRIORITIZATION: Identify the 2-3 MOST RELEVANT knowledge frameworks that directly address this customer's specific situation. Focus on depth of application rather than breadth. Choose techniques that best match the customer's profile, communication style, and expressed needs.\n\n"
+        f"TASK: Determine the most appropriate next actions based on the contact analysis and available knowledge. "
+        f"Select 2-3 techniques that directly address this customer's specific situation, matching their profile, communication style, and expressed needs.\n\n"
         
-        f"Based on the conversation and analysis above, determine the most appropriate next actions using Chain of Thought reasoning. "
-        f"The analysis includes the contact's identity, classification, needs, and communication style. "
-        f"Use the retrieved knowledge to select the most effective approaches.\n\n"
+        f"REASONING FRAMEWORK:\n\n"
         
-        f"IMPORTANT: Pay close attention to the structure of the retrieved knowledge. For each knowledge item, extract and use:"
-        f"- The TITLE to understand the general topic"
-        f"- The DESCRIPTION to grasp the purpose and context"
-        f"- The TAKEAWAYS section containing specific APPLICATION METHODS with step-by-step instructions"
-        f"- The CROSS-CLUSTER CONNECTIONS to understand how this knowledge relates to other concepts"
-        f"These sections provide valuable structure and context for your recommendations.\n\n"
+        f"1. CONTACT PROFILE (Keep brief):\n"
+        f"   - Classification (from analysis): [customer type]\n"
+        f"   - Primary needs: [1-2 key needs]\n"
+        f"   - Communication style: [formal/informal, direct/indirect]\n"
+        f"   - Cultural factors: [key cultural elements]\n\n"
         
-        f"Use the retrieved knowledge, build Chain of Thought reasoning: "
-        f"1. Identify the appropriate knowledge elements relevant to this situation"
-        f"2. Extract the specific value and application methods from the Takeaways section"
-        f"3. Determine how to apply these methods in your conversation flow"
-        f"4. Reference concrete examples from the knowledge to guide implementation\n\n"
+        f"2. KNOWLEDGE SELECTION (Be specific):\n"
+        f"   - Select most relevant techniques from knowledge\n"
+        f"   - Explain why each technique applies to this contact\n"
+        f"   - For each technique, identify specific application steps\n\n"
         
-        f"CHAIN OF THOUGHT REASONING:\n\n"
+        f"3. RESPONSE STRATEGY (Be concrete):\n"
+        f"   - Primary objective: [single clear goal]\n"
+        f"   - Tone and approach: [specific communication style]\n"
+        f"   - Key points to address: [2-3 points maximum]\n"
+        f"   - Specific questions to ask: [1-2 questions from knowledge]\n\n"
         
-        f"1. CONTACT UNDERSTANDING:\n"
-        f"   - Identify the contact's classification (potential customer, existing client, etc.)\n"
-        f"   - Summarize their key needs or problems based on the analysis\n"
-        f"   - Note their emotional state and how it should influence your approach\n"
-        f"   - Consider their communication style preferences (direct, indirect, formal, etc.)\n"
-        f"   - Identify cultural factors that should shape your response\n\n"
-        
-        f"2. CONVERSATION STAGE PLANNING:\n"
-        f"   - Determine exactly where we are in the conversation journey\n"
-        f"   - Identify what's typically needed at this specific stage\n"
-        f"   - Evaluate what information is missing and must be gathered\n"
-        f"   - Decide whether to focus on rapport building, information gathering, or solution presentation\n\n"
-        
-        f"3. KNOWLEDGE APPLICATION:\n"
-        f"   - Identify 2-3 specific techniques from the knowledge content that apply to this situation\n"
-        f"   - For each technique, extract specific methods from the Takeaways section\n"
-        f"   - Reference step-by-step application instructions from the knowledge\n"
-        f"   - Connect each knowledge element directly to this contact's specific needs and style\n\n"
-        
-        f"4. RESPONSE PLANNING:\n"
-        f"   - Based on the above reasoning, determine the primary objective for the next message\n"
-        f"   - Decide on the most appropriate tone and approach for this specific contact\n"
-        f"   - Select the most effective techniques to apply from the knowledge content\n"
-        f"   - Choose specific questions or statements that align with the contact's needs and style\n"
-        f"   - Plan for different possible responses (positive engagement or resistance)\n\n"
-        
-        f"5. CLEAR NEXT ACTIONS:\n"
-        f"   - Define precisely 3-5 specific actions that must be taken next\n"
-        f"   - For each action, explain WHY it's important based on your reasoning\n"
-        f"   - Prioritize these actions in order of importance\n"
-        f"   - Connect each action directly to the contact's needs and the conversation stage\n"
-        f"   - Specify which knowledge/techniques will be applied for each action\n\n"
-        
-        f"NEXT ACTIONS OUTPUT:\n"
-        f"Based on your Chain of Thought reasoning, provide the recommended next actions in this structured format:\n\n"
+        f"OUTPUT FORMAT:\n"
+        f"Based on your reasoning, provide the recommended next actions in this structured format:\n\n"
         
         f"1. PRIMARY OBJECTIVE:\n"
-        f"   [Single most important goal for the next response, considering the contact's classification and needs]\n\n"
+        f"   [Single most important goal for this specific contact and situation]\n\n"
         
         f"2. COMMUNICATION APPROACH:\n"
         f"   - TONE: [Specific emotional tone tailored to this contact's state and style]\n"
-        f"   - STYLE: [Communication style matching the contact's preferences (direct/indirect, formal/casual, etc.)]\n"
-        f"   - CULTURAL CONSIDERATIONS: [Specific cultural elements to incorporate or be mindful of]\n\n"
+        f"   - STYLE: [Communication style matching their preferences (direct/indirect, formal/casual)]\n"
+        f"   - CULTURAL CONSIDERATIONS: [Specific cultural elements to incorporate]\n\n"
         
         f"3. KEY TECHNIQUES:\n"
-        f"   - TECHNIQUE 1: [Name a specific technique from the knowledge]\n"
-        f"     APPLICATION: [How to apply it to this specific contact and situation]\n"
-        f"     SOURCE: [Brief relevant quote from knowledge content]\n"
-        f"   - TECHNIQUE 2: [Name a second technique if appropriate]\n"
-        f"     APPLICATION: [How to apply it to this specific contact and situation]\n"
-        f"     SOURCE: [Brief relevant quote from knowledge content]\n\n"
+        f"   - TECHNIQUE 1: [Specific technique from knowledge item ID]\n"
+        f"     APPLICATION: [How to apply it to this contact - be specific]\n"
+        f"     SOURCE: [Brief quote from knowledge showing steps]\n"
+        f"   - TECHNIQUE 2: [If appropriate - from knowledge item ID]\n"
+        f"     APPLICATION: [How to apply it to this contact - be specific]\n"
+        f"     SOURCE: [Brief quote from knowledge showing steps]\n\n"
         
         f"4. RECOMMENDED RESPONSE ELEMENTS:\n"
-        f"   - OPENING: [How to start the response effectively]\n"
-        f"   - KEY POINTS: [2-3 main points to include, aligned with contact's needs]\n"
-        f"   - QUESTIONS: [Specific questions from knowledge content, if appropriate]\n"
-        f"   - CLOSING: [How to effectively conclude this message]\n\n"
+        f"   - OPENING: [Specific opening approach]\n"
+        f"   - KEY POINTS: [2-3 main points aligned with needs]\n"
+        f"   - QUESTIONS: [Specific questions from knowledge]\n"
+        f"   - CLOSING: [Effective conclusion approach]\n\n"
         
         f"5. ADAPTABILITY PLAN:\n"
         f"   - IF POSITIVE ENGAGEMENT: [Next step if they respond well]\n"
-        f"   - IF RESISTANCE OR CONFUSION: [Alternative approach if needed]\n\n"
+        f"   - IF RESISTANCE OR CONFUSION: [Alternative approach]\n\n"
         
         f"6. PRIORITY NEXT ACTIONS:\n"
-        f"   List the 3-5 most important specific actions to take next, in priority order:\n"
-        f"   1. [Most important action] - WHY: [Brief explanation of importance]\n"
-        f"   2. [Second action] - WHY: [Brief explanation of importance]\n"
-        f"   3. [Third action] - WHY: [Brief explanation of importance]\n"
-        f"   4. [Fourth action if needed] - WHY: [Brief explanation of importance]\n"
-        f"   5. [Fifth action if needed] - WHY: [Brief explanation of importance]\n\n"
+        f"   List the 3-5 most important specific actions in priority order:\n"
+        f"   1. [Most important action] - WHY: [Brief explanation]\n"
+        f"   2. [Second action] - WHY: [Brief explanation]\n"
+        f"   3. [Third action] - WHY: [Brief explanation]\n"
+        f"   4. [Fourth action if needed] - WHY: [Brief explanation]\n"
+        f"   5. [Fifth action if needed] - WHY: [Brief explanation]\n\n"
         
-        f"After completing the English next actions, translate the full output to Vietnamese, maintaining the same structured format. "
-        f"The reasoning should be thorough, but the final output should be practical and directly applicable."
+        f"After completing the English next actions, translate the full output to Vietnamese, maintaining the same structured format."
     )
 
 def process_analysis_result(full_analysis: str) -> Dict[str, str]:
