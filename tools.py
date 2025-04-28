@@ -13,8 +13,7 @@ from analysis import (
     stream_analysis, 
     stream_next_action,
     build_context_analysis_prompt,
-    build_next_actions_prompt,
-    process_next_actions_result
+    build_next_actions_prompt
 )
 from brain_singleton import get_brain, set_graph_version, is_brain_loaded, load_brain_vectors, get_current_graph_version
 
@@ -149,14 +148,10 @@ NEXT_ACTIONS_SCHEMA = {
             },
             "knowledge_context": {
                 "type": "string",
-                "description": "The retrieved knowledge relevant to the conversation (deprecated, use knowledge_sets instead)"
-            },
-            "knowledge_sets": {
-                "type": "object",
-                "description": "Structured knowledge data organized by vector_id"
+                "description": "The retrieved knowledge relevant to the conversation"
             }
         },
-        "required": ["conversation_context", "context_analysis"]
+        "required": ["conversation_context", "context_analysis", "knowledge_context"]
     }
 }
 
@@ -206,10 +201,6 @@ RESPONSE_GENERATION_SCHEMA = {
             "knowledge_context": {
                 "type": "string",
                 "description": "The retrieved knowledge"
-            },
-            "knowledge_sets": {
-                "type": "object",
-                "description": "Structured knowledge data organized by vector_id"
             },
             "personality_instructions": {
                 "type": "string",
@@ -447,7 +438,7 @@ async def next_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     Handle next actions generation with streaming
     
     Args:
-        params: Dictionary containing conversation_context, context_analysis, and optional knowledge_context
+        params: Dictionary containing conversation_context, context_analysis, and knowledge_context
         
     Yields:
         Dict events with streaming next action results
@@ -455,14 +446,12 @@ async def next_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     conversation_context = params.get("conversation_context", "")
     context_analysis = params.get("context_analysis", "")
     knowledge_context = params.get("knowledge_context", "")
-    knowledge_sets = params.get("knowledge_sets", {})
     
     # Build the next actions prompt
     next_actions_prompt = build_next_actions_prompt(
         conversation_context, 
         context_analysis, 
-        knowledge_context if knowledge_context else None,
-        knowledge_sets
+        knowledge_context
     )
     
     # Use existing stream_next_action function
@@ -618,7 +607,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     Args:
         params: Dictionary containing conversation_context, analysis, next_actions, 
-                knowledge_sets, personality_instructions, and knowledge_found
+                knowledge_context, personality_instructions, and knowledge_found
                 
     Yields:
         Streamed response chunks as strings
@@ -626,145 +615,166 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     conversation_context = params.get("conversation_context", "")
     analysis = params.get("analysis", "")
     next_actions = params.get("next_actions", "")
-    knowledge_sets = params.get("knowledge_sets", {})
+    knowledge_context = params.get("knowledge_context", "")
     personality_instructions = params.get("personality_instructions", "")
     knowledge_found = params.get("knowledge_found", False)
     
-    # Process next actions to get structured data
-    next_actions_data = process_next_actions_result(next_actions)
-    primary_objective = next_actions_data.get("primary_objective", "")
-    key_techniques = next_actions_data.get("key_techniques", [])
-    communication_approach = next_actions_data.get("communication_approach", {})
-    response_elements = next_actions_data.get("response_elements", {})
-    next_actions_list = next_actions_data.get("next_actions", [])
-    cross_cluster_connections = next_actions_data.get("cross_cluster_connections", [])
+    # Detect language from analysis or conversation context
+    detected_language = "unknown"
+    if "Vietnamese" in analysis or "tiếng Việt" in analysis:
+        detected_language = "vietnamese"
+    elif "English" in analysis:
+        detected_language = "english"
+    else:
+        # Simple language detection based on common Vietnamese words
+        vietnamese_markers = ["của", "những", "và", "các", "là", "không", "có", "được", "người", "trong", "để", "anh", "chị", "em", "ơi", "nhé"]
+        english_markers = ["the", "and", "is", "in", "to", "of", "that", "for", "you", "with", "have", "this", "are"]
+        
+        vietnamese_count = sum(1 for marker in vietnamese_markers if f" {marker} " in f" {conversation_context} ")
+        english_count = sum(1 for marker in english_markers if f" {marker} " in f" {conversation_context} ")
+        
+        if vietnamese_count > english_count:
+            detected_language = "vietnamese"
+        else:
+            detected_language = "english"
     
-    # Build rich knowledge representation
-    rich_knowledge = ""
-    if knowledge_sets:
-        # Score knowledge items based on relevance
-        scored_items = []
-        for vector_id, data in knowledge_sets.items():
-            score = 0
-            title = data.get("title", "").lower()
-            application = data.get("application_method", "").lower()
-            content = data.get("content", "").lower()
-            
-            # Score based on primary objective
-            if primary_objective and primary_objective.lower() in title:
-                score += 3
-            if primary_objective and primary_objective.lower() in content:
-                score += 2
-            
-            # Score based on key techniques
-            for technique in key_techniques:
-                if technique.lower() in title:
-                    score += 3
-                if technique.lower() in application:
-                    score += 5
-                if technique.lower() in content:
-                    score += 2
-            
-            # Score based on cross-cluster connections
-            for connection in cross_cluster_connections:
-                if connection.lower() in title:
-                    score += 2
-                if connection.lower() in content:
-                    score += 1
-            
-            if score > 0:
-                scored_items.append((vector_id, data, score))
-        
-        # Sort by score and take top 3
-        scored_items.sort(key=lambda x: x[2], reverse=True)
-        top_items = scored_items[:3]
-        
-        # Build rich knowledge content
-        knowledge_parts = []
-        for vector_id, data, score in top_items:
-            item_parts = []
-            
-            # Add title with ID
-            if "title" in data and data["title"]:
-                item_parts.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
-            
-            # Add application method
-            if "application_method" in data and data["application_method"]:
-                item_parts.append(f"APPLICATION METHOD: {data['application_method']}")
-            
-            # Add content
-            if "content" in data and data["content"]:
-                item_parts.append(f"CONTENT: {data['content']}")
-            
-            # Add cross-cluster connections if present
-            if "cross_cluster_connections" in data and data["cross_cluster_connections"]:
-                item_parts.append(f"CROSS-CLUSTER CONNECTIONS: {data['cross_cluster_connections']}")
-            
-            if item_parts:
-                knowledge_parts.append("\n".join(item_parts))
-        
-        if knowledge_parts:
-            rich_knowledge = "\n\n---\n\n".join(knowledge_parts)
+    # Extract user name or pronoun from conversation context
+    user_name = None
+    last_user_message = ""
     
-    # Build the prompt
+    # Get the last user message
+    for line in conversation_context.split('\n'):
+        if line.startswith("User:"):
+            last_user_message = line[5:].strip()
+    
+    # Build language and cultural awareness instructions
+    cultural_instructions = """
+        Respond in the detected language with a natural and culturally aware tone. Adapt to the cultural context implied by the language by following these principles:
+
+        1. Choose forms of address or expressions that reflect the social and relational dynamics inferred from the user's communication style and context.
+        2. Initiate or respond with a tone that feels appropriate to the conversation's flow, balancing respect and familiarity as needed.
+        3. Incorporate linguistic nuances or conversational elements that enhance connection and align with natural speech patterns in the detected language.
+        4. Adjust your tone and level of formality to match the user's style, evolving with the interaction.
+        5. Present ideas or suggestions thoughtfully, respecting the user's perspective and cultural expectations.
+        6. Ensure your language feels authentic and fluent, mirroring the natural rhythms and idioms of the detected language.
+
+        Focus on embodying the cultural values and norms associated with the detected language, fostering rapport through empathy and adaptability while personalizing your tone to the user's cues.
+        """
+    
+    # Build the response prompt
     prompt_parts = [
         "# Conversation Context",
         conversation_context,
-        
-        "# Next Actions Plan",
-        f"PRIMARY OBJECTIVE: {primary_objective}",
-        f"KEY TECHNIQUES: {', '.join(key_techniques)}",
-        f"CROSS-CLUSTER CONNECTIONS: {', '.join(cross_cluster_connections)}",
-        next_actions,
-        
-        "# Relevant Knowledge",
-        rich_knowledge,
-        
-        "# Instructions",
-        f"""
-        PERSONALITY: {personality_instructions}
-        
-        YOUR TASK: Generate a response that implements the Next Actions Plan using the Relevant Knowledge.
-        
-        REQUIREMENTS:
-        1. Start by addressing the PRIMARY OBJECTIVE: {primary_objective}
-        
-        2. Apply the KEY TECHNIQUES:
-           {chr(10).join(f'- {t}' for t in key_techniques)}
-        
-        3. Use the COMMUNICATION APPROACH:
-           - TONE: {communication_approach.get('tone', '')}
-           - STYLE: {communication_approach.get('style', '')}
-           - CULTURAL CONSIDERATIONS: {communication_approach.get('cultural_considerations', '')}
-        
-        4. Structure the response using these elements:
-           - OPENING: {response_elements.get('opening', '')}
-           - KEY POINTS: {response_elements.get('key_points', '')}
-           - QUESTIONS: {response_elements.get('questions', '')}
-           - CLOSING: {response_elements.get('closing', '')}
-        
-        5. Integrate CROSS-CLUSTER CONNECTIONS:
-           {chr(10).join(f'- {c}' for c in cross_cluster_connections)}
-        
-        6. Use the KNOWLEDGE ITEMS to:
-           - Follow the APPLICATION METHODS exactly
-           - Extract relevant examples from CONTENT
-           - Apply knowledge in a practical way
-        
-        7. Keep the response concise (80-100 words) and natural.
-        """
+        "# Analysis",
+        analysis,
+        "# Next Actions",
+        next_actions
     ]
+    
+    if knowledge_context:
+        prompt_parts.extend([
+            "# Retrieved Knowledge",
+            knowledge_context
+        ])
+    
+    prompt_parts.extend([
+        "# Personality Instructions",
+        personality_instructions,
+        "# Language and Cultural Guidelines",
+        cultural_instructions,
+        
+        "# Your Task",
+        """
+            You are an empathetic AI assistant helping users with their concerns. Your goal is to provide a thoughtful, natural-sounding response tailored to this specific situation.
+            
+            Follow ALL of these requirements in your response:
+            
+            1. IMPLEMENT THE PRIMARY OBJECTIVE: Begin with the single most important goal identified in the next actions plan.
+               
+            2. FOLLOW THE COMMUNICATION APPROACH: Your message must:
+               - Use exactly the TONE specified (formal, casual, empathetic, etc.)
+               - Match the STYLE recommended (direct/indirect, structured/flexible)
+               - Incorporate the specific CULTURAL CONSIDERATIONS mentioned
+            
+            3. APPLY THE KEY TECHNIQUES: For each technique mentioned in next actions:
+               - Implement it exactly as described in the APPLICATION section
+               - Incorporate relevant knowledge from the SOURCE quotes provided
+               - Maintain the original intent and approach of each technique
+            
+            4. INCLUDE ALL RECOMMENDED ELEMENTS:
+               - Begin with the specific OPENING approach outlined
+               - Cover all KEY POINTS in the priority order listed
+               - Ask the exact QUESTIONS recommended (when provided)
+               - End with the suggested CLOSING approach
+
+            5. PRIORITIZE KNOWLEDGE INTEGRATION:
+               - Directly apply knowledge from the Retrieved Knowledge section
+               - Use specific facts, methods, and information from knowledge sources
+               - Reference relevant concepts or techniques mentioned in the knowledge
+               - Prioritize domain-specific knowledge that addresses user needs
+               - Maintain factual accuracy based on knowledge context
+            
+            6. PRIORITIZE ACTIONS: Implement the 3-5 specific actions listed in the PRIORITY NEXT ACTIONS section, maintaining their exact order of importance.
+            
+            7. SOUND NATURAL: While following all the above requirements:
+               - Blend technical approaches and knowledge seamlessly into natural dialogue
+               - Use the correct language (English or Vietnamese) as detected
+               - Keep your response concise (80-100 words)
+               - Avoid formulaic closings or repetitive reassurances
+            
+            Your response will be evaluated based on how faithfully you implement the specific next actions plan and integrate relevant knowledge while maintaining natural conversation flow.
+        """
+        ])
     
     prompt = "\n\n".join(prompt_parts)
     
+    # Response optimization components
+    response_processor = ResponseProcessor()
+    response_filter = ResponseFilter()
+    
+    # Check if this is the first message
+    is_first_message = "User:" in conversation_context and conversation_context.count("User:") <= 1
+    
+    # Collect the full response first
+    full_response = ""
+    buffer = ""
+    
     try:
         async for chunk in StreamLLM.astream(prompt):
-            yield chunk
+            content = chunk.content
+            buffer += content
+            full_response += content
+            
+            # Only yield periodically to reduce overhead
+            if len(buffer) >= 20 or content.endswith((".", "!", "?", "\n")):
+                yield buffer
+                buffer = ""
+        
+        # Yield any remaining buffer
+        if buffer:
+            yield buffer
+        
+        # Process the full response for optimization
+        processed_response = response_processor.process_response(
+            full_response, 
+            {"messages": conversation_context.split("\n")},
+            conversation_context.split("\n")[-1] if conversation_context.split("\n") else "",
+            knowledge_found
+        )
+        
+        # Apply greeting filter if needed
+        if not is_first_message:
+            processed_response = response_filter.remove_greeting(processed_response)
+        
+        # We've already yielded the raw response, so we don't need to yield again
+        
     except Exception as e:
         logger.error(f"Error in response generation: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        yield "I encountered an issue while generating a response. Please try again."
+        # Fall back to language-specific error messages
+        if detected_language == "vietnamese":
+            yield "Xin lỗi, tôi đang gặp sự cố khi xử lý yêu cầu của bạn. Vui lòng thử lại."
+        else:
+            yield "I encountered an issue while generating a response. Let me try again."
 
 # Register the tools
 tool_registry.register_tool(
@@ -953,22 +963,6 @@ async def process_llm_with_tools(
                     all_knowledge_entries.extend(entries)
         
         # Format initial knowledge context
-        knowledge_sets = {}  # Initialize structured knowledge dictionary
-        
-        # Process knowledge entries into structured format, similar to profiling_instructions
-        for entry in all_knowledge_entries:
-            vector_id = entry.get("id", "unknown")
-            raw_text = entry.get("raw", "")
-            
-            if raw_text:
-                # Reuse the same structured data extraction function
-                structured_data = extract_structured_data_from_raw(raw_text)
-                if structured_data:
-                    knowledge_sets[vector_id] = structured_data
-        
-        # Log the structured knowledge
-        logger.info(f"Knowledge sets: {knowledge_sets}")
-        
         if all_knowledge_entries:
             knowledge_context = "\n\n".join(entry.get("raw", "") for entry in all_knowledge_entries)
             knowledge_found = True
@@ -983,13 +977,8 @@ async def process_llm_with_tools(
         next_actions_params = {
             "conversation_context": conversation_context,
             "context_analysis": analysis_results,
-            "knowledge_sets": knowledge_sets  # Primary knowledge source now
+            "knowledge_context": knowledge_context
         }
-        
-        # Include knowledge_context for backward compatibility
-        if knowledge_context:
-            next_actions_params["knowledge_context"] = knowledge_context
-            
         if thread_id:
             next_actions_params["_thread_id"] = thread_id
             
@@ -1069,19 +1058,11 @@ async def process_llm_with_tools(
                 if entry_id not in seen_ids:
                     seen_ids.add(entry_id)
                     all_entries_combined.append(entry)
-                    
-                    # Also add to knowledge_sets if not already present
-                    raw_text = entry.get("raw", "")
-                    if raw_text and entry_id not in knowledge_sets:
-                        structured_data = extract_structured_data_from_raw(raw_text)
-                        if structured_data:
-                            knowledge_sets[entry_id] = structured_data
             
             # Format combined knowledge context
             knowledge_context = "\n\n".join(entry.get("raw", "") for entry in all_entries_combined)
             knowledge_found = True
             logger.info(f"Using combined {len(all_entries_combined)} knowledge entries for response generation")
-            logger.info(f"Updated knowledge_sets with {len(knowledge_sets)} total structured entries")
         
         # STEP 7: Assess knowledge coverage (simplified)
         # In the original _handle_request this would call assess_knowledge_coverage
@@ -1095,7 +1076,6 @@ async def process_llm_with_tools(
             "analysis": analysis_results,
             "next_actions": next_actions_results,
             "knowledge_context": knowledge_context,
-            "knowledge_sets": knowledge_sets,  # Add structured knowledge
             "personality_instructions": personality_manager.personality_instructions,
             "knowledge_found": knowledge_found
         }
