@@ -329,12 +329,33 @@ def build_context_analysis_prompt(context: str, profiling_instructions_dict: dic
                 # Extract key instructions from content
                 content_lines = content.split('\n')
                 key_steps = [line for line in content_lines if re.search(r'(step|bước|\d+[\.\)]|[-•*])\s*', line, re.IGNORECASE) and ":" in line]
+                
+                # Enhanced content processing: Look for important patterns
+                examples = [line for line in content_lines if re.search(r'(example|ví dụ|for instance|as seen in|such as|như là)', line, re.IGNORECASE)]
+                classifications = [line for line in content_lines if re.search(r'(type|category|class|group|classification|phân loại|nhóm|loại)', line, re.IGNORECASE) and ":" in line]
+                
+                # Prioritize content sections
+                useful_content = []
                 if key_steps:
                     structured_frameworks += "KEY STEPS:\n"
                     for step in key_steps[:5]:  # Limit to first 5 steps
                         structured_frameworks += f"- {step.strip()}\n"
-                else:
-                    # If no steps found, include a condensed version of the content
+                    useful_content.extend(key_steps)
+                
+                if classifications and not key_steps:  # Only add if not already added key steps
+                    structured_frameworks += "CLASSIFICATIONS:\n"
+                    for classification in classifications[:3]:  # Limit to first 3 classifications
+                        structured_frameworks += f"- {classification.strip()}\n"
+                    useful_content.extend(classifications)
+                
+                if examples and len(useful_content) < 5:  # Add examples if we still have room
+                    structured_frameworks += "EXAMPLES:\n"
+                    for example in examples[:2]:  # Limit to first 2 examples
+                        structured_frameworks += f"- {example.strip()}\n"
+                    useful_content.extend(examples)
+                
+                # If no structured content found, include a condensed version
+                if not useful_content:
                     content_preview = content[:250] + "..." if len(content) > 250 else content
                     structured_frameworks += f"CONTENT SUMMARY: {content_preview}\n"
             
@@ -349,6 +370,18 @@ def build_context_analysis_prompt(context: str, profiling_instructions_dict: dic
             "- Evaluate their knowledge level about the subject matter\n" + \
             "- Consider cultural context cues, especially for Vietnamese communication\n" + \
             "- Note emotional signals that indicate their state of mind\n\n"
+    
+    # Add framework usage guidance
+    framework_usage_guide = """
+    FRAMEWORK USAGE GUIDE:
+    - APPLICATION METHOD: Follow specific steps directly for classifying and analyzing the contact
+    - KEY STEPS: Apply these methodical approaches in your analysis
+    - CLASSIFICATIONS: Use these exact categories when classifying the contact
+    - EXAMPLES: Reference these to understand how to apply the framework
+    - CONTENT: Extract relevant insights that help understand this specific contact
+    
+    For each framework, focus first on APPLICATION METHODS, then KEY STEPS, then relevant CONTENT.
+    """
     
     # Build classification guidance based on detected frameworks
     classification_guidance = ""
@@ -394,6 +427,7 @@ def build_context_analysis_prompt(context: str, profiling_instructions_dict: dic
         
         f"{first_message_note}\n\n"
         f"{structured_frameworks}\n"
+        f"{framework_usage_guide}\n"
         
         f"ANALYSIS INSTRUCTIONS:\n"
         f"Using ONLY the most relevant frameworks from above, analyze this conversation with evidence-based observations. "
@@ -454,62 +488,91 @@ def build_next_actions_prompt(context: str, initial_analysis: str, knowledge_con
     """
     # Build rich knowledge content from knowledge_sets if available
     rich_knowledge_content = ""
+    knowledge_usage_guide = ""
+    
     if knowledge_sets and isinstance(knowledge_sets, dict) and len(knowledge_sets) > 0:
         rich_knowledge_sections = []
+        
+        # Track categories of content to provide tailored usage guidance
+        has_application_methods = False
+        has_examples = False
+        has_classifications = False
+        
         for vector_id, data in knowledge_sets.items():
             section = []
             
-            # Add title with clear heading
+            # Add title with clear knowledge item ID for reference
             if "title" in data and data["title"]:
-                section.append(f"TITLE: {data['title']}")
+                section.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
             
             # Add description
             if "description" in data and data["description"]:
                 section.append(f"DESCRIPTION: {data['description']}")
             
-            # Add content (only if not too long)
+            # Prioritize application method - this is the most actionable part
+            if "application_method" in data and data["application_method"]:
+                section.append(f"APPLICATION METHOD: {data['application_method']}")
+                has_application_methods = True
+            elif "takeaways" in data and data["takeaways"]:
+                section.append(f"TAKEAWAYS: {data['takeaways']}")
+                has_application_methods = True
+            
+            # Process content with enhanced extraction
             if "content" in data and data["content"]:
                 content = data["content"]
+                
+                # Look for examples in content
+                content_lines = content.split('\n')
+                examples = [line for line in content_lines if re.search(r'(example|ví dụ|for instance|as seen in|such as|như là)', line, re.IGNORECASE)]
+                if examples:
+                    has_examples = True
+                
+                # Look for classifications or categories
+                classifications = [line for line in content_lines if re.search(r'(type|category|class|group|classification|phân loại|nhóm|loại)', line, re.IGNORECASE) and ":" in line]
+                if classifications:
+                    has_classifications = True
+                
                 # Trim content if it's very long to keep prompt focused
                 if len(content) > 1000:
                     content = content[:1000] + "...[content truncated for brevity]"
                 section.append(f"CONTENT: {content}")
             
-            # Prioritize application method - this is the most actionable part
-            if "application_method" in data and data["application_method"]:
-                section.append(f"APPLICATION METHOD: {data['application_method']}")
-            elif "takeaways" in data and data["takeaways"]:
-                section.append(f"TAKEAWAYS: {data['takeaways']}")
-            
-            # Add document summary if available (useful for context)
+            # Add document summary if available
             if "document_summary" in data and data["document_summary"]:
                 section.append(f"DOCUMENT SUMMARY: {data['document_summary']}")
             
-            # Add cross-cluster connections if available (useful for integration)
+            # Add cross-cluster connections if available
             if "cross_cluster_connections" in data and data["cross_cluster_connections"]:
                 section.append(f"CROSS-CLUSTER CONNECTIONS: {data['cross_cluster_connections']}")
             
-            # Add the formatted section to the list with clear vector_id reference
+            # Add the formatted section to the list
             if section:
-                rich_knowledge_sections.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]:\n" + "\n".join(section))
+                rich_knowledge_sections.append("\n".join(section))
         
         # Combine all knowledge sections with clear separation
         if rich_knowledge_sections:
             rich_knowledge_content = "\n\n" + "\n\n---\n\n".join(rich_knowledge_sections)
+            
+            # Create tailored knowledge usage guide based on available content types
+            knowledge_usage_guide = "KNOWLEDGE USAGE GUIDE:\n"
+            
+            if has_application_methods:
+                knowledge_usage_guide += "- APPLICATION METHOD/TAKEAWAYS: Follow these specific steps and techniques directly\n"
+            
+            knowledge_usage_guide += "- CONTENT: Extract context, examples, and detailed understanding to apply techniques\n"
+            
+            if has_examples:
+                knowledge_usage_guide += "- EXAMPLES: Reference these in your plan to illustrate how techniques apply\n"
+            
+            if has_classifications:
+                knowledge_usage_guide += "- CLASSIFICATIONS: Use these to tailor your approach to this specific contact type\n"
+            
+            knowledge_usage_guide += "- KNOWLEDGE ITEM IDs: Cite these when referencing specific techniques or methods\n"
+            knowledge_usage_guide += "\nWhen applying knowledge, focus on APPLICATION METHODS first, then extract relevant insights from CONTENT to enhance understanding.\n\n"
+            
     elif knowledge_content:
         # Fallback to original knowledge_content if knowledge_sets is not available
         rich_knowledge_content = knowledge_content
-    
-    # Short instruction for knowledge usage instead of lengthy structured knowledge info
-    knowledge_usage_guide = ""
-    if knowledge_sets and isinstance(knowledge_sets, dict) and len(knowledge_sets) > 0:
-        knowledge_usage_guide = (
-            "KNOWLEDGE USAGE GUIDE:\n"
-            "1. Each knowledge item is clearly labeled with headings\n"
-            "2. For each relevant item, extract specific techniques and application methods\n"
-            "3. When referencing knowledge, cite the specific knowledge item ID\n"
-            "4. Focus on APPLICATION METHODS and TAKEAWAYS for actionable steps\n\n"
-        )
     
     return (
         f"CONVERSATION CONTEXT:\n{context}\n\n"

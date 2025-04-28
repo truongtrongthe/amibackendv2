@@ -684,6 +684,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             relevance_score = 0
             title = data.get("title", "").lower()
             application = data.get("application_method", "")
+            content = data.get("content", "")
             
             # Check for technique relevance
             for keyword in technique_keywords:
@@ -691,6 +692,8 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
                     relevance_score += 3
                 if application and keyword in application.lower():
                     relevance_score += 5
+                if content and keyword in content.lower():
+                    relevance_score += 2
             
             if relevance_score > 0:
                 prioritized_items.append((vector_id, data, relevance_score))
@@ -702,15 +705,20 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         for vector_id, data, score in prioritized_items[:3]:
             item_content = []
             
-            # Add title
+            # Add title with knowledge item ID for reference
             if "title" in data and data["title"]:
-                item_content.append(f"KNOWLEDGE TITLE: {data['title']}")
+                item_content.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
             
             # Prioritize application method - this is the most actionable part
             if "application_method" in data and data["application_method"]:
                 item_content.append(f"APPLICATION METHOD: {data['application_method']}")
             elif "takeaways" in data and data["takeaways"]:
                 item_content.append(f"TAKEAWAYS: {data['takeaways']}")
+            
+            # Include content - this provides context and details
+            if "content" in data and data["content"]:
+                # Indicate the content's purpose without truncating
+                item_content.append(f"CONTENT: {data['content']}")
             
             # Add the formatted item
             if item_content:
@@ -725,11 +733,13 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             for vector_id, data in list(knowledge_sets.items())[:2]:
                 item_content = []
                 if "title" in data and data["title"]:
-                    item_content.append(f"KNOWLEDGE TITLE: {data['title']}")
+                    item_content.append(f"KNOWLEDGE ITEM [{vector_id[:8]}]: {data['title']}")
                 if "application_method" in data and data["application_method"]:
                     item_content.append(f"APPLICATION METHOD: {data['application_method']}")
                 elif "takeaways" in data and data["takeaways"]:
                     item_content.append(f"TAKEAWAYS: {data['takeaways']}")
+                if "content" in data and data["content"]:
+                    item_content.append(f"CONTENT: {data['content']}")
                 if item_content:
                     sample_items.append("\n".join(item_content))
             
@@ -773,6 +783,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             # Fallback: just take the first 200 chars
             personality_core = personality_instructions[:200] + "..."
     
+    # Update the instructions to guide LLM on using content
     prompt_parts.extend([
         "# Instructions",
         f"""
@@ -782,6 +793,11 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         
         YOUR TASK: Generate a response that implements the Next Actions Plan using the Relevant Knowledge.
         
+        KNOWLEDGE USAGE GUIDE:
+        - APPLICATION METHOD/TAKEAWAYS: Use these sections for specific steps and techniques
+        - CONTENT: Extract context, examples, and nuanced understanding that help apply the techniques
+        - Focus on parts of CONTENT that directly relate to the specific techniques and objective
+        
         REQUIREMENTS:
         1. DIRECT IMPLEMENTATION: Start by addressing the PRIMARY OBJECTIVE: {primary_objective}
         
@@ -790,7 +806,11 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
            - Apply the TECHNIQUES: {', '.join(key_techniques) if key_techniques else 'as specified'}
            - Include all RECOMMENDED ELEMENTS in order
         
-        3. INTEGRATE KNOWLEDGE: Use specific facts and methods from the knowledge sections
+        3. INTELLIGENT KNOWLEDGE INTEGRATION:
+           - Follow the application methods exactly
+           - Use context from CONTENT to enhance your understanding
+           - Extract relevant examples or explanations from CONTENT that help apply techniques
+           - Apply knowledge in a practical way that addresses the specific situation
         
         4. NATURAL CONVERSATION:
            - Sound human and conversational, not like you're following a template
