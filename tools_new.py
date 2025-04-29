@@ -16,19 +16,16 @@ from utilities import logger
 
 from brain_singleton import get_brain, get_current_graph_version
 from tool_helpers import (
-    build_user_profile,
     extract_structured_data_from_raw,
     detect_language,
     ensure_brain_loaded,
-    generate_profile_enhanced_queries,
     optimize_knowledge_context,
     format_knowledge_entry,
     extract_key_knowledge
-
 )
 from profile_helper import (
-    build_knowledge_enhanced_profile,
-    format_enhanced_profile_for_cot
+    build_user_profile,
+    format_user_profile_for_prompt
 )
 from response_optimization import ResponseProcessor, ResponseFilter
 
@@ -597,40 +594,33 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     # Get user profile information or use defaults
     language_preference = "vietnamese"
-    comm_style = "neutral"
-    emotional_state = "neutral"
-    detail_preference = "balanced"
-    expertise_level = "intermediate"
     
-    # Extract profile information if available
-    if user_profile:
-        language_preference = user_profile.get("identity", {}).get("language_preference", "vietnamese")
-        comm_style = user_profile.get("communication", {}).get("style", "neutral")
-        emotional_state = user_profile.get("emotional_state", {}).get("current", ["neutral"])[0]
-        detail_preference = user_profile.get("communication", {}).get("detail_preference", "balanced")
-        expertise_level = user_profile.get("identity", {}).get("expertise_level", "intermediate")
+    # Extract basic language information from the portrait or fallback to detection
+    if user_profile and "portrait" in user_profile:
+        # Try to extract language from portrait
+        portrait = user_profile.get("portrait", "")
+        if "communicating in Vietnamese" in portrait:
+            language_preference = "vietnamese"
+        elif "communicating in English" in portrait:
+            language_preference = "english"
+        else:
+            # Fall back to simple language detection
+            language_preference = detect_language(conversation_context)
     else:
         # Fall back to simple language detection if no profile
         language_preference = detect_language(conversation_context)
     
     detected_language = language_preference
     
-    # Tailor cultural instructions based on profile
-    cultural_instructions = f"""
-    Respond in {detected_language} with a {comm_style} tone.
-    - Use {detail_preference} level of detail for a user with {expertise_level} expertise
-    - Address their {emotional_state} emotional state appropriately
-    - Keep language authentic and fluent
-    """
+    # Get the user portrait to include in the prompt
+    user_understanding = format_user_profile_for_prompt(user_profile) if user_profile else ""
+    
+    # Create simplified cultural instructions
+    cultural_instructions = f"Respond in {detected_language}. Use appropriate tone and detail level based on the user understanding."
     
     # OPTIMIZATION: Simplify personality instructions if too long
     if personality_instructions and len(personality_instructions) > 500:
-        personality_instructions = f"""
-        You are a friendly and helpful AI assistant with these key traits:
-        - {comm_style.capitalize()} and professional tone
-        - Clear and concise communication with {detail_preference} detail level
-        - Helpful and informative responses for {expertise_level} expertise level
-        """
+        personality_instructions = "You are a friendly and helpful AI assistant that responds appropriately to users' needs."
     
     # OPTIMIZATION: Drastically reduce knowledge context size
     if knowledge_context and len(knowledge_context) > 1500:
@@ -643,16 +633,12 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         if line.startswith("User:"):
             last_message = line
     
-    # OPTIMIZATION: Simplify the prompt structure but incorporate profile
+    # OPTIMIZATION: Simplify the prompt structure but incorporate user understanding
     prompt = f"""
     # Context
     Latest message: {last_message}
     
-    # User Profile
-    - Communication style: {comm_style}
-    - Emotional state: {emotional_state}
-    - Detail preference: {detail_preference}
-    - Expertise level: {expertise_level}
+    {user_understanding}
     
     # Analysis Summary
     {analysis[:300]}  
@@ -667,10 +653,9 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     # Task
     Create a helpful {detected_language} response that:
-    1. Addresses the user's immediate need with their preferred {comm_style} style
-    2. Responds appropriately to their {emotional_state} emotional state
-    3. Provides {detail_preference} detail level appropriate for {expertise_level} expertise
-    4. Uses knowledge effectively while maintaining conversational flow
+    1. Addresses the user's immediate need based on the user understanding
+    2. Provides an appropriate level of detail and tone
+    3. Uses knowledge effectively while maintaining conversational flow
     
     Begin your response immediately without preamble.
     """
@@ -720,21 +705,11 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             response_task.cancel()
             # Return what we've got so far
             if not full_response:
-                # If we have nothing, generate a simple response based on profile
+                # If we have nothing, generate a simple response based on language
                 if detected_language == "vietnamese":
-                    if emotional_state == "frustrated":
-                        full_response = "Tôi hiểu sự không hài lòng của bạn. Xin hãy cho tôi thêm thông tin để tôi có thể giúp đỡ tốt hơn."
-                    elif emotional_state == "urgent":
-                        full_response = "Tôi sẽ giúp bạn ngay lập tức. Vui lòng cung cấp chi tiết cụ thể để tôi hỗ trợ nhanh nhất."
-                    else:
-                        full_response = "Xin lỗi, tôi đang xử lý thông tin. Vui lòng cho tôi thêm chi tiết để hỗ trợ bạn tốt hơn."
+                    full_response = "Tôi đang xử lý thông tin. Vui lòng cho tôi thêm chi tiết để hỗ trợ bạn tốt hơn."
                 else:
-                    if emotional_state == "frustrated":
-                        full_response = "I understand your frustration. Please provide more details so I can help you better."
-                    elif emotional_state == "urgent":
-                        full_response = "I'll help you right away. Please provide specific details for the fastest assistance."
-                    else:
-                        full_response = "I'm processing your request. Could you provide more details so I can help you better?"
+                    full_response = "I'm processing your request. Could you provide more details so I can help you better?"
                 yield full_response
         
         # Yield any remaining buffer
@@ -746,17 +721,11 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         
     except Exception as e:
         logger.error(f"Error in response generation: {str(e)}")
-        # Fall back to profile-aware language-specific error messages
+        # Fall back to language-specific error messages
         if detected_language == "vietnamese":
-            if emotional_state == "frustrated":
-                yield "Tôi thực sự xin lỗi về sự cố này. Hệ thống đang gặp vấn đề khi xử lý yêu cầu của bạn. Vui lòng thử lại sau vài phút."
-            else:
-                yield "Xin lỗi, tôi đang gặp sự cố khi xử lý yêu cầu của bạn. Vui lòng thử lại."
+            yield "Xin lỗi, tôi đang gặp sự cố khi xử lý yêu cầu của bạn. Vui lòng thử lại."
         else:
-            if emotional_state == "frustrated":
-                yield "I sincerely apologize for this issue. The system is having trouble processing your request. Please try again in a few minutes."
-            else:
-                yield "I encountered an issue while generating a response. Let me try again."
+            yield "I encountered an issue while generating a response. Let me try again."
     
     PERF_METRICS["response_generation_end"] = time.time()
     logger.info(f"Response generation completed in {time.time() - start_time:.2f}s")
@@ -827,17 +796,18 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
     
     # NEW STEP: Build knowledge-enhanced user profile
     logger.info("Building knowledge-enhanced user profile")
-    user_profile = await build_knowledge_enhanced_profile(context_window, last_user_message, graph_version_id)
+    user_profile = await build_user_profile(context_window, last_user_message, graph_version_id)
     _last_cot_results["user_profile"] = user_profile  # Store for future use
     
     # Log profile enhancement results
-    knowledge_rules_applied = sum(len(rules) for rules in user_profile.get("knowledge_applied", {}).values())
-    logger.info(f"Profile built with {knowledge_rules_applied} knowledge rules applied")
+    logger.info(f"User profile built with method: {user_profile.get('method', 'unknown')}")
+    logger.info(f"Profile has {user_profile.get('knowledge_sources', 0)} knowledge sources")
     
     # Generate enhanced search queries based on the knowledge-enhanced profile
     emotional_states = user_profile.get("emotional_state", {}).get("current", [])
     emotional_state = emotional_states[0] if emotional_states else "neutral"
-    enhanced_queries = generate_profile_enhanced_queries(last_user_message, user_profile)
+    #enhanced_queries = generate_profile_enhanced_queries(last_user_message, user_profile)
+    enhanced_queries = []
     logger.info(f"Generated {len(enhanced_queries)} knowledge-enhanced queries: {enhanced_queries}")
     
     # Send knowledge search starting event
@@ -1104,7 +1074,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             
             # Build an enhanced CoT prompt with structured knowledge and user profile
             # Format the user profile for the prompt
-            profile_summary = format_enhanced_profile_for_cot(user_profile)
+            profile_summary = format_user_profile_for_prompt(user_profile)
             logger.info(f"User profile for CoT: {profile_summary}")
             
             cot_prompt = f"""
@@ -1120,9 +1090,10 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             Based on the conversation context, user profile, and provided knowledge:
             
             [ANALYSIS]
-            Analyze the user's core needs through the lens of their profile. Consider their emotional state ({', '.join(user_profile['emotional_state']['current']) if user_profile['emotional_state']['current'] else 'neutral'}), communication style ({', '.join(user_profile['communication']['style_preferences']) if user_profile['communication']['style_preferences'] else 'general'}), and expertise level ({user_profile['identity']['expertise']}).
+            Analyze the user's core needs based on their message and the user understanding provided above.
+            Consider the context of their query, their language preferences, communication style, and emotional state.
             
-            Address how the knowledge can specifically help this user segment ({user_profile['segment']['category']}) with their {user_profile['query_characteristics']['complexity']} complexity {user_profile['query_characteristics']['type']} query.
+            Address how the knowledge can specifically help this user with their query.
             
             If this is a health-related concern, especially regarding sexual health, consider the sensitivity and importance of this topic to the user, potential embarrassment, and psychological impacts.
             [/ANALYSIS]
@@ -1241,7 +1212,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                 # Now check the module-level variable for results if needed
                 if not analysis_content:
                     # Create fallback analysis with knowledge reference and user profile
-                    emotional_state_text = ', '.join(user_profile['emotional_state']['current']) if user_profile['emotional_state']['current'] else 'neutral'
+                    #emotional_state_text = ', '.join(user_profile['emotional_state']['current']) if user_profile['emotional_state']['current'] else 'neutral'
+                    emotional_state_text = ""
                     analysis_content = f"User with {emotional_state_text} emotional state is asking about: {last_user_message[:30]}"
                     fallback_analysis_event = {
                         "type": "analysis",
@@ -1266,55 +1238,32 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                     # Create fallback next actions with knowledge reference and user profile
                     fallback_actions = []
                     
-                    # Try to create profile-aware actions
-                    emotional_states = user_profile["emotional_state"]["current"]
-                    first_emotion = emotional_states[0] if emotional_states else "neutral"
+                    # Try to create basic fallback actions
+                    fallback_actions.append("1. Provide clear and relevant information based on user query")
+                    fallback_actions.append("2. Offer helpful options and next steps")
+                    fallback_actions.append("3. Maintain a supportive tone appropriate to the user's needs")
                     
-                    style_prefs = user_profile["communication"]["style_preferences"]
-                    first_style = style_prefs[0] if style_prefs else "balanced"
+                    # Format the fallback actions
+                    next_actions_content = "\n".join(fallback_actions)
                     
-                    expertise = user_profile["identity"]["expertise"]
-                    
-                    # Emotional state handling
-                    if first_emotion == "frustrated" or "frustration" in emotional_states:
-                        fallback_actions.append("1. Address frustration by offering clear solutions")
-                    elif first_emotion == "curious" or "curiosity" in emotional_states:
-                        fallback_actions.append("1. Satisfy curiosity with detailed explanations")
-                    elif first_emotion == "urgent" or "urgency" in emotional_states or user_profile["emotional_state"]["urgency"] == "high":
-                        fallback_actions.append("1. Address urgent need with immediate actionable steps")
-                    else:
-                        fallback_actions.append("1. Provide balanced information and guidance")
-                    
-                    # Communication style handling
-                    if first_style == "formal":
-                        fallback_actions.append("2. Maintain formal tone and structured response")
-                    elif first_style == "casual" or "direct" in style_prefs:
-                        fallback_actions.append("2. Use conversational tone with practical examples")
-                    elif first_style == "technical":
-                        fallback_actions.append("2. Include technical details and precise information")
-                    else:
-                        fallback_actions.append("2. Balance clarity with appropriate detail level")
-                    
-                    # Expertise level handling
-                    if expertise == "beginner":
-                        fallback_actions.append("3. Explain basic concepts clearly without jargon")
-                    elif expertise == "advanced":
-                        fallback_actions.append("3. Provide advanced insights and in-depth analysis")
-                    else:
-                        fallback_actions.append("3. Balance foundational concepts with practical applications")
-                    
-                    # Join the actions
-                    fallback_actions_text = "\n".join(fallback_actions)
-                    
-                    yield {
+                    fallback_next_actions_event = {
                         "type": "next_actions",
-                        "content": fallback_actions_text,
+                        "content": next_actions_content,
                         "complete": True,
                         "thread_id": thread_id,
                         "status": "complete",
                         "user_profile": user_profile
                     }
-                    next_actions_content = fallback_actions_text
+                    logger.info(f"Sending fallback next_actions due to CoT error: {fallback_next_actions_event}")
+                    
+                    # Use socketio_manager directly for WebSocket events
+                    if thread_id:
+                        try:
+                            from socketio_manager import emit_next_actions_event
+                            was_delivered = emit_next_actions_event(thread_id, fallback_next_actions_event)
+                        except Exception as e:
+                            logger.error(f"Error emitting fallback next_actions: {str(e)}")
+                            yield fallback_next_actions_event
                 
                 # Before completing sections, store results in the module-level variable
                 if analysis_content:
@@ -1606,7 +1555,7 @@ async def process_llm_with_tools(
                     except Exception as e:
                         logger.error(f"Error emitting fallback analysis: {str(e)}")
                         yield fallback_analysis_event
-                
+            
             analysis_events_sent += 1
             
             if not next_actions_results:
