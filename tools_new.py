@@ -680,13 +680,13 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         PERF_METRICS["response_stream_start"] = time.time()
         
         # Set up streaming with timeout
-        response_task = StreamLLM.astream(prompt)
+        response_task = None  # Initialize to None to avoid reference errors
         
         try:
             # Process with timeout
             logger.info(f"Sending response generation request to OpenAI")
             async with asyncio.timeout(RESPONSE_TIMEOUT):
-                async for chunk in response_task:
+                async for chunk in StreamLLM.astream(prompt):
                     content = chunk.content
                     buffer += content
                     full_response += content
@@ -701,15 +701,24 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
                         buffer = ""
         except asyncio.TimeoutError:
             logger.warning(f"Response generation timed out after {RESPONSE_TIMEOUT}s, using partial response")
-            # Cancel the streaming task
-            response_task.cancel()
-            # Return what we've got so far
+            # Don't try to cancel the streaming task since it's not stored as a task
+            # Just yield what we've got so far
             if not full_response:
                 # If we have nothing, generate a simple response based on language
                 if detected_language == "vietnamese":
                     full_response = "Tôi đang xử lý thông tin. Vui lòng cho tôi thêm chi tiết để hỗ trợ bạn tốt hơn."
                 else:
                     full_response = "I'm processing your request. Could you provide more details so I can help you better?"
+                yield full_response
+        except Exception as e:
+            logger.error(f"Error in response generation streaming: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Fall back to language-specific error messages
+            if not full_response:
+                if detected_language == "vietnamese":
+                    full_response = "Xin lỗi, tôi đang gặp sự cố khi xử lý yêu cầu của bạn. Vui lòng thử lại."
+                else:
+                    full_response = "I encountered an issue while generating a response. Let me try again."
                 yield full_response
         
         # Yield any remaining buffer
@@ -1211,19 +1220,28 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                 
                 # Now check the module-level variable for results if needed
                 if not analysis_content:
-                    # Create fallback analysis with knowledge reference and user profile
-                    #emotional_state_text = ', '.join(user_profile['emotional_state']['current']) if user_profile['emotional_state']['current'] else 'neutral'
-                    emotional_state_text = ""
-                    analysis_content = f"User with {emotional_state_text} emotional state is asking about: {last_user_message[:30]}"
+                    # Instead of creating a simple fallback, use the actual user profile to create a more detailed analysis
+                    if user_profile and "portrait" in user_profile:
+                        # Extract key information from the portrait
+                        portrait = user_profile.get("portrait", "")
+                        
+                        # Create a more informative analysis based on the user profile
+                        analysis_content = f"Based on user profile: {portrait[:300]}..."
+                    else:
+                        # Only if no user profile is available, fall back to simple analysis
+                        analysis_content = f"User is asking about: {last_user_message[:100]}"
+                    
+                    # Create a proper analysis event with the full user profile
                     fallback_analysis_event = {
                         "type": "analysis",
                         "content": analysis_content,
                         "complete": True,
                         "thread_id": thread_id,
                         "status": "complete",
-                        "search_terms": []
+                        "search_terms": [],
+                        "user_profile": user_profile  # Always include the full user profile
                     }
-                    logger.info(f"Sending fallback analysis due to CoT error: {fallback_analysis_event}")
+                    logger.info(f"Sending enhanced fallback analysis with full user profile")
                     
                     # Use socketio_manager directly for WebSocket events
                     if thread_id:
@@ -1235,13 +1253,32 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                             yield fallback_analysis_event
                 
                 if not next_actions_content:
-                    # Create fallback next actions with knowledge reference and user profile
+                    # Create more specific fallback actions based on the user profile
                     fallback_actions = []
                     
-                    # Try to create basic fallback actions
-                    fallback_actions.append("1. Provide clear and relevant information based on user query")
-                    fallback_actions.append("2. Offer helpful options and next steps")
-                    fallback_actions.append("3. Maintain a supportive tone appropriate to the user's needs")
+                    # If we have a user profile with a portrait, use it to create more tailored actions
+                    if user_profile and "portrait" in user_profile:
+                        # Extract classification info if available in the portrait
+                        portrait = user_profile.get("portrait", "")
+                        
+                        if "Discouraged Group" in portrait:
+                            fallback_actions.append("1. Provide reassurance and supportive information to build confidence")
+                            fallback_actions.append("2. Offer practical strategies and techniques addressing the specific issue")
+                            fallback_actions.append("3. Suggest professional resources while maintaining a compassionate tone")
+                        elif "Confident Group" in portrait:
+                            fallback_actions.append("1. Provide motivational information to build on existing confidence")
+                            fallback_actions.append("2. Offer advanced strategies and techniques for further improvement")
+                            fallback_actions.append("3. Suggest ways to maintain and enhance current capabilities")
+                        else:
+                            # Generic but still supportive actions
+                            fallback_actions.append("1. Provide clear and relevant information based on user query")
+                            fallback_actions.append("2. Offer helpful options and practical next steps")
+                            fallback_actions.append("3. Maintain a supportive tone appropriate to the user's needs")
+                    else:
+                        # Very basic fallback if no profile available
+                        fallback_actions.append("1. Provide clear and relevant information based on user query")
+                        fallback_actions.append("2. Offer helpful options and next steps")
+                        fallback_actions.append("3. Maintain a supportive tone appropriate to the user's needs")
                     
                     # Format the fallback actions
                     next_actions_content = "\n".join(fallback_actions)
@@ -1252,18 +1289,20 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         "complete": True,
                         "thread_id": thread_id,
                         "status": "complete",
-                        "user_profile": user_profile
+                        "user_profile": user_profile  # Always include the full user profile
                     }
-                    logger.info(f"Sending fallback next_actions due to CoT error: {fallback_next_actions_event}")
+                    logger.info(f"Sending enhanced fallback next_actions with full user profile")
                     
                     # Use socketio_manager directly for WebSocket events
                     if thread_id:
                         try:
-                            from socketio_manager import emit_next_actions_event
-                            was_delivered = emit_next_actions_event(thread_id, fallback_next_actions_event)
+                            from socketio_manager import emit_next_action_event
+                            was_delivered = emit_next_action_event(thread_id, fallback_next_actions_event)
                         except Exception as e:
                             logger.error(f"Error emitting fallback next_actions: {str(e)}")
                             yield fallback_next_actions_event
+                    else:
+                        yield fallback_next_actions_event
                 
                 # Before completing sections, store results in the module-level variable
                 if analysis_content:
@@ -1297,9 +1336,10 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         "complete": True,
                         "thread_id": thread_id,
                         "status": "complete",
-                        "search_terms": []
+                        "search_terms": [],
+                        "user_profile": user_profile  # Always include the full user profile
                     }
-                    logger.info(f"Sending fallback analysis due to CoT error: {fallback_analysis_event}")
+                    logger.info(f"Sending enhanced fallback analysis with full user profile")
                     
                     # Use socketio_manager directly for WebSocket events
                     if thread_id:
@@ -1317,9 +1357,10 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         "content": next_actions_results, 
                         "complete": True,
                         "thread_id": thread_id,
-                        "status": "complete"
+                        "status": "complete",
+                        "user_profile": user_profile  # Always include the full user profile
                     }
-                    logger.info(f"Sending fallback next_actions due to CoT error")
+                    logger.info(f"Sending enhanced fallback next_actions with full user profile")
                     
                     # Use socketio_manager directly for WebSocket events
                     if thread_id:
@@ -1519,10 +1560,16 @@ async def process_llm_with_tools(
                     # Collect analysis results
                     if result.get("type") == "analysis" and result.get("complete", True):
                         analysis_results = result.get("content", "")
+                        # Store user profile if available in the analysis result
+                        if "user_profile" in result:
+                            _last_cot_results["user_profile"] = result["user_profile"]
                     
                     # Collect next_actions results
                     elif result.get("type") == "next_actions" and result.get("complete", True):
                         next_actions_results = result.get("content", "")
+                        # Store user profile if available in the next_actions result
+                        if "user_profile" in result:
+                            _last_cot_results["user_profile"] = result["user_profile"]
                     
                     # Collect knowledge entries
                     elif result.get("type") == "knowledge" and not result.get("complete", False):
@@ -1534,18 +1581,29 @@ async def process_llm_with_tools(
             logger.error(f"Error in CoT processing: {cot_error}")
             logger.error(traceback.format_exc())
             
+            # Make sure we have the user profile even if CoT fails
+            if not _last_cot_results.get("user_profile") and "user_profile" in state:
+                _last_cot_results["user_profile"] = state["user_profile"]
+            
             # Create fallback content
             if not analysis_results:
-                analysis_results = f"User is asking about: {user_message[:30]}"
+                # Create a meaningful analysis from the user profile if available
+                if _last_cot_results.get("user_profile") and "portrait" in _last_cot_results["user_profile"]:
+                    portrait = _last_cot_results["user_profile"]["portrait"]
+                    analysis_results = f"Based on user profile: {portrait[:300]}..."
+                else:
+                    analysis_results = f"User is asking about: {user_message[:100]}"
+                
                 fallback_analysis_event = {
                     "type": "analysis", 
                     "content": analysis_results, 
                     "complete": True,
                     "thread_id": thread_id,
                     "status": "complete",
-                    "search_terms": []  # Add search_terms to match expected format
+                    "search_terms": [],  # Add search_terms to match expected format
+                    "user_profile": _last_cot_results.get("user_profile", {})  # Include user profile
                 }
-                logger.info(f"Sending fallback analysis due to CoT error: {fallback_analysis_event}")
+                logger.info(f"Sending enhanced fallback analysis with full user profile")
                 
                 # CRITICAL FIX: Use socketio_manager directly for WebSocket events
                 if use_websocket:
@@ -1559,15 +1617,27 @@ async def process_llm_with_tools(
             analysis_events_sent += 1
             
             if not next_actions_results:
-                next_actions_results = "1. Provide helpful information\n2. Use appropriate tone"
+                # Create more tailored next actions based on user profile if available
+                if _last_cot_results.get("user_profile") and "portrait" in _last_cot_results["user_profile"]:
+                    portrait = _last_cot_results["user_profile"]["portrait"]
+                    if "Discouraged Group" in portrait:
+                        next_actions_results = "1. Provide reassurance and supportive information\n2. Offer practical strategies for improvement\n3. Suggest professional resources while maintaining empathy"
+                    elif "Confident Group" in portrait:
+                        next_actions_results = "1. Provide motivational information\n2. Offer advanced strategies and techniques\n3. Suggest ways to maintain progress"
+                    else:
+                        next_actions_results = "1. Provide helpful information\n2. Offer practical next steps\n3. Use supportive tone"
+                else:
+                    next_actions_results = "1. Provide helpful information\n2. Use appropriate tone\n3. Offer practical solutions"
+                
                 fallback_next_actions = {
                     "type": "next_actions", 
                     "content": next_actions_results, 
                     "complete": True,
                     "thread_id": thread_id,
-                    "status": "complete"
+                    "status": "complete",
+                    "user_profile": _last_cot_results.get("user_profile", {})  # Include user profile
                 }
-                logger.info(f"Sending fallback next_actions due to CoT error")
+                logger.info(f"Sending enhanced fallback next_actions with full user profile")
                 
                 # CRITICAL FIX: Use socketio_manager directly for WebSocket events
                 if use_websocket:
@@ -1578,7 +1648,17 @@ async def process_llm_with_tools(
                         logger.error(f"Error emitting fallback next_actions: {str(e)}")
                         yield fallback_next_actions
         
-        # IMPORTANT CHANGE: Move this code outside of the if block
+        # Store the analysis in the state as a dictionary
+        if analysis_results:
+            # Create a structured analysis object for the state
+            analysis_dict = {
+                "content": analysis_results,
+                "user_profile": _last_cot_results.get("user_profile", {})
+            }
+            state["analysis"] = analysis_dict
+            logger.info("Final analysis stored in state as a dictionary")
+        
+        # IMPORTANT: Restore response generation code
         # Now check the module-level variable for results if needed
         if not analysis_results and _last_cot_results["analysis_content"]:
             analysis_results = _last_cot_results["analysis_content"]
@@ -1635,13 +1715,19 @@ async def process_llm_with_tools(
         # Add debug logs
         logger.info(f"Starting response generation with params: analysis={len(analysis_results)} chars, next_actions={len(next_actions_results)} chars, knowledge={len(knowledge_context)} chars")
         if _last_cot_results.get("user_profile"):
-            emotional_states = _last_cot_results['user_profile'].get('emotional_state', {}).get('current', [])
-            first_emotion = emotional_states[0] if emotional_states else "neutral"
-            
-            style_prefs = _last_cot_results['user_profile'].get('communication', {}).get('style_preferences', [])
-            first_style = style_prefs[0] if style_prefs else "balanced"
-            
-            logger.info(f"Including user profile in response generation: emotion={first_emotion}, style={first_style}")
+            # Try to extract key information from the user_profile for logging
+            if "portrait" in _last_cot_results["user_profile"]:
+                portrait = _last_cot_results["user_profile"]["portrait"]
+                # Check for classification in the portrait
+                if "Discouraged Group" in portrait:
+                    user_classification = "Discouraged Group"
+                elif "Confident Group" in portrait:
+                    user_classification = "Confident Group"
+                else:
+                    user_classification = "Unclassified"
+                logger.info(f"Including user profile in response generation with classification: {user_classification}")
+            else:
+                logger.info(f"Including user profile in response generation")
         
         # Stream the response
         response_buffer = ""
@@ -1657,7 +1743,13 @@ async def process_llm_with_tools(
             logger.error(f"Error in response generation: {response_error}")
             # If we haven't yielded anything yet, provide a fallback response
             if not response_buffer:
-                fallback = "I'm processing your request. Could you provide more details so I can help you better?"
+                if "portrait" in _last_cot_results.get("user_profile", {}) and "Discouraged Group" in _last_cot_results["user_profile"]["portrait"]:
+                    # Tailored fallback for Discouraged Group
+                    fallback = "Xuất tinh sớm là tình trạng phổ biến, và rất nhiều nam giới gặp phải. Đây không phải là điều gì đáng xấu hổ. Có nhiều phương pháp hữu ích để cải thiện tình trạng này như các bài tập Kegel, kỹ thuật thở sâu, và phương pháp start-stop. Bạn có thể thử những phương pháp này hoặc tham khảo ý kiến chuyên gia y tế."
+                else:
+                    # Generic fallback
+                    fallback = "Tôi hiểu vấn đề bạn đang gặp phải. Có nhiều phương pháp và kỹ thuật có thể giúp cải thiện tình trạng này. Bạn có thể thử một số bài tập thư giãn và kỹ thuật kiểm soát. Nếu cần thiết, tham khảo ý kiến bác sĩ sẽ giúp bạn có phương pháp điều trị phù hợp."
+                
                 yield fallback
                 response_buffer = fallback
         
@@ -1671,11 +1763,6 @@ async def process_llm_with_tools(
             logger.info(f"Updated state with response of {len(response_buffer)} chars")
         else:
             logger.warning("Response buffer is empty, state not updated")
-        
-        # Add analysis to state for future reference
-        if analysis_results:
-            state["analysis"] = analysis_results
-            logger.info("Final analysis stored in state at end of processing")
         
         # Log event counts
         logger.info(f"Total analysis events sent from trigger: {analysis_events_sent}")
