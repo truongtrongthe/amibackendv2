@@ -10,8 +10,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 from utilities import logger
 import json
 
-from tools import process_llm_with_tools, tool_registry
-
+#from tools import process_llm_with_tools, tool_registry
+from tools_new import process_llm_with_tools
 from personality import PersonalityManager
 from response_optimization import ResponseFilter, ResponseProcessor
 
@@ -152,57 +152,125 @@ class MCWithTools:
         # Use process_llm_with_tools to handle the conversation
         analysis_events_sent = 0
         knowledge_events_sent = 0
+        next_action_events_sent = 0
         
-        async for result in process_llm_with_tools(
-            latest_msg_content, 
-            conversation_history,
-            state,
-            graph_version_id,
-            thread_id_for_analysis if use_websocket else None
-        ):
-            # Handle different types of results
-            if isinstance(result, dict):
-                if result.get("type") == "analysis":
-                    # For analysis chunks, pass them through directly
-                    analysis_events_sent += 1
-                    yield result
-                elif result.get("type") == "knowledge":
-                    # For knowledge chunks, pass them through directly
-                    knowledge_events_sent += 1
+        # Import socketio_manager functions outside the loop if using WebSockets
+        if use_websocket and thread_id_for_analysis:
+            try:
+                from socketio_manager import emit_analysis_event, emit_knowledge_event, emit_next_action_event
+                socket_imports_success = True
+                logger.info(f"Successfully imported socketio_manager functions for thread {thread_id_for_analysis}")
+            except Exception as socket_import_error:
+                socket_imports_success = False
+                logger.error(f"Failed to import socketio_manager functions: {socket_import_error}")
+        else:
+            socket_imports_success = False
+        
+        try:
+            async for result in process_llm_with_tools(
+                latest_msg_content, 
+                conversation_history,
+                state,
+                graph_version_id,
+                thread_id_for_analysis if use_websocket else None
+            ):
+                # Handle different types of results
+                if isinstance(result, dict):
+                    event_type = result.get("type")
                     
-                    # FIXED: Add explicit WebSocket emission for knowledge events
-                    if use_websocket and thread_id_for_analysis:
-                        try:
-                            from socketio_manager import emit_knowledge_event
-                            emit_knowledge_event(thread_id_for_analysis, result)
-                            logger.info(f"Emitted knowledge event via socketio_manager for thread {thread_id_for_analysis}")
-                        except Exception as e:
-                            logger.error(f"Error emitting knowledge event: {str(e)}")
+                    # Ensure thread_id is set for all events
+                    if use_websocket and thread_id_for_analysis and "thread_id" not in result:
+                        result["thread_id"] = thread_id_for_analysis
                     
-                    yield result
-                elif result.get("type") == "next_actions":
-                    # For next actions chunks, pass them through directly
-                    # FIXED: Also ensure next_action events are properly emitted
-                    if use_websocket and thread_id_for_analysis:
-                        try:
-                            from socketio_manager import emit_next_action_event
-                            emit_next_action_event(thread_id_for_analysis, result)
-                        except Exception as e:
-                            logger.error(f"Error emitting next_action event: {str(e)}")
+                    # Log the event being processed
+                    result_preview = str(result.get("content", ""))[:30]
+                    logger.info(f"MC received {event_type} event: {result_preview}...")
                     
-                    yield result
-                elif "state" in result:
-                    # This is the final state update
-                    state.update(result["state"])
-                    # Don't yield this to the caller
-                    continue
+                    if event_type == "analysis":
+                        # For analysis chunks, handle WebSocket communication if configured
+                        analysis_events_sent += 1
+                        
+                        if use_websocket and thread_id_for_analysis and socket_imports_success:
+                            try:
+                                # Directly emit to WebSocket using socketio_manager
+                                was_delivered = emit_analysis_event(thread_id_for_analysis, result)
+                                if was_delivered:
+                                    logger.info(f"Analysis event #{analysis_events_sent} emitted to WebSocket")
+                                else:
+                                    logger.warning(f"Analysis event #{analysis_events_sent} FAILED to deliver - no active sessions")
+                                    # Still yield the result for other consumers
+                                    yield result
+                            except Exception as socket_error:
+                                logger.error(f"Socket emission error for analysis: {socket_error}")
+                                # Fall back to yielding the event
+                                yield result
+                        else:
+                            # Not using WebSocket, just yield the event
+                            yield result
+                            
+                    elif event_type == "knowledge":
+                        # For knowledge chunks, handle WebSocket communication if configured
+                        knowledge_events_sent += 1
+                        
+                        if use_websocket and thread_id_for_analysis and socket_imports_success:
+                            try:
+                                # Directly emit to WebSocket using socketio_manager
+                                was_delivered = emit_knowledge_event(thread_id_for_analysis, result)
+                                if was_delivered:
+                                    logger.info(f"Knowledge event #{knowledge_events_sent} emitted to WebSocket")
+                                else:
+                                    logger.warning(f"Knowledge event #{knowledge_events_sent} FAILED to deliver - no active sessions")
+                                    # Still yield the result for other consumers
+                                    yield result
+                            except Exception as socket_error:
+                                logger.error(f"Socket emission error for knowledge: {socket_error}")
+                                # Fall back to yielding the event
+                                yield result
+                        else:
+                            # Not using WebSocket, just yield the event
+                            yield result
+                            
+                    elif event_type == "next_actions":
+                        # For next actions chunks, handle WebSocket communication if configured
+                        next_action_events_sent += 1
+                        
+                        if use_websocket and thread_id_for_analysis and socket_imports_success:
+                            try:
+                                # Directly emit to WebSocket using socketio_manager
+                                was_delivered = emit_next_action_event(thread_id_for_analysis, result)
+                                if was_delivered:
+                                    logger.info(f"Next action event #{next_action_events_sent} emitted to WebSocket")
+                                else:
+                                    logger.warning(f"Next action event #{next_action_events_sent} FAILED to deliver - no active sessions")
+                                    # Still yield the result for other consumers
+                                    yield result
+                            except Exception as socket_error:
+                                logger.error(f"Socket emission error for next_action: {socket_error}")
+                                # Fall back to yielding the event
+                                yield result
+                        else:
+                            # Not using WebSocket, just yield the event
+                            yield result
+                            
+                    elif "state" in result:
+                        # This is the final state update
+                        state.update(result["state"])
+                        # Don't yield this to the caller
+                        continue
+                    else:
+                        # Unknown dict type, just pass it through
+                        yield result
                 else:
-                    # Unknown dict type, just pass it through
+                    # This is a direct response chunk - update the prompt string
+                    if isinstance(result, str):
+                        state["prompt_str"] += result
                     yield result
-            else:
-                # This is a direct response chunk
-                state["prompt_str"] = result if isinstance(result, str) else state["prompt_str"]
-                yield result
+        
+        except Exception as e:
+            logger.error(f"Error in trigger: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"Error: {str(e)}"
         
         # Wrap response as AIMessage and append using add_messages if it wasn't already done
         if state["prompt_str"] and not any(
@@ -211,10 +279,14 @@ class MCWithTools:
         ):
             state["messages"] = add_messages(state["messages"], [AIMessage(content=state["prompt_str"])])
         
+        # Update the internal state 
         self.state.update(state)
+        
+        # Log event counts for debugging
         logger.info(f"Final response: {state['prompt_str']}")
-        logger.info(f"Total analysis events sent from trigger: {analysis_events_sent}")
-        logger.info(f"Total knowledge events sent from trigger: {knowledge_events_sent}")
+        logger.info(f"Total analysis events: {analysis_events_sent}")
+        logger.info(f"Total knowledge events: {knowledge_events_sent}")
+        logger.info(f"Total next action events: {next_action_events_sent}")
         
         # Yield the final state as a special chunk
         yield {"state": state}

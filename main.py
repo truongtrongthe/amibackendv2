@@ -269,8 +269,8 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 # Initialize the brain with default configuration at startup
-DEFAULT_PINECONE_INDEX = "9well"
-DEFAULT_GRAPH_VERSION = "bd5b8bc1-d0cb-4e3e-9cd7-68a8563366fc"
+DEFAULT_PINECONE_INDEX = "dev"
+DEFAULT_GRAPH_VERSION = "54cb6723-4752-431b-9395-64936c40ccb9"
 
 # Initialize the brain singleton
 init_brain(

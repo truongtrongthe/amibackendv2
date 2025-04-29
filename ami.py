@@ -88,10 +88,24 @@ async def mc_node(state: State, config=None):
     
     logger.info(f"Analysis events received: {analysis_count} (complete: {complete_analysis_count})")
     logger.info(f"Final state has analysis: {'analysis' in final_state}")
+    
+    # Handle analysis in final state with proper indentation
     if 'analysis' in final_state:
-        analysis_content = final_state['analysis'].get('content', '')
-        analysis_str = analysis_content if isinstance(analysis_content, str) else str(analysis_content)
-        logger.info(f"Final analysis content: {analysis_str[:100]}...")
+        # CRITICAL FIX: Add proper type checking for analysis field
+        if isinstance(final_state['analysis'], dict):
+            analysis_content = final_state['analysis'].get('content', '')
+            analysis_str = analysis_content if isinstance(analysis_content, str) else str(analysis_content)
+            logger.info(f"Final analysis content: {analysis_str[:100]}...")
+        else:
+            # Handle case where analysis is a string or other non-dict type
+            analysis_str = str(final_state['analysis'])
+            logger.warning(f"Analysis is not a dict type (got {type(final_state['analysis']).__name__}). Content: {analysis_str[:100]}...")
+            # Convert to proper format to avoid issues later
+            final_state['analysis'] = {
+                "content": analysis_str,
+                "complete": True,
+                "type": "analysis"
+            }
     
     # Make ABSOLUTELY sure analysis is included in the final state
     if 'analysis' not in final_state:
@@ -228,6 +242,16 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
                     "type": "analysis", 
                     "content": content,
                     "complete": updated_state["analysis"].get("complete", False)
+                })
+                yield f"data: {analysis_json}\n\n"
+            elif "analysis" in updated_state:
+                # Handle case where analysis is not a dictionary
+                logger.warning(f"Analysis in state is not a dictionary, converting to proper format")
+                analysis_str = str(updated_state["analysis"])
+                analysis_json = json.dumps({
+                    "type": "analysis", 
+                    "content": analysis_str,
+                    "complete": True
                 })
                 yield f"data: {analysis_json}\n\n"
     else:

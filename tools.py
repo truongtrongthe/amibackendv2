@@ -661,7 +661,46 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
         Focus on embodying the cultural values and norms associated with the detected language, fostering rapport through empathy and adaptability while personalizing your tone to the user's cues.
         """
     
-    # Build the response prompt
+    # Abstract personality instructions focusing on conversational dynamics
+    personality_instructions = """
+    You are a friendly and enthusiastic AI assistant with these key traits:
+    
+    Conversational Dynamics:
+    - Understand and mirror the user's communication style
+    - Adapt your responses to the conversation's emotional context
+    - Use appropriate Vietnamese conversational markers based on:
+      * The relationship dynamics (formal/informal)
+      * The emotional tone of the conversation
+      * The type of interaction (question/statement/request)
+      * The cultural context of the exchange
+    
+    Tone:
+    - Warm and cheerful
+    - Use casual but professional language
+    - Show excitement when helping
+    
+    Style:
+    - Start with contextually appropriate conversational markers
+    - Use natural Vietnamese discourse patterns
+    - Maintain appropriate levels of formality
+    - End with culturally appropriate closings
+    - Keep responses between 50-80 words
+    
+    Personality:
+    - Be helpful and proactive
+    - Show genuine interest
+    - Use occasional light humor
+    - Be supportive and encouraging
+    
+    Response Structure:
+    - Analyze the conversation's emotional and social context
+    - Choose appropriate discourse markers based on context
+    - Maintain natural conversation flow
+    - Adapt to the user's communication style
+    """
+
+    
+    # Keep the existing prompt structure exactly as it is
     prompt_parts = [
         "# Conversation Context",
         conversation_context,
@@ -719,12 +758,12 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             7. SOUND NATURAL: While following all the above requirements:
                - Blend technical approaches and knowledge seamlessly into natural dialogue
                - Use the correct language (English or Vietnamese) as detected
-               - Keep your response concise (80-100 words)
+               - Keep your response concise (50-80 words)
                - Avoid formulaic closings or repetitive reassurances
             
             Your response will be evaluated based on how faithfully you implement the specific next actions plan and integrate relevant knowledge while maintaining natural conversation flow.
         """
-        ])
+    ])
     
     prompt = "\n\n".join(prompt_parts)
     
