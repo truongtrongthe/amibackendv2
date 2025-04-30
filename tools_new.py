@@ -14,13 +14,12 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from utilities import logger
 
-from brain_singleton import get_brain, get_current_graph_version
+from brain_singleton import get_brain
 from tool_helpers import (
     extract_structured_data_from_raw,
     detect_language,
     ensure_brain_loaded,
     optimize_knowledge_context,
-    format_knowledge_entry,
     build_analyse_profile_query,
     extract_key_knowledge
 )
@@ -191,370 +190,6 @@ COT_KNOWLEDGE_ANALYSIS_SCHEMA = {
     }
 }
 
-# OPTIMIZED TOOL HANDLERS
-# Combined analysis and next actions handler
-async def combined_analysis_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
-    """
-    Combined handler for context analysis and next actions with improved performance.
-    
-    Args:
-        params: Dictionary containing conversation_context, graph_version_id, 
-                knowledge_context (optional), and additional_instructions (optional)
-        
-    Yields:
-        Dict events with streaming results for both analysis and next actions
-    """
-    start_time = time.time()
-    PERF_METRICS["combined_analysis_start"] = start_time
-    
-    conversation_context = params.get("conversation_context", "")
-    graph_version_id = params.get("graph_version_id", "")
-    knowledge_context = params.get("knowledge_context", "")
-    additional_instructions = params.get("additional_instructions", "")
-    thread_id = params.get("_thread_id")
-    
-    # OPTIMIZATION: Skip profiling completely for faster analysis
-    profiling_instructions = {}
-    
-    # SUPER OPTIMIZATION: Just extract last user message for fastest analysis
-    last_user_message = ""
-    for line in conversation_context.strip().split('\n'):
-        if line.startswith("User:"):
-            last_user_message = line[5:].strip()
-    
-    if not last_user_message and conversation_context:
-        # If we couldn't extract it using the method above, take the last line
-        lines = conversation_context.strip().split('\n')
-        if lines:
-            last_line = lines[-1]
-            if last_line.startswith("User:"):
-                last_user_message = last_line[5:].strip()
-            else:
-                last_user_message = last_line
-    
-    # OPTIMIZATION: Ultra compact minimal prompt to reduce tokens dramatically
-    combined_prompt = f"""Analyze: {last_user_message}
-    
-Format: [ANALYSIS] brief intent/needs analysis [/ANALYSIS] [NEXT_ACTIONS] 3 numbered actions [/NEXT_ACTIONS]"""
-    
-    # Track prompt building time
-    PERF_METRICS["prompt_built"] = time.time()
-    logger.info(f"Ultra optimized minimal prompt built in {time.time() - start_time:.2f}s")
-    
-    # Track current section being processed
-    current_section = None
-    section_buffer = ""
-    analysis_content = ""
-    next_actions_content = ""
-    
-    # CRITICAL FIX: Set very short timeout for analysis
-    ANALYSIS_TIMEOUT = 3  # Reduce from 4 to 3 seconds maximum for analysis
-    
-    try:
-        # Stream a starting event for the frontend to show something is happening
-        # CRITICAL FIX: Format events exactly like knowledge events
-        analysis_start_event = {
-            "type": "analysis", 
-            "content": "Analyzing your message...", 
-            "complete": False,
-            # Add these fields to match knowledge events format
-            "status": "analyzing",
-            "thread_id": thread_id
-        }
-        logger.info(f"Sending initial analysis event: {analysis_start_event}")
-        yield analysis_start_event
-        
-        logger.info("Starting ultra-fast analysis")
-        
-        # FIX: Use a properly cancellable Task for the stream
-        stream_task = None
-        stream_gen = StreamLLM.astream(combined_prompt)
-        
-        try:
-            # Process with timeout
-            async with asyncio.timeout(ANALYSIS_TIMEOUT):
-                async for chunk in stream_gen:
-                    content = chunk.content
-                    
-                    # Process content to separate sections
-                    for line in content.split('\n'):
-                        if '[ANALYSIS]' in line:
-                            current_section = 'analysis'
-                            # Immediately send a starting event for the section
-                            analysis_section_event = {
-                                "type": "analysis", 
-                                "content": "", 
-                                "complete": False,
-                                "thread_id": thread_id,
-                                "status": "analyzing"
-                            }
-                            logger.info(f"Sending analysis section start event: {analysis_section_event}")
-                            yield analysis_section_event
-                            continue
-                        elif '[/ANALYSIS]' in line:
-                            # Complete analysis section
-                            analysis_complete_event = {
-                                "type": "analysis", 
-                                "content": analysis_content, 
-                                "complete": True,
-                                "thread_id": thread_id,
-                                "status": "complete"
-                            }
-                            logger.info(f"Sending analysis complete event with content length: {len(analysis_content)}")
-                            yield analysis_complete_event
-                            current_section = None
-                            continue
-                        elif '[NEXT_ACTIONS]' in line:
-                            current_section = 'next_actions'
-                            # Immediately send a starting event for the section
-                            next_actions_start_event = {
-                                "type": "next_actions", 
-                                "content": "", 
-                                "complete": False,
-                                "thread_id": thread_id,
-                                "status": "analyzing"
-                            }
-                            logger.info(f"Sending next_actions start event")
-                            yield next_actions_start_event
-                            continue
-                        elif '[/NEXT_ACTIONS]' in line:
-                            # Complete next actions section
-                            next_actions_complete_event = {
-                                "type": "next_actions", 
-                                "content": next_actions_content, 
-                                "complete": True,
-                                "thread_id": thread_id,
-                                "status": "complete"
-                            }
-                            logger.info(f"Sending next_actions complete event with content length: {len(next_actions_content)}")
-                            yield next_actions_complete_event
-                            current_section = None
-                            continue
-                        
-                        # Add content to appropriate section and stream as we go
-                        if current_section == 'analysis':
-                            analysis_content += line + "\n"
-                            # CRITICAL FIX: Stream every line immediately to frontend
-                            analysis_line_event = {
-                                "type": "analysis", 
-                                "content": line, 
-                                "complete": False,
-                                "thread_id": thread_id,
-                                "status": "analyzing"
-                            }
-                            logger.info(f"Sending analysis line event: {line[:30]}...")
-                            yield analysis_line_event
-                        elif current_section == 'next_actions':
-                            next_actions_content += line + "\n"
-                            # CRITICAL FIX: Stream every line immediately to frontend
-                            next_actions_line_event = {
-                                "type": "next_actions", 
-                                "content": line, 
-                                "complete": False,
-                                "thread_id": thread_id,
-                                "status": "analyzing"
-                            }
-                            logger.info(f"Sending next_actions line event: {line[:30]}...")
-                            yield next_actions_line_event
-        except asyncio.TimeoutError:
-            logger.warning(f"Analysis timed out after {ANALYSIS_TIMEOUT}s, using partial results")
-            # FIX: We don't need to and can't cancel a generator, it will be garbage collected
-            # Just log the timeout and continue
-            logger.info("Processing timed out, continuing with partial results")
-        except Exception as e:
-            logger.error(f"Error during streaming: {str(e)}")
-        
-        # Ensure we yield complete events for both sections if they weren't properly marked
-        if not analysis_content or "[ANALYSIS]" in analysis_content:
-            # Create simple analysis from user message
-            simple_analysis = f"User is asking about: {last_user_message[:50]}"
-            analysis_content = simple_analysis
-            fallback_analysis_event = {
-                "type": "analysis",
-                "content": simple_analysis,
-                "complete": True,
-                "thread_id": thread_id,
-                "status": "complete"
-            }
-            logger.info(f"Sending fallback analysis complete event: {simple_analysis}")
-            yield fallback_analysis_event
-        else:
-            # Store complete analysis in state for later reference
-            logger.info(f"Stored COMPLETE analysis in state: {analysis_content[:50]}...")
-        
-        if not next_actions_content or "[NEXT_ACTIONS]" in next_actions_content:
-            # Create very basic next actions
-            simple_actions = "1. Provide a helpful response\n2. Include relevant information\n3. Use appropriate tone"
-            next_actions_content = simple_actions
-            fallback_next_actions_event = {
-                "type": "next_actions",
-                "content": simple_actions,
-                "complete": True,
-                "thread_id": thread_id,
-                "status": "complete"
-            }
-            logger.info(f"Sending fallback next_actions complete event")
-            yield fallback_next_actions_event
-        
-        # Track completion time
-        PERF_METRICS["combined_analysis_end"] = time.time()
-        logger.info(f"Combined analysis completed in {time.time() - start_time:.2f}s")
-        
-    except Exception as e:
-        logger.error(f"Error in combined analysis: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        
-        # Always provide at least some analysis and next actions
-        simple_analysis = f"User is asking about: {last_user_message[:50]}"
-        simple_actions = "1. Provide a helpful response\n2. Include relevant information\n3. Use appropriate tone"
-        
-        emergency_analysis_event = {
-            "type": "analysis", 
-            "content": simple_analysis, 
-            "complete": True,
-            "thread_id": thread_id,
-            "status": "complete"
-        }
-        emergency_next_actions_event = {
-            "type": "next_actions", 
-            "content": simple_actions, 
-            "complete": True,
-            "thread_id": thread_id,
-            "status": "complete"
-        }
-        
-        logger.info("Sending emergency fallback events due to exception")
-        yield emergency_analysis_event
-        yield emergency_next_actions_event
-
-# Replace the existing ensure_brain_loaded function with this fixed version
-# that properly caches results of async functions, not the coroutines themselves
-_brain_load_cache = {}
-
-# Optimized knowledge query handler with batch processing and caching
-async def knowledge_query_handler(params: Dict) -> AsyncGenerator[Dict, None]:
-    """
-    Optimized handler for knowledge query requests with improved batch processing.
-    
-    Args:
-        params: Dictionary containing queries, graph_version_id, and optional top_k
-        
-    Yields:
-        Dict events with streaming knowledge query results
-    """
-    start_time = time.time()
-    PERF_METRICS["knowledge_query_start"] = start_time
-    
-    queries = params.get("queries", [])
-    graph_version_id = params.get("graph_version_id", "")
-    top_k = params.get("top_k", 3)
-    thread_id = params.get("_thread_id")  # Internal param for WebSocket
-    
-    # OPTIMIZATION: Reduce number of queries and simplify
-    # Limit number of queries to reduce processing time
-    if len(queries) > 3:  # Reduce from 5 to 3 for better performance
-        # Keep only the most specific queries (usually longer ones)
-        queries = sorted(queries, key=len, reverse=True)[:3]
-    
-    # CRITICAL FIX: Send an initial event to frontend to show progress
-    yield {"type": "knowledge", "content": [], "complete": False, "status": "searching"}
-    
-    # Handle empty queries
-    if not queries:
-        yield {"type": "knowledge", "content": [], "complete": True}
-        PERF_METRICS["knowledge_query_end"] = time.time()
-        return
-        
-    try:
-        # OPTIMIZATION: Skip brain loading if it's taking too long
-        # Set a very short timeout for brain loading
-        try:
-            async with asyncio.timeout(5.0):  # Increase from 3 to 5 second timeout
-                brain_loaded = await ensure_brain_loaded(graph_version_id)
-        except asyncio.TimeoutError:
-            logger.warning("Brain loading timed out, continuing with limited functionality")
-            brain_loaded = False
-            
-        if not brain_loaded:
-            logger.error(f"Failed to load brain for version {graph_version_id}")
-            yield {"type": "knowledge", "content": [], "complete": True, 
-                   "error": f"Knowledge database unavailable at this time"}
-            return
-        
-        # Get global brain instance
-        global brain
-        brain = get_brain()
-        
-        # OPTIMIZATION: Reduce batch size and top_k for faster processing
-        # Use smaller top_k to reduce processing time
-        optimized_top_k = min(top_k, 1)  # Limit to just 1 result per query for extreme speed
-        
-        # Process all queries at once for speed
-        all_results = []
-        seen_ids = set()
-        
-        # OPTIMIZATION: Set a timeout for the knowledge query
-        KNOWLEDGE_TIMEOUT = 10  # Increase from 8 to 10 seconds
-        
-        try:
-            # Process with timeout
-            async with asyncio.timeout(KNOWLEDGE_TIMEOUT):
-                try:
-                    # Just use the first query for extreme speed
-                    if queries:
-                        # OPTIMIZATION: Just use first query
-                        primary_query = queries[0]
-                        logger.info(f"Using primary query only: {primary_query}")
-                        
-                        results = await brain.get_similar_vectors_by_text(primary_query, top_k=optimized_top_k)
-                        
-                        for vector_id, vector, metadata, similarity in results:
-                            if vector_id not in seen_ids:
-                                seen_ids.add(vector_id)
-                                
-                                # OPTIMIZATION: Simplify result format
-                                # Only include essential fields
-                                result = {
-                                    "id": vector_id,
-                                    "similarity": float(similarity),
-                                    "raw": metadata.get("raw", ""),
-                                    "query": primary_query,
-                                }
-                                all_results.append(result)
-                        
-                        # Stream results
-                        if all_results:
-                            yield {"type": "knowledge", "content": all_results, "complete": False}
-                        
-                except Exception as query_error:
-                    logger.error(f"Primary query failed: {query_error}")
-                
-        except asyncio.TimeoutError:
-            logger.warning(f"Knowledge query timed out after {KNOWLEDGE_TIMEOUT}s, using partial results")
-        
-        # Final complete event with stats
-        yield {
-            "type": "knowledge", 
-            "content": all_results, 
-            "complete": True, 
-            "stats": {
-                "total_results": len(all_results),
-                "query_count": 1,  # We're only using one query now
-                "graph_version": get_current_graph_version(),
-                "processing_time": f"{time.time() - start_time:.2f}s"
-            }
-        }
-        logger.info(f"Completed knowledge search with {len(all_results)} total results in {time.time() - start_time:.2f}s")
-        PERF_METRICS["knowledge_query_end"] = time.time()
-        
-    except Exception as e:
-        logger.error(f"Error in knowledge query: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        yield {"type": "knowledge", "content": [], "complete": True, "error": str(e)}
-        PERF_METRICS["knowledge_query_end"] = time.time()
-
 # Optimized response generation handler
 async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]:
     """
@@ -602,9 +237,6 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     # Get the user portrait to include in the prompt
     user_understanding = format_user_profile_for_prompt(user_profile) if user_profile else ""
     
-    # Create simplified cultural instructions
-    cultural_instructions = f"Respond in {detected_language}. Use appropriate tone and detail level based on the user understanding."
-    
     # OPTIMIZATION: Simplify personality instructions if too long
     if personality_instructions and len(personality_instructions) > 500:
         personality_instructions = "You are a friendly and helpful AI assistant that responds appropriately to users' needs."
@@ -651,12 +283,6 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     RESPONSE_TIMEOUT = 7  # 7 seconds timeout
     
     # Response optimization components
-    response_processor = ResponseProcessor()
-    response_filter = ResponseFilter()
-    
-    # Check if this is the first message
-    is_first_message = "User:" in conversation_context and conversation_context.count("User:") <= 1
-    
     # OPTIMIZATION: Collect the full response with larger buffer size
     full_response = ""
     buffer = ""
@@ -854,72 +480,118 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
     except Exception as e:
         logger.error(f"Error in knowledge retrieval: {e}")
     
-    # STEP 3: Generate user analysis with actionable insights
+    # STEP 3: Generate user analysis with actionable insights and extract techniques
     analysis_content = ""
-    next_actions = []
+    approach_techniques = []
     try:
         # Format knowledge for the LLM
         knowledge_context = optimize_knowledge_context(user_analysis_knowledge, last_user_message) if user_analysis_knowledge else ""
-        
+        logger.info(f"Knowledge context for user analysis after step 2: {knowledge_context}")
         # Format user profile for the LLM
         profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
         
-        # Create a prompt for user analysis
+        # Create a comprehensive prompt for user analysis and technique extraction
         analysis_prompt = f"""
-        Based on the user's message and the following information, provide an analysis of their needs and appropriate next actions.
+        Based on the user's message, profile, and the knowledge found, analyze their needs and EXTRACT specific techniques and instructions from the KNOWLEDGE provided.
         
         USER MESSAGE: {last_user_message}
         
+        USER PROFILE:
         {profile_summary}
         
-        {f"RELEVANT KNOWLEDGE:\n{knowledge_context}" if knowledge_context else ""}
+        KNOWLEDGE (critically important - extract techniques and instructions from here):
+        {knowledge_context if knowledge_context else "No specific knowledge found."}
         
-        First, analyze the user's core needs and situation. Then, list THREE specific questions we should research to help them.
-        Format your response as:
+        Provide your response in this exact format:
         
         ANALYSIS: [Your detailed analysis of the user's needs and situation]
         
-        RESEARCH QUESTIONS:
-        1. [First specific question to research to help the user]
-        2. [Second specific question to research to help the user]
-        3. [Third specific question to research to help the user]
+        RECOMMENDED TECHNIQUES: [EXTRACT 2-3 specific techniques or approaches mentioned in the KNOWLEDGE that are appropriate for this user type. DO NOT invent techniques - only include ones found in the knowledge provided]
         
-        IMPORTANT: Respond in the SAME LANGUAGE that the user is using. If they write in Vietnamese, your analysis must be in Vietnamese. If they write in English, respond in English.
+        SPECIFIC INSTRUCTIONS: [EXTRACT any specific "what to do" instructions from the KNOWLEDGE that would help this user. These are concrete actions mentioned in the knowledge]
+        
+        KEY QUERIES: [List 1-2 specific queries we should search to find more implementation details about the techniques or instructions. These should help find "how to implement" the techniques]
+        
+        IMPORTANT: 
+        1. Respond in the SAME LANGUAGE that the user is using
+        2. ONLY extract techniques and instructions actually mentioned in the KNOWLEDGE
+        3. If no specific techniques or instructions are found in the knowledge, state "No specific techniques/instructions found in knowledge" and suggest what we should search for
         """
         
-        # Generate the analysis and research questions
-        logger.info("Generating user analysis with research questions")
+        # Generate the analysis, techniques, and key queries
+        logger.info("Generating comprehensive user analysis with techniques extracted from knowledge")
         response = await LLM.ainvoke(analysis_prompt)
         full_analysis = response.content if hasattr(response, 'content') else str(response)
         
-        # Parse out the analysis and research questions
+        # Parse out the analysis, techniques, instructions and key queries
         analysis_part = ""
-        research_questions = []
+        techniques_part = ""
+        instructions_part = ""
+        key_queries = []
+        approach_techniques = []
         
-        if "ANALYSIS:" in full_analysis and "RESEARCH QUESTIONS:" in full_analysis:
-            parts = full_analysis.split("RESEARCH QUESTIONS:")
-            analysis_part = parts[0].replace("ANALYSIS:", "").strip()
+        # Extract analysis
+        if "ANALYSIS:" in full_analysis:
+            parts = full_analysis.split("ANALYSIS:")[1].split("RECOMMENDED TECHNIQUES:")[0] if "RECOMMENDED TECHNIQUES:" in full_analysis else full_analysis.split("ANALYSIS:")[1]
+            analysis_part = parts.strip()
+        
+        # Extract techniques
+        if "RECOMMENDED TECHNIQUES:" in full_analysis:
+            parts = full_analysis.split("RECOMMENDED TECHNIQUES:")[1].split("SPECIFIC INSTRUCTIONS:")[0] if "SPECIFIC INSTRUCTIONS:" in full_analysis else full_analysis.split("RECOMMENDED TECHNIQUES:")[1]
+            techniques_part = parts.strip()
             
-            # Extract research questions
-            questions_text = parts[1].strip()
-            for line in questions_text.split('\n'):
-                if re.match(r'^\d+\.', line.strip()):
-                    question = re.sub(r'^\d+\.\s*', '', line.strip())
-                    if question:
-                        research_questions.append(question)
-        else:
-            # Fallback if format isn't followed
-            analysis_part = full_analysis
-            # Generate basic research questions based on user message
-            research_questions = [
-                f"Solutions for {last_user_message}",
-                f"Best practices related to {last_user_message}",
-                f"Resources available for {last_user_message}"
-            ]
+            # Process techniques into a list
+            for line in techniques_part.split('\n'):
+                line = line.strip()
+                if line and len(line) > 3 and "No specific techniques found" not in line:
+                    # Clean up the line (remove numbers, bullet points)
+                    technique = re.sub(r'^\s*[\d\.\-\*]+\s*', '', line)
+                    approach_techniques.append(technique)
+            
+            logger.info(f"Extracted {len(approach_techniques)} techniques from knowledge: {approach_techniques}")
         
-        # Store analysis content
+        # Extract specific instructions
+        if "SPECIFIC INSTRUCTIONS:" in full_analysis:
+            parts = full_analysis.split("SPECIFIC INSTRUCTIONS:")[1].split("KEY QUERIES:")[0] if "KEY QUERIES:" in full_analysis else full_analysis.split("SPECIFIC INSTRUCTIONS:")[1]
+            instructions_part = parts.strip()
+            logger.info(f"Extracted instructions from knowledge: {instructions_part[:100]}...")
+        
+        # Extract key queries
+        if "KEY QUERIES:" in full_analysis:
+            queries_text = full_analysis.split("KEY QUERIES:")[1].strip()
+            for line in queries_text.split('\n'):
+                if line.strip() and "No specific queries" not in line:
+                    # Clean up the line (remove numbers, bullet points)
+                    query = re.sub(r'^\s*[\d\.\-\*]+\s*', '', line.strip())
+                    if query and len(query) > 3:
+                        key_queries.append(query)
+        
+        # Fallback if format isn't followed
+        if not analysis_part:
+            analysis_part = full_analysis
+        
+        if not approach_techniques:
+            # Generate basic techniques based on user classification but mark as fallback
+            user_classification = user_profile.get("segment", {}).get("category", "general")
+            approach_techniques = [
+                f"Phương pháp tiếp cận nhóm {user_classification}"
+            ]
+            logger.info("No techniques found in knowledge - using fallback")
+        
+        if not key_queries:
+            # Generate basic key queries based on techniques or classification
+            if approach_techniques:
+                key_queries = [f"Cách thực hiện {approach_techniques[0]}"]
+            else:
+                user_classification = user_profile.get("segment", {}).get("category", "general")
+                key_queries = [f"Phương pháp điều trị cho nhóm {user_classification}"]
+            logger.info("No key queries extracted - using fallback")
+        
+        # Store analysis content, techniques and instructions
         analysis_content = analysis_part
         _last_cot_results["analysis_content"] = analysis_content
+        _last_cot_results["approach_techniques"] = approach_techniques
+        _last_cot_results["specific_instructions"] = instructions_part
         
         # Stream the analysis
         yield {
@@ -929,24 +601,27 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "thread_id": thread_id,
             "status": "complete",
             "user_profile": user_profile,
-            #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+            "techniques": approach_techniques,
+            "instructions": instructions_part
         }
-        logger.info("Analysis completed and streamed")
+        logger.info("Analysis and knowledge extraction completed and streamed")
         
-        # STEP 4: Generate action-oriented queries and fetch solution knowledge
-        logger.info(f"Generated {len(research_questions)} research questions: {research_questions}")
-        
-        # Collect solution knowledge
-        solution_knowledge = []
-        if brain_loaded and research_questions:
-            # Search for knowledge related to each research question
-            for question in research_questions:
-                results = await brain.get_similar_vectors_by_text(question, top_k=2)
+        #### BRIAN MOVED HERE BY 30-04-2025 ####
+        # STEP 4: Generate technique-specific queries and fetch implementation knowledge
+        technique_knowledge = []
+        if brain_loaded and approach_techniques:
+            for technique in approach_techniques[:2]:  # Limit to 2 techniques for efficiency
+                # Create a query about how to implement this technique
+                technique_query = f"Cách thực hiện {technique}"
+                logger.info(f"Searching for implementation knowledge with query: {technique_query}")
+                
+                # Search for knowledge about implementing this technique
+                results = await brain.get_similar_vectors_by_text(technique_query, top_k=2)
                 
                 # Process knowledge results
                 for vector_id, vector, metadata, similarity in results:
                     # Skip duplicates
-                    if any(entry.get("id") == vector_id for entry in solution_knowledge) or \
+                    if any(entry.get("id") == vector_id for entry in technique_knowledge) or \
                        any(entry.get("id") == vector_id for entry in user_analysis_knowledge):
                         continue
                     
@@ -958,28 +633,49 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         "similarity": float(similarity),
                         "raw": raw_text,
                         "structured": structured_data,
-                        "query": question,
-                        "phase": "solution_knowledge"
+                        "query": technique_query,
+                        "phase": "technique_implementation"
                     }
-                    solution_knowledge.append(entry)
+                    technique_knowledge.append(entry)
             
-            # Combine all knowledge entries
-            all_knowledge = user_analysis_knowledge + solution_knowledge
-            _last_cot_results["knowledge_entries"] = all_knowledge
-            
-            # Send updated knowledge results event
-            yield {
-                "type": "knowledge",
-                "content": all_knowledge,
-                "complete": False,
-                "thread_id": thread_id,
-                "status": "searching"
-            }
-            logger.info(f"Found {len(solution_knowledge)} additional knowledge entries for solutions")
+            if technique_knowledge:
+                logger.info(f"Found {len(technique_knowledge)} technique implementation knowledge entries")
         
-        # STEP 5: Generate next actions using solution knowledge
-        # Format the solution knowledge for the LLM
-        solution_context = optimize_knowledge_context(solution_knowledge, last_user_message) if solution_knowledge else ""
+        # STEP 4.5: Get additional knowledge from key queries
+        additional_knowledge = []
+        if brain_loaded and key_queries:
+            # Search for knowledge related to each key query
+            for query in key_queries:
+                results = await brain.get_similar_vectors_by_text(query, top_k=2)
+                
+                # Process knowledge results
+                for vector_id, vector, metadata, similarity in results:
+                    # Skip duplicates
+                    if any(entry.get("id") == vector_id for entry in additional_knowledge) or \
+                       any(entry.get("id") == vector_id for entry in technique_knowledge) or \
+                       any(entry.get("id") == vector_id for entry in user_analysis_knowledge):
+                        continue
+                    
+                    raw_text = metadata.get("raw", "")
+                    structured_data = extract_structured_data_from_raw(raw_text)
+                    
+                    entry = {
+                        "id": vector_id,
+                        "similarity": float(similarity),
+                        "raw": raw_text,
+                        "structured": structured_data,
+                        "query": query,
+                        "phase": "additional_knowledge"
+                    }
+                    additional_knowledge.append(entry)
+            
+            if additional_knowledge:
+                logger.info(f"Found {len(additional_knowledge)} additional knowledge entries from key queries")
+        #Brian: Step 3 & 4 is actually just the knowledge preparation. Step 5 is the actual next actions generation.
+        # STEP 5: Generate next actions using all collected knowledge
+        # Format the combined knowledge for the LLM
+        technique_context = optimize_knowledge_context(technique_knowledge, last_user_message) if technique_knowledge else ""
+        solution_context = optimize_knowledge_context(additional_knowledge, last_user_message) if additional_knowledge else ""
         
         # Create a prompt for generating actionable next steps
         actions_prompt = f"""
@@ -987,22 +683,32 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         USER MESSAGE: {last_user_message}
         
+        USER CLASSIFICATION: {user_profile.get("segment", {}).get("category", "general")}
+        
         OUR ANALYSIS:
         {analysis_content}
         
-        {f"SOLUTION KNOWLEDGE:\n{solution_context}" if solution_context else ""}
+        {f"RECOMMENDED TECHNIQUES FOR THIS USER TYPE:\n{technique_context}" if technique_context else ""}
+        
+        {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
         
         Provide 3 specific, practical next steps the user can take to address their needs. 
         Make these steps clear, actionable, and directly relevant to their situation.
         Format as a numbered list.
         
-        IMPORTANT: Respond in the SAME LANGUAGE that the user is using. If they write in Vietnamese, your next steps must be in Vietnamese. If they write in English, respond in English.
+        IMPORTANT INSTRUCTIONS:
+        1. FIRST, prioritize using the recommended techniques for this user type, as they are specifically chosen for users in this classification.
+        2. SECOND, incorporate the specific solutions that are most relevant to the user's situation.
+        3. Make each step concrete and actionable - tell them exactly what to do.
+        4. Respond in the SAME LANGUAGE that the user is using. If they write in Vietnamese, your next steps must be in Vietnamese. If they write in English, respond in English.
         """
         
         # Generate the next actions
         logger.info("Generating next actions based on solution knowledge")
         response = await LLM.ainvoke(actions_prompt)
         next_actions_content = response.content if hasattr(response, 'content') else str(response)
+
+        logger.info(f"Next actions content: {next_actions_content}")
         
         # Store and format next actions
         _last_cot_results["next_actions_content"] = next_actions_content
@@ -1014,8 +720,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "complete": True,
             "thread_id": thread_id,
             "status": "complete",
-            "user_profile": user_profile,
-            #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+            "user_profile": user_profile
         }
         logger.info("Next actions completed and streamed")
         
@@ -1030,23 +735,19 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                 "complete": True,
                 "thread_id": thread_id,
                 "status": "complete",
-                "user_profile": user_profile,
-                #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+                "user_profile": user_profile
             }
-        
-        # Send minimal next actions if error occurs
         yield {
             "type": "next_actions",
             "content": "1. Consider researching more about this topic\n2. Consult relevant resources\n3. Try a more specific query",
             "complete": True,
             "thread_id": thread_id,
             "status": "complete",
-            "user_profile": user_profile,
-            #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+            "user_profile": user_profile
         }
     
     # Complete the knowledge event
-    all_knowledge = user_analysis_knowledge + (solution_knowledge if 'solution_knowledge' in locals() else [])
+    all_knowledge = user_analysis_knowledge + (technique_knowledge if 'technique_knowledge' in locals() else []) + (additional_knowledge if 'additional_knowledge' in locals() else [])
     yield {
         "type": "knowledge",
         "content": all_knowledge,
@@ -1164,7 +865,6 @@ async def process_llm_with_tools(
         logger.info(f"Sending initial status event: {status_event}")
         yield status_event
         
-        # ==================== NEW CODE: USE CoT APPROACH ====================
         # Use the new CoT handler for combined knowledge retrieval, analysis, and next actions
         logger.info("Using Chain-of-Thought approach for combined knowledge and analysis")
         
@@ -1316,7 +1016,6 @@ async def process_llm_with_tools(
                     "thread_id": thread_id,
                     "status": "complete",
                     "user_profile": _last_cot_results.get("user_profile", {}),  # Include user profile
-                    "portrait": _last_cot_results.get("user_profile", {}).get("portrait", "")  # Add portrait for streaming
                 }
                 logger.info(f"Sending enhanced fallback next_actions with full user profile")
                 

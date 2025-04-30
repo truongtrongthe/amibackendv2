@@ -432,20 +432,25 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     
     # Use LLM to generate queries to analyze the user profile
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    prompt = f"""Generate 3 queries to find knowledge about how to help this user: {portrait}
+    prompt = f"""Extract key user classification and generate queries based on this portrait: {portrait}
 
-Goal: Create queries that will retrieve knowledge about how to approach users with this specific classification and psychological profile.
+                Goal: First identify the user classification/group/type, then create queries that will find knowledge about:
+                1. Understanding this user type's core characteristics
+                2. Best approaches for this user type
+                3. Specific next actions to take with this user type
 
-Your queries should follow this pattern:
-1. "How to approach/understand users in [extracted classification] category"
-2. "What are effective strategies for [user's psychological needs]"
-3. "Best practices for communicating with [user's communication style] users"
+                Your queries MUST follow this exact pattern:
+                1. "Understanding [user classification] users"
+                2. "Best approaches for [user classification] users"
+                3. "What to do next with [user classification] users"
 
-Extract the key classification, needs, and communication style from the profile and formulate queries accordingly.
-
-{language_hint}
-IMPORTANT: Respond in the SAME LANGUAGE as the user.
-"""
+                IMPORTANT INSTRUCTIONS:
+                - Extract ONLY the primary user classification (e.g., "Confident", "Discouraged", "Anxious", etc.)
+                - Use the EXACT SAME classification term in all three queries
+                - Keep the query patterns exactly as shown, only replacing [user classification]
+                - {language_hint}
+                - Respond in the SAME LANGUAGE as the user
+                """
 
     response = llm.invoke(prompt)
     
