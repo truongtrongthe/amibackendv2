@@ -484,9 +484,32 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
     analysis_content = ""
     approach_techniques = []
     try:
-        # Format knowledge for the LLM
-        knowledge_context = optimize_knowledge_context(user_analysis_knowledge, last_user_message) if user_analysis_knowledge else ""
-        logger.info(f"Knowledge context for user analysis after step 2: {knowledge_context}")
+        # Extract user classification from profile if available
+        user_classification = None
+        if user_profile and "segment" in user_profile and "category" in user_profile["segment"]:
+            user_classification = user_profile["segment"]["category"]
+        elif user_profile and "portrait" in user_profile:
+            # Try to extract classification from portrait using regex
+            classification_match = re.search(r'nhóm\s+(\w+\s+\w+|\w+)', user_profile["portrait"], re.IGNORECASE)
+            if classification_match:
+                user_classification = classification_match.group(1)
+            else:
+                # Try looking for classification in **bold** text
+                bold_match = re.search(r'\*\*([^*]+)\*\*', user_profile["portrait"])
+                if bold_match:
+                    user_classification = bold_match.group(1)
+        
+        logger.info(f"Extracted user classification for knowledge filtering: {user_classification}")
+        
+        # Format knowledge for the LLM, passing the user classification
+        knowledge_context = optimize_knowledge_context(
+            user_analysis_knowledge, 
+            last_user_message, 
+            target_classification=user_classification
+        ) if user_analysis_knowledge else ""
+        
+        logger.info(f"Knowledge context for user analysis after step 2: {knowledge_context[:200]}...")
+        
         # Format user profile for the LLM
         profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
         
@@ -674,8 +697,17 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         #Brian: Step 3 & 4 is actually just the knowledge preparation. Step 5 is the actual next actions generation.
         # STEP 5: Generate next actions using all collected knowledge
         # Format the combined knowledge for the LLM
-        technique_context = optimize_knowledge_context(technique_knowledge, last_user_message) if technique_knowledge else ""
-        solution_context = optimize_knowledge_context(additional_knowledge, last_user_message) if additional_knowledge else ""
+        technique_context = optimize_knowledge_context(
+            technique_knowledge, 
+            last_user_message, 
+            target_classification=user_classification
+        ) if technique_knowledge else ""
+        
+        solution_context = optimize_knowledge_context(
+            additional_knowledge, 
+            last_user_message,
+            target_classification=user_classification
+        ) if additional_knowledge else ""
         
         # Create a prompt for generating actionable next steps
         actions_prompt = f"""

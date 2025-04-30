@@ -60,15 +60,17 @@ def extract_structured_data_from_raw(raw_text: str) -> Dict[str, str]:
     
     return structured_data
 
-def optimize_knowledge_context(knowledge_entries: List[Dict], user_query: str, max_chars: int = 2500) -> str:
+def optimize_knowledge_context(knowledge_entries: List[Dict], user_query: str, max_chars: int = 2500, target_classification: str = None) -> str:
     """
     Optimize knowledge context by prioritizing and formatting relevant knowledge
-    entries for the prompt.
+    entries for the prompt. Improved to extract only relevant segments and filter
+    by classification when provided.
     
     Args:
         knowledge_entries: List of knowledge entry dictionaries
         user_query: Original user query for prioritization
         max_chars: Maximum characters allowed in the context
+        target_classification: Optional classification to filter relevant segments (e.g., "Chán Nản")
         
     Returns:
         Formatted knowledge context string
@@ -77,57 +79,111 @@ def optimize_knowledge_context(knowledge_entries: List[Dict], user_query: str, m
         return ""
     
     try:
-        # Step 1: Create a scoring function to prioritize entries
-        def score_entry(entry: Dict) -> float:
-            score = entry.get("similarity", 0)
-            
-            # Bonus for profile-matched entries
-            if entry.get("profile_match"):
-                score += 0.1
-            
-            # Bonus for entries from first phase
-            if entry.get("phase") == "initial":
-                score += 0.05
-            
-            # Bonus for entries with structured data
-            if entry.get("structured") and len(entry.get("structured", {})) > 0:
-                score += 0.03
-            
-            return score
+        # Extract target classification from user query if not provided
+        if not target_classification:
+            # Look for common classification terms in Vietnamese
+            classification_patterns = ["nhóm", "người dùng", "khách hàng"]
+            for pattern in classification_patterns:
+                match = re.search(f"{pattern} ([\\w\\s]+)", user_query, re.IGNORECASE)
+                if match:
+                    target_classification = match.group(1)
+                    break
         
-        # Step 2: Sort entries by score
-        sorted_entries = sorted(knowledge_entries, key=score_entry, reverse=True)
+        # Step 1: Split entries into relevant segments
+        segmented_entries = []
         
-        # Step 3: Format entries in priority order until max_chars is reached
+        for entry in knowledge_entries:
+            raw_text = entry.get("raw", "")
+            entry_id = entry.get("id", "unknown")
+            similarity = entry.get("similarity", 0)
+            query = entry.get("query", "")
+            phase = entry.get("phase", "unknown")
+            
+            # Split text into paragraphs
+            paragraphs = re.split(r'\n\n+', raw_text)
+            
+            # Process each paragraph as a potential segment
+            for i, para in enumerate(paragraphs):
+                # Skip empty paragraphs
+                if not para.strip():
+                    continue
+                
+                # Calculate relevance score
+                relevance = similarity  # Start with base similarity
+                
+                # Check for target classification in segment
+                if target_classification and target_classification.lower() in para.lower():
+                    relevance += 0.3  # Big boost for segments containing the target classification
+                
+                # Check for query terms in segment
+                query_terms = query.lower().split()
+                if query_terms:
+                    query_term_count = sum(1 for term in query_terms if term.lower() in para.lower())
+                    relevance += 0.1 * (query_term_count / len(query_terms))
+                
+                # Check for specific section indicators
+                if re.search(r'(Title:|Description:|Application:|Takeaways:)', para):
+                    relevance += 0.15
+                
+                # Boost for first paragraph (often contains key information)
+                if i == 0:
+                    relevance += 0.05
+                
+                # Store the segment with its calculated relevance
+                segmented_entries.append({
+                    "text": para,
+                    "relevance": relevance,
+                    "id": f"{entry_id}_{i}",
+                    "phase": phase
+                })
+        
+        # Step 2: Sort segments by relevance
+        sorted_segments = sorted(segmented_entries, key=lambda x: x["relevance"], reverse=True)
+        
+        # Step 3: Format segments in priority order until max_chars is reached
         formatted_context = ""
-        added_ids = set()
+        added_segment_ids = set()
         
-        for entry in sorted_entries:
-            # Skip if already added
-            if entry.get("id") in added_ids:
+        for segment in sorted_segments:
+            # Skip if already added (based on unique segment ID)
+            if segment["id"] in added_segment_ids:
                 continue
             
-            # Format this entry
-            entry_text = format_knowledge_entry(entry)
+            # Format the segment text
+            segment_text = segment["text"].strip()
+            
+            # Add phase indicator for clarity
+            if segment["phase"] == "user_analysis":
+                phase_marker = "[User Type Knowledge]"
+            elif segment["phase"] == "technique_implementation":
+                phase_marker = "[Technique Implementation]"
+            elif segment["phase"] == "additional_knowledge":
+                phase_marker = "[Additional Knowledge]"
+            else:
+                phase_marker = ""
+            
+            # Format the segment with phase marker if available
+            formatted_segment = f"{phase_marker}\n{segment_text}" if phase_marker else segment_text
             
             # Check if adding this would exceed max chars
-            if len(formatted_context) + len(entry_text) <= max_chars:
-                formatted_context += entry_text + "\n\n"
-                added_ids.add(entry.get("id"))
+            if len(formatted_context) + len(formatted_segment) + 2 <= max_chars:  # +2 for newlines
+                formatted_context += formatted_segment + "\n\n"
+                added_segment_ids.add(segment["id"])
             else:
-                # If we can't add more full entries, we're done
+                # If we can't add more full segments, we're done
                 break
         
+        logger.info(f"Optimized knowledge context: {len(formatted_context)} chars from {len(segmented_entries)} segments")
         return formatted_context.strip()
     
     except Exception as e:
         logger.error(f"Error optimizing knowledge context: {str(e)}")
         # Fallback: just concatenate raw text of first few entries
         fallback_text = ""
-        for entry in knowledge_entries[:3]:
+        for entry in knowledge_entries[:2]:
             raw = entry.get("raw", "")
             if raw:
-                fallback_text += raw[:500] + "...\n\n"  # Truncate each entry
+                fallback_text += raw[:300] + "...\n\n"  # Truncate each entry
         
         return fallback_text[:max_chars]
 
@@ -426,32 +482,56 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     logger.info(f"User profile portrait: {portrait[:500]}...")
     
     # Determine the language based on the portrait
-    language_hint = ""
-    if "tiếng Việt" in portrait.lower() or "vietnamese" in portrait.lower():
-        language_hint = "Return the queries in Vietnamese language."
+    is_vietnamese = False
+    if "tiếng Việt" in portrait.lower() or "vietnamese" in portrait.lower() or any(char in "ăâêôơưđ" for char in portrait):
+        is_vietnamese = True
+        language_hint = "Trả lời hoàn toàn bằng tiếng Việt. Tạo các câu truy vấn bằng tiếng Việt."
+    else:
+        language_hint = "Return the queries in English."
+    
+    # Default language detection if no profile is available
+    if not portrait:
+        is_vietnamese = True  # Default to Vietnamese for this application
     
     # Use LLM to generate queries to analyze the user profile
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     prompt = f"""Extract key user classification and generate queries based on this portrait: {portrait}
 
-                Goal: First identify the user classification/group/type, then create queries that will find knowledge about:
-                1. Understanding this user type's core characteristics
-                2. Best approaches for this user type
-                3. Specific next actions to take with this user type
+        Goal: First identify the user classification/group/type, then create queries that will find knowledge about:
+        1. Understanding this user type's core characteristics
+        2. Best approaches for this user type
+        3. Specific next actions to take with this user type
 
-                Your queries MUST follow this exact pattern:
-                1. "Understanding [user classification] users"
-                2. "Best approaches for [user classification] users"
-                3. "What to do next with [user classification] users"
+        {language_hint}
 
-                IMPORTANT INSTRUCTIONS:
-                - Extract ONLY the primary user classification (e.g., "Confident", "Discouraged", "Anxious", etc.)
-                - Use the EXACT SAME classification term in all three queries
-                - Keep the query patterns exactly as shown, only replacing [user classification]
-                - {language_hint}
-                - Respond in the SAME LANGUAGE as the user
-                """
+        Your queries MUST follow this exact pattern:
+        """
 
+    # Add language-specific query patterns
+    if is_vietnamese:
+        prompt += """
+        1. "Hiểu về người dùng nhóm [phân loại người dùng]"
+        2. "Phương pháp tiếp cận nhóm [phân loại người dùng]"
+        3. "Những việc cần làm với nhóm [phân loại người dùng]"
+
+        IMPORTANT INSTRUCTIONS:
+        - Extract ONLY the primary user classification (e.g., "Chán Nản", "Tự Tin", "Lo Lắng", etc.)
+        - Use the EXACT SAME classification term in all three queries
+        - Keep the query patterns exactly as shown, only replacing [phân loại người dùng]
+        - ENSURE ALL QUERIES ARE COMPLETELY IN VIETNAMESE
+        """
+    else:
+        prompt += """
+        1. "Understanding [user classification] users"
+        2. "Best approaches for [user classification] users"
+        3. "What to do next with [user classification] users"
+
+        IMPORTANT INSTRUCTIONS:
+        - Extract ONLY the primary user classification (e.g., "Discouraged", "Confident", "Anxious", etc.)
+        - Use the EXACT SAME classification term in all three queries
+        - Keep the query patterns exactly as shown, only replacing [user classification]
+        - ENSURE ALL QUERIES ARE COMPLETELY IN ENGLISH
+        """
     response = llm.invoke(prompt)
     
     # Extract the response content
@@ -462,15 +542,27 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     for line in content.split('\n'):
         if re.match(r'^\s*\d+[\.\)]', line):  # Line starts with a number followed by . or )
             query = re.sub(r'^\s*\d+[\.\)]\s*', '', line).strip()
-            # Remove markdown formatting (** at beginning and end)
+            # Remove markdown formatting (** at beginning and end) and quotes
             query = re.sub(r'^\*\*(.*)\*\*$', r'\1', query)
+            query = re.sub(r'^["\'](.*)["\']$', r'\1', query)
             if query:
                 queries.append(query)
     
-    # If no queries were found, use the full content as a single query
+    # If no queries were found, use fallback queries based on detected language
     if not queries:
         segment = user_profile.get("segment", {}).get("category", "general")
-        queries = [f"Knowledge about {segment} users"]
+        if is_vietnamese:
+            queries = [
+                f"Hiểu về người dùng nhóm {segment}",
+                f"Phương pháp tiếp cận nhóm {segment}",
+                f"Những việc cần làm với nhóm {segment}"
+            ]
+        else:
+            queries = [
+                f"Understanding {segment} users",
+                f"Best approaches for {segment} users",
+                f"What to do next with {segment} users"
+            ]
     
     logger.info(f"Generated {len(queries)} analysis queries: {queries}")
     return queries
