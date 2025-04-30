@@ -21,6 +21,7 @@ from tool_helpers import (
     ensure_brain_loaded,
     optimize_knowledge_context,
     format_knowledge_entry,
+    build_analyse_profile_query,
     extract_key_knowledge
 )
 from profile_helper import (
@@ -742,8 +743,12 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
 # Add the Chain of Thought handler
 async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator[Dict, None]:
     """
-    Chain-of-Thought handler that combines knowledge retrieval with analysis and next actions.
-    Enhanced with user profiling for more targeted knowledge retrieval and analysis.
+    Simplified Chain-of-Thought handler with a linear approach:
+    1) Generate profile-enhanced queries
+    2) Fetch knowledge for user analysis
+    3) Generate action-oriented queries 
+    4) Fetch solution knowledge
+    5) Implement next actions
     
     Args:
         params: Dictionary containing conversation_context, graph_version_id
@@ -752,7 +757,6 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         Dict events with streaming results for knowledge, analysis, and next actions
     """
     start_time = time.time()
-    PERF_METRICS["cot_handler_start"] = start_time
     
     # Access the global variable to store results
     global _last_cot_results
@@ -761,15 +765,14 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         "next_actions_content": "",
         "knowledge_entries": [],
         "knowledge_context": "",
-        "user_profile": {}  # Add user profile to results
+        "user_profile": {}
     }
     
     conversation_context = params.get("conversation_context", "")
     graph_version_id = params.get("graph_version_id", "")
     thread_id = params.get("_thread_id")
     
-    # Extract user message for knowledge retrieval - IMPROVED to capture up to 30 recent messages
-    # This better captures the conversation context and history
+    # Extract user message for knowledge retrieval
     recent_messages = []
     for line in conversation_context.strip().split('\n'):
         if line.startswith("User:") or line.startswith("AI:"):
@@ -785,615 +788,286 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             last_user_message = line[5:].strip()
             break
     
-    # Create a comprehensive context string from recent messages
+    # Create a comprehensive context from recent messages
     context_window = "\n".join(recent_messages)
     
-    logger.info(f"Starting CoT processing with context of {len(recent_messages)} messages")
-    logger.info(f"Most recent query: '{last_user_message[:30]}...'")
+    logger.info(f"Starting simplified CoT with context of {len(recent_messages)} messages")
+    logger.info(f"User query: '{last_user_message}'")
     
-    # 1. First, emit initial events to show progress
+    # STEP 1: Begin analysis and build user profile
     # Send analysis starting event
-    analysis_start_event = {
+    yield {
         "type": "analysis",
-        "content": "Analyzing your message and building knowledge-enhanced profile...",
+        "content": "Analyzing your message...",
         "complete": False,
         "thread_id": thread_id,
         "status": "analyzing"
     }
-    logger.info(f"Sending initial CoT analysis event: {analysis_start_event}")
-    yield analysis_start_event
     
-    # NEW STEP: Build knowledge-enhanced user profile
-    logger.info("Building knowledge-enhanced user profile")
-    user_profile = await build_user_profile(context_window, last_user_message, graph_version_id)
-    _last_cot_results["user_profile"] = user_profile  # Store for future use
+    # Build user profile
+    try:
+        user_profile = await build_user_profile(context_window, last_user_message, graph_version_id)
+        _last_cot_results["user_profile"] = user_profile
+        logger.info(f"User profile built successfully: {user_profile}")
+    except Exception as e:
+        logger.error(f"Error building user profile: {e}")
+        user_profile = {"portrait": f"User query: {last_user_message}"}
     
-    # Log profile enhancement results
-    logger.info(f"User profile built with method: {user_profile.get('method', 'unknown')}")
-    logger.info(f"Profile has {user_profile.get('knowledge_sources', 0)} knowledge sources")
-    
-    # Generate enhanced search queries based on the knowledge-enhanced profile
-    emotional_states = user_profile.get("emotional_state", {}).get("current", [])
-    emotional_state = emotional_states[0] if emotional_states else "neutral"
-    #enhanced_queries = generate_profile_enhanced_queries(last_user_message, user_profile)
-    enhanced_queries = []
-    logger.info(f"Generated {len(enhanced_queries)} knowledge-enhanced queries: {enhanced_queries}")
-    
-    # Send knowledge search starting event
-    knowledge_start_event = {
+    # STEP 2: Generate profile-enhanced queries and fetch knowledge
+    yield {
         "type": "knowledge",
         "content": [],
         "complete": False,
-        "status": "searching",
-        "thread_id": thread_id
+        "thread_id": thread_id,
+        "status": "searching"
     }
-    logger.info(f"Sending knowledge start event for CoT: {knowledge_start_event}")
-    yield knowledge_start_event
     
-    # 2. Retrieve knowledge using profile-enhanced queries
-    knowledge_entries = []
-    structured_knowledge = []  # To store extracted structured data
-    knowledge_context = ""
-    
+    user_analysis_knowledge = []
     try:
-        # Make sure brain is loaded
-        brain_loaded = False
-        try:
-            # Set short timeout for brain loading
-            async with asyncio.timeout(5.0):  # Increase from 3 to 5 seconds
-                brain_loaded = await ensure_brain_loaded(graph_version_id)
-        except asyncio.TimeoutError:
-            logger.warning("Brain loading timed out in CoT, continuing with limited functionality")
-            brain_loaded = False
-            
+        # Generate profile-enhanced queries
+        enhanced_queries = build_analyse_profile_query(user_profile)
+        logger.info(f"Generated {len(enhanced_queries)} profile queries: {enhanced_queries}")
+        
+        # Load the brain for knowledge retrieval
+        brain_loaded = await ensure_brain_loaded(graph_version_id)
+        
         if brain_loaded:
-            # Get global brain instance
             global brain
             brain = get_brain()
             
-            # Use profile-enhanced queries for more targeted search
-            # Use a short timeout for knowledge query
-            KNOWLEDGE_TIMEOUT = 10  # Increase from 8 to 10 seconds
-            
-            try:
-                # Process with timeout
-                async with asyncio.timeout(KNOWLEDGE_TIMEOUT):
-                    # HYBRID APPROACH - Phase 1: Profile-enhanced knowledge retrieval
-                    logger.info(f"CoT PHASE 1: Profile-enhanced knowledge queries: {enhanced_queries[:2]}")
+            # Fetch knowledge using enhanced queries (limit to first 3 queries)
+            for query in enhanced_queries[:3]:
+                results = await brain.get_similar_vectors_by_text(query, top_k=2)
+                
+                # Process knowledge results
+                for vector_id, vector, metadata, similarity in results:
+                    # Skip duplicates
+                    if any(entry.get("id") == vector_id for entry in user_analysis_knowledge):
+                        continue
                     
-                    # Use top 2 profile-enhanced queries for better results
-                    for query_idx, enhanced_query in enumerate(enhanced_queries[:2]):
-                        initial_results = await brain.get_similar_vectors_by_text(enhanced_query, top_k=3)
-                        
-                        # Process initial knowledge results
-                        for vector_id, vector, metadata, similarity in initial_results:
-                            # Skip duplicates
-                            if any(entry.get("id") == vector_id for entry in knowledge_entries):
-                                continue
-                                
-                            raw_text = metadata.get("raw", "")
-                            structured_data = extract_structured_data_from_raw(raw_text)
-                            
-                            entry = {
-                                "id": vector_id,
-                                "similarity": float(similarity),
-                                "raw": raw_text,
-                                "structured": structured_data,
-                                "query": enhanced_query,
-                                "phase": "initial",
-                                "profile_match": True  # Mark as profile-matched
-                            }
-                            knowledge_entries.append(entry)
-                            
-                            if structured_data:
-                                structured_knowledge.append(structured_data)
+                    raw_text = metadata.get("raw", "")
+                    structured_data = extract_structured_data_from_raw(raw_text)
                     
-                    # Stream initial knowledge results
-                    if knowledge_entries:
-                        knowledge_event = {
-                            "type": "knowledge",
-                            "content": knowledge_entries,
-                            "complete": False,
-                            "thread_id": thread_id,
-                            "status": "searching"
-                        }
-                        logger.info(f"CoT PHASE 1: Found {len(knowledge_entries)} initial knowledge entries with profile-enhanced queries")
-                        yield knowledge_event
-                    
-                    # HYBRID APPROACH - Phase 2: Initial Analysis with Profile + Knowledge
-                    # Perform quick analysis on initial results before expanded search
-                    analysis_from_initial = ""
-                    if knowledge_entries:
-                        # Extract key insights based on user profile and initial knowledge
-                        segment = user_profile["segment"]["category"]
-                        emotion = emotional_state
-                        
-                        # Generate a brief analysis text based on profile and initial knowledge
-                        analysis_from_initial = f"User appears to be in {segment} segment with {emotion} emotional state. "
-                        
-                        # Extract relevant topics from knowledge
-                        topics = []
-                        for entry in knowledge_entries:
-                            if entry.get("structured", {}).get("title"):
-                                topics.append(entry["structured"]["title"])
-                        
-                        if topics:
-                            analysis_from_initial += f"Initial knowledge suggests interest in: {', '.join(topics[:3])}"
-                        
-                        logger.info(f"Generated initial analysis for Phase 2: {analysis_from_initial}")
-                    
-                    # HYBRID APPROACH - Phase 3: Expanded Knowledge with Analysis + Profile
-                    if knowledge_entries:
-                        # Extract key concepts from initial knowledge to inform expanded search
-                        search_terms = []
-                        key_concepts = set()
-                        
-                        # 1. First extract from cluster connections with enhanced parsing for Vietnamese
-                        for entry in knowledge_entries:
-                            structured = entry.get("structured", {})
-                            if structured and "cross_cluster_connections" in structured:
-                                connections_text = structured["cross_cluster_connections"]
-                                
-                                # Try to extract cluster references (e.g., "Cluster 8") for Vietnamese
-                                cluster_refs = re.findall(r'Cluster (\d+)', connections_text)
-                                for cluster_num in cluster_refs[:3]:
-                                    key_concepts.add(f"Cluster {cluster_num}")
-                                
-                                # Extract phrases that might be between quotes
-                                key_phrases = re.findall(r'"([^"]+)"|"([^"]+)"', connections_text)
-                                for phrase in key_phrases[:2]:
-                                    if isinstance(phrase, tuple):
-                                        phrase = next((p for p in phrase if p), "")
-                                    if phrase:
-                                        key_concepts.add(phrase)
-                                
-                                # If normal splitting would work better for other languages
-                                if not cluster_refs and not key_phrases:
-                                    concepts = connections_text.split(", ")
-                                    for concept in concepts[:3]:
-                                        key_concepts.add(concept)
-                        
-                        # 2. Then extract titles and themes
-                        for entry in knowledge_entries:
-                            structured = entry.get("structured", {})
-                            if structured and "title" in structured:
-                                key_concepts.add(structured["title"])
-                        
-                        # 3. Add key concepts as search terms
-                        search_terms = list(key_concepts)[:3]
-                        
-                        # 4. Create search term from initial analysis
-                        if analysis_from_initial:
-                            # Extract the most information-rich part
-                            if "interest in:" in analysis_from_initial:
-                                interests_part = analysis_from_initial.split("interest in:")[1].strip()
-                                search_terms.append(interests_part)
-                            
-                        # 5. Add user profile information as search terms
-                        profile_term = ""
-                        knowledge_areas = user_profile.get("query_characteristics", {}).get("knowledge_areas", [])
-                        if knowledge_areas:
-                            profile_term += " ".join(knowledge_areas)
-                        if user_profile["segment"]["category"] != "general":
-                            profile_term += f" {user_profile['segment']['category']}"
-                        if profile_term:
-                            search_terms.append(f"{last_user_message} {profile_term}")
-                        
-                        # 6. Also generate a search term based on context window
-                        if context_window:
-                            context_query = " ".join(recent_messages[-3:])
-                            if context_query and context_query != last_user_message:
-                                search_terms.append(context_query)
-                        
-                        logger.info(f"CoT PHASE 3: Expanded search with terms: {search_terms}")
-                        
-                        # Track existing IDs to avoid duplicates
-                        existing_ids = {entry["id"] for entry in knowledge_entries}
-                        
-                        # Execute expanded searches
-                        for term in search_terms:
-                            expanded_results = await brain.get_similar_vectors_by_text(term, top_k=1)
-                            
-                            # Process additional knowledge results
-                            for vector_id, vector, metadata, similarity in expanded_results:
-                                # Skip if we already have this entry
-                                if vector_id in existing_ids:
-                                    continue
-                                    
-                                existing_ids.add(vector_id)
-                                raw_text = metadata.get("raw", "")
-                                structured_data = extract_structured_data_from_raw(raw_text)
-                                
-                                entry = {
-                                    "id": vector_id,
-                                    "similarity": float(similarity),
-                                    "raw": raw_text,
-                                    "structured": structured_data,
-                                    "query": term,
-                                    "phase": "expanded"
-                                }
-                                knowledge_entries.append(entry)
-                                
-                                if structured_data:
-                                    structured_knowledge.append(structured_data)
-                        
-                        # Stream the expanded results
-                        if len(knowledge_entries) > 0:
-                            expanded_event = {
-                                "type": "knowledge",
-                                "content": knowledge_entries,
-                                "complete": False,
-                                "thread_id": thread_id,
-                                "status": "searching"
-                            }
-                            
-                            logger.info(f"CoT PHASE 3: Additional knowledge found, now {len(knowledge_entries)} total entries")
-                            yield expanded_event
-            
-            except asyncio.TimeoutError:
-                logger.warning(f"CoT knowledge query timed out after {KNOWLEDGE_TIMEOUT}s")
-                # Ensure Phase 3 properly completes even with timeout
-                if knowledge_entries:
-                    yield {
-                        "type": "knowledge",
-                        "content": knowledge_entries,
-                        "complete": True,
-                        "thread_id": thread_id,
-                        "status": "complete",
-                        "stats": {"total_results": len(knowledge_entries)},
-                        "note": "Partial results due to timeout"
+                    entry = {
+                        "id": vector_id,
+                        "similarity": float(similarity),
+                        "raw": raw_text,
+                        "structured": structured_data,
+                        "query": query,
+                        "phase": "user_analysis"
                     }
-            except Exception as e:
-                logger.error(f"Error in CoT knowledge query: {e}")
-                # Ensure Phase 3 completes with error status
+                    user_analysis_knowledge.append(entry)
+            
+            # Send knowledge results event
+            if user_analysis_knowledge:
                 yield {
                     "type": "knowledge",
-                    "content": knowledge_entries,
-                    "complete": True,
+                    "content": user_analysis_knowledge,
+                    "complete": False,
                     "thread_id": thread_id,
-                    "status": "complete",
-                    "stats": {"total_results": len(knowledge_entries)},
-                    "error": f"Error in knowledge retrieval: {str(e)}"
+                    "status": "searching"
                 }
-            
-            # Send knowledge complete event
-            yield {
-                "type": "knowledge",
-                "content": knowledge_entries,
-                "complete": True,
-                "thread_id": thread_id,
-                "status": "complete",
-                "stats": {"total_results": len(knowledge_entries)}
-            }
-            
-            # Format knowledge context for the prompt using the optimized function
-            if knowledge_entries:
-                # Use the new optimized formatter rather than the old approach
-                knowledge_context = optimize_knowledge_context(knowledge_entries, last_user_message, max_chars=2500)
-                logger.info(f"Created optimized knowledge context: {len(knowledge_context)} chars")
-            else:
-                # Fall back to empty knowledge context if no entries found
-                knowledge_context = ""
-                logger.warning("No knowledge entries found, knowledge context will be empty")
-            
-            # Now perform combined analysis and next actions with knowledge context and user profile
-            current_section = None
-            analysis_content = ""
-            next_actions_content = ""
-            
-            # Build an enhanced CoT prompt with structured knowledge and user profile
-            # Format the user profile for the prompt
-            profile_summary = format_user_profile_for_prompt(user_profile)
-            logger.info(f"User profile for CoT: {profile_summary}")
-            
-            cot_prompt = f"""
-            You are an AI assistant using Implicit Chain-of-Thought reasoning to help users effectively.
-            
-            CONVERSATION CONTEXT:
-            {context_window}
-            
-            {profile_summary}
-            
-            {f"RELEVANT KNOWLEDGE:\n{knowledge_context}" if knowledge_context else "NO RELEVANT KNOWLEDGE FOUND."}
-            
-            Based on the conversation context, user profile, and provided knowledge:
-            
-            [ANALYSIS]
-            Analyze the user's core needs based on their message and the user understanding provided above.
-            Consider the context of their query, their language preferences, communication style, and emotional state.
-            
-            Address how the knowledge can specifically help this user with their query.
-            
-            If this is a health-related concern, especially regarding sexual health, consider the sensitivity and importance of this topic to the user, potential embarrassment, and psychological impacts.
-            [/ANALYSIS]
-            
-            [NEXT_ACTIONS]
-            1. Most important action tailored to this user profile
-            2. Secondary action considering their communication preferences  
-            3. Additional action if needed based on their emotional state
-            
-            For health topics, especially sensitive ones like sexual health:
-            - Prioritize factual medical information
-            - Provide empathetic and non-judgmental responses
-            - Consider suggesting professional medical consultation when appropriate
-            - Maintain a respectful and compassionate tone throughout
-            
-            Each action should be concise, practical, and directly applicable to this specific user.
-            [/NEXT_ACTIONS]
-            """
-            
-            # Set timeout for combined analysis
-            COT_TIMEOUT = 30  # seconds
-            
-            logger.info("Starting enhanced CoT LLM stream with structured knowledge and user profile")
-            try:
-                # Stream the CoT analysis with timeout
-                stream_gen = StreamLLM.astream(cot_prompt)
-                
-                try:
-                    # Process with timeout
-                    async with asyncio.timeout(COT_TIMEOUT):
-                        async for chunk in stream_gen:
-                            content = chunk.content
-                            
-                            # Process content to separate sections
-                            for line in content.split('\n'):
-                                if '[ANALYSIS]' in line:
-                                    current_section = 'analysis'
-                                    # Send analysis section start event
-                                    yield {
-                                        "type": "analysis",
-                                        "content": "",
-                                        "complete": False,
-                                        "thread_id": thread_id,
-                                        "status": "analyzing"
-                                    }
-                                    continue
-                                elif '[/ANALYSIS]' in line:
-                                    # Complete analysis section
-                                    analysis_complete_event = {
-                                        "type": "analysis",
-                                        "content": analysis_content,
-                                        "complete": True,
-                                        "thread_id": thread_id,
-                                        "status": "complete",
-                                        "search_terms": [],
-                                        "user_profile": user_profile  # Include user profile in result
-                                    }
-                                    yield analysis_complete_event
-                                    current_section = None
-                                    continue
-                                elif '[NEXT_ACTIONS]' in line:
-                                    current_section = 'next_actions'
-                                    # Send next_actions section start event
-                                    yield {
-                                        "type": "next_actions",
-                                        "content": "",
-                                        "complete": False,
-                                        "thread_id": thread_id,
-                                        "status": "analyzing"
-                                    }
-                                    continue
-                                elif '[/NEXT_ACTIONS]' in line:
-                                    # Complete next_actions section
-                                    next_actions_complete_event = {
-                                        "type": "next_actions",
-                                        "content": next_actions_content,
-                                        "complete": True,
-                                        "thread_id": thread_id,
-                                        "status": "complete",
-                                        "user_profile": user_profile  # Include user profile in result
-                                    }
-                                    yield next_actions_complete_event
-                                    current_section = None
-                                    continue
-                                
-                                # Add content to appropriate section and stream
-                                if current_section == 'analysis':
-                                    analysis_content += line + "\n"
-                                    # Stream analysis line
-                                    yield {
-                                        "type": "analysis",
-                                        "content": line,
-                                        "complete": False,
-                                        "thread_id": thread_id,
-                                        "status": "analyzing"
-                                    }
-                                elif current_section == 'next_actions':
-                                    next_actions_content += line + "\n"
-                                    # Stream next_actions line
-                                    yield {
-                                        "type": "next_actions",
-                                        "content": line,
-                                        "complete": False,
-                                        "thread_id": thread_id,
-                                        "status": "analyzing" 
-                                    }
-                
-                except asyncio.TimeoutError:
-                    logger.warning(f"CoT analysis timed out after {COT_TIMEOUT}s, using partial results")
-                    logger.info("CoT processing timed out, continuing with partial results")
-                    
-                except Exception as e:
-                    logger.error(f"Error in CoT analysis streaming: {e}")
-                    logger.error(traceback.format_exc())
-                
-                # Now check the module-level variable for results if needed
-                if not analysis_content:
-                    # Instead of creating a simple fallback, use the actual user profile to create a more detailed analysis
-                    if user_profile and "portrait" in user_profile:
-                        # Extract key information from the portrait
-                        portrait = user_profile.get("portrait", "")
-                        
-                        # Create a more informative analysis based on the user profile
-                        analysis_content = f"Based on user profile: {portrait[:300]}..."
-                    else:
-                        # Only if no user profile is available, fall back to simple analysis
-                        analysis_content = f"User is asking about: {last_user_message[:100]}"
-                    
-                    # Create a proper analysis event with the full user profile
-                    fallback_analysis_event = {
-                        "type": "analysis",
-                        "content": analysis_content,
-                        "complete": True,
-                        "thread_id": thread_id,
-                        "status": "complete",
-                        "search_terms": [],
-                        "user_profile": user_profile  # Always include the full user profile
-                    }
-                    logger.info(f"Sending enhanced fallback analysis with full user profile")
-                    
-                    # Use socketio_manager directly for WebSocket events
-                    if thread_id:
-                        try:
-                            from socketio_manager import emit_analysis_event
-                            was_delivered = emit_analysis_event(thread_id, fallback_analysis_event)
-                        except Exception as e:
-                            logger.error(f"Error emitting fallback analysis: {str(e)}")
-                            yield fallback_analysis_event
-                
-                if not next_actions_content:
-                    # Create more specific fallback actions based on the user profile
-                    fallback_actions = []
-                    
-                    # If we have a user profile with a portrait, use it to create more tailored actions
-                    if user_profile and "portrait" in user_profile:
-                        # Extract classification info if available in the portrait
-                        portrait = user_profile.get("portrait", "")
-                        
-                        if "Discouraged Group" in portrait:
-                            fallback_actions.append("1. Provide reassurance and supportive information to build confidence")
-                            fallback_actions.append("2. Offer practical strategies and techniques addressing the specific issue")
-                            fallback_actions.append("3. Suggest professional resources while maintaining a compassionate tone")
-                        elif "Confident Group" in portrait:
-                            fallback_actions.append("1. Provide motivational information to build on existing confidence")
-                            fallback_actions.append("2. Offer advanced strategies and techniques for further improvement")
-                            fallback_actions.append("3. Suggest ways to maintain and enhance current capabilities")
-                        else:
-                            # Generic but still supportive actions
-                            fallback_actions.append("1. Provide clear and relevant information based on user query")
-                            fallback_actions.append("2. Offer helpful options and practical next steps")
-                            fallback_actions.append("3. Maintain a supportive tone appropriate to the user's needs")
-                    else:
-                        # Very basic fallback if no profile available
-                        fallback_actions.append("1. Provide clear and relevant information based on user query")
-                        fallback_actions.append("2. Offer helpful options and next steps")
-                        fallback_actions.append("3. Maintain a supportive tone appropriate to the user's needs")
-                    
-                    # Format the fallback actions
-                    next_actions_content = "\n".join(fallback_actions)
-                    
-                    fallback_next_actions_event = {
-                        "type": "next_actions",
-                        "content": next_actions_content,
-                        "complete": True,
-                        "thread_id": thread_id,
-                        "status": "complete",
-                        "user_profile": user_profile  # Always include the full user profile
-                    }
-                    logger.info(f"Sending enhanced fallback next_actions with full user profile")
-                    
-                    # Use socketio_manager directly for WebSocket events
-                    if thread_id:
-                        try:
-                            from socketio_manager import emit_next_action_event
-                            was_delivered = emit_next_action_event(thread_id, fallback_next_actions_event)
-                        except Exception as e:
-                            logger.error(f"Error emitting fallback next_actions: {str(e)}")
-                            yield fallback_next_actions_event
-                    else:
-                        yield fallback_next_actions_event
-                
-                # Before completing sections, store results in the module-level variable
-                if analysis_content:
-                    _last_cot_results["analysis_content"] = analysis_content
-                
-                if next_actions_content:
-                    _last_cot_results["next_actions_content"] = next_actions_content
-                
-                if knowledge_entries:
-                    _last_cot_results["knowledge_entries"] = knowledge_entries
-                    _last_cot_results["knowledge_context"] = knowledge_context
-                
-                _last_cot_results["user_profile"] = user_profile
-                
-                # Track completion time
-                PERF_METRICS["cot_handler_end"] = time.time()
-                total_time = PERF_METRICS["cot_handler_end"] - PERF_METRICS["cot_handler_start"]
-                logger.info(f"CoT handler completed in {total_time:.2f}s")
-                
-            except Exception as e:
-                logger.error(f"Error in CoT processing: {e}")
-                logger.error(traceback.format_exc())
-                
-                # Create fallback content
-                if not analysis_content:
-                    emotional_state_text = ', '.join(user_profile['emotional_state']['current']) if user_profile['emotional_state']['current'] else 'neutral'
-                    analysis_content = f"User with {emotional_state_text} emotional state is asking about: {last_user_message[:30]}"
-                    fallback_analysis_event = {
-                        "type": "analysis",
-                        "content": analysis_content,
-                        "complete": True,
-                        "thread_id": thread_id,
-                        "status": "complete",
-                        "search_terms": [],
-                        "user_profile": user_profile  # Always include the full user profile
-                    }
-                    logger.info(f"Sending enhanced fallback analysis with full user profile")
-                    
-                    # Use socketio_manager directly for WebSocket events
-                    if thread_id:
-                        try:
-                            from socketio_manager import emit_analysis_event
-                            was_delivered = emit_analysis_event(thread_id, fallback_analysis_event)
-                        except Exception as e:
-                            logger.error(f"Error emitting fallback analysis: {str(e)}")
-                            yield fallback_analysis_event
-                
-                if not next_actions_content:
-                    next_actions_results = "1. Provide helpful information\n2. Use appropriate tone"
-                    fallback_next_actions = {
-                        "type": "next_actions", 
-                        "content": next_actions_results, 
-                        "complete": True,
-                        "thread_id": thread_id,
-                        "status": "complete",
-                        "user_profile": user_profile  # Always include the full user profile
-                    }
-                    logger.info(f"Sending enhanced fallback next_actions with full user profile")
-                    
-                    # Use socketio_manager directly for WebSocket events
-                    if thread_id:
-                        try:
-                            from socketio_manager import emit_next_action_event
-                            was_delivered = emit_next_action_event(thread_id, fallback_next_actions)
-                        except Exception as e:
-                            logger.error(f"Error emitting fallback next_actions: {str(e)}")
-                            yield fallback_next_actions
-                
-                # Yield the final state
-                yield {"state": _last_cot_results}
-        else:
-            # Send empty knowledge complete event if brain not loaded
-            yield {
-                "type": "knowledge",
-                "content": [],
-                "complete": True,
-                "thread_id": thread_id,
-                "status": "complete",
-                "error": "Could not access knowledge database"
-            }
+                logger.info(f"Found {len(user_analysis_knowledge)} knowledge entries for user analysis")
     except Exception as e:
-        logger.error(f"Error in CoT knowledge retrieval: {e}")
-        # Send knowledge error event
+        logger.error(f"Error in knowledge retrieval: {e}")
+    
+    # STEP 3: Generate user analysis with actionable insights
+    analysis_content = ""
+    next_actions = []
+    try:
+        # Format knowledge for the LLM
+        knowledge_context = optimize_knowledge_context(user_analysis_knowledge, last_user_message) if user_analysis_knowledge else ""
+        
+        # Format user profile for the LLM
+        profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
+        
+        # Create a prompt for user analysis
+        analysis_prompt = f"""
+        Based on the user's message and the following information, provide an analysis of their needs and appropriate next actions.
+        
+        USER MESSAGE: {last_user_message}
+        
+        {profile_summary}
+        
+        {f"RELEVANT KNOWLEDGE:\n{knowledge_context}" if knowledge_context else ""}
+        
+        First, analyze the user's core needs and situation. Then, list THREE specific questions we should research to help them.
+        Format your response as:
+        
+        ANALYSIS: [Your detailed analysis of the user's needs and situation]
+        
+        RESEARCH QUESTIONS:
+        1. [First specific question to research to help the user]
+        2. [Second specific question to research to help the user]
+        3. [Third specific question to research to help the user]
+        """
+        
+        # Generate the analysis and research questions
+        logger.info("Generating user analysis with research questions")
+        response = await LLM.ainvoke(analysis_prompt)
+        full_analysis = response.content if hasattr(response, 'content') else str(response)
+        
+        # Parse out the analysis and research questions
+        analysis_part = ""
+        research_questions = []
+        
+        if "ANALYSIS:" in full_analysis and "RESEARCH QUESTIONS:" in full_analysis:
+            parts = full_analysis.split("RESEARCH QUESTIONS:")
+            analysis_part = parts[0].replace("ANALYSIS:", "").strip()
+            
+            # Extract research questions
+            questions_text = parts[1].strip()
+            for line in questions_text.split('\n'):
+                if re.match(r'^\d+\.', line.strip()):
+                    question = re.sub(r'^\d+\.\s*', '', line.strip())
+                    if question:
+                        research_questions.append(question)
+        else:
+            # Fallback if format isn't followed
+            analysis_part = full_analysis
+            # Generate basic research questions based on user message
+            research_questions = [
+                f"Solutions for {last_user_message}",
+                f"Best practices related to {last_user_message}",
+                f"Resources available for {last_user_message}"
+            ]
+        
+        # Store analysis content
+        analysis_content = analysis_part
+        _last_cot_results["analysis_content"] = analysis_content
+        
+        # Stream the analysis
         yield {
-            "type": "knowledge",
-            "content": [],
+            "type": "analysis",
+            "content": analysis_content,
             "complete": True,
             "thread_id": thread_id,
             "status": "complete",
-            "error": f"Error retrieving knowledge: {str(e)}"
+            "user_profile": user_profile
         }
+        logger.info("Analysis completed and streamed")
+        
+        # STEP 4: Generate action-oriented queries and fetch solution knowledge
+        logger.info(f"Generated {len(research_questions)} research questions: {research_questions}")
+        
+        # Collect solution knowledge
+        solution_knowledge = []
+        if brain_loaded and research_questions:
+            # Search for knowledge related to each research question
+            for question in research_questions:
+                results = await brain.get_similar_vectors_by_text(question, top_k=2)
+                
+                # Process knowledge results
+                for vector_id, vector, metadata, similarity in results:
+                    # Skip duplicates
+                    if any(entry.get("id") == vector_id for entry in solution_knowledge) or \
+                       any(entry.get("id") == vector_id for entry in user_analysis_knowledge):
+                        continue
+                    
+                    raw_text = metadata.get("raw", "")
+                    structured_data = extract_structured_data_from_raw(raw_text)
+                    
+                    entry = {
+                        "id": vector_id,
+                        "similarity": float(similarity),
+                        "raw": raw_text,
+                        "structured": structured_data,
+                        "query": question,
+                        "phase": "solution_knowledge"
+                    }
+                    solution_knowledge.append(entry)
+            
+            # Combine all knowledge entries
+            all_knowledge = user_analysis_knowledge + solution_knowledge
+            _last_cot_results["knowledge_entries"] = all_knowledge
+            
+            # Send updated knowledge results event
+            yield {
+                "type": "knowledge",
+                "content": all_knowledge,
+                "complete": False,
+                "thread_id": thread_id,
+                "status": "searching"
+            }
+            logger.info(f"Found {len(solution_knowledge)} additional knowledge entries for solutions")
+        
+        # STEP 5: Generate next actions using solution knowledge
+        # Format the solution knowledge for the LLM
+        solution_context = optimize_knowledge_context(solution_knowledge, last_user_message) if solution_knowledge else ""
+        
+        # Create a prompt for generating actionable next steps
+        actions_prompt = f"""
+        Based on the user's message, our analysis, and the knowledge we've found, provide specific, actionable next steps.
+        
+        USER MESSAGE: {last_user_message}
+        
+        OUR ANALYSIS:
+        {analysis_content}
+        
+        {f"SOLUTION KNOWLEDGE:\n{solution_context}" if solution_context else ""}
+        
+        Provide 3 specific, practical next steps the user can take to address their needs. 
+        Make these steps clear, actionable, and directly relevant to their situation.
+        Format as a numbered list.
+        """
+        
+        # Generate the next actions
+        logger.info("Generating next actions based on solution knowledge")
+        response = await LLM.ainvoke(actions_prompt)
+        next_actions_content = response.content if hasattr(response, 'content') else str(response)
+        
+        # Store and format next actions
+        _last_cot_results["next_actions_content"] = next_actions_content
+        
+        # Stream next actions to the client
+        yield {
+            "type": "next_actions",
+            "content": next_actions_content,
+            "complete": True,
+            "thread_id": thread_id,
+            "status": "complete",
+            "user_profile": user_profile
+        }
+        logger.info("Next actions completed and streamed")
+        
+    except Exception as e:
+        logger.error(f"Error generating analysis or next actions: {e}")
+        
+        # Send a minimal analysis if error occurs
+        if not analysis_content:
+            yield {
+                "type": "analysis",
+                "content": f"Analyzing query: {last_user_message}",
+                "complete": True,
+                "thread_id": thread_id,
+                "status": "complete",
+                "user_profile": user_profile
+            }
+        
+        # Send minimal next actions if error occurs
+        yield {
+            "type": "next_actions",
+            "content": "1. Consider researching more about this topic\n2. Consult relevant resources\n3. Try a more specific query",
+            "complete": True,
+            "thread_id": thread_id,
+            "status": "complete",
+            "user_profile": user_profile
+        }
+    
+    # Complete the knowledge event
+    all_knowledge = user_analysis_knowledge + (solution_knowledge if 'solution_knowledge' in locals() else [])
+    yield {
+        "type": "knowledge",
+        "content": all_knowledge,
+        "complete": True,
+        "thread_id": thread_id,
+        "status": "complete",
+        "stats": {"total_results": len(all_knowledge)}
+    }
+    
+    # Log completion time
+    total_time = time.time() - start_time
+    logger.info(f"Simplified CoT handler completed in {total_time:.2f}s")
 
 # Register the new CoT tool
 tool_registry.register_tool(
@@ -1789,7 +1463,22 @@ async def process_llm_with_tools(
     except Exception as e:
         logger.error(f"Error in LLM tool calling: {str(e)}")
         logger.error(traceback.format_exc())
-        yield "I encountered an issue while processing your request. Please try again."
+        
+        # Log additional debugging information
+        logger.error(f"Error occurred during processing of message: '{user_message[:100]}...'")
+        logger.error(f"Performance metrics at time of error: {PERF_METRICS}")
+        
+        # Return a simple error message to the frontend
+        error_event = {
+            "type": "error",
+            "content": "An error occurred during processing.",
+            "error": str(e),
+            "thread_id": thread_id
+        }
+        yield error_event
+        
+        # Also yield a simple text response for compatibility with clients expecting text
+        yield "DEBUG: Processing error occurred. Check logs for details."
 
 async def execute_tool_call(tool_call: Dict, params: Dict, thread_id: Optional[str] = None) -> AsyncGenerator[Dict, None]:
     """

@@ -411,5 +411,41 @@ def extract_key_knowledge(knowledge_context: str, conversation_context: str) -> 
         return knowledge_context[:1000] + "..."
 
 
+def build_analyse_profile_query(user_profile: Dict) -> List[str]:
+    """
+    Build queries to analyze the user profile.
+    
+    Args:
+        user_profile: The user profile dictionary
 
-
+    Returns:
+        A list of query strings for analyzing the user profile
+    """
+    # Extract key information from the user profile
+    portrait = user_profile.get("portrait", "")
+    logger.info(f"User profile portrait: {portrait[:500]}...")
+    
+    # Use LLM to generate queries to analyze the user profile
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    response = llm.invoke(f"Analyze the following user profile: {portrait} and return a numbered list of 3-5 separate queries to find knowledge relevant to this user profile.")
+    
+    # Extract the response content
+    content = response.content if hasattr(response, 'content') else str(response)
+    
+    # Split by newlines and extract queries from numbered items
+    queries = []
+    for line in content.split('\n'):
+        if re.match(r'^\s*\d+[\.\)]', line):  # Line starts with a number followed by . or )
+            query = re.sub(r'^\s*\d+[\.\)]\s*', '', line).strip()
+            # Remove markdown formatting (** at beginning and end)
+            query = re.sub(r'^\*\*(.*)\*\*$', r'\1', query)
+            if query:
+                queries.append(query)
+    
+    # If no queries were found, use the full content as a single query
+    if not queries:
+        segment = user_profile.get("segment", {}).get("category", "general")
+        queries = [f"Knowledge about {segment} users"]
+    
+    logger.info(f"Generated {len(queries)} analysis queries: {queries}")
+    return queries
