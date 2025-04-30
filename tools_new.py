@@ -232,24 +232,10 @@ async def combined_analysis_actions_handler(params: Dict) -> AsyncGenerator[Dict
             else:
                 last_user_message = last_line
     
-    # Ultra fast minimal prompt
-    combined_prompt = f"""
-    Analyze this user message and determine next actions.
+    # OPTIMIZATION: Ultra compact minimal prompt to reduce tokens dramatically
+    combined_prompt = f"""Analyze: {last_user_message}
     
-    USER MESSAGE: {last_user_message}
-    
-    FORMAT YOUR RESPONSE EXACTLY AS FOLLOWS:
-    
-    [ANALYSIS]
-    Brief analysis about the user's intent, needs, and emotional state. 
-    [/ANALYSIS]
-    
-    [NEXT_ACTIONS]
-    1. First action to take
-    2. Second action to take
-    3. Additional actions if needed
-    [/NEXT_ACTIONS]
-    """
+Format: [ANALYSIS] brief intent/needs analysis [/ANALYSIS] [NEXT_ACTIONS] 3 numbered actions [/NEXT_ACTIONS]"""
     
     # Track prompt building time
     PERF_METRICS["prompt_built"] = time.time()
@@ -262,7 +248,7 @@ async def combined_analysis_actions_handler(params: Dict) -> AsyncGenerator[Dict
     next_actions_content = ""
     
     # CRITICAL FIX: Set very short timeout for analysis
-    ANALYSIS_TIMEOUT = 4  # 4 seconds maximum for analysis
+    ANALYSIS_TIMEOUT = 3  # Reduce from 4 to 3 seconds maximum for analysis
     
     try:
         # Stream a starting event for the frontend to show something is happening
@@ -677,7 +663,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     buffer_size = 30  # Increased buffer size for efficiency
     
     try:
-        logger.info(f"Starting profile-aware response generation stream")
+        logger.info(f"Starting prompt response generation stream")
         PERF_METRICS["response_stream_start"] = time.time()
         
         # Set up streaming with timeout
@@ -692,14 +678,11 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
                     buffer += content
                     full_response += content
                     
-                    # Log the first chunk received
-                    if len(full_response) <= len(content):
-                        logger.info(f"Received first response chunk from OpenAI: {content[:30]}...")
-                    
-                    # Only yield when buffer reaches threshold
-                    if len(buffer) >= buffer_size or content.endswith((".", "!", "?", "\n")):
+                    # OPTIMIZATION: Stream more frequently for better UX
+                    if len(buffer) >= buffer_size or content.endswith((".", "!", "?", "\n", " ")):
                         yield buffer
                         buffer = ""
+
         except asyncio.TimeoutError:
             logger.warning(f"Response generation timed out after {RESPONSE_TIMEOUT}s, using partial response")
             # Don't try to cancel the streaming task since it's not stored as a task
@@ -804,13 +787,13 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         "status": "analyzing"
     }
     
-    # Build user profile
+    # OPTIMIZATION: Simplified user profile generation
     try:
         user_profile = await build_user_profile(context_window, last_user_message, graph_version_id)
         _last_cot_results["user_profile"] = user_profile
         logger.info(f"User profile built successfully: {user_profile}")
     except Exception as e:
-        logger.error(f"Error building user profile: {e}")
+        logger.error(f"Error in fast user profile creation: {e}")
         user_profile = {"portrait": f"User query: {last_user_message}"}
     
     # STEP 2: Generate profile-enhanced queries and fetch knowledge
@@ -946,7 +929,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "thread_id": thread_id,
             "status": "complete",
             "user_profile": user_profile,
-            "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+            #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
         }
         logger.info("Analysis completed and streamed")
         
@@ -1032,7 +1015,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "thread_id": thread_id,
             "status": "complete",
             "user_profile": user_profile,
-            "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+            #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
         }
         logger.info("Next actions completed and streamed")
         
@@ -1048,7 +1031,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                 "thread_id": thread_id,
                 "status": "complete",
                 "user_profile": user_profile,
-                "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+                #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
             }
         
         # Send minimal next actions if error occurs
@@ -1059,7 +1042,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "thread_id": thread_id,
             "status": "complete",
             "user_profile": user_profile,
-            "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
+            #"portrait": user_profile.get("portrait", "")  # Add portrait for streaming
         }
     
     # Complete the knowledge event
@@ -1113,24 +1096,39 @@ async def process_llm_with_tools(
     PERF_METRICS.clear()  # Reset metrics for this request
     PERF_METRICS["overall_start"] = overall_start_time
     
-    # CRITICAL OPTIMIZATION: Just use the current message and last AI message for context
-    # This drastically reduces the context size
-    last_ai_message = ""
+    # OPTIMIZATION: Further reduce context size - only use current message and 1-2 recent turns
+    conversation_context = f"User: {user_message}\n"
     
-    if conversation_history:
-        for msg in reversed(conversation_history):
-            if msg.get("role") == "assistant":
-                last_ai_message = msg.get("content", "")
+    # Include at most one previous exchange for context
+    if conversation_history and len(conversation_history) >= 2:
+        prev_ai = None
+        prev_user = None
+        
+        # Get the most recent AI and user messages (excluding current)
+        for msg in reversed(conversation_history[:-1]):  # Skip the current message
+            if msg.get("role") == "assistant" and not prev_ai:
+                prev_ai = msg.get("content", "")
+            elif msg.get("role") == "user" and not prev_user:
+                prev_user = msg.get("content", "")
+            
+            # Break once we have both
+            if prev_ai and prev_user:
                 break
-    
-    conversation_context = ""
-    if last_ai_message:
-        conversation_context += f"AI: {last_ai_message}\n"
-    conversation_context += f"User: {user_message}\n"
+        
+        # Add only the immediate previous exchange if available
+        if prev_user and prev_ai:
+            # OPTIMIZATION: Truncate previous messages to reduce tokens
+            max_prev_len = 100  # Characters
+            if len(prev_user) > max_prev_len:
+                prev_user = prev_user[:max_prev_len] + "..."
+            if len(prev_ai) > max_prev_len:
+                prev_ai = prev_ai[:max_prev_len] + "..."
+                
+            conversation_context = f"User: {prev_user}\nAI: {prev_ai}\n" + conversation_context
     
     # Track history processing time
     PERF_METRICS["history_processed"] = time.time()
-    logger.info(f"Conversation history processed in {time.time() - overall_start_time:.2f}s")
+    logger.info(f"Minimal conversation history processed in {time.time() - overall_start_time:.2f}s")
     
     use_websocket = thread_id is not None
     
