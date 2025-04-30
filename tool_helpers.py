@@ -425,9 +425,29 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     portrait = user_profile.get("portrait", "")
     logger.info(f"User profile portrait: {portrait[:500]}...")
     
+    # Determine the language based on the portrait
+    language_hint = ""
+    if "tiếng Việt" in portrait.lower() or "vietnamese" in portrait.lower():
+        language_hint = "Return the queries in Vietnamese language."
+    
     # Use LLM to generate queries to analyze the user profile
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    response = llm.invoke(f"Analyze the following user profile: {portrait} and return a numbered list of 3-5 separate queries to find knowledge relevant to this user profile.")
+    prompt = f"""Generate 3 queries to find knowledge about how to help this user: {portrait}
+
+Goal: Create queries that will retrieve knowledge about how to approach users with this specific classification and psychological profile.
+
+Your queries should follow this pattern:
+1. "How to approach/understand users in [extracted classification] category"
+2. "What are effective strategies for [user's psychological needs]"
+3. "Best practices for communicating with [user's communication style] users"
+
+Extract the key classification, needs, and communication style from the profile and formulate queries accordingly.
+
+{language_hint}
+IMPORTANT: Respond in the SAME LANGUAGE as the user.
+"""
+
+    response = llm.invoke(prompt)
     
     # Extract the response content
     content = response.content if hasattr(response, 'content') else str(response)

@@ -900,6 +900,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         1. [First specific question to research to help the user]
         2. [Second specific question to research to help the user]
         3. [Third specific question to research to help the user]
+        
+        IMPORTANT: Respond in the SAME LANGUAGE that the user is using. If they write in Vietnamese, your analysis must be in Vietnamese. If they write in English, respond in English.
         """
         
         # Generate the analysis and research questions
@@ -943,7 +945,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "complete": True,
             "thread_id": thread_id,
             "status": "complete",
-            "user_profile": user_profile
+            "user_profile": user_profile,
+            "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
         }
         logger.info("Analysis completed and streamed")
         
@@ -1009,6 +1012,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         Provide 3 specific, practical next steps the user can take to address their needs. 
         Make these steps clear, actionable, and directly relevant to their situation.
         Format as a numbered list.
+        
+        IMPORTANT: Respond in the SAME LANGUAGE that the user is using. If they write in Vietnamese, your next steps must be in Vietnamese. If they write in English, respond in English.
         """
         
         # Generate the next actions
@@ -1026,7 +1031,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "complete": True,
             "thread_id": thread_id,
             "status": "complete",
-            "user_profile": user_profile
+            "user_profile": user_profile,
+            "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
         }
         logger.info("Next actions completed and streamed")
         
@@ -1041,7 +1047,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                 "complete": True,
                 "thread_id": thread_id,
                 "status": "complete",
-                "user_profile": user_profile
+                "user_profile": user_profile,
+                "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
             }
         
         # Send minimal next actions if error occurs
@@ -1051,7 +1058,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             "complete": True,
             "thread_id": thread_id,
             "status": "complete",
-            "user_profile": user_profile
+            "user_profile": user_profile,
+            "portrait": user_profile.get("portrait", "")  # Add portrait for streaming
         }
     
     # Complete the knowledge event
@@ -1309,7 +1317,8 @@ async def process_llm_with_tools(
                     "complete": True,
                     "thread_id": thread_id,
                     "status": "complete",
-                    "user_profile": _last_cot_results.get("user_profile", {})  # Include user profile
+                    "user_profile": _last_cot_results.get("user_profile", {}),  # Include user profile
+                    "portrait": _last_cot_results.get("user_profile", {}).get("portrait", "")  # Add portrait for streaming
                 }
                 logger.info(f"Sending enhanced fallback next_actions with full user profile")
                 

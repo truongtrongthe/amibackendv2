@@ -223,7 +223,7 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         
         # Create a prompt focused on generating a descriptive portrait
         prompt = f"""
-        Analyze this conversation to create a rich, descriptive portrait of the user.
+        Analyze this conversation to create a rich, descriptive portrait of the user using language of the user.
         
         {knowledge_context}{knowledge_instruction}
         
@@ -249,7 +249,9 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         
         6. Approach Strategy: How we should engage with them (tone, communication strategy, level of directness, emotional support needed)
         
-        7. Classification: EXPLICITLY classify this user according to the frameworks mentioned in the knowledge. If the knowledge mentions specific user categories, classification criteria, or behavioral patterns, directly state which category this user belongs to and why. Use the exact terminology from the knowledge.
+        7. Classification: EXPLICITLY classify this user according to the frameworks mentioned in the knowledge. If the knowledge mentions specific user categories, classification criteria, or behavioral patterns, directly state which category this user belongs to and why. Use the exact terminology from the knowledge. PUT THIS CLASSIFICATION IN BOLD by surrounding it with ** symbols in markdown format (e.g., **Discouraged Group**).
+        
+        IMPORTANT: Respond in the SAME LANGUAGE that the user is using in the conversation. If they write in Vietnamese, your portrait must be in Vietnamese. If they write in English, respond in English.
         
         Format your response as a cohesive, flowing paragraph that paints a complete picture of this person, 
         not as a list of attributes. Make your portrait nuanced, insightful, and specific to this person.
