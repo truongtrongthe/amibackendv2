@@ -44,8 +44,10 @@ brain = get_brain()
 _last_cot_results = {
     "analysis_content": "",
     "next_actions_content": "",
+    "clean_next_actions": "",
     "knowledge_entries": [],
-    "knowledge_context": ""
+    "knowledge_context": "",
+    "persuasive_script": ""
 }
 
 class ToolRegistry:
@@ -263,6 +265,8 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     {f"# Knowledge\\n{knowledge_context}" if knowledge_context else ""}
     
+    {f"# Persuasive Sales Script\\n{_last_cot_results.get('persuasive_script', '')}" if _last_cot_results.get('persuasive_script') else ""}
+    
     # Personality
     {personality_instructions}
     
@@ -273,26 +277,26 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     3. Briefly explains ONE key insight
     4. Focuses primarily on the actionable next steps
     
-    KNOWLEDGE INTEGRATION REQUIREMENTS:
-    1. If the knowledge contains classification information (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu"), explicitly use this to personalize your response and recommendations
-    2. If specific service packages are mentioned (like "Gói Thai Sản Cao Cấp" or "Gói Thai Sản Tiết Kiệm"), reference these by name
-    3. Incorporate specific details from the knowledge about procedures, requirements, or benefits to make next actions more sophisticated
-    4. Connect the user's profile to specific recommendations from the knowledge
+    KNOWLEDGE ADHERENCE REQUIREMENTS (HIGHEST PRIORITY):
+    1. ALWAYS refer to application methods, steps, and techniques EXACTLY as described in the knowledge
+    2. ALWAYS use specific service package names, classifications, and terminology from the knowledge
+    3. NEVER invent or suggest techniques or products not mentioned in the knowledge
+    4. PRIORITIZE techniques and steps exactly as they are described in the knowledge
+    
+    SALES SCRIPT REQUIREMENTS:
+    1. Use the persuasive sales script as the primary source for creating your response
+    2. Maintain the same persuasive elements, benefits, and value propositions
+    3. Keep the same hierarchical organization of offerings (premium to standard)
+    4. Use the same tone and persuasive language patterns 
+    5. Preserve all references to specific service packages, features, and classifications
     
     RESPONSE STRUCTURE:
     - 1-2 sentences acknowledging the user's issue
-    - 1-2 sentences explaining the most relevant insight from our analysis, incorporating classification if available
-    - Rest of response focusing on the most important actionable step from the next actions, enhanced with specific details from the knowledge
+    - 1-2 sentences explaining the most relevant HIGH VALUE insight from the knowledge
+    - 3-5 sentences detailing the most important next steps with specific instructions from the knowledge
+    - 1 clear call-to-action sentence that matches the persuasive script
     
-    STYLE REQUIREMENTS:
-    - Be conversational but efficient
-    - Use short, clear sentences
-    - Avoid unnecessary explanations or background information
-    - NO repetition of information
-    - NO generic advice statements
-    - NO lengthy introductions
-    
-    Begin your response immediately without preamble.
+    IMPORTANT: If there are specific application steps, techniques, or methods in the knowledge, PRIORITIZE including these in your response over general advice.
     """
     
     # OPTIMIZATION: Set a timeout for response generation
@@ -390,7 +394,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         "next_actions_content": "",
         "knowledge_entries": [],
         "knowledge_context": "",
-        "user_profile": {}
+        "user_profile": {},
+        "persuasive_script": ""
     }
     
     conversation_context = params.get("conversation_context", "")
@@ -753,6 +758,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         # Extract service packages and classification information for special highlighting
         classification_info = ""
         service_packages = ""
+        application_methods = ""
         
         # Look through all knowledge entries
         all_knowledge = user_analysis_knowledge + technique_knowledge + additional_knowledge
@@ -765,11 +771,13 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                 if ("Nhóm Cao Cấp" in content or "Nhóm Trung Lưu" in content) and len(classification_info) < 500:
                     classification_info += content + "\n\n"
                     
-            # Extract service packages
+            # Extract service packages and application methods with special focus
             if structured and "application_method" in structured:
                 app_method = structured["application_method"]
                 if isinstance(app_method, dict):
                     app_title = app_method.get("title", "")
+                    
+                    # Handle service packages
                     if "Gói Thai Sản" in app_title or "Phân Loại" in app_title:
                         service_packages += f"### {app_title}\n"
                         # Include steps if available
@@ -777,20 +785,49 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                             step_title = step.get("title", "")
                             if step_title:
                                 service_packages += f"- {step_title}\n"
+                    
+                    # Extract any application method with clear steps (high priority for actions)
+                    application_steps = app_method.get("steps", [])
+                    if application_steps and len(application_steps) > 0:
+                        application_methods += f"### APPLICATION METHOD: {app_title}\n"
+                        for i, step in enumerate(application_steps):
+                            step_title = step.get("title", f"Step {i+1}")
+                            step_content = step.get("content", "")
+                            application_methods += f"**STEP {i+1}: {step_title}**\n"
+                            if step_content:
+                                # Clean and format step content
+                                cleaned_content = step_content.replace("\n", " ").strip()
+                                application_methods += f"{cleaned_content}\n\n"
+                            
+                            # Extract sub-steps if available (these are extremely valuable)
+                            sub_steps = step.get("sub_steps", [])
+                            if sub_steps:
+                                for sub_step in sub_steps:
+                                    sub_number = sub_step.get("number", "")
+                                    sub_content = sub_step.get("content", "")
+                                    if sub_content:
+                                        application_methods += f"- Sub-step {sub_number}: {sub_content}\n"
+                        application_methods += "\n"
         
         # Add specially extracted information to the combined knowledge
-        if classification_info or service_packages:
-            combined_knowledge += "## KEY INFORMATION FOR RESPONSE:\n"
+        if classification_info or service_packages or application_methods:
+            combined_knowledge += "## KEY INFORMATION FOR NEXT ACTIONS:\n"
+            
+            # Application methods are highest priority for action generation
+            if application_methods:
+                combined_knowledge += f"### PRIORITIZED APPLICATION METHODS:\n{application_methods}\n"
+                
             if classification_info:
                 combined_knowledge += f"### CUSTOMER CLASSIFICATION:\n{classification_info}\n"
+                
             if service_packages:
                 combined_knowledge += f"### SERVICE PACKAGES:\n{service_packages}\n"
-            
+        
         _last_cot_results["combined_knowledge_context"] = combined_knowledge
         
         # Create a prompt for generating actionable next steps
         actions_prompt = f"""
-        Based on the user's message, our analysis, and the knowledge we've found, provide specific, actionable next steps.
+        Based on the user's message, our analysis, and the knowledge we've found, provide specific, actionable next steps and a persuasive sales script.
         
         USER MESSAGE: {last_user_message}
         
@@ -803,8 +840,23 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
         
+        {f"COMBINED KNOWLEDGE HIGHLIGHTS:\n{combined_knowledge[:1000]}" if 'combined_knowledge' in locals() and combined_knowledge else ""}
+        
+        ## PART 1: SALES AUTOMATION NEXT STEPS
         Provide 3 specific, practical, step-by-step next actions the user can take to address their needs.
-        Each step must be highly actionable, precise, and directly implement the techniques mentioned in the knowledge.
+        Each step must be highly actionable, precise, and DIRECTLY IMPLEMENT the techniques and solutions mentioned in the knowledge.
+        
+        SALES APPROACH REQUIREMENTS:
+        1. These steps should form a clear sales funnel: Awareness → Consideration → Conversion
+        2. If offering service packages, present them in a clear, persuasive hierarchy (premium to standard)
+        3. Any steps must directly relate to the customer journey in the sales process
+        4. Include specific benefits, features, or advantages mentioned in the knowledge
+        
+        KNOWLEDGE ADHERENCE REQUIREMENTS (HIGHEST PRIORITY):
+        1. Your next actions MUST be directly extracted from or based on the provided knowledge - do not invent or create steps outside of this information
+        2. If multiple techniques are provided, prioritize those most relevant to the user's classification and specific situation
+        3. The specific terminology, processes, and steps mentioned in the knowledge MUST be preserved and used verbatim when possible
+        4. Any service names, package names, or classification terms MUST be used exactly as they appear in the knowledge
         
         IMPORTANT REQUIREMENTS:
         1. If the knowledge contains customer classification (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu"), explicitly incorporate this into your recommendations
@@ -819,6 +871,20 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         4. Include specific details on HOW to implement (timing, duration, frequency, etc.)
         5. Focus on actions the user can start immediately
         
+        ## PART 2: PERSUASIVE SALES SCRIPT
+        After providing the 3 next steps, create a brief persuasive sales script (200-250 words) that:
+        1. Addresses the user according to their classification
+        2. Highlights the most compelling benefits in the knowledge
+        3. Presents the recommended service package with clear advantages
+        4. Includes at least one persuasive call-to-action
+        5. Uses persuasive language that matches the tone of the knowledge
+        
+        FORMAT THE SALES SCRIPT AS:
+        
+        PERSUASIVE_SCRIPT:
+        [Your sales script here]
+        END_SCRIPT
+        
         CONTENT REQUIREMENTS:
         1. Extract ONLY techniques and steps mentioned in the knowledge provided
         2. Prioritize the most effective techniques for this specific user classification
@@ -830,28 +896,53 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         - Focus on clarity and precision - each step should be unambiguous
         - DO NOT invent techniques not found in the knowledge
         - DO NOT include general advice unless it appears in the knowledge
+        - If the knowledge mentions specific application methods with numbered steps, PRIORITIZE these
         """
         
-        # Generate the next actions
-        logger.info("Generating next actions based on solution knowledge")
-        response = await LLM.ainvoke(actions_prompt)
-        next_actions_content = response.content if hasattr(response, 'content') else str(response)
-
-        logger.info(f"Next actions content: {next_actions_content}")
+        # Define the system prompt for actions
+        system_prompt_actions = "You are a sales specialist that creates persuasive, actionable recommendations based on accurate knowledge."
+        
+        # Process actions through the LLM
+        next_actions_content = ""
+        
+        # Process chunk by chunk to extract the script
+        async for chunk in LLM.astream_chat([
+            {"role": "system", "content": system_prompt_actions}, 
+            {"role": "user", "content": actions_prompt}
+        ]):
+            token_text = chunk.choices[0].delta.content
+            if token_text is not None:
+                next_actions_content += token_text
+                
+                # Check if we have a complete script section
+                if "PERSUASIVE_SCRIPT:" in next_actions_content and "END_SCRIPT" in next_actions_content:
+                    script_start = next_actions_content.find("PERSUASIVE_SCRIPT:")
+                    script_end = next_actions_content.find("END_SCRIPT", script_start)
+                    if script_start != -1 and script_end != -1:
+                        persuasive_script = next_actions_content[script_start + len("PERSUASIVE_SCRIPT:"):script_end].strip()
+                        _last_cot_results["persuasive_script"] = persuasive_script
+                        logger.info(f"Extracted persuasive script: {persuasive_script[:100]}...")
+                
+                # Stream the content
+                yield {"content": token_text}
         
         # Store and format next actions
         _last_cot_results["next_actions_content"] = next_actions_content
         
-        # Stream next actions to the client
-        yield {
-            "type": "next_actions",
-            "content": next_actions_content,
-            "complete": True,
-            "thread_id": thread_id,
-            "status": "complete",
-            "user_profile": user_profile
-        }
-        logger.info("Next actions completed and streamed")
+        # Clean up the next_actions_content to remove the script section if needed
+        if "PERSUASIVE_SCRIPT:" in next_actions_content:
+            clean_actions = next_actions_content.split("PERSUASIVE_SCRIPT:")[0].strip()
+            _last_cot_results["clean_next_actions"] = clean_actions
+            logger.info(f"Stored clean next actions: {clean_actions[:100]}...")
+        else:
+            _last_cot_results["clean_next_actions"] = next_actions_content
+        
+        logger.info(f"Next actions content: {next_actions_content[:500]}")
+        
+        # Wrap up and return
+        yield {"content": "\n\nAnalysis Complete!"}
+        logger.info("CoT analysis stream complete")
+        return
         
     except Exception as e:
         logger.error(f"Error generating analysis or next actions: {e}")
@@ -972,8 +1063,10 @@ async def process_llm_with_tools(
     _last_cot_results = {
         "analysis_content": "",
         "next_actions_content": "",
+        "clean_next_actions": "",
         "knowledge_entries": [],
-        "knowledge_context": ""
+        "knowledge_context": "",
+        "persuasive_script": ""
     }
     
     try:
@@ -1168,13 +1261,18 @@ async def process_llm_with_tools(
             logger.info("Final analysis stored in state as a dictionary")
         
         # Now check the module-level variable for results if needed
-        if not analysis_results and _last_cot_results["analysis_content"]:
+        if not analysis_results and _last_cot_results.get("analysis_content"):
             analysis_results = _last_cot_results["analysis_content"]
             logger.info(f"Using analysis from _last_cot_results: {analysis_results[:50]}...")
         
-        if not next_actions_results and _last_cot_results["next_actions_content"]:
-            next_actions_results = _last_cot_results["next_actions_content"]
-            logger.info(f"Using next actions from _last_cot_results")
+        if not next_actions_results and _last_cot_results.get("next_actions_content"):
+            # Prefer clean next actions if available
+            if _last_cot_results.get("clean_next_actions"):
+                next_actions_results = _last_cot_results["clean_next_actions"]
+                logger.info(f"Using clean next actions from _last_cot_results")
+            else:
+                next_actions_results = _last_cot_results["next_actions_content"]
+                logger.info(f"Using next actions from _last_cot_results")
         
         # For knowledge, prefer what we've collected during streaming, but fall back to module var
         if not knowledge_entries and _last_cot_results["knowledge_entries"]:
