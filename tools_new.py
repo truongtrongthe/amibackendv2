@@ -906,13 +906,10 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         next_actions_content = ""
         
         # Process chunk by chunk to extract the script
-        async for chunk in LLM.astream_chat([
-            {"role": "system", "content": system_prompt_actions}, 
-            {"role": "user", "content": actions_prompt}
-        ]):
-            token_text = chunk.choices[0].delta.content
-            if token_text is not None:
-                next_actions_content += token_text
+        async for chunk in StreamLLM.astream(actions_prompt):
+            content = chunk.content if hasattr(chunk, 'content') else chunk
+            if content:
+                next_actions_content += content
                 
                 # Check if we have a complete script section
                 if "PERSUASIVE_SCRIPT:" in next_actions_content and "END_SCRIPT" in next_actions_content:
@@ -924,20 +921,105 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         logger.info(f"Extracted persuasive script: {persuasive_script[:100]}...")
                 
                 # Stream the content
-                yield {"content": token_text}
+                yield {"content": content}
         
         # Store and format next actions
         _last_cot_results["next_actions_content"] = next_actions_content
         
         # Clean up the next_actions_content to remove the script section if needed
-        if "PERSUASIVE_SCRIPT:" in next_actions_content:
-            clean_actions = next_actions_content.split("PERSUASIVE_SCRIPT:")[0].strip()
+        if "PERSUASIVE_SCRIPT:" in next_actions_content and "END_SCRIPT" in next_actions_content:
+            # Don't split - keep both parts together for next_actions
+            # The script section is important and should not be removed
+            clean_actions = next_actions_content.replace("END_SCRIPT", "END_SCRIPT\n")
             _last_cot_results["clean_next_actions"] = clean_actions
-            logger.info(f"Stored clean next actions: {clean_actions[:100]}...")
+            
+            # Extract the script separately for response generation
+            script_start = next_actions_content.find("PERSUASIVE_SCRIPT:")
+            script_end = next_actions_content.find("END_SCRIPT", script_start)
+            if script_start != -1 and script_end != -1:
+                persuasive_script = next_actions_content[script_start + len("PERSUASIVE_SCRIPT:"):script_end].strip()
+                _last_cot_results["persuasive_script"] = persuasive_script
+                logger.info(f"Extracted persuasive script: {persuasive_script[:100]}...")
         else:
             _last_cot_results["clean_next_actions"] = next_actions_content
         
-        logger.info(f"Next actions content: {next_actions_content[:500]}")
+        logger.info(f"Next actions content length: {len(next_actions_content)} chars")
+        
+        # Stream next actions to the client
+        next_actions_event = {
+            "type": "next_actions",
+            "content": _last_cot_results["clean_next_actions"],
+            "complete": True,
+            "thread_id": thread_id,
+            "status": "complete",
+            "user_profile": user_profile
+        }
+        
+        # Check if content is truncated in the event
+        if len(next_actions_event["content"]) < len(next_actions_content):
+            logger.warning(f"Next actions content appears to be truncated! Event has {len(next_actions_event['content'])} chars vs original {len(next_actions_content)} chars")
+        else:
+            logger.info(f"Next actions content correctly sized: {len(next_actions_event['content'])} chars")
+        
+        # Check if content might be too large for socket (>16KB is a common limit)
+        MAX_SOCKET_SIZE = 15000  # ~15KB to be safe
+        if len(next_actions_event["content"]) > MAX_SOCKET_SIZE:
+            logger.warning(f"Next actions content too large for single socket message: {len(next_actions_event['content'])} chars")
+            
+            # Split content into chunks
+            content = next_actions_event["content"]
+            total_chunks = (len(content) + MAX_SOCKET_SIZE - 1) // MAX_SOCKET_SIZE
+            
+            # Send chunks
+            for i in range(total_chunks):
+                chunk_start = i * MAX_SOCKET_SIZE
+                chunk_end = min((i + 1) * MAX_SOCKET_SIZE, len(content))
+                chunk = content[chunk_start:chunk_end]
+                
+                # Prepare chunk event
+                chunk_event = {
+                    "type": "next_actions",
+                    "content": chunk,
+                    "complete": i == total_chunks - 1,  # Only mark the last chunk as complete
+                    "thread_id": thread_id,
+                    "status": "chunked" if i < total_chunks - 1 else "complete",
+                    "chunk_index": i,
+                    "total_chunks": total_chunks,
+                    "user_profile": user_profile if i == 0 else None  # Only include profile in first chunk
+                }
+                
+                # Emit the chunk
+                if thread_id:
+                    try:
+                        from socketio_manager import emit_next_action_event
+                        logger.info(f"Emitting next_actions chunk {i+1}/{total_chunks} to thread {thread_id}")
+                        was_delivered = emit_next_action_event(thread_id, chunk_event)
+                        logger.info(f"Emitted next_actions chunk {i+1}/{total_chunks} via socketio_manager")
+                    except Exception as e:
+                        logger.error(f"Error emitting next_actions chunk {i+1}/{total_chunks}: {str(e)}")
+                        yield chunk_event
+                else:
+                    # Not using WebSockets, just yield the chunk
+                    yield chunk_event
+                
+                # Small delay between chunks to prevent overwhelming the socket
+                await asyncio.sleep(0.1)
+            
+            logger.info(f"Sent next_actions in {total_chunks} chunks")
+        else:
+            # Emit the next actions event over socket
+            if thread_id:
+                try:
+                    from socketio_manager import emit_next_action_event
+                    logger.info(f"Emitting next_actions event to thread {thread_id}")
+                    was_delivered = emit_next_action_event(thread_id, next_actions_event)
+                    logger.info(f"Emitted next_actions event via socketio_manager for thread {thread_id}")
+                except Exception as e:
+                    logger.error(f"Error emitting next_actions: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    yield next_actions_event
+        
+        logger.info("Next actions completed and streamed")
         
         # Wrap up and return
         yield {"content": "\n\nAnalysis Complete!"}
@@ -1249,6 +1331,9 @@ async def process_llm_with_tools(
                     except Exception as e:
                         logger.error(f"Error emitting fallback next_actions: {str(e)}")
                         yield fallback_next_actions
+                else:
+                    # Not using WebSockets, just yield the event
+                    yield fallback_next_actions
         
         # Store the analysis in the state as a dictionary
         if analysis_results:
