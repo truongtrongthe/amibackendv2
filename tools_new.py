@@ -20,6 +20,7 @@ from tool_helpers import (
     detect_language,
     ensure_brain_loaded,
     optimize_knowledge_context,
+    prepare_knowledge,
     build_analyse_profile_query,
     extract_key_knowledge
 )
@@ -211,7 +212,6 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     next_actions = params.get("next_actions", "")
     knowledge_context = params.get("knowledge_context", "")
     personality_instructions = params.get("personality_instructions", "")
-    knowledge_found = params.get("knowledge_found", False)
     user_profile = params.get("user_profile", _last_cot_results.get("user_profile", {}))
     
     # Get user profile information or use defaults
@@ -241,10 +241,6 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     if personality_instructions and len(personality_instructions) > 500:
         personality_instructions = "You are a friendly and helpful AI assistant that responds appropriately to users' needs."
     
-    # OPTIMIZATION: Drastically reduce knowledge context size
-    if knowledge_context and len(knowledge_context) > 1500:
-        # Extract only the most relevant parts
-        knowledge_context = extract_key_knowledge(knowledge_context, conversation_context)
     
     # Get the last user message for better context
     last_message = ""
@@ -260,21 +256,41 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     {user_understanding}
     
     # Analysis Summary
-    {analysis[:300]}  
+    {analysis}  
     
     # Actions Needed
-    {next_actions[:300]}
+    {next_actions}
     
-    {f"# Knowledge\n{knowledge_context}" if knowledge_context else ""}
+    {f"# Knowledge\\n{knowledge_context}" if knowledge_context else ""}
     
     # Personality
     {personality_instructions}
     
     # Task
-    Create a helpful {detected_language} response that:
-    1. Addresses the user's immediate need based on the user understanding
-    2. Provides an appropriate level of detail and tone
-    3. Uses knowledge effectively while maintaining conversational flow
+    Create a CONCISE response in {detected_language} (100-120 words maximum) that:
+    1. Directly addresses the user's core need
+    2. Is empathetic but straightforward
+    3. Briefly explains ONE key insight
+    4. Focuses primarily on the actionable next steps
+    
+    KNOWLEDGE INTEGRATION REQUIREMENTS:
+    1. If the knowledge contains classification information (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu"), explicitly use this to personalize your response and recommendations
+    2. If specific service packages are mentioned (like "Gói Thai Sản Cao Cấp" or "Gói Thai Sản Tiết Kiệm"), reference these by name
+    3. Incorporate specific details from the knowledge about procedures, requirements, or benefits to make next actions more sophisticated
+    4. Connect the user's profile to specific recommendations from the knowledge
+    
+    RESPONSE STRUCTURE:
+    - 1-2 sentences acknowledging the user's issue
+    - 1-2 sentences explaining the most relevant insight from our analysis, incorporating classification if available
+    - Rest of response focusing on the most important actionable step from the next actions, enhanced with specific details from the knowledge
+    
+    STYLE REQUIREMENTS:
+    - Be conversational but efficient
+    - Use short, clear sentences
+    - Avoid unnecessary explanations or background information
+    - NO repetition of information
+    - NO generic advice statements
+    - NO lengthy introductions
     
     Begin your response immediately without preamble.
     """
@@ -502,13 +518,17 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         logger.info(f"Extracted user classification for knowledge filtering: {user_classification}")
         
         # Format knowledge for the LLM, passing the user classification
-        knowledge_context = optimize_knowledge_context(
+        knowledge_context = prepare_knowledge(
             user_analysis_knowledge, 
             last_user_message, 
             target_classification=user_classification
         ) if user_analysis_knowledge else ""
         
-        logger.info(f"Knowledge context for user analysis after step 2: {knowledge_context[:200]}...")
+        # Store knowledge context for later use
+        _last_cot_results["knowledge_context"] = knowledge_context
+        _last_cot_results["knowledge_entries"] = user_analysis_knowledge
+        
+        logger.info(f"Prepared knowledge context for user analysis after step 2: {knowledge_context}")
         
         # Format user profile for the LLM
         profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
@@ -697,17 +717,76 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         #Brian: Step 3 & 4 is actually just the knowledge preparation. Step 5 is the actual next actions generation.
         # STEP 5: Generate next actions using all collected knowledge
         # Format the combined knowledge for the LLM
-        technique_context = optimize_knowledge_context(
+        technique_context = prepare_knowledge(
             technique_knowledge, 
             last_user_message, 
             target_classification=user_classification
         ) if technique_knowledge else ""
         
-        solution_context = optimize_knowledge_context(
+        solution_context = prepare_knowledge(
             additional_knowledge, 
             last_user_message,
             target_classification=user_classification
         ) if additional_knowledge else ""
+        
+        # Store all knowledge for later use
+        if technique_knowledge:
+            _last_cot_results["technique_knowledge"] = technique_knowledge
+            _last_cot_results["technique_context"] = technique_context
+            
+        if additional_knowledge:
+            _last_cot_results["additional_knowledge"] = additional_knowledge
+            _last_cot_results["solution_context"] = solution_context
+            
+        # Combine all knowledge entries for complete context
+        _last_cot_results["knowledge_entries"] = user_analysis_knowledge + technique_knowledge + additional_knowledge
+        
+        # Create a comprehensive knowledge context with all prepared knowledge
+        combined_knowledge = ""
+        if knowledge_context:
+            combined_knowledge += f"## USER ANALYSIS KNOWLEDGE:\n{knowledge_context}\n\n"
+        if technique_context:
+            combined_knowledge += f"## TECHNIQUE IMPLEMENTATION KNOWLEDGE:\n{technique_context}\n\n"
+        if solution_context:
+            combined_knowledge += f"## SOLUTION KNOWLEDGE:\n{solution_context}\n\n"
+            
+        # Extract service packages and classification information for special highlighting
+        classification_info = ""
+        service_packages = ""
+        
+        # Look through all knowledge entries
+        all_knowledge = user_analysis_knowledge + technique_knowledge + additional_knowledge
+        for entry in all_knowledge:
+            structured = entry.get("structured", {})
+            
+            # Extract classification information
+            if structured and "content" in structured:
+                content = structured["content"]
+                if ("Nhóm Cao Cấp" in content or "Nhóm Trung Lưu" in content) and len(classification_info) < 500:
+                    classification_info += content + "\n\n"
+                    
+            # Extract service packages
+            if structured and "application_method" in structured:
+                app_method = structured["application_method"]
+                if isinstance(app_method, dict):
+                    app_title = app_method.get("title", "")
+                    if "Gói Thai Sản" in app_title or "Phân Loại" in app_title:
+                        service_packages += f"### {app_title}\n"
+                        # Include steps if available
+                        for step in app_method.get("steps", []):
+                            step_title = step.get("title", "")
+                            if step_title:
+                                service_packages += f"- {step_title}\n"
+        
+        # Add specially extracted information to the combined knowledge
+        if classification_info or service_packages:
+            combined_knowledge += "## KEY INFORMATION FOR RESPONSE:\n"
+            if classification_info:
+                combined_knowledge += f"### CUSTOMER CLASSIFICATION:\n{classification_info}\n"
+            if service_packages:
+                combined_knowledge += f"### SERVICE PACKAGES:\n{service_packages}\n"
+            
+        _last_cot_results["combined_knowledge_context"] = combined_knowledge
         
         # Create a prompt for generating actionable next steps
         actions_prompt = f"""
@@ -718,21 +797,39 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         USER CLASSIFICATION: {user_profile.get("segment", {}).get("category", "general")}
         
         OUR ANALYSIS:
-        {analysis_content}
+        {analysis_content[:1000]}
         
         {f"RECOMMENDED TECHNIQUES FOR THIS USER TYPE:\n{technique_context}" if technique_context else ""}
         
         {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
         
-        Provide 3 specific, practical next steps the user can take to address their needs. 
-        Make these steps clear, actionable, and directly relevant to their situation.
-        Format as a numbered list.
+        Provide 3 specific, practical, step-by-step next actions the user can take to address their needs.
+        Each step must be highly actionable, precise, and directly implement the techniques mentioned in the knowledge.
         
-        IMPORTANT INSTRUCTIONS:
-        1. FIRST, prioritize using the recommended techniques for this user type, as they are specifically chosen for users in this classification.
-        2. SECOND, incorporate the specific solutions that are most relevant to the user's situation.
-        3. Make each step concrete and actionable - tell them exactly what to do.
-        4. Respond in the SAME LANGUAGE that the user is using. If they write in Vietnamese, your next steps must be in Vietnamese. If they write in English, respond in English.
+        IMPORTANT REQUIREMENTS:
+        1. If the knowledge contains customer classification (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu"), explicitly incorporate this into your recommendations
+        2. If specific service packages are mentioned (like "Gói Thai Sản Cao Cấp" or "Gói Thai Sản Tiết Kiệm"), include these by name in your recommendations
+        3. Extract and use any specific procedural steps mentioned in the knowledge, including timelines, requirements, or documentation needed
+        4. Make sure the steps follow the customer journey process described in the knowledge
+        
+        FORMATTING REQUIREMENTS:
+        1. Number each step (1, 2, 3)
+        2. Keep each step concise but complete (30-50 words per step)
+        3. Start each step with an action verb
+        4. Include specific details on HOW to implement (timing, duration, frequency, etc.)
+        5. Focus on actions the user can start immediately
+        
+        CONTENT REQUIREMENTS:
+        1. Extract ONLY techniques and steps mentioned in the knowledge provided
+        2. Prioritize the most effective techniques for this specific user classification
+        3. If steps have sub-steps in the knowledge, include the most critical ones
+        4. Ensure the steps form a coherent action plan (not just random techniques)
+        
+        IMPORTANT:
+        - Respond in the SAME LANGUAGE that the user is using
+        - Focus on clarity and precision - each step should be unambiguous
+        - DO NOT invent techniques not found in the knowledge
+        - DO NOT include general advice unless it appears in the knowledge
         """
         
         # Generate the next actions
@@ -1070,7 +1167,6 @@ async def process_llm_with_tools(
             state["analysis"] = analysis_dict
             logger.info("Final analysis stored in state as a dictionary")
         
-        # IMPORTANT: Restore response generation code
         # Now check the module-level variable for results if needed
         if not analysis_results and _last_cot_results["analysis_content"]:
             analysis_results = _last_cot_results["analysis_content"]
@@ -1087,14 +1183,76 @@ async def process_llm_with_tools(
         
         # Format knowledge context from entries
         if knowledge_entries:
-            # First check if we have a pre-formatted knowledge context from _last_cot_results
-            if _last_cot_results["knowledge_context"]:
+            # First check if we have a pre-formatted combined knowledge context
+            if _last_cot_results.get("combined_knowledge_context"):
+                knowledge_context = _last_cot_results["combined_knowledge_context"]
+                logger.info(f"Using comprehensive combined knowledge context: {len(knowledge_context)} chars")
+            # Next check for the regular pre-formatted context
+            elif _last_cot_results.get("knowledge_context"):
                 knowledge_context = _last_cot_results["knowledge_context"]
-                logger.info(f"Using pre-formatted structured knowledge context from _last_cot_results")
+                logger.info(f"Using pre-formatted structured knowledge context: {len(knowledge_context)} chars")
+            # Technique and solution context can be especially valuable for responses
+            elif _last_cot_results.get("technique_context") or _last_cot_results.get("solution_context"):
+                # Prioritize knowledge with classification and specific recommendations
+                knowledge_context = ""
+                if _last_cot_results.get("technique_context"):
+                    knowledge_context += f"## RECOMMENDED TECHNIQUES\n{_last_cot_results['technique_context']}\n\n"
+                if _last_cot_results.get("solution_context"):
+                    knowledge_context += f"## SPECIFIC SOLUTIONS\n{_last_cot_results['solution_context']}\n\n"
+                logger.info(f"Using technique and solution context for response: {len(knowledge_context)} chars")
             else:
-                # Use our optimized formatter
-                knowledge_context = optimize_knowledge_context(knowledge_entries, user_message, max_chars=2500)
-                logger.info(f"Created optimized knowledge context: {len(knowledge_context)} chars")
+                # Extract key classification data
+                classification_data = []
+                service_offerings = []
+                application_steps = []
+                
+                # Scan knowledge entries for classification and service information
+                for entry in knowledge_entries:
+                    structured = entry.get("structured", {})
+                    # Look for classification info
+                    if structured and "content" in structured:
+                        content = structured["content"]
+                        if "Nhóm Cao Cấp" in content or "Nhóm Trung Lưu" in content:
+                            classification_data.append(content)
+                    
+                    # Look for service offerings
+                    if structured and "application_method" in structured:
+                        app_method = structured["application_method"]
+                        if isinstance(app_method, dict):
+                            app_title = app_method.get("title", "")
+                            if "Gói Thai Sản" in app_title or "Phân Loại" in app_title:
+                                service_offerings.append(app_title)
+                                # Extract steps for better guidance
+                                for step in app_method.get("steps", []):
+                                    step_content = step.get("content", "")
+                                    if step_content:
+                                        application_steps.append(step_content)
+                
+                # IMPORTANT: Use prepare_knowledge to get a well-structured knowledge representation
+                user_classification = None
+                if _last_cot_results.get("user_profile") and "segment" in _last_cot_results["user_profile"]:
+                    user_classification = _last_cot_results["user_profile"]["segment"].get("category")
+                
+                knowledge_context = prepare_knowledge(
+                    knowledge_entries, 
+                    user_message, 
+                    target_classification=user_classification,
+                    max_chars=1500  # Increased limit for better quality
+                )
+                
+                # Augment with classified data if available
+                if classification_data or service_offerings or application_steps:
+                    knowledge_context += "\n\n## KEY INFORMATION FOR RESPONSE\n"
+                    if classification_data:
+                        knowledge_context += "### Customer Classification:\n" + "\n".join(classification_data[:2]) + "\n\n"
+                    if service_offerings:
+                        knowledge_context += "### Service Packages:\n" + "\n".join(service_offerings) + "\n\n"
+                    if application_steps:
+                        knowledge_context += "### Application Steps:\n" + "\n".join(application_steps[:3]) + "\n\n"
+                
+                logger.info(f"Created enhanced structured knowledge context: {len(knowledge_context)} chars")
+                # Store the enhanced knowledge context for future use
+                _last_cot_results["knowledge_context"] = knowledge_context
                 
             knowledge_found = True
             logger.info(f"Using knowledge context for response generation: {len(knowledge_context)} chars")

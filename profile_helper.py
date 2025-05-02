@@ -179,9 +179,29 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
                 takeaways = structured.get("takeaways", "")
                 application_method = structured.get("application_method", "")
                 
+                # Add debug logging for application_method structure
+                if application_method:
+                    logger.info(f"Application method type: {type(application_method).__name__}")
+                    if isinstance(application_method, dict):
+                        logger.info(f"Application method keys: {list(application_method.keys())}")
+                        if "title" in application_method:
+                            logger.info(f"Application method title: {application_method['title']}")
+                            
                 # If we have an application method, capture it
                 if application_method:
-                    knowledge_classification_hints.append(application_method)
+                    # Check if application_method is a dictionary and extract title
+                    if isinstance(application_method, dict) and "title" in application_method:
+                        knowledge_classification_hints.append(application_method["title"])
+                    # If it's a string, use it directly
+                    elif isinstance(application_method, str):
+                        knowledge_classification_hints.append(application_method)
+                    # If it's some other structure, convert to string safely
+                    else:
+                        try:
+                            knowledge_classification_hints.append(str(application_method))
+                        except:
+                            # If conversion fails, skip it
+                            logger.warning(f"Could not process application method for classification hints: {type(application_method)}")
                 
                 # Format the structured data for the prompt
                 knowledge_context += f"--- USER ANALYSIS GUIDANCE ---\n"
@@ -194,7 +214,22 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
                 if takeaways:
                     knowledge_context += f"Key Takeaways: {takeaways}\n"
                 if application_method:
-                    knowledge_context += f"Application Method: {application_method}\n"
+                    # Handle application_method based on its type
+                    if isinstance(application_method, dict):
+                        # Format dictionary application method
+                        app_title = application_method.get("title", "Application Method")
+                        knowledge_context += f"Application Method: {app_title}\n"
+                        
+                        # Include steps if available
+                        steps = application_method.get("steps", [])
+                        if steps:
+                            knowledge_context += "Steps:\n"
+                            for i, step in enumerate(steps):
+                                step_title = step.get("title", f"Step {i+1}")
+                                knowledge_context += f"- {step_title}\n"
+                    else:
+                        # Simple string case
+                        knowledge_context += f"Application Method: {application_method}\n"
                 
                 # If no structured data, fall back to raw text
                 if not (title or content or description or takeaways or application_method):
