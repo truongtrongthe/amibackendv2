@@ -13,6 +13,8 @@ brain = get_brain()
 
 def extract_structured_data_from_raw(raw_text: str) -> Dict[str, Any]:
     """
+    DEPRECATED: This function is kept for backward compatibility but no longer used in the main pipeline.
+    
     Extract structured data from raw text using enhanced regex patterns.
     Captures full descriptions and detailed application methods with steps.
     
@@ -22,9 +24,11 @@ def extract_structured_data_from_raw(raw_text: str) -> Dict[str, Any]:
     Returns:
         Dictionary with extracted fields (title, description, content, takeaways, application_method with steps, etc.)
     """
-    structured_data = {}
+    # Add warning log
+    logger.warning("Using deprecated extract_structured_data_from_raw function. Consider using prepare_knowledge directly.")
     
-    logger.info(f"EXTRACTING STRUCTURED DATA FROM RAW: {raw_text}")    
+    structured_data = {}
+        
     # Extract title
     title_match = re.search(r'Title:\s*(.*?)(?:\n|$)', raw_text)
     if title_match:
@@ -115,145 +119,16 @@ def extract_structured_data_from_raw(raw_text: str) -> Dict[str, Any]:
     # Extract cross-cluster connections
     connections_match = re.search(r'Cross-Cluster Connections:\s*(.*?)(?=\n\n\w+:|$)', raw_text, re.DOTALL)
     if connections_match:
-        structured_data["cross_cluster_connections"] = connections_match.group(1).strip()
-        
-    logger.info(f"STRUCTURED DATA: {structured_data}")
+        structured_data["cross_cluster_connections"] = connections_match.group(1).strip()  
     return structured_data
-
-def optimize_knowledge_context(knowledge_entries: List[Dict], user_query: str, max_chars: int = 2500, target_classification: str = None) -> str:
-    """
-    Optimize knowledge context by prioritizing and formatting relevant knowledge
-    entries for the prompt. Improved to extract only relevant segments and filter
-    by classification when provided.
-    
-    Args:
-        knowledge_entries: List of knowledge entry dictionaries
-        user_query: Original user query for prioritization
-        max_chars: Maximum characters allowed in the context
-        target_classification: Optional classification to filter relevant segments (e.g., "Chán Nản")
-        
-    Returns:
-        Formatted knowledge context string
-    """
-    if not knowledge_entries:
-        return ""
-    
-    try:
-        # Extract target classification from user query if not provided
-        if not target_classification:
-            # Look for common classification terms in Vietnamese
-            classification_patterns = ["nhóm", "người dùng", "khách hàng"]
-            for pattern in classification_patterns:
-                match = re.search(f"{pattern} ([\\w\\s]+)", user_query, re.IGNORECASE)
-                if match:
-                    target_classification = match.group(1)
-                    break
-        
-        # Step 1: Split entries into relevant segments
-        segmented_entries = []
-        
-        for entry in knowledge_entries:
-            raw_text = entry.get("raw", "")
-            entry_id = entry.get("id", "unknown")
-            similarity = entry.get("similarity", 0)
-            query = entry.get("query", "")
-            phase = entry.get("phase", "unknown")
-            
-            # Split text into paragraphs
-            paragraphs = re.split(r'\n\n+', raw_text)
-            
-            # Process each paragraph as a potential segment
-            for i, para in enumerate(paragraphs):
-                # Skip empty paragraphs
-                if not para.strip():
-                    continue
-                
-                # Calculate relevance score
-                relevance = similarity  # Start with base similarity
-                
-                # Check for target classification in segment
-                if target_classification and target_classification.lower() in para.lower():
-                    relevance += 0.3  # Big boost for segments containing the target classification
-                
-                # Check for query terms in segment
-                query_terms = query.lower().split()
-                if query_terms:
-                    query_term_count = sum(1 for term in query_terms if term.lower() in para.lower())
-                    relevance += 0.1 * (query_term_count / len(query_terms))
-                
-                # Check for specific section indicators
-                if re.search(r'(Title:|Description:|Application:|Takeaways:)', para):
-                    relevance += 0.15
-                
-                # Boost for first paragraph (often contains key information)
-                if i == 0:
-                    relevance += 0.05
-                
-                # Store the segment with its calculated relevance
-                segmented_entries.append({
-                    "text": para,
-                    "relevance": relevance,
-                    "id": f"{entry_id}_{i}",
-                    "phase": phase
-                })
-        
-        # Step 2: Sort segments by relevance
-        sorted_segments = sorted(segmented_entries, key=lambda x: x["relevance"], reverse=True)
-        
-        # Step 3: Format segments in priority order until max_chars is reached
-        formatted_context = ""
-        added_segment_ids = set()
-        
-        for segment in sorted_segments:
-            # Skip if already added (based on unique segment ID)
-            if segment["id"] in added_segment_ids:
-                continue
-            
-            # Format the segment text
-            segment_text = segment["text"].strip()
-            
-            # Add phase indicator for clarity
-            if segment["phase"] == "user_analysis":
-                phase_marker = "[User Type Knowledge]"
-            elif segment["phase"] == "technique_implementation":
-                phase_marker = "[Technique Implementation]"
-            elif segment["phase"] == "additional_knowledge":
-                phase_marker = "[Additional Knowledge]"
-            else:
-                phase_marker = ""
-            
-            # Format the segment with phase marker if available
-            formatted_segment = f"{phase_marker}\n{segment_text}" if phase_marker else segment_text
-            
-            # Check if adding this would exceed max chars
-            if len(formatted_context) + len(formatted_segment) + 2 <= max_chars:  # +2 for newlines
-                formatted_context += formatted_segment + "\n\n"
-                added_segment_ids.add(segment["id"])
-            else:
-                # If we can't add more full segments, we're done
-                break
-        
-        logger.info(f"Optimized knowledge context: {len(formatted_context)} chars from {len(segmented_entries)} segments")
-        return formatted_context.strip()
-    
-    except Exception as e:
-        logger.error(f"Error optimizing knowledge context: {str(e)}")
-        # Fallback: just concatenate raw text of first few entries
-        fallback_text = ""
-        for entry in knowledge_entries[:2]:
-            raw = entry.get("raw", "")
-            if raw:
-                fallback_text += raw[:300] + "...\n\n"  # Truncate each entry
-        
-        return fallback_text[:max_chars]
 
 def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars: int = 10000, target_classification: str = None) -> str:
     """
-    Prepare knowledge context by extracting relevant segments, understanding cross-cluster connections,
-    and creating a unified, comprehensive instruction set using LLM.
+    Prepare knowledge context by directly processing raw knowledge text and creating a unified,
+    comprehensive instruction set. This function skips the rigid extraction step.
     
     Args:
-        knowledge_entries: List of knowledge entry dictionaries, each item is formatted by extract_structured_data_from_raw
+        knowledge_entries: List of knowledge entry dictionaries
         user_query: Original user query for prioritization
         max_chars: Maximum characters allowed in the context
         target_classification: Optional classification to filter relevant segments (e.g., "Chán Nản")
@@ -265,9 +140,8 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         return ""
     
     try:
-        # Step 1: Extract structured data and organize by relevance
-        structured_entries = []
-        cross_connections = []
+        # Step 1: Calculate relevance and organize entries
+        ranked_entries = []
         
         for entry in knowledge_entries:
             raw_text = entry.get("raw", "")
@@ -276,130 +150,51 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
             query = entry.get("query", "")
             phase = entry.get("phase", "unknown")
             
-            # Extract structured data
-            structured = entry.get("structured", {})
-            if not structured and raw_text:
-                # Only extract structured data if it doesn't already exist
-                logger.info(f"No structured data found for entry {entry_id}, extracting from raw text")
-                structured = extract_structured_data_from_raw(raw_text)
+            # Skip if no raw text
+            if not raw_text:
+                continue
                 
-            # Log the structured data for debugging
-            if structured:
-                logger.info(f"Using structured data for entry {entry_id}: {list(structured.keys())}")
-            else:
-                logger.info(f"No structured data available for entry {entry_id}")
+            # Calculate relevance score - more straightforward now
+            relevance = similarity  # Base score is similarity
             
-            # Extract cross-cluster connections if available
-            if "cross_cluster_connections" in structured:
-                connections = structured["cross_cluster_connections"]
-                cross_connections.append({
-                    "id": entry_id,
-                    "connections": connections,
-                    "title": structured.get("title", "Untitled Entry")
-                })
-            
-            # Calculate relevance score
-            relevance = similarity  # Start with base similarity
-            
-            # Boost entries containing target classification
-            if target_classification and (
-                (target_classification.lower() in raw_text.lower()) or
-                (structured.get("title", "").lower() and target_classification.lower() in structured["title"].lower())
-            ):
+            # Boost entries containing target classification if provided
+            if target_classification and target_classification.lower() in raw_text.lower():
                 relevance += 0.3
+                logger.info(f"Boosting entry {entry_id} for containing classification '{target_classification}'")
             
-            # Boost for entries matching query terms
-            query_terms = [term for term in query.lower().split() if len(term) > 3]
+            # Boost entries containing key terms from user query
+            query_terms = [term for term in user_query.lower().split() if len(term) > 3]
             if query_terms:
                 term_matches = sum(1 for term in query_terms if term in raw_text.lower())
                 relevance += 0.1 * (term_matches / len(query_terms))
             
-            # Boost for entries with application methods
-            if "application_method" in structured:
+            # Boost entries with application methods
+            if "Application Method:" in raw_text or "Steps:" in raw_text:
                 relevance += 0.25
+                logger.info(f"Boosting entry {entry_id} for containing application methods")
             
-            # Store the structured entry with relevance
-            structured_entries.append({
+            # Store for ranking
+            ranked_entries.append({
                 "id": entry_id,
-                "structured": structured,
                 "raw": raw_text,
                 "relevance": relevance,
                 "phase": phase
             })
         
         # Sort entries by relevance
-        sorted_entries = sorted(structured_entries, key=lambda x: x["relevance"], reverse=True)
+        sorted_entries = sorted(ranked_entries, key=lambda x: x["relevance"], reverse=True)
         
-        # Step 2: Prepare input for LLM synthesis
+        # Step 2: Prepare raw knowledge entries for LLM synthesis
         # Take top most relevant entries (limit to preserve token count)
         top_entries = sorted_entries[:3]
+        logger.info(f"Selected top {len(top_entries)} entries for knowledge context")
         
-        # Prepare knowledge context for LLM
+        # Format raw entries with minimal processing
         knowledge_input = ""
-        
-        # Format the top entries with detailed structured data
         for i, entry in enumerate(top_entries):
-            structured = entry["structured"]
-            knowledge_input += f"KNOWLEDGE ENTRY {i+1}:\n"
-            
-            if "title" in structured:
-                knowledge_input += f"Title: {structured['title']}\n\n"
-            
-            if "description" in structured:
-                knowledge_input += f"Description: {structured['description']}\n\n"
-            
-            # Add content if available
-            if "content" in structured:
-                content_preview = structured['content'][:800] + "..." if len(structured['content']) > 800 else structured['content']
-                knowledge_input += f"Content: {content_preview}\n\n"
-            
-            # Format application method with detailed structure if available
-            if "application_method" in structured and isinstance(structured["application_method"], dict):
-                app_method = structured["application_method"]
-                knowledge_input += f"APPLICATION METHOD: {app_method.get('title', 'No Title')}\n\n"
-                
-                # Process each step with its structure
-                steps = app_method.get("steps", [])
-                for j, step in enumerate(steps):
-                    step_title = step.get("title", f"Step {j+1}")
-                    knowledge_input += f"Step {j+1}: {step_title}\n"
-                    
-                    # Include step content
-                    if "content" in step:
-                        step_content = step["content"]
-                        knowledge_input += f"{step_content}\n"
-                    
-                    # Format sub-steps if available
-                    if "sub_steps" in step and step["sub_steps"]:
-                        knowledge_input += "Detailed steps:\n"
-                        for sub_step in step["sub_steps"]:
-                            if "number" in sub_step and "content" in sub_step:
-                                knowledge_input += f"- Sub-step {sub_step['number']}: {sub_step['content']}\n"
-                            elif "bullet" in sub_step:
-                                knowledge_input += f"- {sub_step['bullet']}\n"
-                    
-                    knowledge_input += "\n"
-            # Fall back to raw application method or takeaways if structured format not available
-            elif "application_method_raw" in structured:
-                knowledge_input += f"Application Method: {structured['application_method_raw']}\n\n"
-            elif "takeaways" in structured:
-                knowledge_input += f"Takeaways: {structured['takeaways']}\n\n"
-            
-            # Add document summary if available
-            if "document_summary" in structured:
-                summary = structured["document_summary"]
-                knowledge_input += f"Summary: {summary}\n\n"
-            
-            knowledge_input += "----\n\n"
+            raw_text = entry["raw"]
+            knowledge_input += f"KNOWLEDGE ENTRY {i+1}:\n{raw_text}\n\n----\n\n"
         
-        # Add cross-cluster connections
-        if cross_connections:
-            knowledge_input += "CROSS-CLUSTER CONNECTIONS:\n"
-            for connection in cross_connections:
-                knowledge_input += f"- {connection['title']} connects to: {connection['connections']}\n"
-            knowledge_input += "\n----\n\n"
-        
-        logger.info(f"SYNTHESIZE STEP 2: Knowledge input before LLM: {knowledge_input}")
         # Step 3: Use LLM to synthesize knowledge into unified instructions
         from langchain_openai import ChatOpenAI
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
@@ -408,34 +203,36 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         language = detect_language(user_query)
         lang_prompt = "in Vietnamese" if language == "vietnamese" else "in English"
         
-        # Create a more structured prompt that encourages the LLM to preserve the step-by-step format
+        # Create a more targeted prompt for knowledge synthesis
         synthesis_prompt = f"""
         Based on the following knowledge entries, create a comprehensive set of instructions and information {lang_prompt} for addressing the user's needs.
         
         USER QUERY: {user_query}
-        USER CLASSIFICATION: {target_classification if target_classification else "Unknown"}
+        {f"USER CLASSIFICATION: {target_classification}" if target_classification else ""}
         
         {knowledge_input}
         
         Create a unified, comprehensive set of instructions that:
-        1. Begins with a clear explanation of what the user is dealing with
-        2. Highlights specific techniques and approaches mentioned in the knowledge entries
-        3. Provides a STEP-BY-STEP action plan with clear, numbered steps
-        4. Preserves the detailed sub-steps from the original knowledge where available
-        5. Connects related concepts across entries when relevant
-        6. Uses a clear structure with headings, bullet points, and numbered lists
+        1. Extracts and highlights specific techniques and approaches from the knowledge
+        2. Preserves ALL step-by-step instructions and application methods
+        3. Keeps ALL detailed steps and sub-steps exactly as presented
+        4. Maintains the exact same hierarchy and numbering system for steps
+        5. DIRECTLY INCLUDES any specific examples, scripts, or templates
         
         FORMAT REQUIREMENTS:
-        - Use numbered steps for the main action plan (1., 2., 3., etc.)
-        - Preserve sub-steps with bullet points or sub-numbering (e.g., 1.1, 1.2, etc.)
+        - Use clear section headings (# for main headings, ## for sub-headings)
+        - Preserve all numbered steps exactly as they appear in the knowledge
+        - Keep all bullet points in their original form
         - Use bold text for important concepts
-        - Create clear section headings
-        - Include application techniques with explicit "how to" instructions
+        - Directly quote any examples, scripts, or templates
         
-        Focus especially on application methods and specific instructions from the knowledge. 
-        If entries have connections between them, explain how these concepts relate to each other.
-        
-        IMPORTANT: Do not fabricate information. Only use what is provided in the knowledge entries.
+        IMPORTANT GUIDELINES:
+        - DO NOT OMIT any steps, examples, or application methods
+        - PRESERVE the exact structure of all application methods and their steps
+        - DO NOT shorten steps - include their full content
+        - DO NOT rewrite or summarize the steps - maintain them as they appear
+        - DO NOT skip steps or leave sections incomplete
+        - DO NOT fabricate information - only use what is provided
         """
         
         logger.info("Using LLM to synthesize knowledge into comprehensive instructions")
@@ -446,56 +243,23 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         if len(synthesized_knowledge) > max_chars:
             synthesized_knowledge = synthesized_knowledge[:max_chars-3] + "..."
         
-        logger.info(f"Successfully synthesized {len(synthesized_knowledge)} chars of knowledge using LLM")
         return synthesized_knowledge
     
     except Exception as e:
         logger.error(f"Error in prepare_knowledge: {str(e)}")
         logger.error(traceback.format_exc())
         
-        # Enhanced fallback: try to preserve structured format even in fallback mode
-        fallback_text = ""
-        try:
-            for entry in knowledge_entries[:2]:
-                structured = entry.get("structured", {})
-                if structured and "title" in structured:
-                    fallback_text += f"# {structured['title']}\n\n"
-                    
-                    if "description" in structured:
-                        fallback_text += f"{structured['description']}\n\n"
-                    
-                    # Include application method with steps if available
-                    if "application_method" in structured and isinstance(structured["application_method"], dict):
-                        app_method = structured["application_method"]
-                        fallback_text += f"## {app_method.get('title', 'Application Method')}\n\n"
-                        
-                        # Include steps
-                        steps = app_method.get("steps", [])
-                        for i, step in enumerate(steps):
-                            fallback_text += f"{i+1}. **{step.get('title', f'Step {i+1}')}**\n"
-                            if "content" in step:
-                                fallback_text += f"   {step['content']}\n\n"
-                    elif "application_method_raw" in structured:
-                        fallback_text += f"## Application Method\n{structured['application_method_raw']}\n\n"
-                    elif "takeaways" in structured:
-                        fallback_text += f"## Key Takeaways\n{structured['takeaways']}\n\n"
-                    
-                    fallback_text += "---\n\n"
-                else:
-                    raw = entry.get("raw", "")
-                    if raw:
-                        # Try to extract at least the title
-                        title_match = re.search(r'Title:\s*(.*?)(?:\n|$)', raw)
-                        title = title_match.group(1).strip() if title_match else "Knowledge Entry"
-                        fallback_text += f"# {title}\n\n"
-                        fallback_text += raw[:300] + "...\n\n---\n\n"
-        except Exception as fallback_error:
-            logger.error(f"Error in fallback text generation: {str(fallback_error)}")
-            # Ultimate fallback - just return raw text
-            for entry in knowledge_entries[:2]:
-                fallback_text += entry.get("raw", "")[:500] + "\n\n"
+        # Fallback: Return simple concatenation of knowledge entries
+        fallback_content = ""
+        for entry in knowledge_entries[:2]:  # Limit to 2 entries for brevity
+            raw_text = entry.get("raw", "")
+            if raw_text:
+                fallback_content += f"--- KNOWLEDGE ---\n{raw_text[:1000]}\n\n"
         
-        return fallback_text[:max_chars]
+        if len(fallback_content) > max_chars:
+            fallback_content = fallback_content[:max_chars-3] + "..."
+            
+        return fallback_content
 
 async def ensure_brain_loaded(graph_version_id: str = "") -> bool:
     """
@@ -536,177 +300,44 @@ def detect_language(text: str) -> str:
         text: The text to analyze
         
     Returns:
-        Language code ('vietnamese' or 'english')
+        String indicating the detected language ("vietnamese" or "english")
     """
-    if not text or len(text.strip()) < 2:
-        # Default to Vietnamese for the application context
-        return "vietnamese"
-    
-    # Convert text to lowercase for better matching
-    text_lower = text.strip().lower()
-    
-    # 1. Check for Vietnamese-specific characters (highest confidence indicator)
-    vietnamese_chars = set("ăâêôơưđáàảãạắằẳẵặấầẩẫậéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ")
-    vi_char_count = sum(1 for char in text_lower if char in vietnamese_chars)
-    
-    # If we have multiple Vietnamese characters, it's very likely Vietnamese
-    if vi_char_count > 1:
-        logger.info(f"Detected Vietnamese by specific characters (found {vi_char_count})")
-        return "vietnamese"
-    
-    # 2. Check for common Vietnamese words (high confidence)
-    vietnamese_words = [
-        "không", "của", "và", "là", "được", "có", "tôi", "cho", "một", "để",
-        "trong", "người", "những", "nhưng", "với", "các", "mình", "này", "đã",
-        "làm", "khi", "giúp", "từ", "cách", "như", "thể", "nếu", "vì", "tại",
-        "quá", "rất", "thì", "phải", "nhiều", "cũng", "sẽ", "đang", "nên", "chỉ",
-        "trên", "bị", "theo", "còn", "đến", "tình", "anh", "em", "bạn", "chúng",
-        "hoặc", "mà", "gì", "năm", "ngày", "đã", "đây", "khoảng", "lúc", "mới",
-        "nhất", "phút", "quan hệ", "xuất tinh", "sớm", "chậm", "lâu", "nhanh", "đủ"
-    ]
-    
-    # Split text into words for matching
-    words = re.findall(r'\b\w+\b', text_lower)
-    vi_word_count = sum(1 for word in words if word in vietnamese_words)
-    
-    # If we have multiple Vietnamese words, it's likely Vietnamese
-    if vi_word_count > 0:
-        vi_word_ratio = vi_word_count / len(words) if words else 0
-        if vi_word_ratio > 0.15 or vi_word_count >= 2:  # More than 15% of words are Vietnamese or at least 2 Vietnamese words
-            logger.info(f"Detected Vietnamese by common words (found {vi_word_count} words, ratio {vi_word_ratio:.2f})")
-            return "vietnamese"
-    
-    # 3. Check for common Vietnamese phrases/patterns
-    vietnamese_patterns = [
-        r'\b(tôi|mình|em|anh)\s+\w+',  # "tôi là", "mình muốn", etc.
-        r'\b\w+\s+(rồi|chưa|á|ạ|nhé)\b',  # Words ending with conversational particles
-        r'\b(làm|mua|xem|đi|biết)\s+(sao|thế|vậy)\b',  # Question patterns
-        r'\b(chào|cám ơn|cảm ơn|xin)\s+\w+',  # Greeting patterns
-        r'\bquá\s+\w+',  # "quá + adjective" pattern
-        r'\b\w+\s+quá\b',  # "adjective + quá" pattern
-        r'\bđã\s+\w+\s+chưa',  # "đã ... chưa" question pattern
-        r'\bcó\s+(thể|phải|nên)',  # "có thể/phải/nên" modal patterns
-        r'\bkhông\s+(thể|phải|được)',  # "không thể/phải/được" patterns
-        r'\b(bị|đang|phải|không|có|đã)\s+\w+',  # Common verb prefixes
-    ]
-    
-    for pattern in vietnamese_patterns:
-        if re.search(pattern, text_lower):
-            logger.info(f"Detected Vietnamese by phrase pattern: {pattern}")
-            return "vietnamese"
-    
-    # 4. Check for English patterns before defaulting
-    english_patterns = [
-        r'\b(i|you|he|she|we|they)\s+\w+',  # English pronouns followed by verbs
-        r'\b(is|are|was|were|have|has|had|do|does|did)\s+\w+',  # English auxiliary verbs
-        r'\b(the|a|an)\s+\w+',  # English articles
-        r'\b(will|would|should|could|can|may|might)\s+\w+',  # English modal verbs
-        r'\b(have|has)\s+been\b',  # Perfect continuous tense markers
-        r'\b(in|on|at|for|with|by|from|to)\s+\w+',  # Common English prepositions
-    ]
-    
-    for pattern in english_patterns:
-        if re.search(pattern, text_lower):
-            logger.info(f"Detected English by phrase pattern: {pattern}")
-            return "english"
-    
-    # 5. Statistical approach as last resort
-    # Count Vietnamese characters, vowels, endings
-    vi_indicators = sum(1 for c in text_lower if c in "ăâêôơưđáàảãạắằẳẵặấầẩẫậéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ")
-    # Count English-specific patterns (th, wh, gh, etc.)
-    en_indicators = len(re.findall(r'\b(th|wh|gh|kn|ph|qu|sh)\w+', text_lower))
-    
-    if vi_indicators > en_indicators:
-        logger.info(f"Detected Vietnamese by character statistics ({vi_indicators} vs {en_indicators})")
-        return "vietnamese"
-    if en_indicators > 0:
-        logger.info(f"Detected English by character statistics ({en_indicators} vs {vi_indicators})")
-        return "english"
-    
-    # Default to Vietnamese for this specific application context
-    logger.info("Defaulting to Vietnamese (application context)")
-    return "vietnamese"
-
-def process_knowledge_context(knowledge_entries: List[Dict], user_query: str) -> str:
-    """
-    Process knowledge entries into a formatted context for the LLM.
-    
-    Args:
-        knowledge_entries: List of knowledge entry dictionaries
-        user_query: The user's query for relevance scoring
-        
-    Returns:
-        Formatted knowledge context string
-    """
-    if not knowledge_entries:
-        return ""
-    
     try:
-        # Group entries by type for better organization
-        entries_by_type = {
-            "high_relevance": [],
-            "medium_relevance": [],
-            "low_relevance": []
-        }
+        # Vietnamese-specific characters
+        vn_chars = set("ăâêôơưđáàảãạắằẳẵặấầẩẫậếềểễệốồổỗộớờởỡợúùủũụứừửữựíìỉĩịýỳỷỹỵ")
         
-        # Calculate median similarity for threshold
-        similarities = [entry.get("similarity", 0) for entry in knowledge_entries]
-        median_similarity = sorted(similarities)[len(similarities) // 2] if similarities else 0
+        # Common Vietnamese words
+        vn_words = [
+            "anh", "tôi", "bạn", "bị", "của", "và", "là", "được", "có", "cho", 
+            "một", "để", "trong", "người", "những", "không", "với", "các", "mình", 
+            "này", "đã", "khi", "từ", "cách", "như", "thể", "nếu", "vì", "tại"
+        ]
         
-        # Create threshold values
-        high_threshold = median_similarity + 0.1
-        low_threshold = median_similarity - 0.1
+        # Clean text
+        cleaned_text = text.lower().strip()
         
-        # Categorize entries by relevance
-        for entry in knowledge_entries:
-            similarity = entry.get("similarity", 0)
-            if similarity >= high_threshold:
-                entries_by_type["high_relevance"].append(entry)
-            elif similarity <= low_threshold:
-                entries_by_type["low_relevance"].append(entry)
-            else:
-                entries_by_type["medium_relevance"].append(entry)
+        # Check for Vietnamese characters (strong indicator)
+        if any(char in vn_chars for char in cleaned_text):
+            return "vietnamese"
         
-        # Format with most relevant first, limited to 2500 chars total
-        formatted_context = "KNOWLEDGE CONTEXT:\n\n"
-        char_count = len(formatted_context)
-        max_chars = 2500
+        # Check for common Vietnamese words
+        words = set(re.findall(r'\b\w+\b', cleaned_text))
+        vn_word_matches = sum(1 for word in words if word in vn_words)
         
-        # Process high relevance
-        for entry in entries_by_type["high_relevance"]:
-            entry_text = format_knowledge_entry(entry)
-            if char_count + len(entry_text) + 10 <= max_chars:
-                formatted_context += f"[HIGH RELEVANCE]\n{entry_text}\n\n"
-                char_count += len(entry_text) + 20  # Account for added tags
-        
-        # Process medium relevance
-        for entry in entries_by_type["medium_relevance"]:
-            entry_text = format_knowledge_entry(entry)
-            if char_count + len(entry_text) + 10 <= max_chars:
-                formatted_context += f"[MEDIUM RELEVANCE]\n{entry_text}\n\n"
-                char_count += len(entry_text) + 22  # Account for added tags
-        
-        # Process low relevance (only if space allows)
-        for entry in entries_by_type["low_relevance"]:
-            entry_text = format_knowledge_entry(entry)
-            if char_count + len(entry_text) + 10 <= max_chars:
-                formatted_context += f"[ADDITIONAL INFO]\n{entry_text}\n\n"
-                char_count += len(entry_text) + 21  # Account for added tags
-        
-        return formatted_context.strip()
-        
+        # If multiple Vietnamese words are found
+        if vn_word_matches >= 2:
+            return "vietnamese"
+            
+        # Check for Vietnamese phrases (additional check)
+        vn_phrases = ["tôi muốn", "anh bị", "em bị", "chúng tôi", "tôi cần", "xin chào"]
+        if any(phrase in cleaned_text for phrase in vn_phrases):
+            return "vietnamese"
+            
+        # Default to English if not detected as Vietnamese
+        return "english"
     except Exception as e:
-        logger.error(f"Error processing knowledge context: {str(e)}")
-        # Fallback: just concatenate the first few entries
-        fallback_text = "KNOWLEDGE CONTEXT:\n\n"
-        for entry in knowledge_entries[:3]:
-            fallback_text += format_knowledge_entry(entry) + "\n\n"
-        
-        # Ensure we don't exceed the maximum length
-        if len(fallback_text) > 2500:
-            fallback_text = fallback_text[:2497] + "..."
-        
-        return fallback_text
+        logger.warning(f"Error in language detection: {str(e)}")
+        return "english"  # Default to English on error
 
 def format_knowledge_entry(entry: Dict) -> str:
     """
@@ -763,87 +394,6 @@ def format_knowledge_entry(entry: Dict) -> str:
     # Last resort if no content available
     return f"Entry {entry_id} (Relevance: {similarity:.2f})"
 
-def extract_key_knowledge(knowledge_context: str, conversation_context: str) -> str:
-    """
-    Extract the most relevant parts from knowledge context based on the conversation.
-    
-    Args:
-        knowledge_context: The full knowledge context text
-        conversation_context: The conversation context to use for relevance
-        
-    Returns:
-        Reduced knowledge context focusing on the most relevant parts
-    """
-    if not knowledge_context:
-        return ""
-    
-    try:
-        # Get key terms from the conversation (last user message)
-        key_terms = []
-        user_msg = ""
-        
-        for line in conversation_context.split('\n'):
-            if line.startswith("User:"):
-                user_msg = line[5:].strip()
-                break
-        
-        # Extract potential key terms from user message
-        if user_msg:
-            # Remove common words and punctuation
-            common_words = {"the", "a", "an", "in", "on", "at", "to", "for", "with", "and", "but", "or", "is", "are",
-                           "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "of"}
-            
-            # Split by common delimiters and convert to lowercase
-            words = re.split(r'[ \t\n,.?!:;()\[\]{}"]', user_msg.lower())
-            words = [w for w in words if w and w not in common_words and len(w) > 2]
-            
-            # Take most frequent terms
-            from collections import Counter
-            term_counter = Counter(words)
-            key_terms = [term for term, _ in term_counter.most_common(5)]
-        
-        # Split knowledge into sections/paragraphs
-        sections = re.split(r'\n\n+', knowledge_context)
-        
-        # Score each section based on key terms
-        scored_sections = []
-        for section in sections:
-            score = 1  # Base score
-            
-            # Score by key term presence
-            for term in key_terms:
-                if term.lower() in section.lower():
-                    score += 3
-            
-            # Bonus for sections with "Title:", "Description:", etc.
-            if re.search(r'(Title|Description|Application|Takeaways):', section):
-                score += 5
-            
-            # Penalize very long sections
-            if len(section) > 300:
-                score -= 2
-            
-            scored_sections.append((section, score))
-        
-        # Sort by score and take top sections
-        scored_sections.sort(key=lambda x: x[1], reverse=True)
-        top_sections = [section for section, _ in scored_sections[:3]]
-        
-        # Combine and return top sections
-        reduced_context = "\n\n".join(top_sections)
-        
-        # Ensure we're within limit
-        if len(reduced_context) > 1500:
-            reduced_context = reduced_context[:1497] + "..."
-        
-        return reduced_context
-        
-    except Exception as e:
-        logger.error(f"Error extracting key knowledge: {str(e)}")
-        # Return truncated original context as fallback
-        return knowledge_context[:1000] + "..."
-
-
 def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     """
     Build queries to analyze the user profile.
@@ -858,11 +408,21 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     portrait = user_profile.get("portrait", "")
     logger.info(f"User profile portrait: {portrait[:500]}...")
     
+    # First, look for specifically bolded classifications in the portrait
+    # These are the explicit classifications from prepare_knowledge
+    bolded_classifications = re.findall(r'\*\*(.*?)\*\*', portrait)
+    primary_classification = None
+    
+    if bolded_classifications:
+        # Use the first bolded classification found
+        primary_classification = bolded_classifications[0].strip()
+        logger.info(f"Found bolded classification in portrait: {primary_classification}")
+    
     # Determine the language based on the portrait
     is_vietnamese = False
     if "tiếng Việt" in portrait.lower() or "vietnamese" in portrait.lower() or any(char in "ăâêôơưđ" for char in portrait):
         is_vietnamese = True
-        language_hint = "Trả lời hoàn toàn bằng tiếng Việt. Tạo các câu truy vấn bằng tiếng Việt."
+        language_hint = f"Trả lời hoàn toàn bằng tiếng Việt. Tạo các câu truy vấn bằng tiếng Việt."
     else:
         language_hint = "Return the queries in English."
     
@@ -870,8 +430,26 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     if not portrait:
         is_vietnamese = True  # Default to Vietnamese for this application
     
-    # Use LLM to generate queries to analyze the user profile
+    # If we already have a classification from bold markers, generate queries directly
+    if primary_classification:
+        if is_vietnamese:
+            queries = [
+                f"Hiểu về người dùng nhóm {primary_classification}",
+                f"Phương pháp tiếp cận nhóm {primary_classification}",
+                f"Những việc cần làm với nhóm {primary_classification}"
+            ]
+            logger.info(f"Generated queries using bolded classification: {primary_classification}")
+            return queries
+    
+    # If no bolded classification was found, use LLM to extract it
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    
+    # If we have a primary classification from bold markers, instruct LLM to use it
+    if primary_classification:
+        instruction = f"Use ONLY this classification: {primary_classification}"
+    else:
+        instruction = "Extract ONLY the primary user classification (e.g., \"Chán Nản\", \"Tự Tin\", \"Lo Lắng\", etc.)"
+    
     prompt = f"""Extract key user classification and generate queries based on this portrait: {portrait}
 
         Goal: First identify the user classification/group/type, then create queries that will find knowledge about:
@@ -886,29 +464,30 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
 
     # Add language-specific query patterns
     if is_vietnamese:
-        prompt += """
+        prompt += f"""
         1. "Hiểu về người dùng nhóm [phân loại người dùng]"
         2. "Phương pháp tiếp cận nhóm [phân loại người dùng]"
         3. "Những việc cần làm với nhóm [phân loại người dùng]"
 
         IMPORTANT INSTRUCTIONS:
-        - Extract ONLY the primary user classification (e.g., "Chán Nản", "Tự Tin", "Lo Lắng", etc.)
+        - {instruction}
         - Use the EXACT SAME classification term in all three queries
         - Keep the query patterns exactly as shown, only replacing [phân loại người dùng]
         - ENSURE ALL QUERIES ARE COMPLETELY IN VIETNAMESE
         """
     else:
-        prompt += """
+        prompt += f"""
         1. "Understanding [user classification] users"
         2. "Best approaches for [user classification] users"
         3. "What to do next with [user classification] users"
 
         IMPORTANT INSTRUCTIONS:
-        - Extract ONLY the primary user classification (e.g., "Discouraged", "Confident", "Anxious", etc.)
+        - {instruction}
         - Use the EXACT SAME classification term in all three queries
         - Keep the query patterns exactly as shown, only replacing [user classification]
         - ENSURE ALL QUERIES ARE COMPLETELY IN ENGLISH
         """
+    
     response = llm.invoke(prompt)
     
     # Extract the response content
@@ -927,7 +506,7 @@ def build_analyse_profile_query(user_profile: Dict) -> List[str]:
     
     # If no queries were found, use fallback queries based on detected language
     if not queries:
-        segment = user_profile.get("segment", {}).get("category", "general")
+        segment = primary_classification or user_profile.get("segment", {}).get("category", "general")
         if is_vietnamese:
             queries = [
                 f"Hiểu về người dùng nhóm {segment}",

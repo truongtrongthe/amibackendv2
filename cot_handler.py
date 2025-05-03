@@ -338,9 +338,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             
             # Format knowledge context for the prompt using the optimized function
             if knowledge_entries:
-                # Use the optimized formatter 
-                from tools_new import optimize_knowledge_context
-                knowledge_context = optimize_knowledge_context(knowledge_entries, last_user_message, max_chars=2500)
+                from tools_new import prepare_knowledge
+                knowledge_context = prepare_knowledge(knowledge_entries, last_user_message)
                 logger.info(f"Created optimized knowledge context: {len(knowledge_context)} chars")
             else:
                 # Fall back to empty knowledge context if no entries found

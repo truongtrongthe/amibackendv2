@@ -14,7 +14,8 @@ from brain_singleton import get_brain
 from tool_helpers import (
     extract_structured_data_from_raw,
     detect_language,
-    ensure_brain_loaded
+    ensure_brain_loaded,
+    prepare_knowledge
 )
 from langchain_openai import ChatOpenAI
 from langchain.schema import HumanMessage, SystemMessage
@@ -82,62 +83,93 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
         # Skip knowledge retrieval if no graph_version_id provided
         if not graph_version_id:
             logger.info("No graph version ID provided, proceeding with LLM-only profiling")
-            return await create_user_portrait(conversation_context, last_user_message, [])
+            return await create_user_portrait(conversation_context, last_user_message, [], "")
         
-        # Prepare the exact queries specified for knowledge retrieval
+        # Prepare broader queries to find relevant analysis methods
         understanding_queries = [
-            "how to analyze user",
-            "how to classify user",
-            "how to understand emotional and psychological status of user",
-            "làm thế nào để nhận diện chân dung người dùng",
-            "làm thế nào để phân loại người dùng",
-            "làm thế nào để hiểu tâm lý và tình trạng tâm lý của người dùng"
+            "how to analyze user needs",
+            "how to understand user psychology",
+            "user profiling techniques",
+            "user communication patterns",
+            "các phương pháp phân tích nhu cầu người dùng",
+            "cách hiểu tâm lý người dùng",
+            "kỹ thuật phân tích người dùng",
+            "mô hình giao tiếp với người dùng"
         ]
+        
+        # Select language-specific queries based on detected language
+        if language == "vi":
+            queries_to_use = understanding_queries[4:8]  # Vietnamese queries
+            # Add a couple English queries as backup
+            queries_to_use.extend(understanding_queries[0:2])
+        else:
+            queries_to_use = understanding_queries[0:4]  # English queries
+            # Add a couple Vietnamese queries as backup
+            queries_to_use.extend(understanding_queries[4:6])
         
         # Ensure brain is loaded
         brain_loaded = await ensure_brain_loaded(graph_version_id)
         if not brain_loaded:
             logger.warning("Brain loading failed, proceeding with LLM-only profiling")
-            return await create_user_portrait(conversation_context, last_user_message, [])
+            return await create_user_portrait(conversation_context, last_user_message, [], "")
         
         # Get brain instance
         brain = get_brain()
-        structured_knowledge = []
+        knowledge_entries = []
         
-        # Retrieve knowledge using the exact 3 queries
+        # Retrieve knowledge using multiple queries for better coverage
         logger.info("Fetching knowledge on user analysis techniques")
         
-        for query in understanding_queries:
+        for query in queries_to_use:
             try:
-                # Fetch knowledge for this query
-                results = await brain.get_similar_vectors_by_text(query, top_k=1)
+                # Increase top_k to get more diverse results
+                results = await brain.get_similar_vectors_by_text(query, top_k=2)
                 
                 for vector_id, vector, metadata, similarity in results:
-                    if similarity < 0.303:  # Relevance threshold
+                    # Use a slightly lower threshold for more coverage
+                    if similarity < 0.28:  # Reduced threshold
+                        continue
+                    
+                    # Skip duplicates
+                    if any(entry.get("id") == vector_id for entry in knowledge_entries):
+                        logger.info(f"Skipping duplicate knowledge entry: {vector_id}")
                         continue
                     
                     # Get the raw text from the results
                     raw_text = metadata.get("raw", "")
                     
-                    # Extract structured data using the helper function
-                    structured_data = extract_structured_data_from_raw(raw_text)
-                    
-                    # Create an enriched knowledge entry with both raw and structured data
+                    # Create a simplified knowledge entry with raw data
+                    # This avoids the preprocessing problems we had before
                     knowledge_entry = {
                         "id": vector_id,
                         "query": query,
-                        "structured": structured_data,
                         "raw": raw_text,
                         "similarity": float(similarity)
                     }
                     
-                    structured_knowledge.append(knowledge_entry)
+                    knowledge_entries.append(knowledge_entry)
             except Exception as e:
                 logger.warning(f"Error retrieving knowledge for query '{query}': {str(e)}")
         
-        # Generate the user portrait using the structured knowledge
-        logger.info(f"Retrieved {len(structured_knowledge)} structured knowledge entries to inform user profiling")
-        return await create_user_portrait(conversation_context, last_user_message, structured_knowledge)
+        # Process the knowledge entries using prepare_knowledge
+        logger.info(f"Retrieved {len(knowledge_entries)} knowledge entries to inform user profiling")
+        
+        if knowledge_entries:
+            # Use prepare_knowledge to create a cohesive knowledge context
+            knowledge_context = prepare_knowledge(
+                knowledge_entries,
+                last_user_message,
+                max_chars=3000,  # Limit to 3000 chars for user profiling
+                target_classification=None  # No specific classification for general profiling
+            )
+            logger.info(f"Knowledge prepared for user profiling: {knowledge_context}")
+        else:
+            knowledge_context = ""
+            logger.info("No knowledge entries found for user profiling")
+        
+        # Generate the user portrait using the knowledge context
+        # Pass both the raw entries and the processed knowledge context
+        return await create_user_portrait(conversation_context, last_user_message, knowledge_entries, knowledge_context)
         
     except Exception as e:
         logger.error(f"Error in user portrait creation: {str(e)}")
@@ -150,161 +182,73 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
         }
 
 
-async def create_user_portrait(conversation_context: str, last_user_message: str, knowledge: List[Dict]) -> Dict:
+async def create_user_portrait(conversation_context: str, last_user_message: str, knowledge: List[Dict], knowledge_context: str) -> Dict:
     """
     Creates a rich, descriptive textual portrait of the user based on conversation and knowledge.
     
     Args:
         conversation_context: The full conversation history
         last_user_message: The most recent user message
-        knowledge: List of knowledge entries to inform the portrait
+        knowledge: List of knowledge entries to inform the portrait (raw entries)
+        knowledge_context: The processed knowledge context from prepare_knowledge
         
     Returns:
         Dictionary with the user portrait and metadata
     """
     try:
-        # Format knowledge for the prompt
-        knowledge_context = ""
-        knowledge_classification_hints = []
-        
-        if knowledge and len(knowledge) > 0:
-            knowledge_context = "Use the following knowledge to guide your analysis:\n\n"
-            
-            for entry in knowledge:
-                # Get the structured data if available
-                structured = entry.get("structured", {})
-                title = structured.get("title", "")
-                content = structured.get("content", "")
-                description = structured.get("description", "")
-                takeaways = structured.get("takeaways", "")
-                application_method = structured.get("application_method", "")
-                
-                # Add debug logging for application_method structure
-                if application_method:
-                    logger.info(f"Application method type: {type(application_method).__name__}")
-                    if isinstance(application_method, dict):
-                        logger.info(f"Application method keys: {list(application_method.keys())}")
-                        if "title" in application_method:
-                            logger.info(f"Application method title: {application_method['title']}")
-                            
-                # If we have an application method, capture it
-                if application_method:
-                    # Check if application_method is a dictionary and extract title
-                    if isinstance(application_method, dict) and "title" in application_method:
-                        knowledge_classification_hints.append(application_method["title"])
-                    # If it's a string, use it directly
-                    elif isinstance(application_method, str):
-                        knowledge_classification_hints.append(application_method)
-                    # If it's some other structure, convert to string safely
-                    else:
-                        try:
-                            knowledge_classification_hints.append(str(application_method))
-                        except:
-                            # If conversion fails, skip it
-                            logger.warning(f"Could not process application method for classification hints: {type(application_method)}")
-                
-                # Format the structured data for the prompt
-                knowledge_context += f"--- USER ANALYSIS GUIDANCE ---\n"
-                if title:
-                    knowledge_context += f"Topic: {title}\n"
-                if description:
-                    knowledge_context += f"Description: {description}\n"
-                if content:
-                    knowledge_context += f"Content: {content[:1000]}...\n" if len(content) > 1000 else f"Content: {content}\n"
-                if takeaways:
-                    knowledge_context += f"Key Takeaways: {takeaways}\n"
-                if application_method:
-                    # Handle application_method based on its type
-                    if isinstance(application_method, dict):
-                        # Format dictionary application method
-                        app_title = application_method.get("title", "Application Method")
-                        knowledge_context += f"Application Method: {app_title}\n"
-                        
-                        # Include steps if available
-                        steps = application_method.get("steps", [])
-                        if steps:
-                            knowledge_context += "Steps:\n"
-                            for i, step in enumerate(steps):
-                                step_title = step.get("title", f"Step {i+1}")
-                                knowledge_context += f"- {step_title}\n"
-                    else:
-                        # Simple string case
-                        knowledge_context += f"Application Method: {application_method}\n"
-                
-                # If no structured data, fall back to raw text
-                if not (title or content or description or takeaways or application_method):
-                    raw_text = entry.get("raw", "")
-                    clean_text = raw_text.replace("\n\n", " ").replace("\n", " ")[:2000]
-                    knowledge_context += f"Guidance: {clean_text}\n"
-                
-                knowledge_context += "\n"
-        
-        # Add special instruction for respecting the knowledge context
-        knowledge_instruction = ""
-        if knowledge:
-            knowledge_instruction = (
-                "\n\nIMPORTANT: The knowledge provided contains specific classification methods "
-                "and approaches to categorize and understand users. Pay close attention to these "
-                "frameworks and explicitly apply them in your analysis. For example, if the knowledge "
-                "mentions specific user categories (like 'Confident Group' or 'Discouraged Group'), "
-                "classification criteria, behavioral patterns, or communication strategies, use these "
-                "exact frameworks to classify this user."
-            )
-            
-            if knowledge_classification_hints:
-                knowledge_instruction += f"\n\nSpecifically, consider these classification methods mentioned in the knowledge: {', '.join(knowledge_classification_hints)}"
-            
-        logger.info(f"Knowledge context before building PORTRAIT: {knowledge_context}")
-        
         # Create a prompt focused on generating a descriptive portrait
+        # Let the LLM identify classification frameworks directly from the knowledge
         prompt = f"""
-        Analyze this conversation to create a rich, descriptive portrait of the user using language of the user.
+        Create a rich, descriptive psychological portrait of the user based on the conversation below.
         
-        {knowledge_context}{knowledge_instruction}
+        {f'KNOWLEDGE TO INFORM YOUR ANALYSIS:\\n{knowledge_context}' if knowledge_context else 'Use your psychological expertise to analyze this conversation.'}
+        
+        {
+            '''IMPORTANT: The knowledge contains specific techniques and classification frameworks.
+            Identify relevant classifications from the knowledge and apply them appropriately to this user.
+            Only use classifications that naturally fit this user's context.
+            PUT ANY CLASSIFICATION YOU USE IN BOLD by surrounding it with ** symbols (e.g., **Category Name**).
+            
+            For Vietnamese classifications describing ongoing processes, ensure you use the "Đang" prefix 
+            when appropriate. For example, use "**Đang Xác Định Nhu Cầu**" instead of "**Xác Định Nhu Cầu**" 
+            when describing a process that is still in progress rather than completed.'''
+            if knowledge_context else ''
+        }
         
         CONVERSATION:
         {conversation_context}
         
-        Create a comprehensive psychological portrait of this user that describes:
+        Create a comprehensive psychological portrait that addresses:
         
-        1. Personal Information: Extract any personal details like name, age, location, occupation, gender, relationship status, family status, etc. Infer these details from context if not explicitly stated.
-        
-        2. Identity: Who they are (language, expertise level, self-perception, self-image, social identity)
-        
-        3. Psychological State: Their current emotions, concerns, confidence level, anxiety level, stress factors
-        
-        4. Desires and Motivations:
-           - Explicit needs: What they directly state they want
-           - Implicit/hidden needs: What they might want but aren't directly expressing
-           - Core motivations driving their behavior
-           - Barriers preventing them from achieving their goals
-           - What they might be avoiding or afraid to address directly
-        
-        5. Communication Style: How they express themselves (style, directness, formality, vocabulary level, precision)
-        
-        6. Approach Strategy: How we should engage with them (tone, communication strategy, level of directness, emotional support needed)
-        
-        7. Classification: EXPLICITLY classify this user according to the frameworks mentioned in the knowledge. If the knowledge mentions specific user categories, classification criteria, or behavioral patterns, directly state which category this user belongs to and why. Use the exact terminology from the knowledge. PUT THIS CLASSIFICATION IN BOLD by surrounding it with ** symbols in markdown format (e.g., **Discouraged Group**).
-        
-        IMPORTANT: Respond in the SAME LANGUAGE that the user is using in the conversation. If they write in Vietnamese, your portrait must be in Vietnamese. If they write in English, respond in English.
-        
-        Format your response as a cohesive, flowing paragraph that paints a complete picture of this person, 
-        not as a list of attributes. Make your portrait nuanced, insightful, and specific to this person.
-        Pay particular attention to uncovering their hidden desires and unstated needs.
+        1. Personal Information: Age, gender, occupation, etc. (inferred if not stated)
+        2. Identity & Self-Perception: How they view themselves
+        3. Psychological State: Current emotions, confidence, concerns
+        4. Desires and Motivations: Both explicit and implicit needs, barriers to goals
+        5. Communication Style: How they express themselves
+        6. Approach Strategy: Best way to engage with them
+        7. Classification: If classification frameworks in the knowledge apply, identify which and explain why
+
+        Guidelines:
+        - Respond in the SAME LANGUAGE the user is using
+        - Write as a cohesive paragraph, not a list
+        - Make your portrait nuanced and specific to this person
+        - Focus especially on uncovering hidden needs
         
         USER PORTRAIT:
         """
         
         # Call the LLM to generate the portrait
         try:
+            from langchain_core.messages import SystemMessage, HumanMessage
+            
             # Use the LangChain ChatOpenAI interface
             messages = [
-                SystemMessage(content="You are an expert psychologist with deep empathy, specializing in creating insightful portraits of people based on their communication. Your strength is recognizing patterns and applying appropriate classification frameworks from provided knowledge."),
+                SystemMessage(content="You are an expert psychologist with deep empathy, specializing in creating insightful portraits of people based on their communication patterns. Your strength is recognizing patterns and applying appropriate classification frameworks from provided knowledge."),
                 HumanMessage(content=prompt)
             ]
             
-            # Call the model
-            response = await LLM.ainvoke(messages)
+            # Call the model with global LLM instance
+            response = await LLM.ainvoke(messages, temperature=0.1)
             
             # Extract the portrait text
             portrait_text = response.content.strip()
@@ -317,7 +261,7 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
             # Return the portrait in a simplified structure
             return {
                 "portrait": portrait_text,
-                "method": "knowledge_enhanced" if knowledge else "llm_only",
+                "method": "knowledge_enhanced" if knowledge_context else "llm_only",
                 "knowledge_sources": len(knowledge)
             }
                 

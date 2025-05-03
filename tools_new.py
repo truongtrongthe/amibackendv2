@@ -16,13 +16,10 @@ from utilities import logger
 
 from brain_singleton import get_brain
 from tool_helpers import (
-    extract_structured_data_from_raw,
     detect_language,
     ensure_brain_loaded,
-    optimize_knowledge_context,
     prepare_knowledge,
-    build_analyse_profile_query,
-    extract_key_knowledge
+    build_analyse_profile_query
 )
 from profile_helper import (
     build_user_profile,
@@ -271,32 +268,28 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     {personality_instructions}
     
     # Task
-    Create a CONCISE response in {detected_language} (100-120 words maximum) that:
-    1. Directly addresses the user's core need
-    2. Is empathetic but straightforward
-    3. Briefly explains ONE key insight
-    4. Focuses primarily on the actionable next steps
+    Create a persuasive response in {detected_language} that:
+    1. Directly addresses the user's needs in a compelling way
+    2. Is professional and confident in tone
+    3. Emphasizes key benefits and value propositions
+    4. Includes a strong call-to-action
     
-    KNOWLEDGE ADHERENCE REQUIREMENTS (HIGHEST PRIORITY):
-    1. ALWAYS refer to application methods, steps, and techniques EXACTLY as described in the knowledge
-    2. ALWAYS use specific service package names, classifications, and terminology from the knowledge
-    3. NEVER invent or suggest techniques or products not mentioned in the knowledge
-    4. PRIORITIZE techniques and steps exactly as they are described in the knowledge
+    HIGHEST PRIORITY - PERSUASIVE SCRIPT ADHERENCE:
+    1. Use the persuasive sales script as your PRIMARY SOURCE and model for your response
+    2. Keep the same structure, flow, and key messaging as the script
+    3. Maintain all specific selling points, benefits, and value propositions
+    4. Use the same persuasive language patterns and emotional appeals
+    5. Include all references to specific service packages, features, and classifications
+    6. Preserve the same enthusiastic, confident tone throughout
     
-    SALES SCRIPT REQUIREMENTS:
-    1. Use the persuasive sales script as the primary source for creating your response
-    2. Maintain the same persuasive elements, benefits, and value propositions
-    3. Keep the same hierarchical organization of offerings (premium to standard)
-    4. Use the same tone and persuasive language patterns 
-    5. Preserve all references to specific service packages, features, and classifications
+    RESPONSE GUIDANCE:
+    - Begin with the same greeting and introduction style as the script
+    - Directly incorporate the main benefits mentioned in the script
+    - Use the same compelling value propositions for services
+    - Include the same special offers or incentives
+    - End with the same style of call-to-action as in the script
     
-    RESPONSE STRUCTURE:
-    - 1-2 sentences acknowledging the user's issue
-    - 1-2 sentences explaining the most relevant HIGH VALUE insight from the knowledge
-    - 3-5 sentences detailing the most important next steps with specific instructions from the knowledge
-    - 1 clear call-to-action sentence that matches the persuasive script
-    
-    IMPORTANT: If there are specific application steps, techniques, or methods in the knowledge, PRIORITIZE including these in your response over general advice.
+    IMPORTANT: Your response should be essentially a polished version of the persuasive script, maintaining its persuasive structure while ensuring smooth flow and natural language. Do NOT shorten or summarize the script - keep all its persuasive elements intact.
     """
     
     # OPTIMIZATION: Set a timeout for response generation
@@ -476,13 +469,11 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         continue
                     
                     raw_text = metadata.get("raw", "")
-                    structured_data = extract_structured_data_from_raw(raw_text)
                     
                     entry = {
                         "id": vector_id,
                         "similarity": float(similarity),
                         "raw": raw_text,
-                        "structured": structured_data,
                         "query": query,
                         "phase": "user_analysis"
                     }
@@ -533,7 +524,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         _last_cot_results["knowledge_context"] = knowledge_context
         _last_cot_results["knowledge_entries"] = user_analysis_knowledge
         
-        logger.info(f"Prepared knowledge context for user analysis after step 2: {knowledge_context}")
+        logger.info(f"Knowledge Context POST PREPARED For user analysis after step 2: {knowledge_context}")
         
         # Format user profile for the LLM
         profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
@@ -674,13 +665,11 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         continue
                     
                     raw_text = metadata.get("raw", "")
-                    structured_data = extract_structured_data_from_raw(raw_text)
                     
                     entry = {
                         "id": vector_id,
                         "similarity": float(similarity),
                         "raw": raw_text,
-                        "structured": structured_data,
                         "query": technique_query,
                         "phase": "technique_implementation"
                     }
@@ -705,13 +694,11 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                         continue
                     
                     raw_text = metadata.get("raw", "")
-                    structured_data = extract_structured_data_from_raw(raw_text)
                     
                     entry = {
                         "id": vector_id,
                         "similarity": float(similarity),
                         "raw": raw_text,
-                        "structured": structured_data,
                         "query": query,
                         "phase": "additional_knowledge"
                     }
@@ -746,8 +733,13 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         # Combine all knowledge entries for complete context
         _last_cot_results["knowledge_entries"] = user_analysis_knowledge + technique_knowledge + additional_knowledge
         
-        # Create a comprehensive knowledge context with all prepared knowledge
+        # Create a comprehensive knowledge context with all knowledge entries
+        all_knowledge = user_analysis_knowledge + technique_knowledge + additional_knowledge
+        
+        # Trust the LLM to extract relevant information by providing clear instructions
         combined_knowledge = ""
+        
+        # Add each knowledge source with clear section headers for context
         if knowledge_context:
             combined_knowledge += f"## USER ANALYSIS KNOWLEDGE:\n{knowledge_context}\n\n"
         if technique_context:
@@ -755,77 +747,11 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         if solution_context:
             combined_knowledge += f"## SOLUTION KNOWLEDGE:\n{solution_context}\n\n"
             
-        # Extract service packages and classification information for special highlighting
-        classification_info = ""
-        service_packages = ""
-        application_methods = ""
-        
-        # Look through all knowledge entries
-        all_knowledge = user_analysis_knowledge + technique_knowledge + additional_knowledge
-        for entry in all_knowledge:
-            structured = entry.get("structured", {})
-            
-            # Extract classification information
-            if structured and "content" in structured:
-                content = structured["content"]
-                if ("Nhóm Cao Cấp" in content or "Nhóm Trung Lưu" in content) and len(classification_info) < 500:
-                    classification_info += content + "\n\n"
-                    
-            # Extract service packages and application methods with special focus
-            if structured and "application_method" in structured:
-                app_method = structured["application_method"]
-                if isinstance(app_method, dict):
-                    app_title = app_method.get("title", "")
-                    
-                    # Handle service packages
-                    if "Gói Thai Sản" in app_title or "Phân Loại" in app_title:
-                        service_packages += f"### {app_title}\n"
-                        # Include steps if available
-                        for step in app_method.get("steps", []):
-                            step_title = step.get("title", "")
-                            if step_title:
-                                service_packages += f"- {step_title}\n"
-                    
-                    # Extract any application method with clear steps (high priority for actions)
-                    application_steps = app_method.get("steps", [])
-                    if application_steps and len(application_steps) > 0:
-                        application_methods += f"### APPLICATION METHOD: {app_title}\n"
-                        for i, step in enumerate(application_steps):
-                            step_title = step.get("title", f"Step {i+1}")
-                            step_content = step.get("content", "")
-                            application_methods += f"**STEP {i+1}: {step_title}**\n"
-                            if step_content:
-                                # Clean and format step content
-                                cleaned_content = step_content.replace("\n", " ").strip()
-                                application_methods += f"{cleaned_content}\n\n"
-                            
-                            # Extract sub-steps if available (these are extremely valuable)
-                            sub_steps = step.get("sub_steps", [])
-                            if sub_steps:
-                                for sub_step in sub_steps:
-                                    sub_number = sub_step.get("number", "")
-                                    sub_content = sub_step.get("content", "")
-                                    if sub_content:
-                                        application_methods += f"- Sub-step {sub_number}: {sub_content}\n"
-                        application_methods += "\n"
-        
-        # Add specially extracted information to the combined knowledge
-        if classification_info or service_packages or application_methods:
-            combined_knowledge += "## KEY INFORMATION FOR NEXT ACTIONS:\n"
-            
-            # Application methods are highest priority for action generation
-            if application_methods:
-                combined_knowledge += f"### PRIORITIZED APPLICATION METHODS:\n{application_methods}\n"
-                
-            if classification_info:
-                combined_knowledge += f"### CUSTOMER CLASSIFICATION:\n{classification_info}\n"
-                
-            if service_packages:
-                combined_knowledge += f"### SERVICE PACKAGES:\n{service_packages}\n"
-        
+        # Store the combined knowledge for later use
         _last_cot_results["combined_knowledge_context"] = combined_knowledge
         
-        # Create a prompt for generating actionable next steps
+        # Create a prompt for generating actionable next steps that instructs the LLM
+        # to identify important information itself
         actions_prompt = f"""
         Based on the user's message, our analysis, and the knowledge we've found, provide specific, actionable next steps and a persuasive sales script.
         
@@ -840,29 +766,18 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
         
-        {f"COMBINED KNOWLEDGE HIGHLIGHTS:\n{combined_knowledge[:1000]}" if 'combined_knowledge' in locals() and combined_knowledge else ""}
+        {f"COMBINED KNOWLEDGE:\n{combined_knowledge[:1500]}" if combined_knowledge else ""}
         
         ## PART 1: SALES AUTOMATION NEXT STEPS
         Provide 3 specific, practical, step-by-step next actions the user can take to address their needs.
-        Each step must be highly actionable, precise, and DIRECTLY IMPLEMENT the techniques and solutions mentioned in the knowledge.
+        Each step must be highly actionable, precise, and based on the knowledge provided.
         
-        SALES APPROACH REQUIREMENTS:
-        1. These steps should form a clear sales funnel: Awareness → Consideration → Conversion
-        2. If offering service packages, present them in a clear, persuasive hierarchy (premium to standard)
-        3. Any steps must directly relate to the customer journey in the sales process
-        4. Include specific benefits, features, or advantages mentioned in the knowledge
-        
-        KNOWLEDGE ADHERENCE REQUIREMENTS (HIGHEST PRIORITY):
-        1. Your next actions MUST be directly extracted from or based on the provided knowledge - do not invent or create steps outside of this information
-        2. If multiple techniques are provided, prioritize those most relevant to the user's classification and specific situation
-        3. The specific terminology, processes, and steps mentioned in the knowledge MUST be preserved and used verbatim when possible
-        4. Any service names, package names, or classification terms MUST be used exactly as they appear in the knowledge
-        
-        IMPORTANT REQUIREMENTS:
-        1. If the knowledge contains customer classification (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu"), explicitly incorporate this into your recommendations
-        2. If specific service packages are mentioned (like "Gói Thai Sản Cao Cấp" or "Gói Thai Sản Tiết Kiệm"), include these by name in your recommendations
-        3. Extract and use any specific procedural steps mentioned in the knowledge, including timelines, requirements, or documentation needed
-        4. Make sure the steps follow the customer journey process described in the knowledge
+        IMPORTANT INSTRUCTIONS:
+        1. PRIORITIZE information about customer classifications (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu")
+        2. HIGHLIGHT any service packages mentioned (like "Gói Thai Sản Cao Cấp" or "Gói Thai Sản Tiết Kiệm")
+        3. EXTRACT and use any specific procedural steps, application methods, or implementation details
+        4. PAY SPECIAL ATTENTION to pricing information, eligibility criteria, and service differences
+        5. IDENTIFY the most appropriate service package based on the user's classification and needs
         
         FORMATTING REQUIREMENTS:
         1. Number each step (1, 2, 3)
@@ -885,18 +800,10 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         [Your sales script here]
         END_SCRIPT
         
-        CONTENT REQUIREMENTS:
-        1. Extract ONLY techniques and steps mentioned in the knowledge provided
-        2. Prioritize the most effective techniques for this specific user classification
-        3. If steps have sub-steps in the knowledge, include the most critical ones
-        4. Ensure the steps form a coherent action plan (not just random techniques)
-        
         IMPORTANT:
         - Respond in the SAME LANGUAGE that the user is using
         - Focus on clarity and precision - each step should be unambiguous
-        - DO NOT invent techniques not found in the knowledge
-        - DO NOT include general advice unless it appears in the knowledge
-        - If the knowledge mentions specific application methods with numbered steps, PRIORITIZE these
+        - Ensure the steps form a coherent action plan
         """
         
         # Define the system prompt for actions
@@ -1206,7 +1113,7 @@ async def process_llm_with_tools(
                 event_type = result.get("type", "unknown")
                 is_complete = result.get("complete", False)
                 event_content_preview = str(result.get("content", ""))[:30]
-                logger.info(f"Forwarding CoT {event_type} event (complete: {is_complete}): {event_content_preview}...")
+                #logger.info(f"Forwarding CoT {event_type} event (complete: {is_complete}): {event_content_preview}...")
                 
                 # CRITICAL FIX: Use socketio_manager directly for WebSocket events
                 if use_websocket:

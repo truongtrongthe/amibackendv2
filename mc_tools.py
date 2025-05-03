@@ -184,7 +184,7 @@ class MCWithTools:
                     
                     # Log the event being processed
                     result_preview = str(result.get("content", ""))[:30]
-                    logger.info(f"MC received {event_type} event: {result_preview}...")
+                    #logger.info(f"MC received {event_type} event: {result_preview}...")
                     
                     if event_type == "analysis":
                         # For analysis chunks, handle WebSocket communication if configured
