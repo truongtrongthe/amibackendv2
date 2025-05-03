@@ -489,7 +489,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                     "thread_id": thread_id,
                     "status": "searching"
                 }
-                logger.info(f"Found {len(user_analysis_knowledge)} knowledge entries for user analysis")
+                logger.info(f"ENHANCED PORTRAIT KNOWLEDGE:{user_analysis_knowledge} ")
     except Exception as e:
         logger.error(f"Error in knowledge retrieval: {e}")
     
@@ -525,7 +525,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         _last_cot_results["knowledge_context"] = knowledge_context
         _last_cot_results["knowledge_entries"] = user_analysis_knowledge
         
-        logger.info(f"Knowledge Context POST PREPARED For user analysis after step 2: {knowledge_context}")
+        logger.info(f"PREPARED KNOWLEDGE FOR USER ANALYSIS: {knowledge_context}")
         
         # Format user profile for the LLM
         profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
