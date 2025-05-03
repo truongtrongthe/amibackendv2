@@ -194,7 +194,78 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         knowledge_input = ""
         for i, entry in enumerate(top_entries):
             raw_text = entry["raw"]
-            knowledge_input += f"KNOWLEDGE ENTRY {i+1}:\n{raw_text}\n\n----\n\n"
+            
+            # Extract only title and application methods
+            title = ""
+            application_methods = []
+            
+            # Extract title
+            title_match = re.search(r'Title:\s*(.*?)(?:\n|$)', raw_text)
+            if title_match:
+                title = title_match.group(1).strip()
+            
+            # Extract application methods from Takeaways section
+            takeaways_match = re.search(r'Takeaways:(.*?)(?=Document Summary:|Cross-Cluster Connections:|$)', raw_text, re.DOTALL)
+            if takeaways_match:
+                takeaways_text = takeaways_match.group(1).strip()
+                
+                # First, try to extract all "Application Method:" sections with their numbered steps
+                app_methods = []
+                app_method_blocks = re.split(r'\n\n(?=Application Method:)', takeaways_text)
+                
+                for block in app_method_blocks:
+                    if block.strip().startswith("Application Method:"):
+                        app_methods.append(block.strip())
+                
+                # If we found application methods, use them
+                if app_methods:
+                    application_methods = app_methods
+                else:
+                    # Fallback: Try to extract numbered steps directly
+                    numbered_steps = re.findall(r'\d+\.\s+\*\*([^*]+)\*\*:\s*(.*?)(?=\n\d+\.\s+\*\*|\n\n|$)', takeaways_text, re.DOTALL)
+                    if numbered_steps:
+                        application_methods = [f"Application Method: Implementation Steps\n\n" + takeaways_text]
+            
+            # Format the extracted content
+            formatted_content = f"KNOWLEDGE ENTRY {i+1}:\n"
+            if title:
+                formatted_content += f"Title: {title}\n\n"
+            
+            if application_methods:
+                formatted_content += "HOW TO APPLY:\n"
+                for method in application_methods:
+                    # Ensure all numbered steps are included by extracting and reformatting
+                    method_name_match = re.match(r'Application Method:\s*(.*?)(?:\n|$)', method)
+                    method_name = method_name_match.group(1).strip() if method_name_match else "Implementation Steps"
+                    
+                    # Keep the original format with method name highlighted
+                    formatted_content += f"Application Method: {method_name}\n\n"
+                    
+                    # Extract and include all numbered steps with their content
+                    step_matches = re.finditer(r'(\d+)\.\s+\*\*([^*]+)\*\*:(.*?)(?=\n\d+\.\s+\*\*|\n\n|$)', method, re.DOTALL)
+                    steps_found = False
+                    
+                    for step_match in step_matches:
+                        steps_found = True
+                        step_num = step_match.group(1)
+                        step_title = step_match.group(2).strip()
+                        step_content = step_match.group(3).strip()
+                        
+                        formatted_content += f"{step_num}. **{step_title}**:{step_content}\n\n"
+                    
+                    # If no steps were found in this format, include the original method text
+                    if not steps_found:
+                        # Remove the method name line since we've already added it
+                        method_content = re.sub(r'^Application Method:[^\n]*\n+', '', method).strip()
+                        formatted_content += f"{method_content}\n\n"
+            else:
+                # Fallback to using some raw text if no application methods found
+                content_preview = raw_text.split("Takeaways:", 1)[0].strip()
+                if len(content_preview) > 300:
+                    content_preview = content_preview[:300] + "..."
+                formatted_content += f"Content: {content_preview}\n\n"
+            
+            knowledge_input += formatted_content + "----\n\n"
         
         # Step 3: Use LLM to synthesize knowledge into unified instructions
         from langchain_openai import ChatOpenAI
@@ -222,7 +293,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         """ if preserve_exact_terminology else ""
         
         synthesis_prompt = f"""
-        Based on the following knowledge entries, create a comprehensive set of instructions and information {lang_prompt} for addressing the user's needs.
+        Synthesize these structured knowledge entries {lang_prompt} to address the user's needs, creating a concise narrative for analysis and implementation.
         
         USER QUERY: {user_query}
         {f"USER CLASSIFICATION: {target_classification}" if target_classification else ""}
@@ -230,41 +301,42 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         
         {knowledge_input}
         
-        FIRST - START WITH CLASSIFICATION FRAMEWORK:
-        Analyze the knowledge entries carefully for ANY type of customer/user classification systems or segmentation frameworks. 
-        When you identify classification patterns (such as different user groups, types, segments, or categories):
+        CRITICAL PRIORITIES:
+        1. KNOWLEDGE NARRATIVE: Create a concise introduction connecting knowledge titles
+          - Summarize ALL knowledge titles found without extra spacing
+          - Show how these knowledge areas solve the user's problem
+          - Keep this section brief (50-75 words maximum)
         
-        1. Begin with a clean, structured section titled "## Customer Classification Framework"
-        2. List ALL classification categories exactly as they appear in the knowledge, preserving original terminology
-        3. Extract and clearly state the CRITERIA used to distinguish between classifications
-           - Look for behavioral indicators, thresholds, time periods, frequency metrics
-           - Note any qualifying conditions or exceptions mentioned
-        4. Include verbatim examples of how to classify users from the knowledge
-        5. Structure the classification system in a clear hierarchy if one exists
+        2. CLASSIFICATIONS: Present any customer classification systems
+          - Use "## Customer Classification Framework" heading
+          - Keep EXACT terminology (e.g., "Nhóm Chán Nản", "Nhóm Tự Tin")
+          - Include criteria and source titles
+          - Use compact formatting - no extra line breaks
         
-        THEN - Continue with comprehensive instructions:
-        1. Extracts and highlights specific techniques and approaches from the knowledge
-        2. Preserves ALL step-by-step instructions and application methods
-        3. Keeps ALL detailed steps and sub-steps exactly as presented
-        4. Maintains the exact same hierarchy and numbering system for steps
-        5. DIRECTLY INCLUDES any specific examples, scripts, or templates
+        3. APPLICATION METHODS: Present the "HOW TO APPLY" sections
+          - Group methods under headings with source titles
+          - Preserve exact steps but minimize extra spacing
+          - Maintain original terminology and phrasings
+          - Use compact formatting throughout
         
-        FORMAT REQUIREMENTS:
-        - Use clear section headings (# for main headings, ## for sub-headings)
-        - Preserve all numbered steps exactly as they appear in the knowledge
-        - Keep all bullet points in their original form
-        - Use bold text for important concepts
-        - Directly quote any examples, scripts, or templates
+        FORMAT (use this exact structure with minimal extra spacing):
+        ## Knowledge Found
+        [Brief narrative connecting knowledge titles - 50-75 words]
         
-        IMPORTANT GUIDELINES:
-        - PRIORITIZE any user classification or segmentation systems you discover
-        - PRESERVE the exact original terminology and criteria for all classifications
-        - MAINTAIN the relationships between classifications if hierarchical structures exist
-        - DO NOT OMIT any steps, examples, or application methods
-        - PRESERVE the exact structure of all application methods and their steps
-        - DO NOT rewrite or summarize the steps - maintain them as they appear
-        - DO NOT skip steps or leave sections incomplete
-        - DO NOT fabricate information - only use what is provided
+        ## Customer Classification Framework
+        [Classifications with exact terminology - compact format]
+        
+        ## Application Methods
+        [Methods with preserved steps - compact format]
+        
+        ## Examples & Implementation
+        [Examples and guidance - compact format]
+        
+        IMPORTANT: 
+        - NEVER translate classification terms
+        - Use compact formatting with minimal line breaks
+        - Avoid extra blank lines between paragraphs
+        - Reference knowledge titles with each information piece
         """
         
         logger.info("Using LLM to synthesize knowledge into comprehensive instructions")
