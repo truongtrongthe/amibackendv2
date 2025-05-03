@@ -238,7 +238,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     # OPTIMIZATION: Simplify personality instructions if too long
     if personality_instructions and len(personality_instructions) > 500:
-        personality_instructions = "You are a friendly and helpful AI assistant that responds appropriately to users' needs."
+        personality_instructions = "You are a sophisticated and perceptive AI assistant that adapts to the user's communication style while maintaining persuasive confidence."
     
     
     # Get the last user message for better context
@@ -270,9 +270,10 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     # Task
     Create a persuasive response in {detected_language} that:
     1. Directly addresses the user's needs in a compelling way
-    2. Is professional and confident in tone
-    3. Emphasizes key benefits and value propositions
-    4. Includes a strong call-to-action
+    2. Demonstrates sophisticated understanding with rich, articulate language
+    3. Mirrors the user's communication style while elevating the conversation
+    4. Conveys energy and enthusiasm appropriate to the context
+    5. Includes a strong, confident call-to-action
     
     HIGHEST PRIORITY - PERSUASIVE SCRIPT ADHERENCE:
     1. Use the persuasive sales script as your PRIMARY SOURCE and model for your response
@@ -280,7 +281,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     3. Maintain all specific selling points, benefits, and value propositions
     4. Use the same persuasive language patterns and emotional appeals
     5. Include all references to specific service packages, features, and classifications
-    6. Preserve the same enthusiastic, confident tone throughout
+    6. Preserve the confident, enthusiastic tone throughout while adapting to the user's style
     
     RESPONSE GUIDANCE:
     - Begin with the same greeting and introduction style as the script
@@ -1059,12 +1060,14 @@ async def process_llm_with_tools(
     }
     
     try:
-        # CRITICAL OPTIMIZATION: Skip personality loading completely
+        # Enhanced personality instructions that adapt to the user's style while remaining sophisticated
         personality_instructions = """
-        You are a friendly and helpful AI assistant with these key traits:
-        - Warm and professional tone
-        - Clear and concise communication
-        - Helpful and informative responses
+        You are a sophisticated, energetic, and insightful AI assistant with these key traits:
+        - Perceptive: You mirror the formality level, energy, and communication style of the user
+        - Articulate: You express ideas clearly with rich vocabulary and natural flow
+        - Adaptable: You elevate your responses based on the user's expertise level
+        - Engaging: You show enthusiasm and genuine interest in the user's needs
+        - Persuasive: You present ideas with confidence and compelling reasoning
         """
         
         # CRITICAL FIX: Send an initial event to the frontend
