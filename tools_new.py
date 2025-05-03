@@ -1172,78 +1172,20 @@ async def process_llm_with_tools(
                             knowledge_entries.extend(entries)
         
         except Exception as cot_error:
+            # Just log the exception for debugging, without any fallbacks
             logger.error(f"Error in CoT processing: {cot_error}")
             logger.error(traceback.format_exc())
+            logger.error(f"CoT processing failed for user message: '{user_message[:100]}...'")
             
-            # Make sure we have the user profile even if CoT fails
-            if not _last_cot_results.get("user_profile") and "user_profile" in state:
-                _last_cot_results["user_profile"] = state["user_profile"]
-            
-            # Create fallback content
-            if not analysis_results:
-                # Create a meaningful analysis from the user profile if available
-                if _last_cot_results.get("user_profile") and "portrait" in _last_cot_results["user_profile"]:
-                    portrait = _last_cot_results["user_profile"]["portrait"]
-                    analysis_results = f"Based on user profile: {portrait[:300]}..."
-                else:
-                    analysis_results = f"User is asking about: {user_message[:100]}"
-                
-                fallback_analysis_event = {
-                    "type": "analysis", 
-                    "content": analysis_results, 
-                    "complete": True,
-                    "thread_id": thread_id,
-                    "status": "complete",
-                    "search_terms": [],  # Add search_terms to match expected format
-                    "user_profile": _last_cot_results.get("user_profile", {})  # Include user profile
-                }
-                logger.info(f"Sending enhanced fallback analysis with full user profile")
-                
-                # CRITICAL FIX: Use socketio_manager directly for WebSocket events
-                if use_websocket:
-                    try:
-                        from socketio_manager import emit_analysis_event
-                        was_delivered = emit_analysis_event(thread_id, fallback_analysis_event)
-                    except Exception as e:
-                        logger.error(f"Error emitting fallback analysis: {str(e)}")
-                        yield fallback_analysis_event
-            
-            analysis_events_sent += 1
-            
-            if not next_actions_results:
-                # Create more tailored next actions based on user profile if available
-                if _last_cot_results.get("user_profile") and "portrait" in _last_cot_results["user_profile"]:
-                    portrait = _last_cot_results["user_profile"]["portrait"]
-                    if "Discouraged Group" in portrait:
-                        next_actions_results = "1. Provide reassurance and supportive information\n2. Offer practical strategies for improvement\n3. Suggest professional resources while maintaining empathy"
-                    elif "Confident Group" in portrait:
-                        next_actions_results = "1. Provide motivational information\n2. Offer advanced strategies and techniques\n3. Suggest ways to maintain progress"
-                    else:
-                        next_actions_results = "1. Provide helpful information\n2. Offer practical next steps\n3. Use supportive tone"
-                else:
-                    next_actions_results = "1. Provide helpful information\n2. Use appropriate tone\n3. Offer practical solutions"
-                
-                fallback_next_actions = {
-                    "type": "next_actions", 
-                    "content": next_actions_results, 
-                    "complete": True,
-                    "thread_id": thread_id,
-                    "status": "complete",
-                    "user_profile": _last_cot_results.get("user_profile", {}),  # Include user profile
-                }
-                logger.info(f"Sending enhanced fallback next_actions with full user profile")
-                
-                # CRITICAL FIX: Use socketio_manager directly for WebSocket events
-                if use_websocket:
-                    try:
-                        from socketio_manager import emit_next_action_event
-                        was_delivered = emit_next_action_event(thread_id, fallback_next_actions)
-                    except Exception as e:
-                        logger.error(f"Error emitting fallback next_actions: {str(e)}")
-                        yield fallback_next_actions
-                else:
-                    # Not using WebSockets, just yield the event
-                    yield fallback_next_actions
+            # Emit an error event for tracking purposes
+            error_info = {
+                "type": "error",
+                "component": "cot_handler",
+                "error": str(cot_error),
+                "thread_id": thread_id,
+                "message": "Chain of Thought processing error - no fallback provided"
+            }
+            yield error_info
         
         # Store the analysis in the state as a dictionary
         if analysis_results:
@@ -1294,57 +1236,29 @@ async def process_llm_with_tools(
                     knowledge_context += f"## SPECIFIC SOLUTIONS\n{_last_cot_results['solution_context']}\n\n"
                 logger.info(f"Using technique and solution context for response: {len(knowledge_context)} chars")
             else:
-                # Extract key classification data
-                classification_data = []
-                service_offerings = []
-                application_steps = []
-                
-                # Scan knowledge entries for classification and service information
-                for entry in knowledge_entries:
-                    structured = entry.get("structured", {})
-                    # Look for classification info
-                    if structured and "content" in structured:
-                        content = structured["content"]
-                        if "Nhóm Cao Cấp" in content or "Nhóm Trung Lưu" in content:
-                            classification_data.append(content)
-                    
-                    # Look for service offerings
-                    if structured and "application_method" in structured:
-                        app_method = structured["application_method"]
-                        if isinstance(app_method, dict):
-                            app_title = app_method.get("title", "")
-                            if "Gói Thai Sản" in app_title or "Phân Loại" in app_title:
-                                service_offerings.append(app_title)
-                                # Extract steps for better guidance
-                                for step in app_method.get("steps", []):
-                                    step_content = step.get("content", "")
-                                    if step_content:
-                                        application_steps.append(step_content)
-                
-                # IMPORTANT: Use prepare_knowledge to get a well-structured knowledge representation
+                # Get user classification from profile if available
                 user_classification = None
                 if _last_cot_results.get("user_profile") and "segment" in _last_cot_results["user_profile"]:
                     user_classification = _last_cot_results["user_profile"]["segment"].get("category")
+                    logger.info(f"Using user classification from profile: {user_classification}")
                 
+                # First check if we have cached profiling knowledge entries for consistency
+                # This ensures we use the same knowledge entries that were used for user profiling
+                if "profiling_knowledge_entries" in state and state["profiling_knowledge_entries"]:
+                    logger.info("Using cached profiling knowledge entries for consistency")
+                    knowledge_entries = state["profiling_knowledge_entries"]
+                
+                # Let prepare_knowledge do all the work of structuring the knowledge with the user classification
                 knowledge_context = prepare_knowledge(
                     knowledge_entries, 
                     user_message, 
                     target_classification=user_classification,
-                    max_chars=1500  # Increased limit for better quality
+                    max_chars=10000,  # Increased limit for better quality
+                    preserve_exact_terminology=True  # Ensure consistent classification terminology
                 )
                 
-                # Augment with classified data if available
-                if classification_data or service_offerings or application_steps:
-                    knowledge_context += "\n\n## KEY INFORMATION FOR RESPONSE\n"
-                    if classification_data:
-                        knowledge_context += "### Customer Classification:\n" + "\n".join(classification_data[:2]) + "\n\n"
-                    if service_offerings:
-                        knowledge_context += "### Service Packages:\n" + "\n".join(service_offerings) + "\n\n"
-                    if application_steps:
-                        knowledge_context += "### Application Steps:\n" + "\n".join(application_steps[:3]) + "\n\n"
-                
-                logger.info(f"Created enhanced structured knowledge context: {len(knowledge_context)} chars")
-                # Store the enhanced knowledge context for future use
+                logger.info(f"Created knowledge context using prepare_knowledge: {len(knowledge_context)} chars")
+                # Store the knowledge context for future use
                 _last_cot_results["knowledge_context"] = knowledge_context
                 
             knowledge_found = True

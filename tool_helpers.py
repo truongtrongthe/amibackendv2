@@ -122,7 +122,7 @@ def extract_structured_data_from_raw(raw_text: str) -> Dict[str, Any]:
         structured_data["cross_cluster_connections"] = connections_match.group(1).strip()  
     return structured_data
 
-def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars: int = 10000, target_classification: str = None) -> str:
+def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars: int = 10000, target_classification: str = None, preserve_exact_terminology: bool = False) -> str:
     """
     Prepare knowledge context by directly processing raw knowledge text and creating a unified,
     comprehensive instruction set. This function skips the rigid extraction step.
@@ -132,6 +132,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         user_query: Original user query for prioritization
         max_chars: Maximum characters allowed in the context
         target_classification: Optional classification to filter relevant segments (e.g., "Chán Nản")
+        preserve_exact_terminology: If True, instructs LLM to preserve exact classification terms without translation or transformation
         
     Returns:
         Formatted knowledge context string with comprehensive instructions
@@ -204,15 +205,44 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         lang_prompt = "in Vietnamese" if language == "vietnamese" else "in English"
         
         # Create a more targeted prompt for knowledge synthesis
+        preservation_instruction = """
+        CRITICAL INSTRUCTION: You MUST PRESERVE THE EXACT TERMINOLOGY of ALL classification categories.
+        - VERBATIM COPY classification names with EXACT CHARACTERS, SPACES, and FORMATTING
+        - DO NOT translate classification names (e.g., keep "Nhóm Chán Nản" exactly as is, not as "Discouraged Group" or similar)
+        - DO NOT reinterpret classification categories with equivalent terms
+        - DO NOT reorganize or merge classification categories
+        - DO NOT ADD new classifications or categories that aren't explicitly in the knowledge
+        - COPY-PASTE examples from the knowledge EXACTLY as they appear, especially example phrases like "Tôi bị xuất sớm"
+        - Maintain the original hierarchy and relationships between classifications
+        
+        WHEN CREATING THE CLASSIFICATION FRAMEWORK:
+        - Place the classifications in a titled section at the top of your response
+        - Include EXACT EXAMPLES from the knowledge on how to apply each classification
+        - Include explicit categorization criteria for each classification with VERBATIM QUOTES when possible
+        """ if preserve_exact_terminology else ""
+        
         synthesis_prompt = f"""
         Based on the following knowledge entries, create a comprehensive set of instructions and information {lang_prompt} for addressing the user's needs.
         
         USER QUERY: {user_query}
         {f"USER CLASSIFICATION: {target_classification}" if target_classification else ""}
+        {preservation_instruction}
         
         {knowledge_input}
         
-        Create a unified, comprehensive set of instructions that:
+        FIRST - START WITH CLASSIFICATION FRAMEWORK:
+        Analyze the knowledge entries carefully for ANY type of customer/user classification systems or segmentation frameworks. 
+        When you identify classification patterns (such as different user groups, types, segments, or categories):
+        
+        1. Begin with a clean, structured section titled "## Customer Classification Framework"
+        2. List ALL classification categories exactly as they appear in the knowledge, preserving original terminology
+        3. Extract and clearly state the CRITERIA used to distinguish between classifications
+           - Look for behavioral indicators, thresholds, time periods, frequency metrics
+           - Note any qualifying conditions or exceptions mentioned
+        4. Include verbatim examples of how to classify users from the knowledge
+        5. Structure the classification system in a clear hierarchy if one exists
+        
+        THEN - Continue with comprehensive instructions:
         1. Extracts and highlights specific techniques and approaches from the knowledge
         2. Preserves ALL step-by-step instructions and application methods
         3. Keeps ALL detailed steps and sub-steps exactly as presented
@@ -227,9 +257,11 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         - Directly quote any examples, scripts, or templates
         
         IMPORTANT GUIDELINES:
+        - PRIORITIZE any user classification or segmentation systems you discover
+        - PRESERVE the exact original terminology and criteria for all classifications
+        - MAINTAIN the relationships between classifications if hierarchical structures exist
         - DO NOT OMIT any steps, examples, or application methods
         - PRESERVE the exact structure of all application methods and their steps
-        - DO NOT shorten steps - include their full content
         - DO NOT rewrite or summarize the steps - maintain them as they appear
         - DO NOT skip steps or leave sections incomplete
         - DO NOT fabricate information - only use what is provided

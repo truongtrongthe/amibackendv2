@@ -18,7 +18,19 @@ from tool_helpers import (
     prepare_knowledge
 )
 from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
+
+# Configuration constants
+CLASSIFICATION_TERMS = [
+    "nhóm chán nản", 
+    "nhóm tự tin", 
+    "nhóm chưa rõ tâm lý", 
+    "phân loại khách hàng", 
+    "phân nhóm"
+]
+
+# Initialize global state dictionary
+state = {}
 
 # Initialize the LangChain ChatOpenAI model
 LLM = ChatOpenAI(
@@ -120,7 +132,18 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
         # Retrieve knowledge using multiple queries for better coverage
         logger.info("Fetching knowledge on user analysis techniques")
         
-        for query in queries_to_use:
+        # Prioritize classification knowledge
+        classification_queries = [
+            "phân loại khách hàng",
+            "nhóm tâm lý khách hàng",
+            "phân nhóm khách hàng dựa trên tâm lý",
+            "classification of customers"
+        ]
+        
+        # Add these queries to the front of the list to prioritize classification knowledge
+        combined_queries = classification_queries + queries_to_use
+        
+        for query in combined_queries:
             try:
                 # Increase top_k to get more diverse results
                 results = await brain.get_similar_vectors_by_text(query, top_k=2)
@@ -138,13 +161,19 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
                     # Get the raw text from the results
                     raw_text = metadata.get("raw", "")
                     
+                    # Prioritize entries containing classification terms
+                    boost = 0.0
+                    if any(term in raw_text.lower() for term in CLASSIFICATION_TERMS):
+                        boost = 0.4
+                        logger.info(f"Boosting entry {vector_id} for containing classification terms")
+                    
                     # Create a simplified knowledge entry with raw data
-                    # This avoids the preprocessing problems we had before
                     knowledge_entry = {
                         "id": vector_id,
                         "query": query,
                         "raw": raw_text,
-                        "similarity": float(similarity)
+                        "similarity": float(similarity) + boost,
+                        "priority": 1 if boost > 0 else 0  # Priority flag for classification entries
                     }
                     
                     knowledge_entries.append(knowledge_entry)
@@ -152,15 +181,36 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
                 logger.warning(f"Error retrieving knowledge for query '{query}': {str(e)}")
         
         # Process the knowledge entries using prepare_knowledge
-        logger.info(f"Retrieved {len(knowledge_entries)} knowledge entries to inform user profiling")
+        logger.info(f"Retrieved {knowledge_entries} knowledge entries to inform user profiling")
         
         if knowledge_entries:
-            # Use prepare_knowledge to create a cohesive knowledge context
+            # Sort entries by priority (classification entries first) and then by similarity
+            sorted_entries = sorted(knowledge_entries, key=lambda x: (-x.get("priority", 0), -x.get("similarity", 0)))
+            
+            # Take top entries prioritizing classification entries
+            classification_entries = [entry for entry in sorted_entries if entry.get("priority", 0) > 0]
+            other_entries = [entry for entry in sorted_entries if entry.get("priority", 0) == 0]
+            
+            # Ensure we have at least some classification entries
+            selected_entries = classification_entries[:2]  # Take up to 2 classification entries
+            # Fill the rest with other entries if needed
+            if len(selected_entries) < 3:
+                selected_entries.extend(other_entries[:3-len(selected_entries)])
+                
+            logger.info(f"Selected {len(selected_entries)} entries for user profiling, including {len(classification_entries[:2])} classification entries")
+            
+            # Save these entries to state so CoT analysis can use the same ones
+            # This ensures consistency between user profiling and later analysis
+            state["profiling_knowledge_entries"] = selected_entries
+            logger.info("Saved profiling knowledge entries to state for consistent CoT analysis")
+            
+            # Use prepare_knowledge to create a cohesive knowledge context with exact terminology preservation
             knowledge_context = prepare_knowledge(
-                knowledge_entries,
+                selected_entries,
                 last_user_message,
-                max_chars=3000,  # Limit to 3000 chars for user profiling
-                target_classification=None  # No specific classification for general profiling
+                max_chars=10000,  # Limit for user profiling
+                target_classification=None,  # No specific classification for general profiling
+                preserve_exact_terminology=True  # Preserve original classification names exactly
             )
             logger.info(f"Knowledge prepared for user profiling: {knowledge_context}")
         else:
@@ -196,82 +246,70 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         Dictionary with the user portrait and metadata
     """
     try:
-        # Create a prompt focused on generating a descriptive portrait
-        # Let the LLM identify classification frameworks directly from the knowledge
+        # Determine language for output
+        is_vietnamese = detect_vietnamese_language(last_user_message)
+        
+        # Create a knowledge-informed portrait prompt with focus on customer classification
         prompt = f"""
-        Create a rich, descriptive psychological portrait of the user based on the conversation below.
+        Create a rich, descriptive psychological portrait of the user based on their conversation and our knowledge base.
         
-        {f'KNOWLEDGE TO INFORM YOUR ANALYSIS:\\n{knowledge_context}' if knowledge_context else 'Use your psychological expertise to analyze this conversation.'}
-        
-        {
-            '''IMPORTANT: The knowledge contains specific techniques and classification frameworks.
-            Identify relevant classifications from the knowledge and apply them appropriately to this user.
-            Only use classifications that naturally fit this user's context.
-            PUT ANY CLASSIFICATION YOU USE IN BOLD by surrounding it with ** symbols (e.g., **Category Name**).
-            
-            For Vietnamese classifications describing ongoing processes, ensure you use the "Đang" prefix 
-            when appropriate. For example, use "**Đang Xác Định Nhu Cầu**" instead of "**Xác Định Nhu Cầu**" 
-            when describing a process that is still in progress rather than completed.'''
-            if knowledge_context else ''
-        }
+        {f'KNOWLEDGE FOR YOUR ANALYSIS (CONTAINS CUSTOMER CLASSIFICATION FRAMEWORKS):\\n{knowledge_context}' if knowledge_context else 'Use your psychological expertise to analyze this conversation.'}
         
         CONVERSATION:
         {conversation_context}
         
-        Create a comprehensive psychological portrait that addresses:
+        CLASSIFICATION INSTRUCTIONS:
+        1. FIRST: Carefully extract the EXACT classification framework from the KNOWLEDGE section
+           - Identify all classification categories/segments presented in the knowledge
+           - Note the exact terminology used for each classification
+        2. SECOND: Extract the SPECIFIC CRITERIA that define each classification
+           - Look for time thresholds, frequency metrics, behavioral indicators, qualifying conditions
+           - Pay attention to examples that illustrate how to apply each classification
+        3. THIRD: Apply these criteria STRICTLY to classify the user
+           - Match the user's statements and behavior patterns to the classification criteria
+           - Look for explicit signals in the conversation that align with specific classifications
+           - Only use the "unclear" or "undetermined" classification if the user truly doesn't fit other categories
+        4. Create a SINGLE COHERENT PARAGRAPH that properly categorizes the user according to our framework
+        5. Respond in the SAME LANGUAGE as the user ({('Vietnamese' if is_vietnamese else 'English')})
         
-        1. Personal Information: Age, gender, occupation, etc. (inferred if not stated)
-        2. Identity & Self-Perception: How they view themselves
-        3. Psychological State: Current emotions, confidence, concerns
-        4. Desires and Motivations: Both explicit and implicit needs, barriers to goals
-        5. Communication Style: How they express themselves
-        6. Approach Strategy: Best way to engage with them
-        7. Classification: If classification frameworks in the knowledge apply, identify which and explain why
-
-        Guidelines:
-        - Respond in the SAME LANGUAGE the user is using
-        - Write as a cohesive paragraph, not a list
-        - Make your portrait nuanced and specific to this person
-        - Focus especially on uncovering hidden needs
+        Your portrait MUST include:
+        - User's psychological state and communication patterns
+        - Their EXACT CLASSIFICATION from our framework in BOLD with ** markers (e.g., **Nhóm Chán Nản**, **Nhóm Tự Tin**)
+        - Process state if appropriate (e.g., **Đang Tìm Hiểu** vs **Đã Quyết Định**)
+        - 2-3 key needs or pain points specific to their classification
+        - Recommended approach strategy based on our framework's guidance for this classification
         
-        USER PORTRAIT:
+        IMPORTANT:
+        - Apply the classification framework EXACTLY as described in the knowledge
+        - Use the classification criteria rigorously - don't make assumptions beyond the provided criteria
+        - Only use the "unclear" classification type when clearly appropriate based on knowledge criteria
+        - ALWAYS mark the chosen classification with ** for visibility (e.g., **[Classification]**)
+        - Return ONLY a single descriptive paragraph (200-250 words)
         """
         
-        # Call the LLM to generate the portrait
-        try:
-            from langchain_core.messages import SystemMessage, HumanMessage
+        # Use the LangChain ChatOpenAI interface
+        messages = [
+            SystemMessage(content="You are an expert psychologist with deep empathy, specializing in creating insightful portraits of people based on their communication patterns. Your strength is recognizing patterns, applying appropriate classification frameworks, and formatting JSON responses exactly as requested."),
+            HumanMessage(content=prompt)
+        ]
+        
+        # Call the model with global LLM instance
+        response = await LLM.ainvoke(messages, temperature=0.1)
+        
+        # Extract the portrait text
+        portrait_text = response.content.strip()
+        
+        # Basic validation - ensure we got a substantial response
+        if len(portrait_text) < 50:
+            logger.warning("Portrait text too short, using fallback")
+            portrait_text = f"User communicating in {'Vietnamese' if detect_vietnamese_language(last_user_message) else 'English'}, asking about: {last_user_message[:100]}..."
             
-            # Use the LangChain ChatOpenAI interface
-            messages = [
-                SystemMessage(content="You are an expert psychologist with deep empathy, specializing in creating insightful portraits of people based on their communication patterns. Your strength is recognizing patterns and applying appropriate classification frameworks from provided knowledge."),
-                HumanMessage(content=prompt)
-            ]
-            
-            # Call the model with global LLM instance
-            response = await LLM.ainvoke(messages, temperature=0.1)
-            
-            # Extract the portrait text
-            portrait_text = response.content.strip()
-            
-            # Basic validation - ensure we got a substantial response
-            if len(portrait_text) < 50:
-                logger.warning("Portrait text too short, using fallback")
-                portrait_text = f"User communicating in {'Vietnamese' if detect_vietnamese_language(last_user_message) else 'English'}, asking about: {last_user_message[:100]}..."
-                
-            # Return the portrait in a simplified structure
-            return {
-                "portrait": portrait_text,
-                "method": "knowledge_enhanced" if knowledge_context else "llm_only",
-                "knowledge_sources": len(knowledge)
-            }
-                
-        except Exception as llm_error:
-            logger.error(f"Error generating portrait with LLM: {str(llm_error)}")
-            return {
-                "portrait": f"User communicating in {'Vietnamese' if detect_vietnamese_language(last_user_message) else 'English'}, asking about: {last_user_message[:100]}...",
-                "method": "error_fallback",
-                "error": str(llm_error)
-            }
+        # Return the portrait in a simplified structure
+        return {
+            "portrait": portrait_text,
+            "method": "knowledge_enhanced" if knowledge_context else "llm_only",
+            "knowledge_sources": len(knowledge)
+        }
             
     except Exception as e:
         logger.error(f"Error in portrait creation: {str(e)}")
