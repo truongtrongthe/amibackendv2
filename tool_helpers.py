@@ -238,7 +238,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         
         # Step 3: Use LLM to synthesize knowledge into unified instructions
         from langchain_openai import ChatOpenAI
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.05)
         
         # Detect language for prompt
         language = detect_language(user_query)
@@ -332,7 +332,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         """
         
         logger.info("Using LLM to synthesize knowledge into comprehensive instructions")
-        response = llm.invoke(synthesis_prompt)
+        response = llm.invoke(synthesis_prompt,temperature=0.05)
         synthesized_knowledge = response.content if hasattr(response, 'content') else str(response)
         
         # Ensure we don't exceed max characters

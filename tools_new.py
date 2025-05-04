@@ -753,8 +753,12 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             combined_knowledge += f"## SOLUTION KNOWLEDGE:\n{solution_context}\n\n"
         
         #### BRIAN MOVED HERE BY 04-05-2025 - JUST BEFORE THE ACTIONS PROMPT ####
-        logger.info(f"COMBINED KNOWLEDGE: {combined_knowledge}")
         
+        {analysis_content}
+        
+        logger.info(f"RECOMMENDED TECHNIQUES (ALREADY IDENTIFIED): {_last_cot_results.get("approach_techniques", [])}.")
+        logger.info(f"SPECIFIC INSTRUCTIONS (ALREADY IDENTIFIED):{_last_cot_results.get("specific_instructions", "")}")
+
         # Store the combined knowledge for later use
         _last_cot_results["combined_knowledge_context"] = combined_knowledge
         
@@ -768,7 +772,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         USER CLASSIFICATION: {user_profile.get("segment", {}).get("category", "general")}
         
         OUR ANALYSIS:
-        {analysis_content[:1000]}
+        {analysis_content}
         
         RECOMMENDED TECHNIQUES (ALREADY IDENTIFIED):
         {_last_cot_results.get("approach_techniques", [])}
@@ -780,46 +784,54 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
         
-        {f"COMBINED KNOWLEDGE (FOR REFERENCE):\n{combined_knowledge[:1500]}" if combined_knowledge else ""}
+        {f"COMBINED KNOWLEDGE:\n{combined_knowledge}" if combined_knowledge else ""}
         
         ## PART 1: SALES AUTOMATION NEXT STEPS
-        Using the RECOMMENDED TECHNIQUES and SPECIFIC INSTRUCTIONS already identified above, provide 3 specific, practical, step-by-step next actions the user can take.
-        Each step should directly implement the techniques and instructions identified in the analysis.
+        NAME and BOLD the specific techniques from the RECOMMENDED TECHNIQUES list.
+        Extract the exact actions associated with each technique from the SPECIFIC INSTRUCTIONS.
         
         IMPORTANT INSTRUCTIONS:
-        1. PRIORITIZE the already identified techniques and instructions - these are the foundation for your steps
-        2. INCORPORATE the exact language from the SPECIFIC INSTRUCTIONS whenever possible
-        3. EXPAND on each technique using details from the TECHNIQUE IMPLEMENTATION KNOWLEDGE
-        4. UTILIZE the exact quotes and examples provided in the Implementation Guide sections
-        5. MAINTAIN the customer classification context (like "Nhóm Chán Nản") throughout all steps
+        1. IDENTIFY each recommended technique by name (e.g., "**Trấn An Khách Hàng Nhóm Chán Nản**")
+        2. BOLD each technique name using markdown format (with ** before and after)
+        3. EXTRACT the exact implementation steps for each technique from the SPECIFIC INSTRUCTIONS
+        4. ORGANIZE these steps in the sequence they appear in the SPECIFIC INSTRUCTIONS
+        5. PRESERVE all quotes, examples, and language exactly as written
         
         FORMATTING REQUIREMENTS:
-        1. Number each step (1, 2, 3)
-        2. Keep each step concise but complete (30-50 words per step)
-        3. Start each step with an action verb
-        4. Include specific details on HOW to implement (timing, duration, frequency, etc.)
-        5. Focus on actions the user can start immediately
+        1. Start each technique section with its BOLDED name (e.g., "**Technique Name:**")
+        2. List the implementation steps under each technique
+        3. Use exact wording from the SPECIFIC INSTRUCTIONS
+        4. Include all quotes exactly as they appear (e.g., "Em hiểu rằng việc này...")
+        5. Format as a clean, structured list with clear technique headings
         
         ## PART 2: PERSUASIVE SALES SCRIPT
-        After providing the 3 next steps, create a brief persuasive sales script (200-250 words) that:
-        1. Addresses the user according to their classification
-        2. DIRECTLY INCORPORATES language from the Implementation Guide sections in the knowledge
-        3. USES the exact phrases and conversation flows from the SPECIFIC INSTRUCTIONS
-        4. INCLUDES the specific quotes and examples found in the Implementation Guide (like "Em hiểu rằng việc này có thể gây ra nhiều lo lắng cho anh.")
-        5. FOLLOWS the exact structure of techniques identified in the analysis
+        SEARCH the COMBINED KNOWLEDGE for detailed instructions on HOW to perform each technique, then create a script that implements these techniques.
+        
+        IMPORTANT SCRIPT REQUIREMENTS:
+        1. For EACH technique in Part 1, FIND specific implementation details in the COMBINED KNOWLEDGE
+        2. LOOK FOR sections labeled "What", "How", "Implementation Guide", or "Bước" (steps)
+        3. EXTRACT exact phrases, conversation examples, and quoted text from these sections
+        4. STRUCTURE your script to follow the exact sequence of techniques identified in Part 1
+        5. COPY the exact wording of quotes, examples, and key phrases from the knowledge
+        
+        The script should:
+        1. Start with the EXACT empathetic opening phrases found in the knowledge
+        2. USE the PRECISE reassurance statements found in the Implementation Guide
+        3. INCLUDE the EXACT refund guarantee language as written in the knowledge
+        4. INCORPORATE the SPECIFIC expert support phrasing from the knowledge
+        5. MAINTAIN the EXACT conversational flow described in the techniques
         
         FORMAT THE SALES SCRIPT AS:
         
         PERSUASIVE_SCRIPT:
-        [Your sales script here that faithfully implements the techniques and uses the exact language from the Implementation Guide]
+        [Your script here that EXACTLY follows the SPECIFIC INSTRUCTIONS using the precise language and quotes]
         END_SCRIPT
         
         IMPORTANT:
-        - Respond in the SAME LANGUAGE that the user is using
-        - PRESERVE exact wording from the Implementation Guide whenever possible
-        - USE THE EXACT quotes and examples provided in the knowledge
-        - Keep the script conversational while following the recommended techniques
-        - Ensure the steps form a coherent action plan that aligns with the analysis
+        - Respond in the SAME LANGUAGE as the user
+        - DO NOT CREATE NEW CONTENT - use only what's provided in the instructions and knowledge
+        - PRESERVE all quoted text exactly as written
+        - EXECUTE the specified techniques precisely as described
         """
         
         # Define the system prompt for actions
