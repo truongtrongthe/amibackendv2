@@ -551,7 +551,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         USER MESSAGE: {last_user_message}
         
-        USER PROFILE:
+        USER PROFILE (CRITICALLY IMPORTANT - INCORPORATE THIS INFORMATION):
         {profile_summary}
         
         KNOWLEDGE (critically important - extract techniques and instructions from here):
@@ -559,20 +559,27 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         Provide your response in this exact format:
         
-        ANALYSIS: [Your detailed analysis of the user's needs and situation]
+        ANALYSIS: [Your detailed analysis that MUST incorporate key insights from USER PROFILE including:
+        1. Their communication style (from portrait)
+        2. Their classification (e.g., Nhóm Trung Lưu)
+        3. Their decision state (e.g., Đã Quyết Định, Đang Tìm Hiểu)
+        4. Their specific needs (both primary and secondary)
+        5. The ideal approach strategy for their profile type]
         
-        RECOMMENDED TECHNIQUES: [EXTRACT the most appropriate techniques or approaches mentioned in the KNOWLEDGE for this user type. DO NOT invent techniques - only include ones found in the knowledge provided]
+        RECOMMENDED TECHNIQUES: [EXTRACT the most appropriate techniques or approaches mentioned in the KNOWLEDGE for this user type. DO NOT invent techniques - only include ones found in the knowledge provided. Prioritize techniques that match the user's classification and decision state.]
         
-        SPECIFIC INSTRUCTIONS: [COPY-PASTE the EXACT numbered steps from the "Implementation Guide" section of the KNOWLEDGE. Do not change a single word - use the precise wording including all examples and quotation marks. If there's no Implementation Guide section, copy the most detailed steps from the Application Methods sections]
+        SPECIFIC INSTRUCTIONS: [COPY-PASTE the EXACT numbered steps from the "Implementation Guide" section of the KNOWLEDGE. Do not change a single word - use the precise wording including all examples and quotation marks. If there's no Implementation Guide section, copy the most detailed steps from the Application Methods sections. If the user is already classified or has provided information mentioned in the steps, make note of this.]
         
         KEY QUERIES: [List 2 specific queries that begin with "Cách thực hiện" (Vietnamese) or "How to implement" (English) followed by the EXACT name of the recommended techniques you identified above. For example: "Cách thực hiện Trấn An Khách Hàng Nhóm Chán Nản" or "How to implement Customer Reassurance Technique"]
         
         IMPORTANT: 
         1. Respond in the SAME LANGUAGE that the user is using
-        2. For RECOMMENDED TECHNIQUES, use the EXACT headings from the "Application Methods for [Classification]" section
-        3. For SPECIFIC INSTRUCTIONS, COPY-PASTE the full Implementation Guide steps verbatim with quotation marks intact
-        4. For KEY QUERIES, format exactly as shown using "Cách thực hiện" for Vietnamese or "How to implement" for English
-        5. Do NOT add any explanations or additional text beyond what's specifically requested in each section
+        2. For ANALYSIS, extensively use details from the USER PROFILE - this is critical
+        3. For RECOMMENDED TECHNIQUES, use the EXACT headings from the "Application Methods for [Classification]" section
+        4. For SPECIFIC INSTRUCTIONS, COPY-PASTE the full Implementation Guide steps verbatim with quotation marks intact
+        5. For KEY QUERIES, format exactly as shown using "Cách thực hiện" for Vietnamese or "How to implement" for English
+        6. DO NOT add any explanations or additional text beyond what's specifically requested in each section
+        7. DO NOT omit any critical information present in the USER PROFILE from your ANALYSIS
         """
         
         # Generate the analysis, techniques, and key queries
