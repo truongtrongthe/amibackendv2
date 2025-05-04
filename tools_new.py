@@ -238,7 +238,14 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     
     # OPTIMIZATION: Simplify personality instructions if too long
     if personality_instructions and len(personality_instructions) > 500:
-        personality_instructions = "You are a sophisticated and perceptive AI assistant that adapts to the user's communication style while maintaining persuasive confidence."
+        personality_instructions = """
+        You are a warm, conversational assistant who communicates naturally like a friendly human would:
+        - Use casual, everyday language rather than formal or technical phrasing
+        - Include culturally appropriate terms of address (like "Chị ơi", "Anh ơi" in Vietnamese)
+        - Keep responses concise and to the point (prefer 2-3 short paragraphs)
+        - Mirror the user's communication style while maintaining clarity
+        - Use appropriate emotional markers and conversational particles for the language
+        """
     
     
     # Get the last user message for better context
@@ -268,29 +275,37 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
     {personality_instructions}
     
     # Task
-    Create a persuasive response in {detected_language} that:
+    Create a concise, persuasive response in {detected_language} that:
     1. Directly addresses the user's needs in a compelling way
-    2. Demonstrates sophisticated understanding with rich, articulate language
-    3. Mirrors the user's communication style while elevating the conversation
-    4. Conveys energy and enthusiasm appropriate to the context
-    5. Includes a strong, confident call-to-action
+    2. Sounds like a friendly human, not an AI
+    3. Uses appropriate cultural terms of address and conversational markers
+    4. Keeps the content brief but complete (aim for 2-3 short paragraphs)
+    5. Includes a natural, friendly call-to-action
     
-    HIGHEST PRIORITY - PERSUASIVE SCRIPT ADHERENCE:
-    1. Use the persuasive sales script as your PRIMARY SOURCE and model for your response
-    2. Keep the same structure, flow, and key messaging as the script
-    3. Maintain all specific selling points, benefits, and value propositions
-    4. Use the same persuasive language patterns and emotional appeals
-    5. Include all references to specific service packages, features, and classifications
-    6. Preserve the confident, enthusiastic tone throughout while adapting to the user's style
+    CONVERSATIONAL STYLE GUIDE:
+    - In Vietnamese: Use appropriate terms like "Chị ơi/Anh ơi" at the beginning, and conversational particles like "nhé", "ạ", "nha" where natural
+    - In English: Use friendly openings like "Hi there" and conversational closings like "Let me know if you need anything else"
+    - Keep sentences short and simple
+    - Use contractions and everyday phrases
+    - Sound like you're chatting, not writing a formal document
+    - AVOID REPEATING the same prefixes or greeting patterns across consecutive messages
+    - VARY your expressions and phrasing to sound more natural
+    
+    HIGHEST PRIORITY - PERSUASIVE SCRIPT ADAPTATION:
+    1. Use the persuasive sales script as your PRIMARY SOURCE for content
+    2. Adapt the script to be more conversational and human-sounding
+    3. Maintain all key selling points and value propositions
+    4. Shorten lengthy explanations while preserving the main message
+    5. Add appropriate conversational markers and cultural terms
     
     RESPONSE GUIDANCE:
-    - Begin with the same greeting and introduction style as the script
-    - Directly incorporate the main benefits mentioned in the script
-    - Use the same compelling value propositions for services
-    - Include the same special offers or incentives
-    - End with the same style of call-to-action as in the script
+    - Begin with the appropriate conversational greeting for the language
+    - Present the main value proposition concisely
+    - Keep technical details minimal but sufficient
+    - End with a warm, friendly close and simple call-to-action
+    - If this is a follow-up message, don't repeat the same greeting from previous messages
     
-    IMPORTANT: Your response should be essentially a polished version of the persuasive script, maintaining its persuasive structure while ensuring smooth flow and natural language. Do NOT shorten or summarize the script - keep all its persuasive elements intact.
+    IMPORTANT: Your response should feel like a message from a helpful friend rather than a formal business communication. Make it conversational, concise, and culturally appropriate. Vary your language patterns between messages to sound more human.
     """
     
     # OPTIMIZATION: Set a timeout for response generation
@@ -313,7 +328,7 @@ async def response_generation_handler(params: Dict) -> AsyncGenerator[str, None]
             # Process with timeout
             logger.info(f"Sending response generation request to OpenAI")
             async with asyncio.timeout(RESPONSE_TIMEOUT):
-                async for chunk in StreamLLM.astream(prompt):
+                async for chunk in StreamLLM.astream(prompt,temperature=0.05):
                     content = chunk.content
                     buffer += content
                     full_response += content
@@ -546,7 +561,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         ANALYSIS: [Your detailed analysis of the user's needs and situation]
         
-        RECOMMENDED TECHNIQUES: [EXTRACT 2-3 specific techniques or approaches mentioned in the KNOWLEDGE that are appropriate for this user type. DO NOT invent techniques - only include ones found in the knowledge provided]
+        RECOMMENDED TECHNIQUES: [EXTRACT the most appropriate techniques or approaches mentioned in the KNOWLEDGE for this user type. DO NOT invent techniques - only include ones found in the knowledge provided]
         
         SPECIFIC INSTRUCTIONS: [COPY-PASTE the EXACT numbered steps from the "Implementation Guide" section of the KNOWLEDGE. Do not change a single word - use the precise wording including all examples and quotation marks. If there's no Implementation Guide section, copy the most detailed steps from the Application Methods sections]
         
@@ -771,6 +786,9 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         USER CLASSIFICATION: {user_profile.get("segment", {}).get("category", "general")}
         
+        USER PROFILE INFORMATION:
+        {format_user_profile_for_prompt(user_profile) if user_profile else ""}
+        
         OUR ANALYSIS:
         {analysis_content}
         
@@ -789,23 +807,27 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         ## PART 1: SALES AUTOMATION NEXT STEPS
         NAME and BOLD the specific techniques from the RECOMMENDED TECHNIQUES list.
         Extract the exact actions associated with each technique from the SPECIFIC INSTRUCTIONS.
+        THEN ADAPT each step based on information already available in the USER PROFILE and prior conversation context.
         
         IMPORTANT INSTRUCTIONS:
         1. IDENTIFY each recommended technique by name (e.g., "**Trấn An Khách Hàng Nhóm Chán Nản**")
         2. BOLD each technique name using markdown format (with ** before and after)
         3. EXTRACT the exact implementation steps for each technique from the SPECIFIC INSTRUCTIONS
-        4. ORGANIZE these steps in the sequence they appear in the SPECIFIC INSTRUCTIONS
-        5. PRESERVE all quotes, examples, and language exactly as written
+        4. ADAPT implementation steps based on context - SKIP steps requesting information that is ALREADY KNOWN from the USER PROFILE
+        5. ORGANIZE these steps in the sequence they appear in the SPECIFIC INSTRUCTIONS, after adaptation
+        6. PRESERVE all quotes, examples, and language exactly as written except for the adapted steps
+        7. For information that we ALREADY KNOW (like profession, user classification, etc.), DO NOT include steps to gather this information again
         
         FORMATTING REQUIREMENTS:
         1. Start each technique section with its BOLDED name (e.g., "**Technique Name:**")
         2. List the implementation steps under each technique
-        3. Use exact wording from the SPECIFIC INSTRUCTIONS
+        3. Use exact wording from the SPECIFIC INSTRUCTIONS for non-adapted steps
         4. Include all quotes exactly as they appear (e.g., "Em hiểu rằng việc này...")
         5. Format as a clean, structured list with clear technique headings
         
         ## PART 2: PERSUASIVE SALES SCRIPT
         SEARCH the COMBINED KNOWLEDGE for detailed instructions on HOW to perform each technique, then create a script that implements these techniques.
+        IMPORTANT: The script must be consistent with the ADAPTED steps from Part 1 - do not include script elements for steps that were skipped.
         
         IMPORTANT SCRIPT REQUIREMENTS:
         1. For EACH technique in Part 1, FIND specific implementation details in the COMBINED KNOWLEDGE
@@ -813,6 +835,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         3. EXTRACT exact phrases, conversation examples, and quoted text from these sections
         4. STRUCTURE your script to follow the exact sequence of techniques identified in Part 1
         5. COPY the exact wording of quotes, examples, and key phrases from the knowledge
+        6. SKIP any dialogue requesting information that's ALREADY KNOWN from the user profile
         
         The script should:
         1. Start with the EXACT empathetic opening phrases found in the knowledge
@@ -820,11 +843,12 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         3. INCLUDE the EXACT refund guarantee language as written in the knowledge
         4. INCORPORATE the SPECIFIC expert support phrasing from the knowledge
         5. MAINTAIN the EXACT conversational flow described in the techniques
+        6. SKIP any steps asking for information we already have (like profession, classification)
         
         FORMAT THE SALES SCRIPT AS:
         
         PERSUASIVE_SCRIPT:
-        [Your script here that EXACTLY follows the SPECIFIC INSTRUCTIONS using the precise language and quotes]
+        [Your script here that EXACTLY follows the ADAPTED SPECIFIC INSTRUCTIONS using the precise language and quotes]
         END_SCRIPT
         
         IMPORTANT:
@@ -832,6 +856,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         - DO NOT CREATE NEW CONTENT - use only what's provided in the instructions and knowledge
         - PRESERVE all quoted text exactly as written
         - EXECUTE the specified techniques precisely as described
+        - RECOGNIZE INFORMATION ALREADY IN THE USER PROFILE and avoid steps asking for it again
         """
         
         # Define the system prompt for actions
@@ -1034,35 +1059,33 @@ async def process_llm_with_tools(
     PERF_METRICS.clear()  # Reset metrics for this request
     PERF_METRICS["overall_start"] = overall_start_time
     
-    # OPTIMIZATION: Further reduce context size - only use current message and 1-2 recent turns
+    # OPTIMIZATION: Include more context - use up to 15 messages for richer conversation history
     conversation_context = f"User: {user_message}\n"
     
-    # Include at most one previous exchange for context
-    if conversation_history and len(conversation_history) >= 2:
-        prev_ai = None
-        prev_user = None
+    # Include up to 15 previous messages for context (increased from just 1-2 turns)
+    if conversation_history:
+        # Extract the last 15 messages excluding the current
+        recent_messages = []
+        message_count = 0
+        max_messages = 15  # Increased from previous 1-2
         
-        # Get the most recent AI and user messages (excluding current)
         for msg in reversed(conversation_history[:-1]):  # Skip the current message
-            if msg.get("role") == "assistant" and not prev_ai:
-                prev_ai = msg.get("content", "")
-            elif msg.get("role") == "user" and not prev_user:
-                prev_user = msg.get("content", "")
+            role = msg.get("role", "")
+            content = msg.get("content", "")
             
-            # Break once we have both
-            if prev_ai and prev_user:
-                break
-        
-        # Add only the immediate previous exchange if available
-        if prev_user and prev_ai:
-            # OPTIMIZATION: Truncate previous messages to reduce tokens
-            max_prev_len = 100  # Characters
-            if len(prev_user) > max_prev_len:
-                prev_user = prev_user[:max_prev_len] + "..."
-            if len(prev_ai) > max_prev_len:
-                prev_ai = prev_ai[:max_prev_len] + "..."
+            if role and content:
+                if role == "assistant":
+                    recent_messages.append(f"AI: {content}")
+                elif role == "user":
+                    recent_messages.append(f"User: {content}")
                 
-            conversation_context = f"User: {prev_user}\nAI: {prev_ai}\n" + conversation_context
+                message_count += 1
+                if message_count >= max_messages:
+                    break
+        
+        # Add messages in chronological order
+        if recent_messages:
+            conversation_context = "\n".join(reversed(recent_messages)) + "\n" + conversation_context
     
     # Track history processing time
     PERF_METRICS["history_processed"] = time.time()
@@ -1289,7 +1312,7 @@ async def process_llm_with_tools(
                 _last_cot_results["knowledge_context"] = knowledge_context
                 
             knowledge_found = True
-            logger.info(f"Using knowledge context for response generation: {len(knowledge_context)} chars")
+            logger.info(f"KNOWLEDGE FOR RESPONSE: {knowledge_context} chars")
         
         # Log completion of CoT processing
         PERF_METRICS["cot_processing_end"] = time.time()
