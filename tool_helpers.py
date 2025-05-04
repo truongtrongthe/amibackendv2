@@ -204,27 +204,18 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
             if title_match:
                 title = title_match.group(1).strip()
             
-            # Extract application methods from Takeaways section
+            # Extract takeaways section - simpler approach
             takeaways_match = re.search(r'Takeaways:(.*?)(?=Document Summary:|Cross-Cluster Connections:|$)', raw_text, re.DOTALL)
             if takeaways_match:
                 takeaways_text = takeaways_match.group(1).strip()
                 
-                # First, try to extract all "Application Method:" sections with their numbered steps
-                app_methods = []
-                app_method_blocks = re.split(r'\n\n(?=Application Method:)', takeaways_text)
-                
-                for block in app_method_blocks:
-                    if block.strip().startswith("Application Method:"):
-                        app_methods.append(block.strip())
-                
-                # If we found application methods, use them
-                if app_methods:
-                    application_methods = app_methods
-                else:
-                    # Fallback: Try to extract numbered steps directly
-                    numbered_steps = re.findall(r'\d+\.\s+\*\*([^*]+)\*\*:\s*(.*?)(?=\n\d+\.\s+\*\*|\n\n|$)', takeaways_text, re.DOTALL)
-                    if numbered_steps:
-                        application_methods = [f"Application Method: Implementation Steps\n\n" + takeaways_text]
+                # Simple capture of all text in Takeaways section without complex patterns
+                # Just check if the entire section contains "Application Method:" or similar keywords
+                if "Application Method:" in takeaways_text:
+                    # Instead of complex regex, just add the entire section
+                    application_methods.append(takeaways_text)
+            
+            #logger.info(f"Application methods found: {application_methods}")
             
             # Format the extracted content
             formatted_content = f"KNOWLEDGE ENTRY {i+1}:\n"
@@ -234,30 +225,8 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
             if application_methods:
                 formatted_content += "HOW TO APPLY:\n"
                 for method in application_methods:
-                    # Ensure all numbered steps are included by extracting and reformatting
-                    method_name_match = re.match(r'Application Method:\s*(.*?)(?:\n|$)', method)
-                    method_name = method_name_match.group(1).strip() if method_name_match else "Implementation Steps"
-                    
-                    # Keep the original format with method name highlighted
-                    formatted_content += f"Application Method: {method_name}\n\n"
-                    
-                    # Extract and include all numbered steps with their content
-                    step_matches = re.finditer(r'(\d+)\.\s+\*\*([^*]+)\*\*:(.*?)(?=\n\d+\.\s+\*\*|\n\n|$)', method, re.DOTALL)
-                    steps_found = False
-                    
-                    for step_match in step_matches:
-                        steps_found = True
-                        step_num = step_match.group(1)
-                        step_title = step_match.group(2).strip()
-                        step_content = step_match.group(3).strip()
-                        
-                        formatted_content += f"{step_num}. **{step_title}**:{step_content}\n\n"
-                    
-                    # If no steps were found in this format, include the original method text
-                    if not steps_found:
-                        # Remove the method name line since we've already added it
-                        method_content = re.sub(r'^Application Method:[^\n]*\n+', '', method).strip()
-                        formatted_content += f"{method_content}\n\n"
+                    # Simply include the entire method text with minimal processing
+                    formatted_content += f"{method}\n\n"
             else:
                 # Fallback to using some raw text if no application methods found
                 content_preview = raw_text.split("Takeaways:", 1)[0].strip()
@@ -307,36 +276,59 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
           - Show how these knowledge areas solve the user's problem
           - Keep this section brief (50-75 words maximum)
         
-        2. CLASSIFICATIONS: Present any customer classification systems
+        2. CLASSIFICATIONS: Present the complete customer classification framework
           - Use "## Customer Classification Framework" heading
-          - Keep EXACT terminology (e.g., "Nhóm Chán Nản", "Nhóm Tự Tin")
-          - Include criteria and source titles
-          - Use compact formatting - no extra line breaks
+          - PRESERVE EXACT classification terminology (e.g., "Nhóm Chán Nản", "Nhóm Tự Tin")
+          - Include ALL identifying criteria for each classification (behaviors, phrases, thresholds)
+          - Format each classification with bold markers: **Nhóm Chán Nản**
+          - Include EXACT verbatim examples from knowledge (e.g., "Tôi bị xuất sớm")
         
-        3. APPLICATION METHODS: Present the "HOW TO APPLY" sections
-          - Group methods under headings with source titles
-          - Preserve exact steps but minimize extra spacing
-          - Maintain original terminology and phrasings
-          - Use compact formatting throughout
+        3. APPLICATION METHODS: Organize and present ALL methods without duplication
+          - Group by classification (e.g., "## Methods for Nhóm Chán Nản")
+          - Include EXACT method names (e.g., "Trấn An Khách Hàng Nhóm Chán Nản")
+          - For each method, provide clear WHAT (objective) and HOW (steps)
+          - Keep ALL specific instructions, scripts, and examples
+          - NEVER omit key steps or application methods
+          - PRESERVE original numbered steps format with bold titles
         
-        FORMAT (use this exact structure with minimal extra spacing):
+        4. IMPLEMENTATION GUIDE: Create practical implementation summary
+          - For the user classification, provide step-by-step implementation guide
+          - Synthesize across different application methods for the SAME classification
+          - Include concrete language and phrases to use (verbatim from knowledge)
+          - Ensure ALL critical steps are preserved
+          
+        FORMAT (use this exact structure with minimal spacing):
         ## Knowledge Found
         [Brief narrative connecting knowledge titles - 50-75 words]
         
         ## Customer Classification Framework
-        [Classifications with exact terminology - compact format]
+        **[Classification 1]**: [Criteria with EXACT terminology - include verbatim examples]
+        **[Classification 2]**: [Criteria with EXACT terminology - include verbatim examples]
         
-        ## Application Methods
-        [Methods with preserved steps - compact format]
+        ## Application Methods for [Primary Classification]
+        ### [Method 1 Name - EXACT as in knowledge]
+        **What**: [Objective of this method]
+        **How**:
+        1. [Step 1 with EXACT wording]
+        2. [Step 2 with EXACT wording]
         
-        ## Examples & Implementation
-        [Examples and guidance - compact format]
+        ### [Method 2 Name - EXACT as in knowledge]
+        **What**: [Objective of this method]
+        **How**:
+        1. [Step 1 with EXACT wording]
+        2. [Step 2 with EXACT wording]
+        
+        ## Implementation Guide
+        1. [First implementation step combining best practices]
+        2. [Second implementation step with concrete examples]
         
         IMPORTANT: 
         - NEVER translate classification terms
-        - Use compact formatting with minimal line breaks
-        - Avoid extra blank lines between paragraphs
-        - Reference knowledge titles with each information piece
+        - PRESERVE ALL application methods for the target classification
+        - Include ALL steps and examples for each method
+        - MAINTAIN exact wording, especially for classification names
+        - DO NOT merge or simplify application methods
+        - ENSURE all critical methods like "Trấn An Khách Hàng Nhóm Chán Nản" are included
         """
         
         logger.info("Using LLM to synthesize knowledge into comprehensive instructions")

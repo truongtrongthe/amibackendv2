@@ -489,7 +489,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                     "thread_id": thread_id,
                     "status": "searching"
                 }
-                logger.info(f"ENHANCED PORTRAIT KNOWLEDGE:{user_analysis_knowledge} ")
+                #logger.info(f"ENHANCED PORTRAIT KNOWLEDGE:{user_analysis_knowledge} ")
     except Exception as e:
         logger.error(f"Error in knowledge retrieval: {e}")
     
@@ -548,20 +548,24 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         RECOMMENDED TECHNIQUES: [EXTRACT 2-3 specific techniques or approaches mentioned in the KNOWLEDGE that are appropriate for this user type. DO NOT invent techniques - only include ones found in the knowledge provided]
         
-        SPECIFIC INSTRUCTIONS: [EXTRACT any specific "what to do" instructions from the KNOWLEDGE that would help this user. These are concrete actions mentioned in the knowledge]
+        SPECIFIC INSTRUCTIONS: [COPY-PASTE the EXACT numbered steps from the "Implementation Guide" section of the KNOWLEDGE. Do not change a single word - use the precise wording including all examples and quotation marks. If there's no Implementation Guide section, copy the most detailed steps from the Application Methods sections]
         
-        KEY QUERIES: [List 1-2 specific queries we should search to find more implementation details about the techniques or instructions. These should help find "how to implement" the techniques]
+        KEY QUERIES: [List 2 specific queries that begin with "Cách thực hiện" (Vietnamese) or "How to implement" (English) followed by the EXACT name of the recommended techniques you identified above. For example: "Cách thực hiện Trấn An Khách Hàng Nhóm Chán Nản" or "How to implement Customer Reassurance Technique"]
         
         IMPORTANT: 
         1. Respond in the SAME LANGUAGE that the user is using
-        2. ONLY extract techniques and instructions actually mentioned in the KNOWLEDGE
-        3. If no specific techniques or instructions are found in the knowledge, state "No specific techniques/instructions found in knowledge" and suggest what we should search for
+        2. For RECOMMENDED TECHNIQUES, use the EXACT headings from the "Application Methods for [Classification]" section
+        3. For SPECIFIC INSTRUCTIONS, COPY-PASTE the full Implementation Guide steps verbatim with quotation marks intact
+        4. For KEY QUERIES, format exactly as shown using "Cách thực hiện" for Vietnamese or "How to implement" for English
+        5. Do NOT add any explanations or additional text beyond what's specifically requested in each section
         """
         
         # Generate the analysis, techniques, and key queries
-        logger.info("Generating comprehensive user analysis with techniques extracted from knowledge")
-        response = await LLM.ainvoke(analysis_prompt)
+        response = await LLM.ainvoke(analysis_prompt,temperature=0.1)
+        
+        
         full_analysis = response.content if hasattr(response, 'content') else str(response)
+        logger.info(f"FULL ANALYSIS RESPONSE: {full_analysis}")
         
         # Parse out the analysis, techniques, instructions and key queries
         analysis_part = ""
@@ -605,7 +609,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
                     query = re.sub(r'^\s*[\d\.\-\*]+\s*', '', line.strip())
                     if query and len(query) > 3:
                         key_queries.append(query)
-        
+        logger.info(f"EXTRACTED KEY QUERIES: {key_queries}")
         # Fallback if format isn't followed
         if not analysis_part:
             analysis_part = full_analysis
@@ -646,7 +650,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         }
         logger.info("Analysis and knowledge extraction completed and streamed")
         
-        #### BRIAN MOVED HERE BY 30-04-2025 ####
+        
         # STEP 4: Generate technique-specific queries and fetch implementation knowledge
         technique_knowledge = []
         if brain_loaded and approach_techniques:
@@ -707,7 +711,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             
             if additional_knowledge:
                 logger.info(f"Found {len(additional_knowledge)} additional knowledge entries from key queries")
-        #Brian: Step 3 & 4 is actually just the knowledge preparation. Step 5 is the actual next actions generation.
+        
         # STEP 5: Generate next actions using all collected knowledge
         # Format the combined knowledge for the LLM
         technique_context = prepare_knowledge(
@@ -747,7 +751,10 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             combined_knowledge += f"## TECHNIQUE IMPLEMENTATION KNOWLEDGE:\n{technique_context}\n\n"
         if solution_context:
             combined_knowledge += f"## SOLUTION KNOWLEDGE:\n{solution_context}\n\n"
-            
+        
+        #### BRIAN MOVED HERE BY 04-05-2025 - JUST BEFORE THE ACTIONS PROMPT ####
+        logger.info(f"COMBINED KNOWLEDGE: {combined_knowledge}")
+        
         # Store the combined knowledge for later use
         _last_cot_results["combined_knowledge_context"] = combined_knowledge
         
@@ -763,22 +770,28 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         OUR ANALYSIS:
         {analysis_content[:1000]}
         
-        {f"RECOMMENDED TECHNIQUES FOR THIS USER TYPE:\n{technique_context}" if technique_context else ""}
+        RECOMMENDED TECHNIQUES (ALREADY IDENTIFIED):
+        {_last_cot_results.get("approach_techniques", [])}
+        
+        SPECIFIC INSTRUCTIONS (ALREADY IDENTIFIED):
+        {_last_cot_results.get("specific_instructions", "")}
+        
+        {f"TECHNIQUE IMPLEMENTATION KNOWLEDGE:\n{technique_context}" if technique_context else ""}
         
         {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
         
-        {f"COMBINED KNOWLEDGE:\n{combined_knowledge[:1500]}" if combined_knowledge else ""}
+        {f"COMBINED KNOWLEDGE (FOR REFERENCE):\n{combined_knowledge[:1500]}" if combined_knowledge else ""}
         
         ## PART 1: SALES AUTOMATION NEXT STEPS
-        Provide 3 specific, practical, step-by-step next actions the user can take to address their needs.
-        Each step must be highly actionable, precise, and based on the knowledge provided.
+        Using the RECOMMENDED TECHNIQUES and SPECIFIC INSTRUCTIONS already identified above, provide 3 specific, practical, step-by-step next actions the user can take.
+        Each step should directly implement the techniques and instructions identified in the analysis.
         
         IMPORTANT INSTRUCTIONS:
-        1. PRIORITIZE information about customer classifications (like "Nhóm Cao Cấp" or "Nhóm Trung Lưu")
-        2. HIGHLIGHT any service packages mentioned (like "Gói Thai Sản Cao Cấp" or "Gói Thai Sản Tiết Kiệm")
-        3. EXTRACT and use any specific procedural steps, application methods, or implementation details
-        4. PAY SPECIAL ATTENTION to pricing information, eligibility criteria, and service differences
-        5. IDENTIFY the most appropriate service package based on the user's classification and needs
+        1. PRIORITIZE the already identified techniques and instructions - these are the foundation for your steps
+        2. INCORPORATE the exact language from the SPECIFIC INSTRUCTIONS whenever possible
+        3. EXPAND on each technique using details from the TECHNIQUE IMPLEMENTATION KNOWLEDGE
+        4. UTILIZE the exact quotes and examples provided in the Implementation Guide sections
+        5. MAINTAIN the customer classification context (like "Nhóm Chán Nản") throughout all steps
         
         FORMATTING REQUIREMENTS:
         1. Number each step (1, 2, 3)
@@ -790,21 +803,23 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         ## PART 2: PERSUASIVE SALES SCRIPT
         After providing the 3 next steps, create a brief persuasive sales script (200-250 words) that:
         1. Addresses the user according to their classification
-        2. Highlights the most compelling benefits in the knowledge
-        3. Presents the recommended service package with clear advantages
-        4. Includes at least one persuasive call-to-action
-        5. Uses persuasive language that matches the tone of the knowledge
+        2. DIRECTLY INCORPORATES language from the Implementation Guide sections in the knowledge
+        3. USES the exact phrases and conversation flows from the SPECIFIC INSTRUCTIONS
+        4. INCLUDES the specific quotes and examples found in the Implementation Guide (like "Em hiểu rằng việc này có thể gây ra nhiều lo lắng cho anh.")
+        5. FOLLOWS the exact structure of techniques identified in the analysis
         
         FORMAT THE SALES SCRIPT AS:
         
         PERSUASIVE_SCRIPT:
-        [Your sales script here]
+        [Your sales script here that faithfully implements the techniques and uses the exact language from the Implementation Guide]
         END_SCRIPT
         
         IMPORTANT:
         - Respond in the SAME LANGUAGE that the user is using
-        - Focus on clarity and precision - each step should be unambiguous
-        - Ensure the steps form a coherent action plan
+        - PRESERVE exact wording from the Implementation Guide whenever possible
+        - USE THE EXACT quotes and examples provided in the knowledge
+        - Keep the script conversational while following the recommended techniques
+        - Ensure the steps form a coherent action plan that aligns with the analysis
         """
         
         # Define the system prompt for actions

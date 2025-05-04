@@ -181,7 +181,7 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
                 logger.warning(f"Error retrieving knowledge for query '{query}': {str(e)}")
         
         # Process the knowledge entries using prepare_knowledge
-        logger.info(f"Retrieved {knowledge_entries} knowledge entries to inform user profiling")
+        #logger.info(f"Retrieved {knowledge_entries} knowledge entries to inform user profiling")
         
         if knowledge_entries:
             # Sort entries by priority (classification entries first) and then by similarity
