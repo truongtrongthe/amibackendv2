@@ -215,7 +215,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
                     # Instead of complex regex, just add the entire section
                     application_methods.append(takeaways_text)
             
-            #logger.info(f"Application methods found: {application_methods}")
+            logger.info(f"Application methods found: {application_methods}")
             
             # Format the extracted content
             formatted_content = f"KNOWLEDGE ENTRY {i+1}:\n"
@@ -238,7 +238,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         
         # Step 3: Use LLM to synthesize knowledge into unified instructions
         from langchain_openai import ChatOpenAI
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.05)
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.05)
         
         # Detect language for prompt
         language = detect_language(user_query)
@@ -283,52 +283,63 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
           - Format each classification with bold markers: **Nhóm Chán Nản**
           - Include EXACT verbatim examples from knowledge (e.g., "Tôi bị xuất sớm")
         
-        3. APPLICATION METHODS: Organize and present ALL methods without duplication
+        3. APPLICATION METHODS: Organize and present ALL methods without consolidation
           - Group by classification (e.g., "## Methods for Nhóm Chán Nản")
-          - Include EXACT method names (e.g., "Trấn An Khách Hàng Nhóm Chán Nản")
-          - For each method, provide clear WHAT (objective) and HOW (steps)
-          - Keep ALL specific instructions, scripts, and examples
-          - NEVER omit key steps or application methods
+          - PRESERVE EACH DISTINCT APPLICATION METHOD NAME EXACTLY AS FOUND IN SOURCE
+          - List all methods separately with their original headings
+          - For each method, include the complete title exactly as written (e.g., "Đặt câu hỏi với mỗi nhóm khách hàng")
+          - NEVER combine or merge different methods even if they seem related
+          - INCLUDE ALL NUMBERED STEPS exactly as they appear in the original knowledge
+          - DO NOT truncate steps or limit them to any predetermined number
+          - Keep ALL specific instructions, scripts, and examples within their original method
           - PRESERVE original numbered steps format with bold titles
+          - DO NOT RENAME OR REWORD method titles under any circumstances
         
         4. IMPLEMENTATION GUIDE: Create practical implementation summary
           - For the user classification, provide step-by-step implementation guide
-          - Synthesize across different application methods for the SAME classification
+          - Reference each distinct application method by its exact name
           - Include concrete language and phrases to use (verbatim from knowledge)
           - Ensure ALL critical steps are preserved
           
         FORMAT (use this exact structure with minimal spacing):
         ## Knowledge Found
-        [Brief narrative connecting knowledge titles - 50-75 words]
+        [Brief narrative connecting knowledge titles - 80-100 words]
         
         ## Customer Classification Framework
         **[Classification 1]**: [Criteria with EXACT terminology - include verbatim examples]
         **[Classification 2]**: [Criteria with EXACT terminology - include verbatim examples]
         
         ## Application Methods for [Primary Classification]
-        ### [Method 1 Name - EXACT as in knowledge]
+        ### [EXACT Method 1 Name - PRESERVE COMPLETE ORIGINAL TITLE]
         **What**: [Objective of this method]
         **How**:
         1. [Step 1 with EXACT wording]
         2. [Step 2 with EXACT wording]
+        ... [Include ALL additional steps exactly as numbered in original]
+        N. [Last step with EXACT wording]
         
-        ### [Method 2 Name - EXACT as in knowledge]
+        ### [EXACT Method 2 Name - PRESERVE COMPLETE ORIGINAL TITLE]
         **What**: [Objective of this method]
         **How**:
         1. [Step 1 with EXACT wording]
         2. [Step 2 with EXACT wording]
+        ... [Include ALL additional steps exactly as numbered in original]
+        N. [Last step with EXACT wording]
         
         ## Implementation Guide
-        1. [First implementation step combining best practices]
+        1. [First implementation step referencing specific method by exact name]
         2. [Second implementation step with concrete examples]
         
         IMPORTANT: 
         - NEVER translate classification terms
-        - PRESERVE ALL application methods for the target classification
-        - Include ALL steps and examples for each method
-        - MAINTAIN exact wording, especially for classification names
-        - DO NOT merge or simplify application methods
-        - ENSURE all critical methods like "Trấn An Khách Hàng Nhóm Chán Nản" are included
+        - PRESERVE ALL application methods as SEPARATE, DISTINCT entries with their COMPLETE original titles
+        - DO NOT CONSOLIDATE methods - each original method must appear as its own section
+        - INCLUDE EVERY SINGLE STEP from each application method - do not omit any steps regardless of how many there are
+        - PRESERVE THE EXACT NUMBERING SCHEME from the original knowledge
+        - DO NOT limit methods to a specific number of steps - include all steps from the original
+        - MAINTAIN exact wording, especially for classification names and method titles
+        - DO NOT merge or simplify application methods under any circumstances
+        - ENSURE all distinct methods like "Đặt câu hỏi với mỗi nhóm khách hàng", "Đánh vào tâm lý với mỗi nhóm khách hàng", etc. are listed separately
         """
         
         logger.info("Using LLM to synthesize knowledge into comprehensive instructions")

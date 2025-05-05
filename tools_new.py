@@ -544,6 +544,8 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         
         # Format user profile for the LLM
         profile_summary = format_user_profile_for_prompt(user_profile) if "portrait" in user_profile else ""
+
+        logger.info(f"PROFILE SUMMARY: {profile_summary}")
         
         # Create a comprehensive prompt for user analysis and technique extraction
         analysis_prompt = f"""
