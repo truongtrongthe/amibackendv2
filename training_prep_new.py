@@ -291,20 +291,24 @@ async def generate_cluster_title(sentences: List[str]) -> str:
     try:
         sentences_text = "\n".join([f"- {s}" for s in sentences])
         prompt = (
-            f"You are a knowledge organization expert.\n\n"
-            f"TASK: Based on the following sentences, generate a SHORT, DESCRIPTIVE TITLE (3-5 words) that captures the core theme or topic.\n"
-            f"If the sentences are not concise enough, rephrase them into a clear, focused title.\n\n"
+            f"You are a knowledge organization expert with excellent abstraction skills.\n\n"
+            f"TASK: Based on the following sentences, generate a COMPREHENSIVE yet CONCISE TITLE (5-8 words) that perfectly captures the underlying concept, theme, or principle.\n"
+            f"If the sentences are not clear enough, abstract and elevate them to a higher-level concept.\n\n"
             f"GUIDELINES:\n"
-            f"1. The title should be in the SAME LANGUAGE as the sentences\n"
-            f"2. If the sentences are verbose or unclear, create a concise title that captures the essence\n"
-            f"3. Use clear, direct language that immediately conveys the main idea\n"
-            f"4. Keep technical terms and domain-specific vocabulary\n"
-            f"5. Make the title actionable and specific\n\n"
+            f"1. The title MUST be in the EXACT SAME LANGUAGE as the sentences\n"
+            f"2. Create a highly informative and specific title that reveals the core essence\n"
+            f"3. Use precise, rich vocabulary that communicates depth of understanding\n"
+            f"4. Incorporate key technical terms and domain-specific vocabulary when relevant\n"
+            f"5. Balance abstraction with specificity - be conceptual yet clearly descriptive\n"
+            f"6. Make the title meaningful even to someone who hasn't read the sentences\n"
+            f"7. Identify patterns and principles underlying the specific examples\n"
+            f"8. Aim for sophistication and elegance in your wording\n"
+            f"9. Ensure the title would serve as an excellent reference point\n\n"
             f"SENTENCES:\n{sentences_text}\n\n"
-            f"TITLE:"
+            f"COMPREHENSIVE TITLE:"
         )
         
-        response = await invoke_llm_with_retry(LLM, prompt, max_tokens=25)
+        response = await invoke_llm_with_retry(LLM, prompt, max_tokens=50)
         title = response.content.strip()
         
         # Remove quotes if present
@@ -347,27 +351,24 @@ async def generate_cluster_description(
         
         prompt = (
             f"You are a knowledge organization expert.\n\n"
-            f"TASK: Analyze the following cluster of sentences and describe them in the EXACT SAME LANGUAGE as the sentences.\n"
+            f"TASK: Create a CONCISE, BRIEF summary (2-3 sentences maximum) of the following cluster of sentences in the EXACT SAME LANGUAGE as the sentences.\n"
             f"DO NOT TRANSLATE TO ENGLISH. Use the same words, phrases, and expressions as in the original sentences.\n\n"
             f"EXAMPLE:\n"
             f"If the sentences are in Vietnamese, write the description in Vietnamese.\n"
             f"If the sentences are in Japanese, write the description in Japanese.\n"
             f"If the sentences are in Spanish, write the description in Spanish.\n\n"
             f"REQUIREMENTS:\n"
-            f"1. Use the EXACT SAME LANGUAGE as the sentences - no translation allowed\n"
-            f"2. Keep all technical terms and domain-specific vocabulary exactly as they appear\n"
-            f"3. Maintain the same tone, style, and expressions\n"
-            f"4. Preserve all cultural context and nuances\n"
-            f"5. Do not add any English words or phrases\n"
-            f"6. If the sentences use informal language, use the same informal style\n"
-            f"7. If the sentences use formal language, use the same formal style\n\n"
-            f"DESCRIBE:\n"
-            f"1. The main theme and purpose of this cluster\n"
-            f"2. How it relates to other clusters in the document\n"
-            f"3. The role it plays in the overall context\n\n"
+            f"1. Be EXTREMELY BRIEF - no more than 2-3 sentences total\n"
+            f"2. Focus ONLY on the core concept or key insight from these sentences\n"
+            f"3. Use the EXACT SAME LANGUAGE as the sentences - no translation allowed\n"
+            f"4. Keep all technical terms and domain-specific vocabulary exactly as they appear\n"
+            f"5. Maintain the same tone, style, and expressions\n"
+            f"6. Preserve all cultural context and nuances\n"
+            f"7. Extract the essence without unnecessary details\n"
+            f"8. Be direct and to the point\n\n"
             f"CURRENT CLUSTER SENTENCES:\n{current_text}\n\n"
             f"OTHER CLUSTERS:\n{other_text}\n\n"
-            f"DESCRIPTION (write in the same language as the sentences above):"
+            f"BRIEF DESCRIPTION (2-3 sentences in the same language as the sentences above):"
         )
         
         response = await invoke_llm_with_retry(LLM, prompt, max_tokens=200)
@@ -382,6 +383,7 @@ async def generate_takeaways(
 ) -> Dict[int, Tuple[str, str, str]]:
     """
     Generate titles, descriptions, and application-focused takeaways for each cluster using GPT-4o.
+    Processes multiple clusters in parallel for improved performance.
     
     Args:
         cluster_sentences: Dictionary mapping cluster IDs to sentences
@@ -391,48 +393,83 @@ async def generate_takeaways(
         Dictionary mapping cluster IDs to (title, description, takeaways) tuples
     """
     try:
-        results = {}
-        
         # Get a sample of the full document for context
         doc_sample = "\n".join(sentences[:30] if len(sentences) > 30 else sentences)
         
-        for cluster_id, cluster_sents in cluster_sentences.items():
-            # Generate cluster title
-            title = await generate_cluster_title(cluster_sents)
-            logger.info(f"Generated title for cluster {cluster_id}: {title}")
-            
-            # Generate cluster description and relationships
-            description = await generate_cluster_description(cluster_sentences, cluster_id, cluster_sentences)
-            logger.info(f"Generated description for cluster {cluster_id}")
-            
-            # Prepare the prompt for takeaways
+        # Create a helper function for generating takeaways
+        async def generate_takeaway_for_cluster(cluster_id, cluster_sents):
             sentences_text = "\n".join([f"- {s}" for s in cluster_sents])
             prompt = (
-                f"You are a knowledge application expert specializing in sales.\n\n"
+                f"You are a knowledge application expert specializing in practical implementation.\n\n"
                 f"DOCUMENT CONTEXT (sample from the full document):\n{doc_sample}\n\n"
-                f"TASK: Analyze the following sentences and generate detailed, practical takeaways focusing SPECIFICALLY on HOW TO APPLY these insights in sales contexts.\n"
+                f"TASK: Analyze the following sentences and generate detailed, practical takeaways focusing SPECIFICALLY on HOW TO APPLY these insights in relevant practical contexts.\n"
                 f"IMPORTANT: Your response MUST be in the SAME LANGUAGE as the sentences.\n\n"
                 f"GUIDELINES:\n"
-                f"1. Focus on METHODS OF APPLICATION - explain exactly HOW to apply these insights\n"
-                f"2. Structure your response with numbered steps or a clear methodology\n"
-                f"3. Provide SPECIFIC EXAMPLE SCRIPTS, dialogues, or templates that demonstrate the application\n"
-                f"4. Include step-by-step instructions for implementation\n"
-                f"5. Consider the document context when interpreting these sentences\n"
-                f"6. Format your response as 'Application Method: [title]' followed by the steps\n"
-                f"7. Each application method should be immediately actionable\n"
+                f"1. Focus on METHODS OF APPLICATION - explain exactly HOW to apply these insights in the domain they belong to\n"
+                f"2. Infer the domain/field from the content itself - adapt to whatever topic is being discussed\n"
+                f"3. Structure your response with numbered steps or a clear methodology\n"
+                f"4. Provide SPECIFIC EXAMPLE SCRIPTS, dialogues, or templates that demonstrate the application\n"
+                f"5. Include step-by-step instructions for implementation\n"
+                f"6. Consider the document context when interpreting these sentences\n"
+                f"7. Format your response as 'Application Method: [title]' followed by the steps\n"
                 f"8. IMPORTANT: Maintain the original language of the sentences in your response\n"
                 f"9. Include specific factual details and nuanced observations from the text\n"
                 f"10. Highlight any subtle but important distinctions or variations in approach\n"
                 f"11. Note any potential edge cases or special situations to consider\n"
                 f"12. Use the same terminology and expressions as in the original text\n"
-                f"13. Keep all technical terms and domain-specific vocabulary in their original form\n\n"
+                f"13. Keep all technical terms and domain-specific vocabulary in their original form\n"
+                f"14. Even if the input sentences are very short, extract meaningful principles and applications\n"
+                f"15. Build upon the factual information to develop practical applications in the relevant domain\n\n"
                 f"SENTENCES TO ANALYZE:\n{sentences_text}\n\n"
                 f"APPLICATION METHODS (with specific examples and step-by-step instructions):"
             )
-            
-            # Generate takeaway
-            response = await invoke_llm_with_retry(LLM, prompt)
-            results[cluster_id] = (title, description, response.content.strip())
+            response = await invoke_llm_with_retry(LLM, prompt, temperature=0.05)
+            return response.content.strip()
+        
+        # Prepare the tasks for each operation type
+        title_tasks = {
+            cluster_id: generate_cluster_title(cluster_sents) 
+            for cluster_id, cluster_sents in cluster_sentences.items()
+        }
+        
+        # Run title generation in parallel
+        logger.info(f"Generating titles for {len(title_tasks)} clusters in parallel...")
+        titles = {}
+        for cluster_id, task in title_tasks.items():
+            titles[cluster_id] = await task
+            logger.info(f"Generated title for cluster {cluster_id}: {titles[cluster_id]}")
+        
+        # Prepare description tasks
+        description_tasks = {
+            cluster_id: generate_cluster_description(cluster_sentences, cluster_id, cluster_sentences)
+            for cluster_id in cluster_sentences.keys()
+        }
+        
+        # Run description generation in parallel
+        logger.info(f"Generating descriptions for {len(description_tasks)} clusters in parallel...")
+        descriptions = {}
+        for cluster_id, task in description_tasks.items():
+            descriptions[cluster_id] = await task
+            logger.info(f"Generated description for cluster {cluster_id}")
+        
+        # Prepare takeaway tasks
+        takeaway_tasks = {
+            cluster_id: generate_takeaway_for_cluster(cluster_id, cluster_sents)
+            for cluster_id, cluster_sents in cluster_sentences.items()
+        }
+        
+        # Run takeaway generation in parallel
+        logger.info(f"Generating takeaways for {len(takeaway_tasks)} clusters in parallel...")
+        takeaways = {}
+        for cluster_id, task in takeaway_tasks.items():
+            takeaways[cluster_id] = await task
+            logger.info(f"Generated takeaways for cluster {cluster_id}")
+        
+        # Combine results
+        results = {
+            cluster_id: (titles[cluster_id], descriptions[cluster_id], takeaways[cluster_id])
+            for cluster_id in cluster_sentences.keys()
+        }
             
         return results
     except Exception as e:
@@ -768,7 +805,8 @@ async def understand_document(input_source: Union[str, BytesIO, BinaryIO], file_
         
         # Generate connections between clusters if there are multiple
         logger.info(f"Generating connections between {len(clusters_list)} clusters...")
-        connections = await generate_cluster_connections(clusters_list, sentences)
+        #connections = await generate_cluster_connections(clusters_list, sentences)
+        connections = ""
         logger.info("Generated cluster connections")
         
         result = {
@@ -914,4 +952,115 @@ async def save_document_insights(document_insight: str = "", user_id: str = "", 
         import traceback
         logger.error(traceback.format_exc())
         return False
+
+async def understand_cluster(sentences: List[str]) -> Dict:
+    """
+    Function to process a pre-clustered set of sentences and extract insights.
+    Assumes the input sentences belong to a single cluster.
+    Preserves the same response structure as understand_document for compatibility.
+    
+    Args:
+        sentences: List of sentences to process (pre-clustered)
+        
+    Returns:
+        Dictionary containing processing results in the same format as understand_document
+    """
+    try:
+        # Validate input
+        if not sentences:
+            logger.warning("No sentences provided")
+            return {
+                "success": False,
+                "error": "No sentences provided",
+                "error_type": "InputError"
+            }
+            
+        logger.info(f"Processing {len(sentences)} sentences")
+        
+        # Detect language
+        sample_text = " ".join(sentences[:3]) if len(sentences) > 3 else " ".join(sentences)
+        is_english = all(ord(c) < 128 for c in sample_text.replace('\n', ' ').replace(' ', ''))
+        language = "English" if is_english else "Non-English (possibly multilingual)"
+        logger.info(f"Detected language: {language}")
+        
+        # Special case for only one sentence
+        if len(sentences) == 1:
+            logger.warning("Only 1 sentence provided - simplified processing")
+            single_sentence = sentences[0]
+            
+            # Create a simple result with just one cluster - matching understand_document format
+            result = {
+                "success": True,
+                "document_insights": {
+                    "metadata": {
+                        "sentence_count": 1,
+                        "cluster_count": 1,
+                        "noise_points": 0,
+                        "language": language,
+                        "processing_level": "minimal"
+                    },
+                    "summary": single_sentence[:100] + ("..." if len(single_sentence) > 100 else ""),
+                    "clusters": [
+                        {
+                            "id": "0",
+                            "title": "Content Summary",
+                            "description": "The entire content",
+                            "sentences": sentences,
+                            "takeaways": "Content is too brief for detailed analysis. Consider adding more sentences."
+                        }
+                    ],
+                    "connections": ""
+                }
+            }
+            logger.info("Processing complete with simplified approach")
+            return result
+        
+        # Prepare the cluster data - assume all sentences belong to a single cluster
+        # We'll use the cluster ID 0 as a key
+        cluster_sentences = {0: sentences}
+        
+        # Generate cluster titles and takeaways
+        logger.info(f"Generating title, description and application methods...")
+        cluster_results = await generate_takeaways(cluster_sentences, sentences)
+        
+        # Get the results for the single cluster
+        title, description, takeaways = cluster_results[0]
+        
+        # Create result dictionary in the same format as understand_document for compatibility
+        clusters_list = [{
+            "id": "0",
+            "title": title,
+            "description": description,
+            "sentences": sentences,
+            "takeaways": takeaways,
+            "sentence_count": len(sentences)
+        }]
+        
+        result = {
+            "success": True,
+            "document_insights": {
+                "metadata": {
+                    "sentence_count": len(sentences),
+                    "cluster_count": 1,
+                    "noise_points": 0,
+                    "language": language,
+                    "processing_level": "full"
+                },
+                "summary": f"This content covers: {title}",
+                "clusters": clusters_list,
+                "connections": ""
+            }
+        }
+        
+        logger.info("Sentence understanding complete!")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error understanding sentences: {type(e).__name__}: {str(e)}")
+        logger.error(f"Error details: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
 

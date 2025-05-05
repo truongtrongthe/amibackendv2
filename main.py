@@ -11,6 +11,7 @@ nest_asyncio.apply()  # Apply patch to allow nested event loops
 
 # SentenceTransformer has to be imported before FAISS
 from training_prep import process_document,refine_document
+from training_prep_new import understand_document,save_document_insights, understand_cluster
 #FAISS importing here
 from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version, get_brain, flick_out, activate_brain_with_version
 
@@ -59,7 +60,7 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from threading import Lock
 from utilities import logger
 from enrich_profile import ProfileEnricher
-from training_prep_new import understand_document,save_document_insights
+
 
 # Import SocketIO functionality from socketio_manager.py
 from socketio_manager import init_socketio
@@ -3269,6 +3270,77 @@ def batch_analyze_contacts_endpoint():
         
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/understand-cluster', methods=['POST', 'OPTIONS'])
+def understand_cluster_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    # Check for data in JSON format
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Request must be in JSON format"}), 400
+
+    # Validate required fields
+    if 'sentences' not in request.json:
+        return jsonify({"success": False, "error": "Missing 'sentences' field in request body"}), 400
+        
+    sentences = request.json['sentences']
+    
+    # Validate sentences is a list
+    if not isinstance(sentences, list):
+        return jsonify({"success": False, "error": "The 'sentences' field must be a list of strings"}), 400
+        
+    # Validate sentences are not empty
+    if not sentences:
+        return jsonify({"success": False, "error": "The 'sentences' list cannot be empty"}), 400
+        
+    # Validate all sentences are strings
+    if not all(isinstance(s, str) for s in sentences):
+        return jsonify({"success": False, "error": "All items in 'sentences' must be strings"}), 400
+
+    # Log information
+    logger.info(f"Processing {len(sentences)} sentences in understand-cluster endpoint")
+    
+    # Use the thread-based approach to call the async function
+    try:
+        # Run the async understand_cluster function in a separate thread
+        result = run_async_in_thread(understand_cluster, sentences)
+        
+        # Validate result structure
+        if not isinstance(result, dict):
+            logger.error(f"Invalid result type from understand_cluster: {type(result)}")
+            return jsonify({
+                "success": False,
+                "error": "Cluster processing returned invalid data structure",
+                "error_type": "ProcessingError"
+            }), 500
+        
+        # Check for success
+        if result.get("success", False):
+            # Log success statistics
+            insights = result["document_insights"]
+            logger.info(f"Cluster processed successfully: {insights.get('metadata', {}).get('sentence_count', 0)} sentences")
+            
+            # Return the document insights with proper structure
+            return jsonify(result), 200
+        else:
+            error_msg = result.get("error", "Failed to process sentences")
+            error_type = result.get("error_type", "UnknownError")
+            logger.error(f"Cluster processing failed: {error_type}: {error_msg}")
+            return jsonify({
+                "success": False,
+                "error": error_msg,
+                "error_type": error_type
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in understand_cluster: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": f"Error processing sentences: {str(e)}",
+            "error_type": type(e).__name__
+        }), 500
 
 # Run the server when executed directly
 if __name__ == '__main__':
