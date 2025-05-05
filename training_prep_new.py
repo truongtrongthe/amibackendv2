@@ -346,7 +346,7 @@ async def generate_cluster_description(
         
         # Prepare the prompt
         current_text = "\n".join([f"- {s}" for s in current_sentences])
-        other_text = "\n".join([f"Cluster {cid}:\n" + "\n".join([f"- {s}" for s in sents])
+        other_text = "\n".join([f"Cluster {cid}:\n" + "\n".join([f"- {s}" for s in sents[:2]])  # Only use first 2 sentences from other clusters
                               for cid, sents in other_clusters.items()])
         
         prompt = (
@@ -371,7 +371,7 @@ async def generate_cluster_description(
             f"BRIEF DESCRIPTION (2-3 sentences in the same language as the sentences above):"
         )
         
-        response = await invoke_llm_with_retry(LLM, prompt, max_tokens=200)
+        response = await invoke_llm_with_retry(LLM, prompt, max_tokens=150)
         return response.content.strip()
     except Exception as e:
         logger.error(f"Error generating cluster description: {str(e)}")
@@ -383,7 +383,7 @@ async def generate_takeaways(
 ) -> Dict[int, Tuple[str, str, str]]:
     """
     Generate titles, descriptions, and application-focused takeaways for each cluster using GPT-4o.
-    Processes multiple clusters in parallel for improved performance.
+    Uses true parallel processing with proper rate limiting for optimal performance.
     
     Args:
         cluster_sentences: Dictionary mapping cluster IDs to sentences
@@ -393,15 +393,74 @@ async def generate_takeaways(
         Dictionary mapping cluster IDs to (title, description, takeaways) tuples
     """
     try:
+        import asyncio
+        from functools import partial
+        
         # Get a sample of the full document for context
         doc_sample = "\n".join(sentences[:30] if len(sentences) > 30 else sentences)
         
-        # Create a helper function for generating takeaways
-        async def generate_takeaway_for_cluster(cluster_id, cluster_sents):
+        # Create helper functions for each type of generation
+        async def generate_title_for_cluster(cluster_sents):
+            sentences_text = "\n".join([f"- {s}" for s in cluster_sents])
+            prompt = (
+                f"You are a knowledge organization expert with excellent abstraction skills.\n\n"
+                f"TASK: Based on the following sentences, generate a COMPREHENSIVE yet CONCISE TITLE (5-8 words) that perfectly captures the underlying concept, theme, or principle.\n"
+                f"If the sentences are not clear enough, abstract and elevate them to a higher-level concept.\n\n"
+                f"GUIDELINES:\n"
+                f"1. The title MUST be in the EXACT SAME LANGUAGE as the sentences\n"
+                f"2. Create a highly informative and specific title that reveals the core essence\n"
+                f"3. Use precise, rich vocabulary that communicates depth of understanding\n"
+                f"4. Incorporate key technical terms and domain-specific vocabulary when relevant\n"
+                f"5. Balance abstraction with specificity - be conceptual yet clearly descriptive\n"
+                f"6. Make the title meaningful even to someone who hasn't read the sentences\n"
+                f"7. Identify patterns and principles underlying the specific examples\n"
+                f"8. Aim for sophistication and elegance in your wording\n"
+                f"9. Ensure the title would serve as an excellent reference point\n\n"
+                f"SENTENCES:\n{sentences_text}\n\n"
+                f"COMPREHENSIVE TITLE:"
+            )
+            response = await invoke_llm_with_retry(LLM, prompt, max_tokens=50)
+            title = response.content.strip()
+            # Remove quotes if present
+            if title.startswith('"') and title.endswith('"'):
+                title = title[1:-1]
+            return title
+        
+        async def generate_description_for_cluster(cluster_id, all_clusters):
+            # Get sentences from current cluster
+            current_sentences = all_clusters[cluster_id]
+            # Get sentences from other clusters
+            other_clusters = {cid: sents for cid, sents in all_clusters.items() 
+                            if cid != cluster_id and cid != -1}
+            
+            # Prepare the prompt
+            current_text = "\n".join([f"- {s}" for s in current_sentences])
+            other_text = "\n".join([f"Cluster {cid}:\n" + "\n".join([f"- {s}" for s in sents[:2]])  # Only use first 2 sentences from other clusters
+                                for cid, sents in other_clusters.items()])
+            
+            prompt = (
+                f"You are a knowledge organization expert.\n\n"
+                f"TASK: Create a CONCISE, BRIEF summary (2-3 sentences maximum) of the following cluster of sentences in the EXACT SAME LANGUAGE as the sentences.\n"
+                f"DO NOT TRANSLATE TO ENGLISH. Use the same words, phrases, and expressions as in the original sentences.\n\n"
+                f"REQUIREMENTS:\n"
+                f"1. Be EXTREMELY BRIEF - no more than 2-3 sentences total\n"
+                f"2. Focus ONLY on the core concept or key insight from these sentences\n"
+                f"3. Use the EXACT SAME LANGUAGE as the sentences - no translation allowed\n"
+                f"4. Keep all technical terms and domain-specific vocabulary exactly as they appear\n"
+                f"5. Maintain the same tone, style, and expressions\n"
+                f"6. Extract the essence without unnecessary details\n"
+                f"7. Be direct and to the point\n\n"
+                f"CURRENT CLUSTER SENTENCES:\n{current_text}\n\n"
+                f"BRIEF DESCRIPTION (2-3 sentences in the same language as the sentences above):"
+            )
+            response = await invoke_llm_with_retry(LLM, prompt, max_tokens=150)
+            return response.content.strip()
+            
+        async def generate_takeaway_for_cluster(cluster_sents):
             sentences_text = "\n".join([f"- {s}" for s in cluster_sents])
             prompt = (
                 f"You are a knowledge application expert specializing in practical implementation.\n\n"
-                f"DOCUMENT CONTEXT (sample from the full document):\n{doc_sample}\n\n"
+                f"DOCUMENT CONTEXT (sample from the full document):\n{doc_sample[:500]}...\n\n"  # Limit context to 500 chars
                 f"TASK: Analyze the following sentences and generate detailed, practical takeaways focusing SPECIFICALLY on HOW TO APPLY these insights in relevant practical contexts.\n"
                 f"IMPORTANT: Your response MUST be in the SAME LANGUAGE as the sentences.\n\n"
                 f"GUIDELINES:\n"
@@ -410,70 +469,52 @@ async def generate_takeaways(
                 f"3. Structure your response with numbered steps or a clear methodology\n"
                 f"4. Provide SPECIFIC EXAMPLE SCRIPTS, dialogues, or templates that demonstrate the application\n"
                 f"5. Include step-by-step instructions for implementation\n"
-                f"6. Consider the document context when interpreting these sentences\n"
-                f"7. Format your response as 'Application Method: [title]' followed by the steps\n"
-                f"8. IMPORTANT: Maintain the original language of the sentences in your response\n"
-                f"9. Include specific factual details and nuanced observations from the text\n"
-                f"10. Highlight any subtle but important distinctions or variations in approach\n"
-                f"11. Note any potential edge cases or special situations to consider\n"
-                f"12. Use the same terminology and expressions as in the original text\n"
-                f"13. Keep all technical terms and domain-specific vocabulary in their original form\n"
-                f"14. Even if the input sentences are very short, extract meaningful principles and applications\n"
-                f"15. Build upon the factual information to develop practical applications in the relevant domain\n\n"
+                f"6. Format your response as 'Application Method: [title]' followed by the steps\n"
+                f"7. IMPORTANT: Maintain the original language of the sentences in your response\n"
+                f"8. Include specific factual details and nuanced observations from the text\n"
+                f"9. Even if the input sentences are very short, extract meaningful principles and applications\n\n"
                 f"SENTENCES TO ANALYZE:\n{sentences_text}\n\n"
                 f"APPLICATION METHODS (with specific examples and step-by-step instructions):"
             )
             response = await invoke_llm_with_retry(LLM, prompt, temperature=0.05)
             return response.content.strip()
         
-        # Prepare the tasks for each operation type
-        title_tasks = {
-            cluster_id: generate_cluster_title(cluster_sents) 
-            for cluster_id, cluster_sents in cluster_sentences.items()
-        }
-        
-        # Run title generation in parallel
-        logger.info(f"Generating titles for {len(title_tasks)} clusters in parallel...")
-        titles = {}
-        for cluster_id, task in title_tasks.items():
-            titles[cluster_id] = await task
-            logger.info(f"Generated title for cluster {cluster_id}: {titles[cluster_id]}")
-        
-        # Prepare description tasks
-        description_tasks = {
-            cluster_id: generate_cluster_description(cluster_sentences, cluster_id, cluster_sentences)
-            for cluster_id in cluster_sentences.keys()
-        }
-        
-        # Run description generation in parallel
-        logger.info(f"Generating descriptions for {len(description_tasks)} clusters in parallel...")
-        descriptions = {}
-        for cluster_id, task in description_tasks.items():
-            descriptions[cluster_id] = await task
-            logger.info(f"Generated description for cluster {cluster_id}")
-        
-        # Prepare takeaway tasks
-        takeaway_tasks = {
-            cluster_id: generate_takeaway_for_cluster(cluster_id, cluster_sents)
-            for cluster_id, cluster_sents in cluster_sentences.items()
-        }
-        
-        # Run takeaway generation in parallel
-        logger.info(f"Generating takeaways for {len(takeaway_tasks)} clusters in parallel...")
-        takeaways = {}
-        for cluster_id, task in takeaway_tasks.items():
-            takeaways[cluster_id] = await task
-            logger.info(f"Generated takeaways for cluster {cluster_id}")
-        
-        # Combine results
-        results = {
-            cluster_id: (titles[cluster_id], descriptions[cluster_id], takeaways[cluster_id])
-            for cluster_id in cluster_sentences.keys()
-        }
+        # This processes all operations for a single cluster concurrently
+        async def process_cluster(cluster_id, cluster_sents):
+            # Run all three operations concurrently for this cluster
+            title, description, takeaway = await asyncio.gather(
+                generate_title_for_cluster(cluster_sents),
+                generate_description_for_cluster(cluster_id, cluster_sentences),
+                generate_takeaway_for_cluster(cluster_sents)
+            )
             
-        return results
+            logger.info(f"Completed processing for cluster {cluster_id}")
+            return cluster_id, (title, description, takeaway)
+            
+        # Create tasks for all clusters - we'll use a semaphore to limit concurrency
+        sem = asyncio.Semaphore(5)  # Process up to 5 clusters concurrently to avoid rate limits
+        
+        async def process_with_rate_limit(cluster_id, cluster_sents):
+            async with sem:
+                return await process_cluster(cluster_id, cluster_sents)
+        
+        # Create task for each cluster
+        logger.info(f"Beginning parallel processing for {len(cluster_sentences)} clusters...")
+        tasks = [
+            process_with_rate_limit(cluster_id, cluster_sents)
+            for cluster_id, cluster_sents in cluster_sentences.items()
+        ]
+        
+        # Run all tasks concurrently and get results
+        results_list = await asyncio.gather(*tasks)
+        
+        # Convert list of results to dictionary
+        return {cluster_id: result for cluster_id, result in results_list}
+            
     except Exception as e:
         logger.error(f"Error generating takeaways: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
 
 def save_results(
