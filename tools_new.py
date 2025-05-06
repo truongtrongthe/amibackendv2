@@ -26,6 +26,7 @@ from profile_helper import (
     format_user_profile_for_prompt
 )
 from response_optimization import ResponseProcessor, ResponseFilter
+from profile_cache import get_profile_knowledge
 
 # Use the same LLM instances as mc.py
 LLM = ChatOpenAI(model="gpt-4o", streaming=False)
@@ -410,6 +411,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
     conversation_context = params.get("conversation_context", "")
     graph_version_id = params.get("graph_version_id", "")
     thread_id = params.get("_thread_id")
+    state = params.get("state", {})
     
     # Extract user message for knowledge retrieval
     recent_messages = []
@@ -443,14 +445,46 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         "status": "analyzing"
     }
     
-    # OPTIMIZATION: Simplified user profile generation
-    try:
-        user_profile = await build_user_profile(context_window, last_user_message, graph_version_id)
+    # OPTIMIZATION: Check if we have existing profiling knowledge we can reuse
+    existing_profile_knowledge = False
+    cached_user_profile = None
+    user_analysis_knowledge = []
+    
+    # First check if we have profiling knowledge entries in the state
+    if state and "profiling_knowledge_entries" in state and state["profiling_knowledge_entries"]:
+        user_analysis_knowledge = state["profiling_knowledge_entries"]
+        logger.info(f"Reusing {len(user_analysis_knowledge)} profile knowledge entries from state")
+        existing_profile_knowledge = True
+    
+    # Check if we already have a user profile in the state
+    if state and "analysis" in state and isinstance(state["analysis"], dict) and "user_profile" in state["analysis"]:
+        cached_user_profile = state["analysis"]["user_profile"]
+        logger.info("Reusing cached user profile from state")
+    
+    # OPTIMIZATION: If we don't have a cached profile, build it, but also keep the knowledge it found
+    if not cached_user_profile:
+        try:
+            user_profile = await build_user_profile(context_window, last_user_message, graph_version_id)
+            _last_cot_results["user_profile"] = user_profile
+            logger.info(f"User profile built successfully: {user_profile}")
+            
+            # If we don't have profile knowledge yet, and state exists, save it for future use
+            if not existing_profile_knowledge and user_analysis_knowledge and state is not None:
+                # Look for knowledge entries that might have been created during profile building
+                profile_knowledge = get_last_profiling_knowledge_entries()
+                if profile_knowledge:
+                    user_analysis_knowledge = profile_knowledge
+                    state["profiling_knowledge_entries"] = profile_knowledge
+                    logger.info(f"Saved {len(profile_knowledge)} profile knowledge entries to state for reuse")
+                    existing_profile_knowledge = True
+        except Exception as e:
+            logger.error(f"Error in fast user profile creation: {e}")
+            user_profile = {"portrait": f"User query: {last_user_message}"}
+    else:
+        # Use the cached profile
+        user_profile = cached_user_profile
         _last_cot_results["user_profile"] = user_profile
-        logger.info(f"User profile built successfully: {user_profile}")
-    except Exception as e:
-        logger.error(f"Error in fast user profile creation: {e}")
-        user_profile = {"portrait": f"User query: {last_user_message}"}
+        logger.info("Using cached user profile instead of rebuilding")
     
     # STEP 2: Generate profile-enhanced queries and fetch knowledge
     yield {
@@ -461,52 +495,67 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         "status": "searching"
     }
     
-    user_analysis_knowledge = []
-    try:
-        # Generate profile-enhanced queries
-        enhanced_queries = build_analyse_profile_query(user_profile)
-        logger.info(f"Generated {len(enhanced_queries)} profile queries: {enhanced_queries}")
-        
-        # Load the brain for knowledge retrieval
-        brain_loaded = await ensure_brain_loaded(graph_version_id)
-        
-        if brain_loaded:
-            global brain
-            brain = get_brain()
+    # Check if we have cached profile knowledge we can reuse
+    user_analysis_knowledge = get_profile_knowledge()
+    cached_knowledge_available = bool(user_analysis_knowledge)
+    
+    if cached_knowledge_available:
+        logger.info(f"Using {len(user_analysis_knowledge)} cached profile knowledge entries")
+        # Send the cached knowledge results to the client
+        yield {
+            "type": "knowledge",
+            "content": user_analysis_knowledge,
+            "complete": False,
+            "thread_id": thread_id,
+            "status": "searching"
+        }
+    # Only fetch knowledge if cache is empty
+    else:
+        try:
+            # Generate profile-enhanced queries
+            enhanced_queries = build_analyse_profile_query(user_profile)
+            logger.info(f"Generated {len(enhanced_queries)} profile queries: {enhanced_queries}")
             
-            # Fetch knowledge using enhanced queries (limit to first 3 queries)
-            for query in enhanced_queries[:3]:
-                results = await brain.get_similar_vectors_by_text(query, top_k=2)
+            # Load the brain for knowledge retrieval
+            brain_loaded = await ensure_brain_loaded(graph_version_id)
+            
+            if brain_loaded:
+                global brain
+                brain = get_brain()
                 
-                # Process knowledge results
-                for vector_id, vector, metadata, similarity in results:
-                    # Skip duplicates
-                    if any(entry.get("id") == vector_id for entry in user_analysis_knowledge):
-                        continue
+                # Fetch knowledge using enhanced queries (limit to first 3 queries)
+                for query in enhanced_queries[:3]:
+                    results = await brain.get_similar_vectors_by_text(query, top_k=2)
                     
-                    raw_text = metadata.get("raw", "")
-                    
-                    entry = {
-                        "id": vector_id,
-                        "similarity": float(similarity),
-                        "raw": raw_text,
-                        "query": query,
-                        "phase": "user_analysis"
+                    # Process knowledge results
+                    for vector_id, vector, metadata, similarity in results:
+                        # Skip duplicates
+                        if any(entry.get("id") == vector_id for entry in user_analysis_knowledge):
+                            continue
+                        
+                        raw_text = metadata.get("raw", "")
+                        
+                        entry = {
+                            "id": vector_id,
+                            "similarity": float(similarity),
+                            "raw": raw_text,
+                            "query": query,
+                            "phase": "user_analysis"
+                        }
+                        user_analysis_knowledge.append(entry)
+                
+                # Send knowledge results event
+                if user_analysis_knowledge:
+                    yield {
+                        "type": "knowledge",
+                        "content": user_analysis_knowledge,
+                        "complete": False,
+                        "thread_id": thread_id,
+                        "status": "searching"
                     }
-                    user_analysis_knowledge.append(entry)
-            
-            # Send knowledge results event
-            if user_analysis_knowledge:
-                yield {
-                    "type": "knowledge",
-                    "content": user_analysis_knowledge,
-                    "complete": False,
-                    "thread_id": thread_id,
-                    "status": "searching"
-                }
-                #logger.info(f"ENHANCED PORTRAIT KNOWLEDGE:{user_analysis_knowledge} ")
-    except Exception as e:
-        logger.error(f"Error in knowledge retrieval: {e}")
+                    #logger.info(f"ENHANCED PORTRAIT KNOWLEDGE:{user_analysis_knowledge} ")
+        except Exception as e:
+            logger.error(f"Error in knowledge retrieval: {e}")
     
     # STEP 3: Generate user analysis with actionable insights and extract techniques
     analysis_content = ""

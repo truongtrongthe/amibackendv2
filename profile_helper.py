@@ -19,6 +19,7 @@ from tool_helpers import (
 )
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from profile_cache import store_profile_knowledge
 
 # Configuration constants
 CLASSIFICATION_TERMS = [
@@ -203,6 +204,10 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
             # This ensures consistency between user profiling and later analysis
             state["profiling_knowledge_entries"] = selected_entries
             logger.info("Saved profiling knowledge entries to state for consistent CoT analysis")
+            
+            # Also store in profile_cache for retrieval by other components
+            store_profile_knowledge(selected_entries)
+            logger.info("Stored profiling knowledge entries in global cache")
             
             # Use prepare_knowledge to create a cohesive knowledge context with exact terminology preservation
             knowledge_context = prepare_knowledge(
