@@ -143,7 +143,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
     try:
         # Step 1: Calculate relevance and organize entries
         ranked_entries = []
-        
+        #explore the knowledge entries aka vectors  
         for entry in knowledge_entries:
             raw_text = entry.get("raw", "")
             entry_id = entry.get("id", "unknown")
@@ -170,7 +170,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
                 relevance += 0.1 * (term_matches / len(query_terms))
             
             # Boost entries with application methods
-            if "Application Method:" in raw_text or "Steps:" in raw_text:
+            if "Application Method" in raw_text or "Steps:" in raw_text:
                 relevance += 0.25
                 logger.info(f"Boosting entry {entry_id} for containing application methods")
             
@@ -187,7 +187,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         
         # Step 2: Prepare raw knowledge entries for LLM synthesis
         # Take top most relevant entries (limit to preserve token count)
-        top_entries = sorted_entries[:3]
+        top_entries = sorted_entries[:5]
         logger.info(f"Selected top {len(top_entries)} entries for knowledge context")
         
         # Format raw entries with minimal processing
@@ -209,10 +209,15 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
             if takeaways_match:
                 takeaways_text = takeaways_match.group(1).strip()
                 
-                # Simple capture of all text in Takeaways section without complex patterns
-                # Just check if the entire section contains "Application Method:" or similar keywords
-                if "Application Method:" in takeaways_text:
-                    # Instead of complex regex, just add the entire section
+                # Capture all distinct application methods by splitting on 'Application method:' or similar patterns
+                method_blocks = re.split(r'(?i)Application method:', takeaways_text)
+                for block in method_blocks[1:]:  # Skip the first block as it is before the first method
+                    method_text = block.strip()
+                    if method_text:
+                        application_methods.append(method_text)
+                
+                # If no split by 'Application method:', check for a single method or fallback
+                if len(method_blocks) <= 1 and "application method" in takeaways_text.lower():
                     application_methods.append(takeaways_text)
             
             logger.info(f"Application methods found: {application_methods}")
@@ -224,9 +229,9 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
             
             if application_methods:
                 formatted_content += "HOW TO APPLY:\n"
-                for method in application_methods:
+                for idx, method in enumerate(application_methods):
                     # Simply include the entire method text with minimal processing
-                    formatted_content += f"{method}\n\n"
+                    formatted_content += f"Method {idx+1}:\n{method}\n\n"
             else:
                 # Fallback to using some raw text if no application methods found
                 content_preview = raw_text.split("Takeaways:", 1)[0].strip()
@@ -285,6 +290,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         
         3. APPLICATION METHODS: Organize and present ALL methods without consolidation
           - Group by classification (e.g., "## Methods for Nhóm Chán Nản")
+          - If a method applies to multiple classifications or is general, include it under a "## General Application Methods" section
           - PRESERVE EACH DISTINCT APPLICATION METHOD NAME EXACTLY AS FOUND IN SOURCE
           - List all methods separately with their original headings
           - For each method, include the complete title exactly as written (e.g., "Đặt câu hỏi với mỗi nhóm khách hàng")
@@ -299,8 +305,9 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
           - For the user classification, provide step-by-step implementation guide
           - Reference each distinct application method by its exact name
           - Include concrete language and phrases to use (verbatim from knowledge)
-          - Ensure ALL critical steps are preserved
-          
+          - Ensure ALL critical steps are preserved, including steps for collecting demographic information like age
+          - Include steps from general methods if they are relevant to building a complete customer portrait
+        
         FORMAT (use this exact structure with minimal spacing):
         ## Knowledge Found
         [Brief narrative connecting knowledge titles - 80-100 words]
@@ -326,9 +333,19 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         ... [Include ALL additional steps exactly as numbered in original]
         N. [Last step with EXACT wording]
         
+        ## General Application Methods (if applicable)
+        ### [EXACT Method Name for General Use - PRESERVE COMPLETE ORIGINAL TITLE]
+        **What**: [Objective of this method]
+        **How**:
+        1. [Step 1 with EXACT wording]
+        2. [Step 2 with EXACT wording]
+        ... [Include ALL additional steps exactly as numbered in original]
+        N. [Last step with EXACT wording]
+        
         ## Implementation Guide
         1. [First implementation step referencing specific method by exact name]
         2. [Second implementation step with concrete examples]
+        ... [Include additional steps as necessary to cover all relevant methods, including general ones for demographic data collection]
         
         IMPORTANT: 
         - NEVER translate classification terms
@@ -340,6 +357,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         - MAINTAIN exact wording, especially for classification names and method titles
         - DO NOT merge or simplify application methods under any circumstances
         - ENSURE all distinct methods like "Đặt câu hỏi với mỗi nhóm khách hàng", "Đánh vào tâm lý với mỗi nhóm khách hàng", etc. are listed separately
+        - INCLUDE methods for collecting demographic information (e.g., age) even if they are not specific to a classification
         """
         
         logger.info("Using LLM to synthesize knowledge into comprehensive instructions")

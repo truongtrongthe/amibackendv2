@@ -258,7 +258,7 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         prompt = f"""
         Create a rich, descriptive psychological portrait of the user based on their conversation and our knowledge base.
         
-        {f'KNOWLEDGE FOR YOUR ANALYSIS (CONTAINS CUSTOMER CLASSIFICATION FRAMEWORKS):\\n{knowledge_context}' if knowledge_context else 'Use your psychological expertise to analyze this conversation.'}
+        {f'KNOWLEDGE FOR YOUR ANALYSIS (CONTAINS CUSTOMER CLASSIFICATION FRAMEWORKS):\n{knowledge_context}' if knowledge_context else 'Use your psychological expertise to analyze this conversation.'}
         
         CONVERSATION:
         {conversation_context}
@@ -282,7 +282,8 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         - Their EXACT CLASSIFICATION from our framework in BOLD with ** markers (e.g., **Nhóm Chán Nản**, **Nhóm Tự Tin**)
         - Process state if appropriate (e.g., **Đang Tìm Hiểu** vs **Đã Quyết Định**)
         - 2-3 key needs or pain points specific to their classification
-        - Recommended approach strategy based on our framework's guidance for this classification
+        - Recommended approach strategy based on our framework's guidance for this classification, explicitly referencing specific application methods (e.g., 'Giao tiếp với nhóm khách Hàng thoải mái, cởi mở') and implementation steps from the knowledge context
+        - Identification of missing information in the user portrait that could enhance understanding (e.g., demographic details like age, specific triggers for their condition), explicitly stating what next steps should focus on gathering
         
         IMPORTANT:
         - Apply the classification framework EXACTLY as described in the knowledge
@@ -290,6 +291,8 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         - Only use the "unclear" classification type when clearly appropriate based on knowledge criteria
         - ALWAYS mark the chosen classification with ** for visibility (e.g., **[Classification]**)
         - Return ONLY a single descriptive paragraph (200-250 words)
+        - When crafting the recommended approach, directly reference and incorporate details from the 'What' and 'How' sections of application methods and the step-by-step implementation guide provided in the knowledge context
+        - Proactively suggest areas of missing information to guide next steps in building a more complete user profile
         """
         
         # Use the LangChain ChatOpenAI interface
