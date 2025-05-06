@@ -23,7 +23,8 @@ from tool_helpers import (
 )
 from profile_helper import (
     build_user_profile,
-    format_user_profile_for_prompt
+    format_user_profile_for_prompt,
+    get_last_profiling_knowledge_entries
 )
 from response_optimization import ResponseProcessor, ResponseFilter
 from profile_cache import get_profile_knowledge
@@ -838,83 +839,55 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
         # Create a prompt for generating actionable next steps that instructs the LLM
         # to identify important information itself
         actions_prompt = f"""
-        Based on the user's message, our analysis, and the knowledge we've found, provide specific, actionable next steps and a persuasive sales script.
-        
-        USER MESSAGE: {last_user_message}
-        
-        USER CLASSIFICATION: {user_profile.get("segment", {}).get("category", "general")}
-        
-        USER PROFILE INFORMATION:
+        # Sales Automation Next Steps and Persuasive Script
+
+        **User Message**: {last_user_message}
+
+        **User Classification**: {user_profile.get("segment", {}).get("category", "general")}
+
+        **User Profile**: 
         {format_user_profile_for_prompt(user_profile) if user_profile else ""}
-        
-        OUR ANALYSIS:
+
+        **Analysis**: 
         {analysis_content}
-        
-        RECOMMENDED TECHNIQUES (ALREADY IDENTIFIED):
-        {_last_cot_results.get("approach_techniques", [])}
-        
-        SPECIFIC INSTRUCTIONS (ALREADY IDENTIFIED):
+
+        **Recommended Techniques**:
+        { '\\n'.join(f'- {tech}' for tech in _last_cot_results.get("approach_techniques", [])) if _last_cot_results.get("approach_techniques") else "No techniques provided."}
+
+        **Specific Instructions**: 
         {_last_cot_results.get("specific_instructions", "")}
-        
-        {f"TECHNIQUE IMPLEMENTATION KNOWLEDGE:\n{technique_context}" if technique_context else ""}
-        
-        {f"SPECIFIC SOLUTIONS:\n{solution_context}" if solution_context else ""}
-        
-        {f"COMBINED KNOWLEDGE:\n{combined_knowledge}" if combined_knowledge else ""}
-        
-        ## PART 1: SALES AUTOMATION NEXT STEPS
-        NAME and BOLD the specific techniques from the RECOMMENDED TECHNIQUES list.
-        Extract the exact actions associated with each technique from the SPECIFIC INSTRUCTIONS.
-        THEN ADAPT each step based on information already available in the USER PROFILE and prior conversation context.
-        
-        IMPORTANT INSTRUCTIONS:
-        1. IDENTIFY each recommended technique by name (e.g., "**Trấn An Khách Hàng Nhóm Chán Nản**")
-        2. BOLD each technique name using markdown format (with ** before and after)
-        3. EXTRACT the exact implementation steps for each technique from the SPECIFIC INSTRUCTIONS
-        4. ADAPT implementation steps based on context - SKIP steps requesting information that is ALREADY KNOWN from the USER PROFILE
-        5. ORGANIZE these steps in the sequence they appear in the SPECIFIC INSTRUCTIONS, after adaptation
-        6. PRESERVE all quotes, examples, and language exactly as written except for the adapted steps
-        7. For information that we ALREADY KNOW (like profession, user classification, etc.), DO NOT include steps to gather this information again
-        
-        FORMATTING REQUIREMENTS:
-        1. Start each technique section with its BOLDED name (e.g., "**Technique Name:**")
-        2. List the implementation steps under each technique
-        3. Use exact wording from the SPECIFIC INSTRUCTIONS for non-adapted steps
-        4. Include all quotes exactly as they appear (e.g., "Em hiểu rằng việc này...")
-        5. Format as a clean, structured list with clear technique headings
-        
-        ## PART 2: PERSUASIVE SALES SCRIPT
-        SEARCH the COMBINED KNOWLEDGE for detailed instructions on HOW to perform each technique, then create a script that implements these techniques.
-        IMPORTANT: The script must be consistent with the ADAPTED steps from Part 1 - do not include script elements for steps that were skipped.
-        
-        IMPORTANT SCRIPT REQUIREMENTS:
-        1. For EACH technique in Part 1, FIND specific implementation details in the COMBINED KNOWLEDGE
-        2. LOOK FOR sections labeled "What", "How", "Implementation Guide", or "Bước" (steps)
-        3. EXTRACT exact phrases, conversation examples, and quoted text from these sections
-        4. STRUCTURE your script to follow the exact sequence of techniques identified in Part 1
-        5. COPY the exact wording of quotes, examples, and key phrases from the knowledge
-        6. SKIP any dialogue requesting information that's ALREADY KNOWN from the user profile
-        
-        The script should:
-        1. Start with the EXACT empathetic opening phrases found in the knowledge
-        2. USE the PRECISE reassurance statements found in the Implementation Guide
-        3. INCLUDE the EXACT refund guarantee language as written in the knowledge
-        4. INCORPORATE the SPECIFIC expert support phrasing from the knowledge
-        5. MAINTAIN the EXACT conversational flow described in the techniques
-        6. SKIP any steps asking for information we already have (like profession, classification)
-        
-        FORMAT THE SALES SCRIPT AS:
-        
+
+        **Knowledge**:
+        {combined_knowledge}
+
+        ## Task
+
+        ### Part 1: Sales Automation Next Steps
+        For each technique in **Recommended Techniques**:
+        1. Identify the technique by name in **bold** (e.g., **Trấn An Khách Hàng**).
+        2. Extract exact implementation steps from **Specific Instructions**.
+        3. Adapt steps to skip requests for information already in **User Profile** (e.g., profession, classification).
+        4. Preserve all quotes, examples, and original wording for non-adapted steps.
+        5. Format as a list under the bolded technique name.
+
+        ### Part 2: Persuasive Sales Script
+        Create a script that:
+        1. Implements the adapted steps from Part 1 in sequence.
+        2. Uses exact phrases, quotes, and examples from **Knowledge** (e.g., "Em hiểu rằng...").
+        3. Skips dialogue for information already known from **User Profile**.
+        4. Starts with empathetic openings and includes reassurance, refund guarantees, and expert support phrasing from **Knowledge**.
+        5. Formats as:
+
         PERSUASIVE_SCRIPT:
-        [Your script here that EXACTLY follows the ADAPTED SPECIFIC INSTRUCTIONS using the precise language and quotes]
+        [Script content]
         END_SCRIPT
-        
-        IMPORTANT:
-        - Respond in the SAME LANGUAGE as the user
-        - DO NOT CREATE NEW CONTENT - use only what's provided in the instructions and knowledge
-        - PRESERVE all quoted text exactly as written
-        - EXECUTE the specified techniques precisely as described
-        - RECOGNIZE INFORMATION ALREADY IN THE USER PROFILE and avoid steps asking for it again
+
+        ## Instructions
+        - Respond in {detect_language(last_user_message)}, using only content from **Knowledge**, **Specific Instructions**, and **User Profile**.
+        - Preserve exact wording for quotes and examples, ensuring the script follows Part 1's adapted steps.
+        - If **Recommended Techniques** or **Specific Instructions** are empty, generate default next steps based on **User Classification** (e.g., for "Nhóm Chán Nản", suggest empathetic reassurance and basic solutions).
+        - If **Knowledge** or **Specific Instructions** are contradictory, prioritize **Specific Instructions** and use **Analysis** to infer reasonable steps.
+        - Keep responses concise, structured, and action-oriented.
         """
         
         # Define the system prompt for actions
