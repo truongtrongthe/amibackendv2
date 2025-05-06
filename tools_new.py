@@ -471,7 +471,7 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
             # If we don't have profile knowledge yet, and state exists, save it for future use
             if not existing_profile_knowledge and user_analysis_knowledge and state is not None:
                 # Look for knowledge entries that might have been created during profile building
-                profile_knowledge = get_last_profiling_knowledge_entries()
+                profile_knowledge = get_profile_knowledge()
                 if profile_knowledge:
                     user_analysis_knowledge = profile_knowledge
                     state["profiling_knowledge_entries"] = profile_knowledge
@@ -498,6 +498,16 @@ async def cot_knowledge_analysis_actions_handler(params: Dict) -> AsyncGenerator
     # Check if we have cached profile knowledge we can reuse
     user_analysis_knowledge = get_profile_knowledge()
     cached_knowledge_available = bool(user_analysis_knowledge)
+    
+    # Initialize brain_loaded to False to avoid reference errors
+    brain_loaded = False
+    
+    # Initialize key_queries to avoid reference errors later
+    key_queries = []
+    
+    # Initialize knowledge containers to avoid reference errors
+    technique_knowledge = []
+    additional_knowledge = []
     
     if cached_knowledge_available:
         logger.info(f"Using {len(user_analysis_knowledge)} cached profile knowledge entries")
