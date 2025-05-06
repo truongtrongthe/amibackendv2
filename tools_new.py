@@ -23,8 +23,7 @@ from tool_helpers import (
 )
 from profile_helper import (
     build_user_profile,
-    format_user_profile_for_prompt,
-    get_last_profiling_knowledge_entries
+    format_user_profile_for_prompt
 )
 from response_optimization import ResponseProcessor, ResponseFilter
 from profile_cache import get_profile_knowledge
