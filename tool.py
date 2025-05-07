@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from cachetools import TTLCache
 import os
 
-from utilities import logger as default_logger
+from utilities import logger 
 from brain_singleton import get_brain
 from tool_helpers import (
     detect_language,
@@ -24,17 +24,6 @@ from profiling import (
     build_user_profile,
     format_user_profile_for_prompt
 )
-from profile_cache import get_profile_knowledge
-
-# Initialize structured logging
-structlog.configure(
-    processors=[
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-)
-logger = structlog.get_logger()
 
 # Configuration
 RESPONSE_TIMEOUT = float(os.getenv("RESPONSE_TIMEOUT", 7))
@@ -68,7 +57,7 @@ class ToolRegistry:
         """Register a tool with its handler and schema."""
         self.tools[name] = handler
         self.tool_schemas[name] = schema
-        logger.info("Registered tool", tool_name=name)
+        logger.info(f"Registered tool:{name}")
     
     def get_tool_schemas(self) -> List[Dict]:
         """Get all tool schemas for LLM tool calling."""
@@ -191,7 +180,7 @@ Provide:
 ANALYSIS: [Incorporate communication style, classification, decision state, needs, strategy]
 RECOMMENDED TECHNIQUES: [Extracted from knowledge]
 SPECIFIC INSTRUCTIONS: [Copied verbatim]
-KEY QUERIES: [Formatted as "Cách thực hiện {technique}"]
+KEY QUERIES: [Formatted as "Cách thực hiện {{technique}}"]
 """,
     "actions": """
 # Sales Automation Next Steps and Persuasive Script
@@ -278,7 +267,7 @@ async def response_generation_handler(params: ResponseGenerationParams) -> Async
     # Check cache
     cache_key = hashlib.md5(prompt.encode()).hexdigest()
     if cache_key in response_cache:
-        logger.info("Using cached response", cache_key=cache_key)
+        logger.info(f"Using cached response: {cache_key}")
         for chunk in response_cache[cache_key]:
             yield chunk
         return
@@ -291,7 +280,7 @@ async def response_generation_handler(params: ResponseGenerationParams) -> Async
         start_time = time.time()
         async for chunk in StreamLLM.astream(prompt, temperature=0.05):
             if time.time() - start_time > RESPONSE_TIMEOUT:
-                logger.warning("Response generation timed out", timeout=RESPONSE_TIMEOUT)
+                logger.warning(f"Response generation timed out: {RESPONSE_TIMEOUT}")
                 break
             
             content = chunk.content
@@ -307,7 +296,7 @@ async def response_generation_handler(params: ResponseGenerationParams) -> Async
         
         # Cache the response
         response_cache[cache_key] = full_response
-        logger.info("Cached response", cache_key=cache_key)
+        logger.info(f"Cached response: {cache_key}")
         
     except Exception as e:
         logger.error("Response generation error", error=str(e), traceback=traceback.format_exc())
@@ -320,40 +309,46 @@ async def response_generation_handler(params: ResponseGenerationParams) -> Async
             yield chunk
     
     PERF_METRICS["response_generation_end"] = time.time()
-    logger.info("Response generation completed", duration=PERF_METRICS["response_generation_end"] - start_time)
+    logger.info(f"Response generation completed: {PERF_METRICS['response_generation_end'] - start_time}")
 
 async def build_user_profile_step(context: str, graph_version_id: str, state: Dict) -> Dict:
     """STEP 1: Build or retrieve user profile."""
-    if state.get("analysis", {}).get("user_profile"):
-        logger.info("Using cached user profile")
-        return state["analysis"]["user_profile"]
-    
     try:
         last_message = context.split('\n')[-1].replace("User:", "").strip()
         profile = await build_user_profile(context, last_message, graph_version_id, state=state)
         state["analysis"] = state.get("analysis", {})
         state["analysis"]["user_profile"] = profile
         state["profiling_knowledge_entries"] = state.get("profiling_knowledge_entries", [])
-        logger.info("Built user profile", profile=profile)
+        logger.info(f"Built user profile: {profile}")
         return profile
     except Exception as e:
-        logger.error("Error building user profile", error=str(e))
+        logger.error(f"Error building user profile: {str(e)}\nTraceback: {traceback.format_exc()}")
         return {"portrait": f"User query: {context.split('\n')[-1]}"}
 
 async def fetch_knowledge_step(user_profile: Dict, graph_version_id: str, state: Dict, last_user_message: str) -> Dict[str, List[Dict]]:
-    """STEP 2: Fetch categorized knowledge from cache or brain."""
-    cache_key = f"{graph_version_id}:{user_profile.get('segment', {}).get('category', '')}"
+    """STEP 2: Fetch categorized knowledge from cache or brain for profiling purposes."""
+    # Use a cache key specific to profiling knowledge
+    cache_key = f"{graph_version_id}:{user_profile.get('segment', {}).get('category', '')}:profiling_synthesized"
     if cache_key in knowledge_cache:
-        logger.info("Using cached knowledge", cache_key=cache_key)
+        logger.info(f"Using cached synthesized profiling knowledge: {cache_key}")
         return knowledge_cache[cache_key]
     
     if state.get("profiling_knowledge_entries"):
-        logger.info("Using state knowledge entries")
-        return {
+        logger.info(f"Using state profiling knowledge entries for processing: {len(state['profiling_knowledge_entries'])}")
+        knowledge = {
             "user_analysis": state["profiling_knowledge_entries"],
             "technique_implementation": [],
             "additional": []
         }
+        # Cache only synthesized profiling knowledge
+        synthesized_profiling_knowledge = {
+            "user_analysis": knowledge["user_analysis"],
+            "technique_implementation": [],
+            "additional": []
+        }
+        knowledge_cache[cache_key] = synthesized_profiling_knowledge
+        logger.info(f"Cached synthesized profiling knowledge: {cache_key}")
+        return knowledge
     
     knowledge = {
         "user_analysis": [],
@@ -363,7 +358,7 @@ async def fetch_knowledge_step(user_profile: Dict, graph_version_id: str, state:
     
     try:
         if await ensure_brain_loaded(graph_version_id):
-            # Fetch user analysis knowledge
+            # Fetch user analysis knowledge for profiling
             queries = build_analyse_profile_query(user_profile)[:3]
             for query in queries:
                 results = await brain.get_similar_vectors_by_text(query, top_k=2)
@@ -379,10 +374,16 @@ async def fetch_knowledge_step(user_profile: Dict, graph_version_id: str, state:
                     })
             
             state["profiling_knowledge_entries"] = knowledge["user_analysis"]
-            knowledge_cache[cache_key] = knowledge
-            logger.info("Fetched knowledge", user_analysis_entries=len(knowledge["user_analysis"]))
+            # Cache only synthesized profiling knowledge, not other types
+            synthesized_profiling_knowledge = {
+                "user_analysis": knowledge["user_analysis"],
+                "technique_implementation": [],
+                "additional": []
+            }
+            knowledge_cache[cache_key] = synthesized_profiling_knowledge
+            logger.info(f"Fetched and cached synthesized profiling knowledge: {len(knowledge['user_analysis'])}")
     except Exception as e:
-        logger.error("Knowledge retrieval error", error=str(e))
+        logger.error(f"Knowledge retrieval error: {str(e)}")
     
     return knowledge
 
@@ -405,12 +406,13 @@ async def generate_analysis_step(user_profile: Dict, knowledge: Dict[str, List[D
             knowledge_context=knowledge_context or "No specific knowledge found."
         )
     except KeyError as e:
-        logger.error("KeyError in prompt formatting", error=str(e))
+        logger.error(f"KeyError in prompt formatting: {str(e)}")
         prompt = f"Analyze the user message: {last_user_message}"
     
     try:
         response = await LLM.ainvoke(prompt, temperature=0.1)
         full_analysis = response.content
+        logger.info(f"Generated analysis: {full_analysis}")
         
         # Parse response
         analysis_part = full_analysis.split("ANALYSIS:")[1].split("RECOMMENDED TECHNIQUES:")[0].strip() if "ANALYSIS:" in full_analysis else full_analysis
@@ -426,10 +428,10 @@ async def generate_analysis_step(user_profile: Dict, knowledge: Dict[str, List[D
         if not key_queries:
             key_queries = [f"Cách thực hiện {techniques[0]}" if techniques else f"Phương pháp điều trị cho nhóm {user_classification}"]
         
-        logger.info("Generated analysis", analysis_len=len(analysis_part), techniques=techniques, queries=key_queries)
+        logger.info(f"Generated analysis: {len(analysis_part)}, {techniques}, {key_queries}")
         return analysis_part, techniques, instructions_part, key_queries
     except Exception as e:
-        logger.error("Analysis generation error", error=str(e))
+        logger.error(f"Analysis generation error: {str(e)}")
         return (
             f"Analyzing query: {last_user_message}",
             [f"Phương pháp tiếp cận nhóm {user_classification}"],
@@ -477,13 +479,11 @@ async def fetch_technique_knowledge_step(techniques: List[str], key_queries: Lis
                     })
         
         logger.info(
-            "Fetched technique knowledge",
-            technique_entries=len(knowledge["technique_implementation"]),
-            additional_entries=len(knowledge["additional"])
+            f"Fetched technique knowledge: {len(knowledge['technique_implementation'])}, {len(knowledge['additional'])}"
         )
         return knowledge
     except Exception as e:
-        logger.error("Technique knowledge retrieval error", error=str(e))
+        logger.error(f"Technique knowledge retrieval error: {str(e)}")
         return knowledge
 
 async def plan_actions_step(techniques: List[str], instructions: str, user_profile: Dict, knowledge: Dict[str, List[Dict]], last_user_message: str) -> tuple[str, str]:
@@ -538,10 +538,10 @@ async def plan_actions_step(techniques: List[str], instructions: str, user_profi
                     persuasive_script = next_actions[script_start + len("PERSUASIVE_SCRIPT:"):script_end].strip()
         
         clean_actions = next_actions.replace("END_SCRIPT", "END_SCRIPT\n") if persuasive_script else next_actions
-        logger.info("Planned actions", actions_len=len(clean_actions), script_len=len(persuasive_script))
+        logger.info(f"Planned actions: {len(clean_actions)}, {len(persuasive_script)}")
         return clean_actions, persuasive_script
     except Exception as e:
-        logger.error("Actions planning error", error=str(e))
+        logger.error(f"Actions planning error: {str(e)}")
         return (
             "1. Research more\n2. Consult resources\n3. Try specific query",
             "Xin lỗi, tôi cần thêm thông tin để hỗ trợ bạn." if detect_language(last_user_message) == "vietnamese" else "Sorry, I need more information to assist you."
@@ -624,7 +624,7 @@ async def cot_knowledge_analysis_actions_handler(params: CotKnowledgeAnalysisPar
                 "user_profile": user_profile if i == 0 else None
             }
             yield event
-            logger.debug("Yielded next_actions chunk", chunk_index=i, thread_id=params.thread_id)
+            logger.debug(f"Yielded next_actions chunk: {i}, {params.thread_id}")
             await asyncio.sleep(0.1)
     else:
         event = {
@@ -636,7 +636,7 @@ async def cot_knowledge_analysis_actions_handler(params: CotKnowledgeAnalysisPar
             "user_profile": user_profile
         }
         yield event
-        logger.debug("Yielded next_actions event", thread_id=params.thread_id)
+        logger.debug(f"Yielded next_actions event: {params.thread_id}")
     
     # Complete knowledge event
     all_knowledge = (
@@ -655,7 +655,7 @@ async def cot_knowledge_analysis_actions_handler(params: CotKnowledgeAnalysisPar
     yield event
     logger.debug("Yielded knowledge complete event", thread_id=params.thread_id)
     
-    logger.info("CoT handler completed", duration=time.time() - start_time)
+    logger.info(f"CoT handler completed: {time.time() - start_time}")
 
 # Register tools
 tool_registry.register_tool(
@@ -687,12 +687,12 @@ async def process_llm_with_tools(
         if recent_messages:
             conversation_context = "\n".join(recent_messages) + "\n" + conversation_context
     
-    logger.info("Conversation history processed", messages=len(conversation_history))
+    logger.info(f"Conversation history processed: {len(conversation_history)}")
     
     # Initial status
     event = {"type": "status", "status": "processing", "message": "Processing your request..."}
     yield event
-    logger.debug("Yielded initial status event", thread_id=thread_id)
+    logger.debug(f"Yielded initial status event: {thread_id}")
     
     # Process with CoT handler
     cot_params = CotKnowledgeAnalysisParams(
@@ -724,17 +724,17 @@ async def process_llm_with_tools(
                     }.get(result["type"])
                     if emit_func:
                         emit_func(thread_id, result)
-                        logger.debug(f"Emitted {result['type']} event via socketio", thread_id=thread_id)
+                        logger.debug(f"Emitted {result['type']} event via socketio: {thread_id}")
                     else:
                         yield result
-                        logger.debug(f"Yielded {result['type']} event directly", thread_id=thread_id)
+                        logger.debug(f"Yielded {result['type']} event directly: {thread_id}")
                 except Exception as e:
                     logger.error(f"Error emitting {result.get('type')} event", error=str(e))
                     yield result
-                    logger.debug(f"Yielded {result['type']} event after emission failure", thread_id=thread_id)
+                    logger.debug(f"Yielded {result['type']} event after emission failure: {thread_id}")
             else:
                 yield result
-                logger.debug(f"Yielded {result.get('type', 'unknown')} event", thread_id=thread_id)
+                logger.debug(f"Yielded {result.get('type', 'unknown')} event: {thread_id}")
             
             if result.get("type") == "analysis" and result.get("complete"):
                 analysis_results = result.get("content", "")
@@ -743,7 +743,7 @@ async def process_llm_with_tools(
             elif result.get("type") == "knowledge" and not result.get("complete"):
                 knowledge_entries.extend(result.get("content", []))
     except Exception as e:
-        logger.error("CoT processing error", error=str(e), traceback=traceback.format_exc())
+        logger.error(f"CoT processing error: {str(e)}", traceback=traceback.format_exc())
         yield {"type": "error", "component": "cot_handler", "error": str(e)}
     
     # Format knowledge context
@@ -778,7 +778,7 @@ async def process_llm_with_tools(
             response_buffer += chunk
             yield chunk
     except Exception as e:
-        logger.error("Response generation error", error=str(e))
+        logger.error(f"Response generation error: {str(e)}")
         fallback = (
             "Xin lỗi, có lỗi xảy ra. Vui lòng thử lại nha." if detect_language(user_message) == "vietnamese"
             else "Sorry, an error occurred. Please try again."
@@ -802,7 +802,7 @@ async def process_llm_with_tools(
         state["prompt_str"] = response_buffer
     
     yield {"state": state}
-    logger.info("Processing completed", duration=time.time() - overall_start_time)
+    logger.info(f"Processing completed: {time.time() - overall_start_time}")
 
 async def execute_tool_call(
     tool_call: Dict,
@@ -816,7 +816,7 @@ async def execute_tool_call(
         
         handler = tool_registry.get_tool_handler(tool_name)
         if not handler:
-            logger.error("Tool not found", tool_name=tool_name)
+            logger.error(f"Tool not found: {tool_name}")
             yield {"error": f"Tool not found: {tool_name}"}
             return
         
@@ -830,13 +830,13 @@ async def execute_tool_call(
         if thread_id:
             call_params["thread_id"] = thread_id
         
-        logger.info("Executing tool call", tool_name=tool_name, params=call_params)
+        logger.info(f"Executing tool call: {tool_name}, {call_params}")
         
         start_time = time.time()
         async for result in handler(call_params):
             yield result
         
-        logger.info("Tool call completed", tool_name=tool_name, duration=time.time() - start_time)
+        logger.info(f"Tool call completed: {tool_name}, {time.time() - start_time}")
     except Exception as e:
-        logger.error("Tool execution error", error=str(e), traceback=traceback.format_exc())
+        logger.error(f"Tool execution error: {str(e)}", traceback=traceback.format_exc())
         yield {"error": f"Tool execution error: {str(e)}"}

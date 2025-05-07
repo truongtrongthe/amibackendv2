@@ -220,7 +220,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
                 if len(method_blocks) <= 1 and "application method" in takeaways_text.lower():
                     application_methods.append(takeaways_text)
             
-            logger.info(f"Application methods found: {application_methods}")
+            #logger.info(f"Application methods found: {application_methods}")
             
             # Format the extracted content
             formatted_content = f"KNOWLEDGE ENTRY {i+1}:\n"

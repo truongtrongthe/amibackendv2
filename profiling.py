@@ -18,17 +18,21 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from profile_cache import store_profile_knowledge
 import os
+from profile_helper import detect_vietnamese_language
 
-# Initialize structured logging
-import structlog
-structlog.configure(
-    processors=[
-        structlog.processors.JSONRenderer()
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-)
-logger = structlog.get_logger()
+
+from utilities import logger
+# Additional configuration to handle Unicode in JSON serialization if logs are processed further
+import json
+# Custom JSON encoder to prevent escaping of non-ASCII characters
+class UnicodeJSONEncoder(json.JSONEncoder):
+    def __init__(self, *args, **kwargs):
+        kwargs['ensure_ascii'] = False
+        super().__init__(*args, **kwargs)
+
+# If logs are serialized to JSON, use the custom encoder
+def custom_json_renderer(event_dict):
+    return json.dumps(event_dict, cls=UnicodeJSONEncoder)
 
 # Configuration constants
 CLASSIFICATION_TERMS = [
@@ -76,14 +80,15 @@ CLASSIFICATION INSTRUCTIONS:
    - Look for explicit signals in the conversation that align with specific classifications
    - Only use the "unclear" or "undetermined" classification if the user truly doesn't fit other categories
 4. Create a SINGLE COHERENT PARAGRAPH that properly categorizes the user according to our framework
-5. Respond in the SAME LANGUAGE as the user ({language})
+5. Respond ENTIRELY and EXCLUSIVELY in the SAME LANGUAGE as the user ({language}). This is ABSOLUTELY CRITICAL - if the user language is Vietnamese, EVERY SINGLE WORD and SENTENCE in your response MUST be in Vietnamese. Do NOT include ANY English text or explanations in your response.
 
 Your portrait MUST include:
 - User's psychological state and communication patterns
 - Their EXACT CLASSIFICATION from our framework in BOLD with ** markers (e.g., **Nhóm Chán Nản**, **Nhóm Tự Tin**)
 - Process state if appropriate (e.g., **Đang Tìm Hiểu** vs **Đã Quyết Định**)
 - 2-3 key needs or pain points specific to their classification
-- Recommended approach strategy based on our framework's guidance for this classification
+- Recommended approach strategy based on our framework's guidance for this classification, explicitly referencing specific application methods (e.g., 'Giao tiếp với nhóm khách Hàng thoải mái, cởi mở') and implementation steps from the knowledge context
+- Identification of missing information in the user portrait that could enhance understanding (e.g., demographic details like age, specific triggers for their condition), explicitly stating what next steps should focus on gathering
 
 IMPORTANT:
 - Apply the classification framework EXACTLY as described in the knowledge
@@ -91,6 +96,9 @@ IMPORTANT:
 - Only use the "unclear" classification type when clearly appropriate based on knowledge criteria
 - ALWAYS mark the chosen classification with ** for visibility (e.g., **[Classification]**)
 - Return ONLY a single descriptive paragraph (200-250 words)
+- When crafting the recommended approach, directly reference and incorporate details from the 'What' and 'How' sections of application methods and the step-by-step implementation guide provided in the knowledge context
+- Proactively suggest areas of missing information to guide next steps in building a more complete user profile
+- STRICTLY adhere to the user's language ({language}) for ALL text in the response. ABSOLUTELY NO text should be in any other language, including English explanations or translations.
 """
 }
 
@@ -113,20 +121,20 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
         # Use provided state or create a temporary one
         local_state = state if state is not None else {}
         
-        # Detect language using tool_helpers' detect_language
-        language = detect_language(last_user_message)
-        language_name = "Vietnamese" if language == "vietnamese" else "English"
+        # Detect language using detect_vietnamese_language for better Vietnamese detection
+        is_vietnamese = detect_vietnamese_language(last_user_message)
+        language_name = "Vietnamese" if is_vietnamese else "English"
         
         # Skip knowledge retrieval if no graph_version_id provided
         if not graph_version_id:
-            logger.info("No graph version ID provided, proceeding with LLM-only profiling")
+            logger.info(f"No graph version ID provided, proceeding with LLM-only profiling: {language_name}")
             return await create_user_portrait(conversation_context, last_user_message, [], "", language_name)
         
         # Cache key for knowledge
         knowledge_cache_key = f"{graph_version_id}:{hashlib.md5(last_user_message.encode()).hexdigest()}"
         if knowledge_cache_key in knowledge_cache:
             knowledge_entries = knowledge_cache[knowledge_cache_key]
-            logger.info("Using cached knowledge entries", cache_key=knowledge_cache_key)
+            logger.info(f"Using cached knowledge entries: {knowledge_cache_key}")
         else:
             # Prepare broader queries to find relevant analysis methods
             understanding_queries = [
@@ -141,8 +149,8 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
             ]
             
             # Select language-specific queries
-            queries_to_use = understanding_queries[4:8] if language == "vietnamese" else understanding_queries[0:4]
-            queries_to_use.extend(understanding_queries[0:2] if language == "vietnamese" else understanding_queries[4:6])
+            queries_to_use = understanding_queries[4:8] if is_vietnamese else understanding_queries[0:4]
+            queries_to_use.extend(understanding_queries[0:2] if is_vietnamese else understanding_queries[4:6])
             
             # Prioritize classification knowledge
             classification_queries = [
@@ -172,13 +180,13 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
                             continue
                         
                         if any(entry.get("id") == vector_id for entry in knowledge_entries):
-                            logger.info("Skipping duplicate knowledge entry", vector_id=vector_id)
+                            logger.info(f"Skipping duplicate knowledge entry: {vector_id}")
                             continue
                         
                         raw_text = metadata.get("raw", "")
                         boost = CLASSIFICATION_BOOST if any(term in raw_text.lower() for term in CLASSIFICATION_TERMS) else 0.0
                         if boost:
-                            logger.info("Boosting entry for classification terms", vector_id=vector_id)
+                            logger.info(f"Boosting entry for classification terms: {vector_id}")
                         
                         knowledge_entries.append({
                             "id": vector_id,
@@ -188,21 +196,21 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
                             "priority": 1 if boost > 0 else 0
                         })
                 except Exception as e:
-                    logger.warning("Error retrieving knowledge", query=query, error=str(e))
+                    logger.warning(f"Error retrieving knowledge: {query}, {str(e)}")
             
             knowledge_cache[knowledge_cache_key] = knowledge_entries
-            logger.info("Cached knowledge entries", cache_key=knowledge_cache_key, entries=len(knowledge_entries))
+            logger.info(f"Cached knowledge entries: {knowledge_cache_key}, {len(knowledge_entries)}")
         
         # Process knowledge entries
         if knowledge_entries:
             sorted_entries = sorted(knowledge_entries, key=lambda x: (-x.get("priority", 0), -x.get("similarity", 0)))
             selected_entries = sorted_entries[:5]  # Take top 3 entries
-            logger.info("Selected knowledge entries for profiling", entries=len(selected_entries))
+            logger.info(f"Selected knowledge entries for profiling: {len(selected_entries)}")
             
             # Store in state and profile_cache
             local_state["profiling_knowledge_entries"] = selected_entries
             store_profile_knowledge(selected_entries)
-            logger.info("Stored profiling knowledge entries", in_state=state is not None, in_cache=True)
+            logger.info(f"Stored profiling knowledge entries: {state is not None}, {True}")
             
             knowledge_context = prepare_knowledge(
                 selected_entries,
@@ -214,12 +222,12 @@ async def build_user_profile(conversation_context: str, last_user_message: str, 
             logger.info(f"Knowledge For Profiling: {knowledge_context}")
         else:
             knowledge_context = ""
-            logger.info("No knowledge entries found for user profiling")
+            logger.info(f"No knowledge entries found for user profiling: {language_name}")
         
         return await create_user_portrait(conversation_context, last_user_message, knowledge_entries, knowledge_context, language_name)
         
     except Exception as e:
-        logger.error("Error in user portrait creation", error=str(e), traceback=traceback.format_exc())
+        logger.error(f"Error in user portrait creation: {str(e)}", traceback=traceback.format_exc())
         return {
             "portrait": f"User communicating in {language_name}, asking about: {last_user_message[:100]}...",
             "method": "error_fallback",
@@ -244,28 +252,44 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         # Cache key for portrait
         cache_key = hashlib.md5((conversation_context + knowledge_context).encode()).hexdigest()
         if cache_key in portrait_cache:
-            logger.info("Using cached user portrait", cache_key=cache_key)
+            logger.info(f"Using cached user portrait: {cache_key}")
             return portrait_cache[cache_key]
         
         # Create knowledge section for prompt
         knowledge_section = f"KNOWLEDGE FOR YOUR ANALYSIS (CONTAINS CUSTOMER CLASSIFICATION FRAMEWORKS):\n{knowledge_context}" if knowledge_context else "Use your psychological expertise to analyze this conversation."
         
         # Create prompt
-        prompt = PROMPT_TEMPLATES["user_portrait"].format(
-            knowledge_section=knowledge_section,
-            conversation_context=conversation_context,
-            language=language
-        )
+        try:
+            prompt = PROMPT_TEMPLATES["user_portrait"].format(
+                knowledge_section=knowledge_section,
+                conversation_context=conversation_context,
+                language=language
+            )
+        except KeyError as ke:
+            logger.error(f"KeyError in prompt formatting: {str(ke)}, template: user_portrait")
+            raise
         
         # Use LangChain interface
         messages = [
-            SystemMessage(content="You are an expert psychologist specializing in creating insightful user portraits based on communication patterns. Apply classification frameworks rigorously and format JSON responses as requested."),
+            SystemMessage(content="You are an expert psychologist specializing in creating insightful user portraits based on communication patterns. Apply classification frameworks rigorously and format responses as plain text paragraphs."),
             HumanMessage(content=prompt)
         ]
         
         # Call LLM
         response = await LLM.ainvoke(messages, temperature=0.1)
         portrait_text = response.content.strip()
+        
+        # Remove any unwanted JSON or code block formatting if present
+        portrait_text = portrait_text.replace('```json', '').replace('```', '').strip()
+        if portrait_text.startswith('{') and portrait_text.endswith('}'):
+            # Attempt to extract the main content if it's JSON formatted
+            try:
+                import json
+                parsed = json.loads(portrait_text)
+                if 'psychological_portrait' in parsed:
+                    portrait_text = parsed['psychological_portrait']
+            except:
+                pass  # If parsing fails, keep the original text
         
         # Validate response
         if len(portrait_text) < 50:
@@ -281,12 +305,13 @@ async def create_user_portrait(conversation_context: str, last_user_message: str
         
         # Cache result
         portrait_cache[cache_key] = result
-        logger.info("Cached user portrait", cache_key=cache_key)
+        logger.info(f"Cached user portrait: {cache_key}")
+        logger.info(f"Generated user portrait: {portrait_text[:200]}...")
         
         return result
             
     except Exception as e:
-        logger.error("Error in portrait creation", error=str(e), traceback=traceback.format_exc())
+        logger.error(f"Error in portrait creation: {str(e)}", traceback=traceback.format_exc())
         return {
             "portrait": f"User communicating in {language}, asking about: {last_user_message[:100]}...",
             "method": "error_fallback",
