@@ -126,3 +126,66 @@ def prepare_knowledge(knowledge_entries: List[Dict[str, Any]], query: str, is_pr
         formatted_output.append(f"KNOWLEDGE ENTRY {i}:\nTitle: {title}\n\n{raw_text}\n----\n")
     
     return "\n".join(formatted_output)
+
+def emit_analysis_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """
+    Emit an analysis event to all clients in a thread room
+    
+    Args:
+        thread_id: The thread ID to send the event to
+        data: The analysis event data to send
+        
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    try:
+        from socketio_manager import emit_analysis_event as socket_emit
+        return socket_emit(thread_id, data)
+    except ImportError:
+        logger.error("socketio_manager not available for analysis event emission")
+        return False
+    except Exception as e:
+        logger.error(f"Error emitting analysis event: {str(e)}")
+        return False
+
+def emit_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """
+    Emit a knowledge event to all clients in a thread room
+    
+    Args:
+        thread_id: The thread ID to send the event to
+        data: The knowledge event data to send
+        
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    try:
+        from socketio_manager import emit_knowledge_event as socket_emit
+        return socket_emit(thread_id, data)
+    except ImportError:
+        logger.error("socketio_manager not available for knowledge event emission")
+        return False
+    except Exception as e:
+        logger.error(f"Error emitting knowledge event: {str(e)}")
+        return False
+
+def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """
+    Emit a next_action event to all clients in a thread room
+    
+    Args:
+        thread_id: The thread ID to send the event to
+        data: The next_action event data to send
+        
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    try:
+        from socketio_manager import emit_next_action_event as socket_emit
+        return socket_emit(thread_id, data)
+    except ImportError:
+        logger.error("socketio_manager not available for next action event emission")
+        return False
+    except Exception as e:
+        logger.error(f"Error emitting next action event: {str(e)}")
+        return False

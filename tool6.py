@@ -10,9 +10,19 @@ import re
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from aitools import fetch_knowledge, brain  # Assuming these are available
+from aitools import fetch_knowledge, brain, emit_analysis_event  # Assuming these are available
 from brain_singleton import get_current_graph_version
 
+# Custom JSON encoder to handle datetime objects
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+def serialize_model(model: BaseModel) -> Dict[str, Any]:
+    """Serialize a Pydantic model to a JSON-serializable dict."""
+    return json.loads(json.dumps(model.model_dump(), cls=DateTimeEncoder))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -119,15 +129,36 @@ class CoTProcessor:
             }
         }
 
-    async def process_incoming_message(self, message: str,conversation_context: str, user_id: str) -> Dict[str, Any]:
+    async def process_incoming_message(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None) -> Dict[str, Any]:
         """Process incoming message with CoT flow.
         This function is the main function that processes the incoming message.
         It will get or build user profile, search analysis knowledge, propose an action plan, and execute the action plan.  
         """
         logger.info(f"Processing message from user {user_id}")
         try:
+            # Emit initial analysis event
+            if thread_id:
+                emit_analysis_event(thread_id, {
+                    "type": "analysis",
+                    "content": "Starting analysis",
+                    "complete": False,
+                    "status": "starting"
+                })
+
             logger.info(f"Now I am processing message from user {user_id}")
             user_profile = await self._get_or_build_user_profile(user_id, message, conversation_context)
+            
+            # Emit user profile analysis event
+            if thread_id:
+                profile_data = serialize_model(user_profile)
+                logger.info(f"Emitting profile_complete event with data: {json.dumps(profile_data, indent=2)}")
+                emit_analysis_event(thread_id, {
+                    "type": "analysis",
+                    "content": "User profile analysis complete",
+                    "complete": False,
+                    "status": "profile_complete",
+                    "user_profile": profile_data
+                })
             
             logger.info("I've Built User Profile:")
             logger.info(f"Classification: {user_profile.classification}")
@@ -135,13 +166,43 @@ class CoTProcessor:
             logger.info(f"Why I classified like this: {user_profile.other_aspects.get('classification_criteria', 'Not available')}")
             logger.info(f"I propose these queries to analyze user: {user_profile.analysis_queries}")
             
+            # Emit knowledge search event
+            if thread_id:
+                emit_analysis_event(thread_id, {
+                    "type": "analysis",
+                    "content": "Searching for analysis knowledge...",
+                    "complete": False,
+                    "status": "searching_knowledge"
+                })
+            
             logger.info(f"Now I am searching knowledge follow the queries ...")
             analysis_knowledge = await self._search_analysis_knowledge(user_profile.classification, user_profile, message)
             logger.info(f"I found analysis knowledge: {analysis_knowledge}")
+            
+            # Emit knowledge found event
+            if thread_id:
+                emit_analysis_event(thread_id, {
+                    "type": "analysis",
+                    "content": "Analysis knowledge found",
+                    "complete": False,
+                    "status": "knowledge_found",
+                    "analysis_knowledge": analysis_knowledge
+                })
+            
             logger.info(f"Now I am proposing an action plan for user {user_id} ...")
             action_plan = await self._decide_action_plan_with_llm(user_profile, analysis_knowledge)
             user_profile.action_plan = action_plan
             user_profile.analysis_summary = action_plan.get("analysis_summary", "Analysis completed.")
+            
+            # Emit action plan event
+            if thread_id:
+                emit_analysis_event(thread_id, {
+                    "type": "analysis",
+                    "content": "Action plan created",
+                    "complete": False,
+                    "status": "action_plan_created",
+                    "action_plan": action_plan
+                })
             
             # Log detailed analysis results
             logger.info("Here is the analysis results:")
@@ -165,14 +226,25 @@ class CoTProcessor:
             logger.info(f"Now I have response: {response}")
             self.user_profiles[user_id] = user_profile
             logger.info(f"I have updated user profile!")
+
+            
+
             if isinstance(response, str):
-                response = {"status": "success", "message": response, "user_profile": user_profile.dict()}
+                response = {"status": "success", "message": response, "user_profile": serialize_model(user_profile)}
             else:
                 response.setdefault("status", "success")
-                response.setdefault("user_profile", user_profile.dict())
+                response.setdefault("user_profile", serialize_model(user_profile))
             return response
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
+            # Emit error event
+            if thread_id:
+                emit_analysis_event(thread_id, {
+                    "type": "analysis",
+                    "content": str(e),
+                    "complete": True,
+                    "status": "error"
+                })
             return {"status": "error", "message": f"Error: {str(e)}"}
 
     async def _get_or_build_user_profile(self, user_id: str, message: str, conversation_context: str) -> UserProfileModel:
@@ -234,7 +306,7 @@ class CoTProcessor:
         try:
             response = await LLM.ainvoke(prompt)
             content = response.content.strip()
-            #logger.info(f"RAW PORTRAIT RESPONSE: {content}")
+            logger.info(f"RAW PORTRAIT RESPONSE: {content}")
             
             # Try to extract JSON if there's any surrounding text
             json_match = re.search(r'\{[\s\S]*\}', content)
@@ -258,6 +330,10 @@ class CoTProcessor:
                     "portrait_paragraph": "Unable to generate portrait at this time."
                 }
             
+            # Extract portrait_paragraph from the response
+            portrait_paragraph = llm_response.get("portrait_paragraph", "")
+            
+            # Create user profile with all fields
             user_profile = UserProfileModel(
                 user_id=user_id,
                 skills=llm_response.get("skills", []),
@@ -266,9 +342,13 @@ class CoTProcessor:
                 analysis_queries=llm_response.get("analysis_queries", []),
                 other_aspects={
                     **llm_response.get("other_aspects", {}),
-                    "portrait_paragraph": llm_response.get("portrait_paragraph", "")
+                    "portrait_paragraph": portrait_paragraph
                 }
             )
+            
+            # Log the created profile for debugging
+            logger.info(f"Created user profile with portrait: {portrait_paragraph}")
+            
             self.user_profiles[user_id] = user_profile
             return user_profile
         except Exception as e:
@@ -510,14 +590,23 @@ async def process_llm_with_tools(
     cot_processor = state.get('cot_processor', CoTProcessor())
     state['cot_processor'] = cot_processor
     state['graph_version_id'] = graph_version_id
+    
     try:
-        response = await cot_processor.process_incoming_message(user_message, conversation_context, state.get('user_id', 'unknown'))
+        # Process the message - events will be emitted from process_incoming_message
+        response = await cot_processor.process_incoming_message(
+            user_message, 
+            conversation_context, 
+            state.get('user_id', 'unknown'),
+            thread_id
+        )
+        
         yield response
         state.setdefault("messages", []).append({"role": "assistant", "content": response.get("message", "")})
         state["prompt_str"] = response.get("message", "")
     except Exception as e:
         logger.error(f"Error in CoT processing: {str(e)}")
-        yield {"status": "error", "message": f"Error: {str(e)}"}
+        error_response = {"status": "error", "message": f"Error: {str(e)}"}
+        yield error_response
     yield {"state": state}
 
 async def execute_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
