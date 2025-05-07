@@ -57,14 +57,14 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
         if knowledge_entries:
             sorted_entries = sorted(knowledge_entries, key=lambda x: (-x.get("priority", 0), -x.get("similarity", 0)))
             selected_entries = sorted_entries[:5]  # Take top 3 entries
-            logger.info(f"Selected knowledge entries for profiling: {len(selected_entries)}")
+            #logger.info(f"Selected knowledge entries for profiling: {len(selected_entries)}")
             
             knowledge_context = prepare_knowledge(
                 selected_entries,
                 query,
                 is_profiling=True
             )
-            logger.info(f"Knowledge For Profiling: {knowledge_context}")
+            logger.info(f"Knowledge For Profiling. Logging at AITools: {knowledge_context}")
         else:
             knowledge_context = ""
             logger.info(f"No knowledge entries found for user profiling")

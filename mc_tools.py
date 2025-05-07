@@ -11,8 +11,8 @@ from utilities import logger
 import json
 
 #from tools import process_llm_with_tools, tool_registry
-#from tools_new import process_llm_with_tools
-from tool6 import process_llm_with_tools
+from tools_new import process_llm_with_tools
+#from tool6 import process_llm_with_tools
 from personality import PersonalityManager
 from response_optimization import ResponseFilter, ResponseProcessor
 
