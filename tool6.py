@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Initialize LLM
-LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.1)
+LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.01)
 
 # Pydantic model for UserProfile
 class UserProfileModel(BaseModel):
@@ -27,7 +27,12 @@ class UserProfileModel(BaseModel):
     requirements: List[str] = Field(default_factory=list)
     classification: str = "unknown"
     other_aspects: Dict[str, Any] = Field(default_factory=dict)
-    analysis_summary: str = "Sistine Chapel"
+    analysis_summary: Dict[str, Any] = Field(default_factory=lambda: {
+        "key_findings": [],
+        "user_needs": [],
+        "potential_challenges": [],
+        "narrative": "No analysis available."
+    })
     action_plan: Dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=datetime.now)
     analysis_queries: List[str] = Field(default_factory=list)
@@ -105,9 +110,6 @@ class CoTProcessor:
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
         
-        logger.info(f"Processed knowledge entries: {len(cleaned_context)}")
-        logger.info(f"First 1000 chars of knowledge: {full_knowledge[:1000]}")
-
         return {
             "knowledge_context": full_knowledge,
             "metadata": {
@@ -117,17 +119,52 @@ class CoTProcessor:
             }
         }
 
-    async def process_incoming_message(self, message: str, user_id: str) -> Dict[str, Any]:
-        """Process incoming message with CoT flow."""
+    async def process_incoming_message(self, message: str,conversation_context: str, user_id: str) -> Dict[str, Any]:
+        """Process incoming message with CoT flow.
+        This function is the main function that processes the incoming message.
+        It will get or build user profile, search analysis knowledge, propose an action plan, and execute the action plan.  
+        """
         logger.info(f"Processing message from user {user_id}")
         try:
-            user_profile = await self._get_or_build_user_profile(user_id, message)
+            logger.info(f"Now I am processing message from user {user_id}")
+            user_profile = await self._get_or_build_user_profile(user_id, message, conversation_context)
+            
+            logger.info("I've Built User Profile:")
+            logger.info(f"Classification: {user_profile.classification}")
+            logger.info(f"Portrait: {user_profile.other_aspects.get('portrait_paragraph', 'Not available')}")
+            logger.info(f"Why I classified like this: {user_profile.other_aspects.get('classification_criteria', 'Not available')}")
+            logger.info(f"I propose these queries to analyze user: {user_profile.analysis_queries}")
+            
+            logger.info(f"Now I am searching knowledge follow the queries ...")
             analysis_knowledge = await self._search_analysis_knowledge(user_profile.classification, user_profile, message)
+            logger.info(f"I found analysis knowledge: {analysis_knowledge}")
+            logger.info(f"Now I am proposing an action plan for user {user_id} ...")
             action_plan = await self._decide_action_plan_with_llm(user_profile, analysis_knowledge)
             user_profile.action_plan = action_plan
             user_profile.analysis_summary = action_plan.get("analysis_summary", "Analysis completed.")
+            
+            # Log detailed analysis results
+            logger.info("Here is the analysis results:")
+            analysis_summary = action_plan.get("analysis_summary", {})
+            logger.info(f"Key Findings: {analysis_summary.get('key_findings', [])}")
+            logger.info(f"User Needs: {analysis_summary.get('user_needs', [])}")
+            logger.info(f"Analysis Narrative: {analysis_summary.get('narrative', 'No narrative available')}")
+            
+            # Log action plan details
+            next_actions = action_plan.get("next_actions", [])
+            logger.info("Here is the action plan:")
+            for i, action in enumerate(next_actions, 1):
+                logger.info(f"Action {i}:")
+                logger.info(f"  - What: {action.get('action', 'No action specified')}")
+                logger.info(f"  - Priority: {action.get('priority', 'Not specified')}")
+                logger.info(f"  - Why: {action.get('reasoning', 'No reasoning provided')}")
+                logger.info(f"  - Expected: {action.get('expected_outcome', 'No expected outcome specified')}")
+            
+            logger.info(f"Now I am executing the action plan for user {user_id} ...")
             response = await self._execute_action_plan(user_profile, message)
+            logger.info(f"Now I have response: {response}")
             self.user_profiles[user_id] = user_profile
+            logger.info(f"I have updated user profile!")
             if isinstance(response, str):
                 response = {"status": "success", "message": response, "user_profile": user_profile.dict()}
             else:
@@ -138,18 +175,17 @@ class CoTProcessor:
             logger.error(f"Error processing message: {str(e)}")
             return {"status": "error", "message": f"Error: {str(e)}"}
 
-    async def _get_or_build_user_profile(self, user_id: str, message: str) -> UserProfileModel:
+    async def _get_or_build_user_profile(self, user_id: str, message: str, conversation_context: str) -> UserProfileModel:
         """Get cached profile or build new one."""
         if user_id in self.user_profiles:
             profile = self.user_profiles[user_id]
             if (datetime.now() - profile.timestamp).total_seconds() < self.user_profiles.ttl:
                 logger.info(f"Using cached profile for user {user_id}")
                 return profile
-        return await self._build_user_portrait_with_llm(user_id, message)
+        return await self._build_user_portrait_with_llm(user_id, message,conversation_context=conversation_context)
 
-    async def _build_user_portrait_with_llm(self, user_id: str, message: str) -> UserProfileModel:
+    async def _build_user_portrait_with_llm(self, user_id: str, message: str, conversation_context: str) -> UserProfileModel:
         """Build user profile using LLM."""
-        logger.info(f"Building user portrait for {user_id}")
         
         # Get the knowledge context
         knowledge_context = self.profiling_skills.get("knowledge_context", "")
@@ -164,8 +200,9 @@ class CoTProcessor:
         USER MESSAGE:
         User ID: {user_id}
         Message: {message}
+        Conversation Context: {conversation_context}
 
-        Based on the knowledge context, analyze the user's message and create a detailed profile.
+        Based on the knowledge context, the conversation context and the user's message, analyze the user's message and create a detailed profile.
         First, identify the classification techniques and criteria from the knowledge context.
         Then, apply these techniques to classify the user and analyze their profile.
 
@@ -197,13 +234,12 @@ class CoTProcessor:
         try:
             response = await LLM.ainvoke(prompt)
             content = response.content.strip()
-            logger.info(f"RAW PORTRAIT RESPONSE: {content}")
+            #logger.info(f"RAW PORTRAIT RESPONSE: {content}")
             
             # Try to extract JSON if there's any surrounding text
             json_match = re.search(r'\{[\s\S]*\}', content)
             if json_match:
                 content = json_match.group(0)
-            
             try:
                 llm_response = json.loads(content)
             except json.JSONDecodeError as e:
@@ -286,7 +322,6 @@ class CoTProcessor:
 
     async def _decide_action_plan_with_llm(self, user_profile: UserProfileModel, analysis_knowledge: Dict[str, Any]) -> Dict[str, Any]:
         """Create action plan using LLM based on user profile and analysis knowledge."""
-        logger.info(f"Deciding action plan for user {user_profile.user_id}")
         
         # Extract knowledge context from analysis
         knowledge_context = analysis_knowledge.get("knowledge_context", "")
@@ -340,7 +375,7 @@ class CoTProcessor:
         try:
             response = await LLM.ainvoke(prompt)
             content = response.content.strip()
-            logger.info(f"RAW ACTION PLAN RESPONSE: {content}")
+            #logger.info(f"RAW ACTION PLAN RESPONSE: {content}")
             
             # Try to extract JSON if there's any surrounding text
             json_match = re.search(r'\{[\s\S]*\}', content)
@@ -402,7 +437,6 @@ class CoTProcessor:
 
     async def _execute_action_plan(self, user_profile: UserProfileModel, message: str) -> Dict[str, Any]:
         """Generate user-friendly response based on the action plan."""
-        logger.info(f"Generating response for user {user_profile.user_id}")
         
         if not user_profile.action_plan:
             return {
@@ -423,21 +457,16 @@ class CoTProcessor:
 
         USER MESSAGE:
         {message}
-
         ANALYSIS SUMMARY:
         {json.dumps(analysis_summary, indent=2)}
-
         IMPORTANT NOTES:
         {json.dumps(important_notes, indent=2)}
-
         PLANNED ACTIONS:
         {json.dumps(next_actions, indent=2)}
-
         USER CONTEXT:
         - Classification: {user_profile.classification}
         - Skills: {', '.join(user_profile.skills)}
         - Requirements: {', '.join(user_profile.requirements)}
-
         Generate a natural, helpful response that:
         1. Addresses the user's needs in their language style
         2. Explains the planned actions clearly
@@ -482,7 +511,7 @@ async def process_llm_with_tools(
     state['cot_processor'] = cot_processor
     state['graph_version_id'] = graph_version_id
     try:
-        response = await cot_processor.process_incoming_message(user_message, state.get('user_id', 'unknown'))
+        response = await cot_processor.process_incoming_message(user_message, conversation_context, state.get('user_id', 'unknown'))
         yield response
         state.setdefault("messages", []).append({"role": "assistant", "content": response.get("message", "")})
         state["prompt_str"] = response.get("message", "")

@@ -273,7 +273,7 @@ asyncio.set_event_loop(loop)
 DEFAULT_PINECONE_INDEX = "futurehome"
 #DEFAULT_GRAPH_VERSION = "54cb6723-4752-431b-9395-64936c40ccb9"
 #DEFAULT_GRAPH_VERSION = "bd5b8bc1-d0cb-4e3e-9cd7-68a8563366fc"
-DEFAULT_GRAPH_VERSION = "a86b91a1-115e-4427-8daf-d38a64c540f3"
+DEFAULT_GRAPH_VERSION = "ab126ea1-a526-4c52-8a2d-9b6392e44bd8"
 
 # Initialize the brain singleton
 init_brain(

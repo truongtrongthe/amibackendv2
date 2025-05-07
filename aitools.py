@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, Optional
 from langchain_openai import ChatOpenAI
 from utilities import logger
-from brain_singleton import get_brain, set_graph_version, is_brain_loaded, load_brain_vectors, get_current_graph_version
+from brain_singleton import get_brain
 import json
 import re
 import time
@@ -64,7 +64,6 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
                 query,
                 is_profiling=True
             )
-            logger.info(f"Knowledge For Profiling. Logging at AITools: {knowledge_context}")
         else:
             knowledge_context = ""
             logger.info(f"No knowledge entries found for user profiling")
