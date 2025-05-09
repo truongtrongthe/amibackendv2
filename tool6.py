@@ -6,6 +6,7 @@ from datetime import datetime
 from uuid import uuid4
 from cachetools import TTLCache
 import re
+import pytz
 
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
@@ -262,10 +263,44 @@ class CoTProcessor:
         # Get the knowledge context
         knowledge_context = self.profiling_skills.get("knowledge_context", "")
         
+        # Add temporal context for resolving relative time references
+        vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        current_time = datetime.now(vietnam_tz)
+        date_str = current_time.strftime("%A, %B %d, %Y")
+        time_str = current_time.strftime("%H:%M")
+        
+        # Create a temporal context string
+        temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
+        
+        # Check if message contains temporal references that need resolution
+        temporal_keywords = [
+            "today", "tomorrow", "yesterday", 
+            "next week", "last week", "this week",
+            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+            "morning", "afternoon", "evening", "night",
+            "ngày mai", "hôm nay", "hôm qua", "tuần tới", "tuần sau", "tuần trước", 
+            "thứ hai", "thứ ba", "thứ tư", "thứ năm", "thứ sáu", "thứ bảy", "chủ nhật"
+        ]
+        
+        needs_temporal_resolution = any(keyword in message.lower() for keyword in temporal_keywords)
+        
+        # Add temporal resolution instruction if needed
+        temporal_resolution_instruction = ""
+        if needs_temporal_resolution:
+            temporal_resolution_instruction = """
+            "temporal_references": {
+                "original_mentions": ["array of temporal expressions found in message"],
+                "resolved_dates": ["array of resolved absolute dates in YYYY-MM-DD format"],
+                "resolved_times": ["array of resolved times in HH:MM format if applicable"]
+            },
+            """
+            logger.info(f"Detected temporal references in message. Adding temporal resolution instructions.")
+        
         prompt = f"""Build a user profile from:
                 KNOWLEDGE: {knowledge_context}
                 USER: {message}
                 CONTEXT: {conversation_context}
+                TIME CONTEXT: {temporal_context}
 
                 Analyze the message using classification techniques from the knowledge context.
                 Match your language style to the user's message.
@@ -276,6 +311,7 @@ class CoTProcessor:
                 3. Uncover hidden needs beyond stated requirements
                 4. Determine information gaps for better service
                 5. Plan next engagement steps
+                {f"6. Resolve any temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
                 For ANALYSIS_QUERIES:
                 - Create 5-7 natural language queries for Pinecone vector search
@@ -296,6 +332,7 @@ class CoTProcessor:
                         "required_info": ["missing information we need from/about the user"],
                         "next_steps": ["engagement steps"],
                         "classification_criteria": "classification rationale"
+                        {temporal_resolution_instruction if needs_temporal_resolution else ""}
                     }},
                     "portrait_paragraph": "Comprehensive profile narrative including classification, needs, and behavior."
                 }}
@@ -346,6 +383,11 @@ class CoTProcessor:
             
             # Log the created profile for debugging
             logger.info(f"Created user profile with portrait: {portrait_paragraph}")
+            
+            # If we resolved temporal references, log them
+            if needs_temporal_resolution and "temporal_references" in user_profile.other_aspects:
+                temporal_refs = user_profile.other_aspects.get("temporal_references", {})
+                logger.info(f"Resolved temporal references: {json.dumps(temporal_refs, indent=2)}")
             
             self.user_profiles[user_id] = user_profile
             return user_profile
@@ -428,6 +470,40 @@ class CoTProcessor:
         # Generate user story narrative
         user_story = await self._user_story(user_profile)
         
+        # Extract temporal references if available
+        temporal_info = ""
+        if "temporal_references" in user_profile.other_aspects:
+            temporal_references = user_profile.other_aspects.get("temporal_references", {})
+            original_mentions = temporal_references.get("original_mentions", [])
+            resolved_dates = temporal_references.get("resolved_dates", [])
+            resolved_times = temporal_references.get("resolved_times", [])
+            
+            if original_mentions and resolved_dates:
+                temporal_info = "TEMPORAL REFERENCES:\n"
+                for i, mention in enumerate(original_mentions):
+                    resolved_date = resolved_dates[i] if i < len(resolved_dates) else "unknown"
+                    resolved_time = resolved_times[i] if resolved_times and i < len(resolved_times) else ""
+                    
+                    if resolved_time:
+                        temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date} at {resolved_time}\n"
+                    else:
+                        temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
+                
+                logger.info(f"Including temporal references in action planning: {json.dumps(temporal_references, indent=2)}")
+        
+        # Add current date/time information for temporal context
+        from datetime import datetime
+        import pytz
+        
+        # Use Vietnam timezone by default
+        vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        current_time = datetime.now(vietnam_tz)
+        date_str = current_time.strftime("%A, %B %d, %Y")
+        time_str = current_time.strftime("%H:%M")
+        
+        # Create a temporal context string
+        temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
+        
         prompt = f"""
         Create a comprehensive action plan based on the user's profile and the analysis:
 
@@ -439,6 +515,10 @@ class CoTProcessor:
 
         ANALYSIS QUERIES USED:
         {', '.join(analysis_queries)}
+
+        TIME CONTEXT:
+        {temporal_context}
+        {temporal_info}
 
         Your task has two parts:
         
@@ -455,12 +535,14 @@ class CoTProcessor:
         - Relevant products, services, or solutions
         - Best practices for this type of user
         - Potential objections or concerns
+        - Specific date/time requirements if temporal references were detected
         
         PART 2: CREATE ACTION PLAN
         Based on this information, create a detailed action plan that addresses the user's needs and requirements.
         Focus on providing clear, actionable steps that will help the user achieve their goals.
         Each action should have a clear priority, reasoning, and expected outcome.
         Write all narrative sections in the same language style as the user's message.
+        If temporal references were detected, ensure the action plan explicitly addresses timing requirements.
 
         IMPORTANT: You MUST respond with a valid JSON object only. Do not include any other text or explanation.
         The JSON must follow this exact structure:
@@ -511,6 +593,11 @@ class CoTProcessor:
                     "analysis_query_count": len(analysis_queries),
                     "user_classification": user_profile.classification
                 }
+                
+                # Add temporal information to metadata if available
+                if "temporal_references" in user_profile.other_aspects:
+                    action_plan["metadata"]["temporal_references"] = user_profile.other_aspects.get("temporal_references", {})
+                
                 return action_plan
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse LLM action plan: {str(e)}")
@@ -575,6 +662,12 @@ class CoTProcessor:
         next_actions = action_plan.get("next_actions", [])
         knowledge_queries = action_plan.get("knowledge_queries", [])
         
+        # Extract resolved temporal references if available
+        temporal_references = {}
+        if "temporal_references" in user_profile.other_aspects:
+            temporal_references = user_profile.other_aspects.get("temporal_references", {})
+            logger.info(f"Including temporal references in response generation: {json.dumps(temporal_references, indent=2)}")
+        
         # Fetch additional knowledge if queries are provided
         additional_knowledge = ""
         if knowledge_queries:
@@ -594,11 +687,44 @@ class CoTProcessor:
             except Exception as e:
                 logger.error(f"Error fetching additional knowledge: {str(e)}")
 
+        # Include current date/time information for temporal context
+        from datetime import datetime
+        import pytz
+        
+        # Use Vietnam timezone by default (can be customized based on user preferences later)
+        vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        current_time = datetime.now(vietnam_tz)
+        date_str = current_time.strftime("%A, %B %d, %Y")
+        time_str = current_time.strftime("%H:%M")
+        
+        # Create a temporal context string
+        temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
+        
+        # Format temporal references for inclusion in the prompt if available
+        temporal_info = ""
+        if temporal_references:
+            original_mentions = temporal_references.get("original_mentions", [])
+            resolved_dates = temporal_references.get("resolved_dates", [])
+            resolved_times = temporal_references.get("resolved_times", [])
+            
+            temporal_info = "TEMPORAL REFERENCES:\n"
+            if original_mentions and resolved_dates:
+                for i, mention in enumerate(original_mentions):
+                    resolved_date = resolved_dates[i] if i < len(resolved_dates) else "unknown"
+                    resolved_time = resolved_times[i] if resolved_times and i < len(resolved_times) else ""
+                    
+                    if resolved_time:
+                        temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date} at {resolved_time}\n"
+                    else:
+                        temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
+        
         # Build prompt for LLM to generate response
         prompt = f"""Generate a concise, culturally appropriate response to this user based on:
 
         CURRENT MESSAGE: {message}
         CONVERSATION: {conversation_context}
+        TIME CONTEXT: {temporal_context}
+        {temporal_info if temporal_info else ""}
         ANALYSIS: {json.dumps(analysis_summary, indent=2) if analysis_summary else "N/A"}
         PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
         CONTEXT: Class={user_profile.classification}, Skills={', '.join(user_profile.skills)}, Needs={', '.join(user_profile.requirements)}
@@ -610,6 +736,7 @@ class CoTProcessor:
         3. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
         4. APPLY DOMAIN EXPERTISE - For any next_action, include specific details identified from the available sources
         5. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
+        6. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
 
         REQUIREMENTS:
         1. BE CONCISE - Keep response under 100 words
@@ -622,6 +749,7 @@ class CoTProcessor:
         8. MAINTAIN CONVERSATION FLOW - Reference prior exchanges when relevant
         9. BE NATURAL - Write as a human expert would, not as an AI assistant
         10. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
+        11. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
 
         LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
         """
@@ -635,7 +763,8 @@ class CoTProcessor:
                     "timestamp": datetime.now().isoformat(),
                     "user_id": user_profile.user_id,
                     "knowledge_queries_used": knowledge_queries,
-                    "additional_knowledge_found": bool(additional_knowledge)
+                    "additional_knowledge_found": bool(additional_knowledge),
+                    "temporal_references": temporal_references if temporal_references else None
                 }
             }
         except Exception as e:
