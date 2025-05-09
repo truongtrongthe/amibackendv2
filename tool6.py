@@ -876,6 +876,33 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
         # Handle string or other return types
         result_data = {}
         if isinstance(knowledge_data, str):
+            # Check if the knowledge_data contains vector representations
+            if knowledge_data and ("[" in knowledge_data and "]" in knowledge_data):
+                # Look for specific patterns indicating vector data
+                if any(pattern in knowledge_data for pattern in ["-0.", "0.", "1.", "2.", "..."]):
+                    # Filter out the vector data sections
+                    lines = knowledge_data.split("\n")
+                    filtered_lines = []
+                    skip_until_next_entry = False
+                    
+                    for line in lines:
+                        # If line contains vector data pattern, skip it
+                        if ("[" in line and "]" in line and 
+                            any(pattern in line for pattern in ["-0.", "0.", "1.", "2.", "..."])):
+                            skip_until_next_entry = True
+                            filtered_lines.append("Content unavailable (vector data)")
+                        # Reset skip flag when reaching entry separator
+                        elif "----" in line:
+                            skip_until_next_entry = False
+                            filtered_lines.append(line)
+                        # Include line if not in skip mode
+                        elif not skip_until_next_entry:
+                            filtered_lines.append(line)
+                    
+                    # Replace knowledge data with filtered version
+                    knowledge_data = "\n".join(filtered_lines)
+                    logger.info("Filtered out vector data from knowledge response")
+            
             try:
                 # Try to parse as JSON if it's a string that contains JSON
                 result_data = json.loads(knowledge_data)

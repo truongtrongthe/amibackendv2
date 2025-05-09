@@ -123,12 +123,57 @@ def prepare_knowledge(knowledge_entries: List[Dict[str, Any]], query: str, is_pr
         try:
             # Get raw text with fallback
             raw_text = entry.get("raw", "")
+            
+            # Check if raw text appears to be vector data or arrays of IDs
+            if raw_text and isinstance(raw_text, str):
+                # Filter out content that looks like vector data
+                if (raw_text.startswith("[") and "]" in raw_text and 
+                    ("..." in raw_text or 
+                     any(x in raw_text for x in ["-0.", "0.", "1.", "2."]) or
+                     "_tfl-user_" in raw_text)):  # Also filter arrays of IDs
+                    
+                    logger.warning(f"Raw content appears to be vector data or ID array, ignoring it: {raw_text[:50]}...")
+                    raw_text = ""
+            
             if not raw_text:
                 # Try to construct raw text from other fields
                 title = entry.get("title", "")
                 description = entry.get("description", "")
                 content = entry.get("content", "")
+                
+                # Check if these fields also contain vector data
+                fields_to_check = {"title": title, "description": description, "content": content}
+                for field_name, field_value in fields_to_check.items():
+                    if isinstance(field_value, str) and field_value.startswith("[") and "]" in field_value:
+                        if ("..." in field_value or 
+                            any(x in field_value for x in ["-0.", "0.", "1.", "2."]) or
+                            "_tfl-user_" in field_value):
+                            
+                            logger.warning(f"Field {field_name} contains vector data, clearing it: {field_value[:50]}...")
+                            if field_name == "title":
+                                title = "Untitled"
+                            elif field_name == "description":
+                                description = ""
+                            elif field_name == "content":
+                                content = ""
+                
+                # Try other fields if main ones contain vector data
+                if not (title.strip() or description.strip() or content.strip()):
+                    # Look through all fields for usable text content
+                    for key, value in entry.items():
+                        if key not in ["raw", "title", "description", "content", "id", "similarity", "query"] and isinstance(value, str):
+                            if not (value.startswith("[") and "]" in value and 
+                                   ("..." in value or any(x in value for x in ["-0.", "0.", "1.", "2."]))):
+                                if key == "data":
+                                    content = value
+                                else:
+                                    content += f"{key.capitalize()}: {value}\n"
+                
                 raw_text = f"{title}\n{description}\n{content}".strip()
+                
+                # If still no content, provide a fallback
+                if not raw_text:
+                    raw_text = f"No useful content available for query: {query}"
             
             # Calculate relevance score
             similarity = entry.get("similarity", 0.0)
@@ -154,6 +199,11 @@ def prepare_knowledge(knowledge_entries: List[Dict[str, Any]], query: str, is_pr
     formatted_output = []
     for i, (entry, score, raw_text) in enumerate(top_entries, 1):
         title = entry.get("title", "Untitled")
+        # Clean up title if it's a vector representation
+        if isinstance(title, str) and title.startswith("[") and "]" in title:
+            if "..." in title or any(x in title for x in ["-0.", "0.", "1.", "2."]):
+                title = "Untitled"
+                
         formatted_output.append(f"KNOWLEDGE ENTRY {i}:\nTitle: {title}\n\n{raw_text}\n----\n")
     
     return "\n".join(formatted_output)

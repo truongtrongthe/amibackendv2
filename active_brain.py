@@ -1068,24 +1068,69 @@ class ActiveBrain:
                     if norm > 0:
                         vector_data = vector_data / norm
                 
-                # Get metadata, ensuring it's a dictionary
+                # Get metadata, ensuring it's a dictionary with useful content
                 metadata_dict = {}
                 try:
                     if vector_id in self.metadata:
                         if isinstance(self.metadata[vector_id], dict):
                             metadata_dict = self.metadata[vector_id]
+                            
+                            # Check if raw field contains numpy array or list representation
+                            if "raw" in metadata_dict:
+                                raw_content = metadata_dict["raw"]
+                                if isinstance(raw_content, str):
+                                    # Filter out content that appears to be vector data or IDs arrays
+                                    if (raw_content.startswith("[") and "]" in raw_content and 
+                                        ("..." in raw_content or 
+                                         any(x in raw_content for x in ["-0.", "0.", "1.", "2."]))):
+                                        logger.warning(f"Raw content appears to be vector data, clearing it: {raw_content[:50]}...")
+                                        metadata_dict["raw"] = "No useful content available."
+                                
+                            # Add better fallback content
+                            if "raw" not in metadata_dict or not metadata_dict["raw"]:
+                                # Try to construct content from available fields
+                                content_fields = ["content", "text", "description", "title", "data"]
+                                constructed_content = []
+                                
+                                for field in content_fields:
+                                    if field in metadata_dict and metadata_dict[field]:
+                                        field_value = metadata_dict[field]
+                                        if isinstance(field_value, str):
+                                            if not field_value.startswith("[") or not "]" in field_value:
+                                                constructed_content.append(f"{field.capitalize()}: {field_value}")
+                                
+                                if constructed_content:
+                                    metadata_dict["raw"] = "\n".join(constructed_content)
+                                else:
+                                    metadata_dict["raw"] = "No content available."
+                                    
+                                # Add a note about the content source
+                                metadata_dict["content_note"] = "Content constructed from metadata fields."
+                                
                         else:
                             # If metadata is not a dictionary, convert it to a simple dict with a 'data' field
                             logger.warning(f"Metadata for vector {vector_id} is not a dictionary but {type(self.metadata[vector_id])}")
-                            metadata_dict = {"data": str(self.metadata[vector_id])}
+                            
+                            # Try to provide useful string representation
+                            if isinstance(self.metadata[vector_id], (list, np.ndarray)):
+                                metadata_dict = {
+                                    "vector_id": vector_id,
+                                    "raw": "No useful content available.",
+                                    "note": "Original metadata was vector data."
+                                }
+                            else:
+                                metadata_dict = {
+                                    "data": str(self.metadata[vector_id]),
+                                    "vector_id": vector_id
+                                }
                     else:
                         logger.warning(f"No metadata found for vector {vector_id}")
                         # Create minimal metadata
-                        metadata_dict = {"vector_id": vector_id}
+                        metadata_dict = {"vector_id": vector_id, "raw": "No metadata available."}
                 except Exception as metadata_error:
                     logger.warning(f"Error retrieving metadata for vector {vector_id}: {metadata_error}")
                     # Create minimal fallback metadata
-                    metadata_dict = {"vector_id": vector_id, "error": str(metadata_error)}
+                    metadata_dict = {"vector_id": vector_id, "error": str(metadata_error), "raw": "Error retrieving content."}
                 
                 # Add result with metadata dictionary
                 results.append((
