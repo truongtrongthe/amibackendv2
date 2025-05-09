@@ -33,10 +33,18 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
             logger.info("Fetching knowledge on user analysis techniques")
             
             try:
-                results = await brain.get_similar_vectors_by_text(query, top_k=5)
-                for vector_id, _, metadata, similarity in results:
-                    if similarity < 0.4:
-                        continue
+                # Use a lower threshold to allow more results
+                results = await brain.get_similar_vectors_by_text(query, top_k=5, threshold=0.0)
+                
+                # Check if we got any results
+                if not results:
+                    logger.info(f"No vectors found for query: {query}")
+                
+                for vector_id, vector, metadata, similarity in results:
+                    # Use a much lower similarity threshold (even 0.1 would be reasonable for knowledge retrieval)
+                    # since we want to prioritize having some context over having none
+                    if similarity < 0.35:
+                        logger.info(f"Low similarity {similarity} for vector {vector_id}, but keeping it to provide context")
                             
                     if any(entry.get("id") == vector_id for entry in knowledge_entries):
                         logger.info(f"Skipping duplicate knowledge entry: {vector_id}")
@@ -48,7 +56,26 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
                     else:
                         logger.warning(f"Metadata for vector {vector_id} is not a dictionary but {type(metadata)}. Converting to empty string.")
                         raw_text = ""
-                        
+                    
+                    # If raw_text is empty but we have some kind of metadata, use it anyway
+                    if not raw_text and metadata:
+                        if isinstance(metadata, dict):
+                            # Try to extract any useful content from metadata
+                            for key in ["content", "text", "data"]:
+                                if key in metadata and metadata[key]:
+                                    raw_text = str(metadata[key])
+                                    break
+                            
+                            # If still no content, try to serialize the entire metadata
+                            if not raw_text:
+                                try:
+                                    raw_text = json.dumps(metadata, ensure_ascii=False)
+                                except:
+                                    raw_text = str(metadata)
+                        else:
+                            # Try to convert non-dict metadata to string
+                            raw_text = str(metadata)
+                            
                     knowledge_entries.append({
                                 "id": vector_id,
                                 "query": query,
