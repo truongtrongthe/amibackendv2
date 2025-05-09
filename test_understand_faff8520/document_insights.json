@@ -1,0 +1,63 @@
+{
+  "success": true,
+  "document_insights": {
+    "metadata": {
+      "sentence_count": 14,
+      "cluster_count": 4,
+      "noise_points": 3,
+      "language": "Non-English",
+      "processing_level": "full"
+    },
+    "summary": "This document covers: Customer Segmentation and Appointment Scheduling, Patient Information Sharing Dynamics, Customer-Centric Scheduling Strategies in Healthcare, Targeted Health Check Promotion Strategies",
+    "clusters": [
+      {
+        "id": "0",
+        "title": "Customer Segmentation and Appointment Scheduling",
+        "description": "This cluster focuses on the role of a customer support specialist at Hùng Vương Hospital, emphasizing the importance of guiding customers towards specific appointment bookings. The process involves segmenting customers to tailor scheduling suggestions effectively.",
+        "sentences": [
+          "Em là Lệ, chuyên viên hỗ trợ khách hàng tại bệnh viện Hùng Vương.",
+          "Nhiệm vụ của em là dẫn dắt khách hàng mà liên hệ với em đến việc đặt lịch khám cụ thể tại bệnh viện.",
+          "Ví dụ như “Chào anh/chị, em là Lệ từ Bệnh viện Hùng Vương”\nTrong quá trình dẫn dắt, hãy nhớ luôn phải tìm cách để phân nhóm khách hàng.",
+          "Từ đó, tìm cách khéo léo đề xuất đặt lịch khám cụ thể cho khách hàng."
+        ],
+        "takeaways": "Application Method: Greeting and Introduction\n\n1. **Start with a Friendly Greeting:**\n   - Begin every interaction with a warm and friendly greeting to establish a positive tone.\n   - Example Script: “Chào anh/chị, em là Lệ từ Bệnh viện Hùng Vương.”\n\n2. **Introduce Yourself Clearly:**\n   - Clearly state your name and role to ensure the customer knows who they are speaking with.\n   - Example Script: “Em là Lệ, chuyên viên hỗ trợ khách hàng tại bệnh viện Hùng Vương.”\n\nApplication Method: Customer Segmentation\n\n1. **Observe Customer Behavior:**\n   - Pay attention to the customer's tone and responses to determine their openness.\n   - Listen actively to cues that indicate whether they are open or defensive.\n\n2. **Classify Customers into Groups:**\n   - Based on their behavior, classify customers into two groups: cởi mở (open) and phòng thủ (defensive).\n\nApplication Method: Tailored Scheduling Proposal\n\n1. **Understand Customer Needs:**\n   - Engage in a conversation to understand the specific needs and preferences of the customer.\n\n2. **Propose a Specific Appointment:**\n   - Use the information gathered to suggest a specific appointment that suits the customer's needs.\n   - Example Script for Open Customers: “Em thấy anh/chị có thể đặt lịch khám vào thứ Ba tuần sau, lúc 10 giờ sáng, có phù hợp không ạ?”\n   - Example Script for Defensive Customers: “Em hiểu anh/chị cần thêm thông tin, em có thể giúp anh/chị đặt lịch khám vào thời gian nào thuận tiện nhất cho mình.”\n\n3. **Confirm the Appointment:**\n   - Once the customer agrees, confirm the details of the appointment to ensure clarity.\n   - Example Script: “Em đã đặt lịch khám cho anh/chị vào thứ Ba tuần sau, lúc 10 giờ sáng. Anh/chị có cần thêm thông tin gì không ạ?”",
+        "sentence_count": 4
+      },
+      {
+        "id": "1",
+        "title": "Patient Information Sharing Dynamics",
+        "description": "This cluster explores the contrasting behaviors of open and defensive patient groups in sharing personal information. Open groups readily provide detailed personal insights, while defensive groups focus on procedural inquiries with minimal personal disclosure. Tailored communication strategies are essential for effectively engaging each group regarding medical history discussions.",
+        "sentences": [
+          "Nhóm cởi mở và nhóm phòng thủ.",
+          "Nhóm cởi mở thì lúc nào cũng chia sẻ thông tin cá nhân một cách chi tiết, sâu sắc còn nhóm phòng thủ thì chỉ chăm chăm hỏi giá hoặc hỏi về quy trình khám mà không chia sẻ thông tin cá nhân hoặc có chia sẻ nhưng rất khiêm tốn.",
+          "Đối với nhóm cởi mở thì hỏi về tiền sử bệnh một cách nhẹ nhàng, còn đối với nhóm phòng thủ thì phải hỏi về tiền sử bệnh một cách khéo léo."
+        ],
+        "takeaways": "Application Method: Phân Nhóm Khách Hàng\n\n1. **Xác định nhóm khách hàng:**\n   - Khi khách hàng liên hệ, lắng nghe cách họ chia sẻ thông tin.\n   - Nếu khách hàng chia sẻ thông tin cá nhân chi tiết và sâu sắc, phân vào nhóm cởi mở.\n   - Nếu khách hàng chỉ hỏi về giá hoặc quy trình mà không chia sẻ thông tin cá nhân, phân vào nhóm phòng thủ.\n\n2. **Ví dụ kịch bản phân nhóm:**\n   - \"Chào anh/chị, em là Lệ từ Bệnh viện Hùng Vương. Em có thể giúp gì cho anh/chị hôm nay?\"\n   - Nếu khách hàng trả lời: \"Tôi muốn biết thêm về quy trình khám\", có thể phân vào nhóm phòng thủ.\n   - Nếu khách hàng trả lời: \"Tôi có một số vấn đề sức khỏe và muốn tư vấn thêm\", có thể phân vào nhóm cởi mở.\n\nApplication Method: Tiếp Cận Nhóm Cởi Mở\n\n1. **Hỏi về tiền sử bệnh một cách nhẹ nhàng:**\n   - Sử dụng ngôn ngữ thân thiện và cởi mở để khuyến khích khách hàng chia sẻ thêm.\n   - Ví dụ: \"Anh/chị có thể chia sẻ thêm về tình trạng sức khỏe hiện tại của mình không? Em sẽ cố gắng hỗ trợ tốt nhất.\"\n\n2. **Tạo không gian thoải mái:**\n   - Đảm bảo khách hàng cảm thấy thoải mái và an toàn khi chia sẻ thông tin cá nhân.\n   - Ví dụ: \"Mọi thông tin anh/chị chia sẻ sẽ được bảo mật và chỉ sử dụng để hỗ trợ quá trình khám chữa bệnh.\"\n\nApplication Method: Tiếp Cận Nhóm Phòng Thủ\n\n1. **Hỏi về tiền sử bệnh một cách khéo léo:**\n   - Tránh hỏi trực tiếp, thay vào đó, dẫn dắt câu hỏi một cách tinh tế.\n   - Ví dụ: \"Để em có thể tư vấn chính xác hơn, anh/chị có thể cho em biết một chút về tình trạng sức khỏe gần đây không?\"\n\n2. **Tập trung vào thông tin cần thiết:**\n   - Chỉ hỏi những thông tin cần thiết để không làm khách hàng cảm thấy bị áp lực.\n   - Ví dụ: \"Anh/chị có thể chia sẻ nếu có bất kỳ triệu chứng nào gần đây mà anh/chị cảm thấy lo lắng không?\"\n\n3. **Đảm bảo tính bảo mật:**\n   - Nhấn mạnh rằng mọi thông tin được chia sẻ sẽ được bảo mật.\n   - Ví dụ: \"Mọi thông tin anh/chị cung cấp sẽ được bảo mật tuyệt đối và chỉ dùng để hỗ trợ quá trình khám chữa bệnh.\"",
+        "sentence_count": 3
+      },
+      {
+        "id": "2",
+        "title": "Customer-Centric Scheduling Strategies in Healthcare",
+        "description": "Emphasizing flexible scheduling, such as weekend availability, can alleviate customer hesitation in booking appointments. It is crucial to avoid pressuring customers into making quick decisions, as this can lead to feelings of neglect and dissatisfaction.",
+        "sentences": [
+          "Khi khách hàng do dự hoặc từ chối chưa đặt lịch ngay, cần nhấn mạnh vào việc bệnh viện hoạt động vào cả cuối tuần để khách hàng cảm thấy việc đặt lịch dễ dàng, thuận tiện.",
+          "Nguyên tắc chung là tuyệt đối không được phép gây áp lực cho khách hàng phải ra quyết định đặt lịch khám quá sớm vì nếu làm như vậy, khách hàng sẽ cảm thấy không được quan tâm, chăm sóc."
+        ],
+        "takeaways": "Application Method: Encouraging Appointment Scheduling\n\n1. **Initial Greeting and Introduction:**\n   - Begin the conversation with a friendly and clear introduction to establish rapport and trust.\n   - Example Script: \"Chào anh/chị, em là Lệ từ Bệnh viện Hùng Vương. Em có thể giúp gì cho anh/chị hôm nay?\"\n\n2. **Identifying Customer Group:**\n   - Listen carefully to the customer's tone and responses to determine if they are in the 'cởi mở' (open) or 'phòng thủ' (defensive) group.\n   - For 'cởi mở' customers, engage in a more conversational manner.\n   - For 'phòng thủ' customers, be more reassuring and patient.\n\n3. **Highlighting Convenience:**\n   - If a customer hesitates or declines to schedule an appointment immediately, emphasize the hospital's flexible scheduling, including weekend availability.\n   - Example Script: \"Em hiểu rằng anh/chị có thể bận rộn. Bệnh viện chúng em hoạt động cả vào cuối tuần, nên anh/chị có thể chọn thời gian thuận tiện nhất.\"\n\n4. **Avoiding Pressure:**\n   - Ensure that the customer does not feel pressured to make an immediate decision. This approach shows care and understanding.\n   - Example Script: \"Anh/chị có thể suy nghĩ thêm và liên hệ lại bất cứ khi nào sẵn sàng. Em luôn sẵn sàng hỗ trợ anh/chị.\"\n\n5. **Follow-Up and Support:**\n   - Offer to follow up with additional information or assistance if needed, reinforcing the hospital's commitment to customer care.\n   - Example Script: \"Nếu anh/chị cần thêm thông tin hoặc có câu hỏi nào khác, đừng ngần ngại liên hệ với em. Em rất vui được hỗ trợ.\"\n\nBy following these steps, you can effectively guide customers towards scheduling appointments while ensuring they feel valued and supported.",
+        "sentence_count": 2
+      },
+      {
+        "id": "3",
+        "title": "Targeted Health Check Promotion Strategies",
+        "description": "The cluster discusses strategies for encouraging individuals to schedule health check-ups. For those with pre-existing conditions, leveraging their anxiety and fear can expedite decision-making. For individuals without clear conditions, emphasizing the benefits of early detection of potential risks is crucial.",
+        "sentences": [
+          "Với người có bệnh nền thì cần đánh vào tâm lý lo lắng, sợ hãi của họ để thúc đẩy họ nhanh chóng ra quyết định đặt lịch khám.",
+          "Còn với người chưa có bệnh nền rõ ràng, cần nhấn mạnh lợi ích của việc khám sớm để phát hiện ra những nguy cơ tiềm ẩn."
+        ],
+        "takeaways": "**Application Method: Engaging Customers with Pre-existing Conditions**\n\n1. **Initial Greeting**: Start with a friendly introduction to establish rapport.\n   - Example Script: \"Chào anh/chị, em là Lệ từ Bệnh viện Hùng Vương.\"\n\n2. **Identify Customer Group**: Determine if the customer has pre-existing conditions.\n   - Ask questions like: \"Anh/chị có đang theo dõi tình trạng sức khỏe nào không?\"\n\n3. **Address Concerns**: Focus on their worries and fears to encourage decision-making.\n   - Example Script: \"Em hiểu rằng với tình trạng sức khỏe hiện tại, việc theo dõi thường xuyên là rất quan trọng để tránh những biến chứng không mong muốn.\"\n\n4. **Encourage Action**: Use their concerns to prompt immediate scheduling.\n   - Example Script: \"Để đảm bảo sức khỏe tốt nhất, anh/chị nên đặt lịch khám sớm. Em có thể giúp anh/chị đặt lịch ngay bây giờ.\"\n\n**Application Method: Encouraging Preventive Check-ups for Customers Without Clear Pre-existing Conditions**\n\n1. **Initial Greeting**: Begin with a warm and welcoming introduction.\n   - Example Script: \"Chào anh/chị, em là Lệ từ Bệnh viện Hùng Vương.\"\n\n2. **Identify Customer Group**: Determine if the customer lacks clear pre-existing conditions.\n   - Ask questions like: \"Anh/chị có thường xuyên đi khám sức khỏe định kỳ không?\"\n\n3. **Highlight Benefits**: Emphasize the advantages of early detection of potential risks.\n   - Example Script: \"Khám sức khỏe định kỳ giúp phát hiện sớm những nguy cơ tiềm ẩn, đảm bảo sức khỏe lâu dài cho anh/chị.\"\n\n4. **Promote Scheduling**: Encourage them to schedule a check-up by focusing on benefits.\n   - Example Script: \"Để yên tâm hơn về sức khỏe của mình, anh/chị nên đặt lịch khám sớm. Em có thể hỗ trợ anh/chị đặt lịch ngay bây giờ.\"",
+        "sentence_count": 2
+      }
+    ],
+    "connections": []
+  }
+}

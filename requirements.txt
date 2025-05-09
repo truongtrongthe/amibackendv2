@@ -27,3 +27,7 @@ nltk
 faiss-cpu
 faiss-gpu
 faiss
+matplotlib
+networkx
+tqdm
+tenacity

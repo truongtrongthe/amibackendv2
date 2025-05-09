@@ -1,0 +1,52 @@
+{
+  "success": true,
+  "document_insights": {
+    "metadata": {
+      "sentence_count": 9,
+      "cluster_count": 3,
+      "noise_points": 0,
+      "language": "Vietnamese",
+      "processing_level": "full"
+    },
+    "summary": "Hướng dẫn tư vấn khách hàng tại bệnh viện đa khoa",
+    "clusters": [
+      {
+        "id": "0",
+        "title": "Tiếp đón và giao tiếp ban đầu",
+        "description": "Cách chào hỏi và tạo thiện cảm với bệnh nhân.",
+        "sentences": [
+          "Chào mừng bạn đến với khoa tư vấn của Bệnh Viện Đa Khoa.",
+          "Khi tiếp nhận cuộc gọi, luôn bắt đầu bằng lời chào thân thiện và giới thiệu bản thân để xây dựng lòng tin với bệnh nhân.",
+          "Kỹ năng lắng nghe chủ động giúp nhân viên tư vấn hiểu rõ nhu cầu thực sự của bệnh nhân."
+        ],
+        "sentence_count": 3,
+        "takeaways": "Phong cách giao tiếp chuyên nghiệp và thân thiện là chìa khóa tạo thiện cảm."
+      },
+      {
+        "id": "1",
+        "title": "Nhận diện loại khách hàng",
+        "description": "Cách xác định kiểu bệnh nhân để điều chỉnh phương pháp tư vấn.",
+        "sentences": [
+          "Đối với bệnh nhân mới, cần chú ý cách họ chia sẻ thông tin. Có người sẵn sàng cung cấp chi tiết, có người lại dè dặt.",
+          "Bệnh nhân thuộc nhóm cởi mở thường dễ tiếp nhận thông tin và đặt lịch nhanh chóng.",
+          "Đối với bệnh nhân thuộc nhóm phòng thủ, cần kiên nhẫn và xây dựng lòng tin trước khi đề xuất lịch khám."
+        ],
+        "sentence_count": 3,
+        "takeaways": "Phân loại bệnh nhân thành nhóm cởi mở hoặc phòng thủ sẽ quyết định chiến lược tư vấn."
+      },
+      {
+        "id": "2",
+        "title": "Hướng dẫn đặt lịch khám",
+        "description": "Cách tư vấn để khách hàng quyết định đặt lịch theo nhu cầu.",
+        "sentences": [
+          "Với những bệnh nhân có tiền sử bệnh lý phức tạp, chúng ta nên tư vấn đặt lịch khám sớm để được bác sĩ theo dõi.",
+          "Lịch làm việc của bệnh viện linh hoạt cả ngày trong tuần, kể cả cuối tuần để thuận tiện cho bệnh nhân.",
+          "Tránh gây áp lực cho bệnh nhân khi quyết định đặt lịch khám, thay vào đó hãy cung cấp thông tin đầy đủ để họ tự quyết định."
+        ],
+        "sentence_count": 3,
+        "takeaways": "Cung cấp thông tin về lịch làm việc linh hoạt và tầm quan trọng của việc theo dõi bệnh là yếu tố thuyết phục."
+      }
+    ],
+    "connections": []
+  }
+}

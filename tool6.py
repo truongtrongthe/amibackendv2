@@ -183,7 +183,7 @@ class CoTProcessor:
             if thread_id:
                 emit_analysis_event(thread_id, {
                     "type": "analysis",
-                    "content": "Analysis knowledge found",
+                    "content": "Analysis knowledge found.Analyzing it and proposing an action plan.",
                     "complete": False,
                     "status": "knowledge_found",
                     "analysis_knowledge": analysis_knowledge
@@ -222,7 +222,7 @@ class CoTProcessor:
                 logger.info(f"  - Expected: {action.get('expected_outcome', 'No expected outcome specified')}")
             
             logger.info(f"Now I am executing the action plan for user {user_id} ...")
-            response = await self._execute_action_plan(user_profile, message)
+            response = await self._execute_action_plan(user_profile, message, conversation_context)
             logger.info(f"Now I have response: {response}")
             self.user_profiles[user_id] = user_profile
             logger.info(f"I have updated user profile!")
@@ -262,46 +262,44 @@ class CoTProcessor:
         # Get the knowledge context
         knowledge_context = self.profiling_skills.get("knowledge_context", "")
         
-        prompt = f"""
-        You are an AI assistant tasked with building a detailed user profile based on the provided knowledge context and user message.
-        Your task is to analyze the user's behavior, needs, and characteristics to create a comprehensive profile.
+        prompt = f"""Build a user profile from:
+                KNOWLEDGE: {knowledge_context}
+                USER: {message}
+                CONTEXT: {conversation_context}
 
-        KNOWLEDGE CONTEXT:
-        {knowledge_context}
+                Analyze the message using classification techniques from the knowledge context.
+                Match your language style to the user's message.
 
-        USER MESSAGE:
-        User ID: {user_id}
-        Message: {message}
-        Conversation Context: {conversation_context}
+                Key focus areas:
+                1. Apply classification techniques from knowledge context
+                2. Identify behavioral patterns and classification signals
+                3. Uncover hidden needs beyond stated requirements
+                4. Determine information gaps for better service
+                5. Plan next engagement steps
 
-        Based on the knowledge context, the conversation context and the user's message, analyze the user's message and create a detailed profile.
-        First, identify the classification techniques and criteria from the knowledge context.
-        Then, apply these techniques to classify the user and analyze their profile.
+                For ANALYSIS_QUERIES:
+                - Create 5-7 natural language queries for Pinecone vector search
+                - Include domain terms, user type, and specific needs
+                - Mix general approaches with specific details
+                - Add 1-2 queries in user's native language if appropriate
+                - Format as document titles/summaries (e.g., "Best approach for price-sensitive maternity patients")
 
-        Pay special attention to:
-        1. Classification techniques and criteria mentioned in the knowledge
-        2. Behavioral patterns that indicate specific classifications
-        3. Hidden needs and motivations
-        4. Required information for better service
-        5. Potential next steps for engagement
-
-        IMPORTANT: You MUST respond with a valid JSON object only. Do not include any other text or explanation.
-        The JSON must follow this exact structure:
-        {{
-            "classification": "string (extract classification from knowledge context)",
-            "skills": ["array of identified skills or capabilities"],
-            "requirements": ["array of specific requirements or needs"],
-            "analysis_queries": ["array of specific queries to gather more information"],
-            "other_aspects": {{
-                "behavioral_patterns": "detailed description of observed behavior",
-                "hidden_needs": "analysis of underlying needs",
-                "required_info": ["list of information needed"],
-                "next_steps": ["suggested next steps for engagement"],
-                "classification_criteria": "explanation of why this classification was chosen"
-            }},
-            "portrait_paragraph": "A detailed paragraph describing the user's profile, written in the same language style as the user's message. Include their classification, needs, and behavioral patterns in a natural, flowing narrative."
-        }}
-        """
+                RESPOND WITH JSON ONLY:
+                {{
+                    "classification": "string (from knowledge context)",
+                    "skills": ["identified skills/capabilities"],
+                    "requirements": ["specific needs/requirements"],
+                    "analysis_queries": ["vector search queries for Pinecone"],
+                    "other_aspects": {{
+                        "behavioral_patterns": "observed behavior description",
+                        "hidden_needs": "underlying needs analysis",
+                        "required_info": ["missing information we need from/about the user"],
+                        "next_steps": ["engagement steps"],
+                        "classification_criteria": "classification rationale"
+                    }},
+                    "portrait_paragraph": "Comprehensive profile narrative including classification, needs, and behavior."
+                }}
+                """
         
         try:
             response = await LLM.ainvoke(prompt)
@@ -400,6 +398,26 @@ class CoTProcessor:
             "rationale": f"Analyzed {len(knowledge_entries)} queries for user profile"
         }
 
+    async def _user_story(self, user_profile: UserProfileModel) -> str:
+        """Transform user profile into a compact narrative format."""
+        # Extract key elements
+        classification = user_profile.classification
+        skills = ', '.join(user_profile.skills) if user_profile.skills else 'None'
+        requirements = ', '.join(user_profile.requirements) if user_profile.requirements else 'None'
+        
+        # Extract other aspects
+        portrait = user_profile.other_aspects.get("portrait_paragraph", "")
+        behavioral = user_profile.other_aspects.get("behavioral_patterns", "")
+        hidden_needs = user_profile.other_aspects.get("hidden_needs", "")
+        criteria = user_profile.other_aspects.get("classification_criteria", "")
+        required_info = ', '.join(user_profile.other_aspects.get("required_info", [])) or "None"
+        next_steps = ', '.join(user_profile.other_aspects.get("next_steps", [])) or "None"
+        
+        # Construct compact narrative
+        return f"""This user is {classification} who {criteria}. {portrait} Their behavior shows {behavioral}, 
+        suggesting {hidden_needs} as underlying needs. With {skills} skills, they're looking to {requirements}. 
+        Missing information we still need: {required_info}. Next best steps: {next_steps}"""
+
     async def _decide_action_plan_with_llm(self, user_profile: UserProfileModel, analysis_knowledge: Dict[str, Any]) -> Dict[str, Any]:
         """Create action plan using LLM based on user profile and analysis knowledge."""
         
@@ -407,14 +425,14 @@ class CoTProcessor:
         knowledge_context = analysis_knowledge.get("knowledge_context", "")
         analysis_queries = analysis_knowledge.get("analysis_methods", [])
         
+        # Generate user story narrative
+        user_story = await self._user_story(user_profile)
+        
         prompt = f"""
-        Create a comprehensive action plan based on the user's profile and the knowledge gathered from analysis:
+        Create a comprehensive action plan based on the user's profile and the analysis:
 
-        USER PROFILE:
-        - Classification: {user_profile.classification}
-        - Skills: {', '.join(user_profile.skills)}
-        - Requirements: {', '.join(user_profile.requirements)}
-        - Other Aspects: {json.dumps(user_profile.other_aspects, indent=2)}
+        USER PROFILE NARRATIVE:
+        {user_story}
 
         ANALYSIS KNOWLEDGE:
         {knowledge_context}
@@ -422,13 +440,36 @@ class CoTProcessor:
         ANALYSIS QUERIES USED:
         {', '.join(analysis_queries)}
 
+        Your task has two parts:
+        
+        PART 1: IDENTIFY KNOWLEDGE GAPS
+        First, identify 3-5 specific knowledge queries we should run to get additional information before finalizing the action plan.
+        
+        Notice in the USER PROFILE NARRATIVE where it mentions "Missing information we still need: [...]" - these are specific information gaps about the user that we've identified as missing. Your knowledge queries should:
+        1. Prioritize finding information that can fill these specific gaps about the user
+        2. Focus on knowledge that would help us better understand or serve this user without having to ask them directly
+        3. Include queries that would retrieve helpful context, explanations, or approaches for addressing users with these information gaps
+        
+        Your queries should address:
+        - The user's specific situation or needs
+        - Relevant products, services, or solutions
+        - Best practices for this type of user
+        - Potential objections or concerns
+        
+        PART 2: CREATE ACTION PLAN
         Based on this information, create a detailed action plan that addresses the user's needs and requirements.
         Focus on providing clear, actionable steps that will help the user achieve their goals.
+        Each action should have a clear priority, reasoning, and expected outcome.
         Write all narrative sections in the same language style as the user's message.
 
         IMPORTANT: You MUST respond with a valid JSON object only. Do not include any other text or explanation.
         The JSON must follow this exact structure:
         {{
+            "knowledge_queries": [
+                "specific query 1 to get more information",
+                "specific query 2 to get more information",
+                "specific query 3 to get more information"
+            ],
             "next_actions": [
                 {{
                     "action": "string (specific action to take)",
@@ -475,6 +516,7 @@ class CoTProcessor:
                 logger.error(f"Failed to parse LLM action plan: {str(e)}")
                 logger.error(f"Raw content: {content}")
                 return {
+                    "knowledge_queries": [],
                     "next_actions": [],
                     "analysis_summary": {
                         "key_findings": [],
@@ -496,6 +538,7 @@ class CoTProcessor:
         except Exception as e:
             logger.error(f"Error in action plan: {str(e)}")
             return {
+                "knowledge_queries": [],
                 "next_actions": [],
                 "analysis_summary": {
                     "key_findings": [],
@@ -515,8 +558,9 @@ class CoTProcessor:
                 }
             }
 
-    async def _execute_action_plan(self, user_profile: UserProfileModel, message: str) -> Dict[str, Any]:
+    async def _execute_action_plan(self, user_profile: UserProfileModel, message: str, conversation_context: str = "") -> Dict[str, Any]:
         """Generate user-friendly response based on the action plan."""
+        logger.info("Executing action plan")
         
         if not user_profile.action_plan:
             return {
@@ -529,32 +573,57 @@ class CoTProcessor:
         analysis_summary = action_plan.get("analysis_summary", {})
         important_notes = action_plan.get("important_notes", {})
         next_actions = action_plan.get("next_actions", [])
+        knowledge_queries = action_plan.get("knowledge_queries", [])
+        
+        # Fetch additional knowledge if queries are provided
+        additional_knowledge = ""
+        if knowledge_queries:
+            logger.info(f"Fetching additional knowledge for {len(knowledge_queries)} queries")
+            try:
+                knowledge_results = []
+                for query in knowledge_queries[:3]:  # Limit to top 3 queries
+                    try:
+                        knowledge = await fetch_knowledge(query, self.graph_version_id)
+                        if knowledge:
+                            knowledge_results.append(f"Query: {query}\nResult: {knowledge}")
+                    except Exception as e:
+                        logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
+                
+                additional_knowledge = "\n\n".join(knowledge_results)
+                logger.info(f"Fetched additional knowledge: {len(additional_knowledge)} chars")
+            except Exception as e:
+                logger.error(f"Error fetching additional knowledge: {str(e)}")
 
         # Build prompt for LLM to generate response
-        prompt = f"""
-        Based on the following analysis and action plan, generate a helpful and friendly response to the user.
-        The response should be written in the same language style as the user's message.
+        prompt = f"""Generate a concise, culturally appropriate response to this user based on:
 
-        USER MESSAGE:
-        {message}
-        ANALYSIS SUMMARY:
-        {json.dumps(analysis_summary, indent=2)}
-        IMPORTANT NOTES:
-        {json.dumps(important_notes, indent=2)}
-        PLANNED ACTIONS:
-        {json.dumps(next_actions, indent=2)}
-        USER CONTEXT:
-        - Classification: {user_profile.classification}
-        - Skills: {', '.join(user_profile.skills)}
-        - Requirements: {', '.join(user_profile.requirements)}
-        Generate a natural, helpful response that:
-        1. Addresses the user's needs in their language style
-        2. Explains the planned actions clearly
-        3. Provides clear next steps
-        4. Maintains a friendly and supportive tone
-        5. Uses the same language (Vietnamese/English) as the user's message
+        CURRENT MESSAGE: {message}
+        CONVERSATION: {conversation_context}
+        ANALYSIS: {json.dumps(analysis_summary, indent=2) if analysis_summary else "N/A"}
+        PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
+        CONTEXT: Class={user_profile.classification}, Skills={', '.join(user_profile.skills)}, Needs={', '.join(user_profile.requirements)}
+        INFO: {additional_knowledge}
 
-        The response should be a single, well-structured paragraph that flows naturally.
+        EXECUTION STRATEGY:
+        1. EXTRACT KEY INFORMATION - Thoroughly examine all sources (conversation, knowledge, analysis) for data needed to execute the plan
+        2. IDENTIFY INFORMATION GAPS - If information needed for next_actions isn't available, acknowledge this fact
+        3. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
+        4. APPLY DOMAIN EXPERTISE - For any next_action, include specific details identified from the available sources
+        5. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
+
+        REQUIREMENTS:
+        1. BE CONCISE - Keep response under 100 words
+        2. APPLY CULTURAL INTELLIGENCE - Use culturally appropriate forms of address and relationship terms that reflect the user's language context
+        3. MATCH LANGUAGE SOPHISTICATION - Sound like a domain expert in their language
+        4. MAINTAIN TONE - Friendly but professional
+        5. PERSONALIZE - Address specific user needs without repeating their question
+        6. INCORPORATE KNOWLEDGE - Use additional info where relevant
+        7. PRIORITIZE CLARITY - Focus on next steps and solutions
+        8. MAINTAIN CONVERSATION FLOW - Reference prior exchanges when relevant
+        9. BE NATURAL - Write as a human expert would, not as an AI assistant
+        10. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
+
+        LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
         """
 
         try:
@@ -564,7 +633,9 @@ class CoTProcessor:
                 "message": response.content.strip(),
                 "metadata": {
                     "timestamp": datetime.now().isoformat(),
-                    "user_id": user_profile.user_id
+                    "user_id": user_profile.user_id,
+                    "knowledge_queries_used": knowledge_queries,
+                    "additional_knowledge_found": bool(additional_knowledge)
                 }
             }
         except Exception as e:
