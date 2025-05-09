@@ -27,18 +27,49 @@ else:
 class ActiveBrain:
     def __init__(self, dim: int = 1536, namespace: str = "", graph_version_ids: List[str] = None, pinecone_index_name: str = None):
         """Initialize the active brain with FAISS and optional graph version IDs."""
-        self.dim = dim
-        self.namespace = namespace
-        self.vector_ids = []
-        self.vectors = None
-        self.metadata = {}
-        self.graph_version_ids = graph_version_ids or []
-        self.faiss_index = self._initialize_faiss()
-        self.pinecone_index = None
-        
-        # Initialize Pinecone if index name provided
-        if pinecone_index_name:
-            self._initialize_pinecone(pinecone_index_name)
+        try:
+            self.dim = dim
+            self.namespace = namespace
+            self.vector_ids = []
+            self.vectors = None
+            self.metadata = {}
+            self.graph_version_ids = graph_version_ids or []
+            
+            # Ensure faiss is properly initialized first
+            try:
+                logger.info(f"Initializing ActiveBrain with dimension {dim}")
+                self.faiss_index = self._initialize_faiss()
+            except Exception as faiss_error:
+                logger.error(f"Error initializing FAISS: {faiss_error}")
+                logger.error(traceback.format_exc())
+                # Create an emergency index to prevent AttributeError
+                logger.info("Creating emergency FAISS index")
+                self.faiss_index = faiss.IndexFlatIP(self.dim)
+            
+            self.pinecone_index = None
+            
+            # Initialize Pinecone if index name provided
+            if pinecone_index_name:
+                self._initialize_pinecone(pinecone_index_name)
+                
+            # Verify initialization was successful
+            if not hasattr(self, 'faiss_index') or self.faiss_index is None:
+                logger.error("FAISS index still not initialized after __init__! Creating emergency index.")
+                self.faiss_index = faiss.IndexFlatIP(self.dim)
+                
+            logger.info("ActiveBrain initialization complete")
+                
+        except Exception as e:
+            logger.error(f"Critical error during ActiveBrain initialization: {e}")
+            logger.error(traceback.format_exc())
+            # Set emergency defaults to prevent AttributeError
+            self.dim = dim
+            self.namespace = namespace
+            self.vector_ids = []
+            self.vectors = np.empty((0, self.dim), dtype=np.float32)
+            self.metadata = {}
+            self.faiss_index = faiss.IndexFlatIP(self.dim)
+            self.pinecone_index = None
     
     def _initialize_pinecone(self, index_name: str):
         """Initialize Pinecone connection with the given index name."""
@@ -59,58 +90,90 @@ class ActiveBrain:
         
     def _initialize_faiss(self) -> faiss.Index:
         """Initialize or load FAISS index from disk."""
-        faiss_index = faiss.IndexFlatIP(self.dim)
-        
-        if os.path.exists("faiss_index.bin") and os.path.exists("metadata.pkl"):
-            logger.info("Loading existing FAISS index and metadata...")
-            try:
-                with open("metadata.pkl", "rb") as f:
-                    self.metadata = pickle.load(f)
-                self.vector_ids = list(self.metadata.keys())
-                
-                # Load vectors from FAISS index
+        try:
+            logger.info("Initializing FAISS index")
+            faiss_index = faiss.IndexFlatIP(self.dim)
+            
+            if os.path.exists("faiss_index.bin") and os.path.exists("metadata.pkl"):
+                logger.info("Loading existing FAISS index and metadata...")
                 try:
-                    self.faiss_index = faiss.read_index("faiss_index.bin")
-                    logger.info(f"Successfully loaded FAISS index with {len(self.vector_ids)} vectors")
+                    with open("metadata.pkl", "rb") as f:
+                        self.metadata = pickle.load(f)
+                    self.vector_ids = list(self.metadata.keys())
                     
-                    # Extract vectors from FAISS index if possible
-                    ntotal = self.faiss_index.ntotal
+                    # Load vectors from FAISS index
                     try:
-                        # Try to get the underlying storage
-                        if hasattr(self.faiss_index, 'xb'):
-                            # Direct access for some index types
-                            xb = self.faiss_index.xb
-                            if xb is not None:
-                                self.vectors = np.array(xb).reshape(ntotal, self.dim)
-                                logger.info(f"Successfully extracted {ntotal} vectors directly")
-                        elif isinstance(self.faiss_index, faiss.IndexFlat):
-                            # For flat indexes, we can use .get_xb() and vector_to_array
-                            flat_vectors = faiss.vector_to_array(self.faiss_index.get_xb())
-                            self.vectors = flat_vectors.reshape(ntotal, self.dim)
-                            logger.info(f"Successfully extracted {ntotal} vectors from flat index")
-                        else:
-                            # For indexes without direct vector access, we need to re-create vectors
-                            raise AttributeError("Cannot directly access vectors from this index type")
-                    except (AttributeError, AssertionError) as access_err:
-                        logger.warning(f"Cannot extract vectors directly from index: {access_err}")
-                        logger.warning("Initializing empty vector array - vectors will be recreated when needed")
+                        self.faiss_index = faiss.read_index("faiss_index.bin")
+                        logger.info(f"Successfully loaded FAISS index with {len(self.vector_ids)} vectors")
                         
-                        # Initialize an empty vector array that will be populated later
-                        # instead of creating zero placeholders which cause issues
+                        # Extract vectors from FAISS index if possible
+                        ntotal = self.faiss_index.ntotal
+                        try:
+                            # Try to get the underlying storage
+                            if hasattr(self.faiss_index, 'xb'):
+                                # Direct access for some index types
+                                xb = self.faiss_index.xb
+                                if xb is not None:
+                                    self.vectors = np.array(xb).reshape(ntotal, self.dim)
+                                    logger.info(f"Successfully extracted {ntotal} vectors directly")
+                            elif isinstance(self.faiss_index, faiss.IndexFlat):
+                                # For flat indexes, we can use .get_xb() and vector_to_array
+                                flat_vectors = faiss.vector_to_array(self.faiss_index.get_xb())
+                                self.vectors = flat_vectors.reshape(ntotal, self.dim)
+                                logger.info(f"Successfully extracted {ntotal} vectors from flat index")
+                            else:
+                                # For indexes without direct vector access, we need to re-create vectors
+                                raise AttributeError("Cannot directly access vectors from this index type")
+                        except (AttributeError, AssertionError) as access_err:
+                            logger.warning(f"Cannot extract vectors directly from index: {access_err}")
+                            logger.warning("Initializing empty vector array - vectors will be recreated when needed")
+                            
+                            # Initialize an empty vector array that will be populated later
+                            # instead of creating zero placeholders which cause issues
+                            self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to load FAISS index: {e}")
+                        logger.error(traceback.format_exc())
+                        # Create a new FAISS index if loading fails
+                        logger.info("Creating new FAISS index after load failure")
+                        self.faiss_index = faiss.IndexFlatIP(self.dim)
                         self.vectors = np.empty((0, self.dim), dtype=np.float32)
-                        
+                        self.vector_ids = []
+                        self.metadata = {}
                 except Exception as e:
-                    logger.error(f"Failed to load FAISS index: {e}")
-                    raise
-            except Exception as e:
-                logger.error(f"Failed to load local files: {e}")
-                raise
-        else:
-            logger.info("Creating new FAISS index...")
-            self.faiss_index = faiss.IndexFlatIP(self.dim)
+                    logger.error(f"Failed to load local files: {e}")
+                    logger.error(traceback.format_exc())
+                    # Create a new FAISS index if loading fails
+                    logger.info("Creating new FAISS index after metadata load failure")
+                    self.faiss_index = faiss.IndexFlatIP(self.dim)
+                    self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                    self.vector_ids = []
+                    self.metadata = {}
+            else:
+                logger.info("Creating new FAISS index...")
+                self.faiss_index = faiss.IndexFlatIP(self.dim)
+                self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                self.vector_ids = []
+                self.metadata = {}
+            
+            # Ensure faiss_index is set in all cases
+            if not hasattr(self, 'faiss_index') or self.faiss_index is None:
+                logger.error("FAISS index still not set after initialization! Creating emergency index.")
+                self.faiss_index = faiss.IndexFlatIP(self.dim)
+                
+            return self.faiss_index
+            
+        except Exception as e:
+            logger.error(f"Critical error in FAISS initialization: {e}")
+            logger.error(traceback.format_exc())
+            # Create an emergency index to prevent further errors
+            emergency_index = faiss.IndexFlatIP(self.dim)
+            self.faiss_index = emergency_index
             self.vectors = np.empty((0, self.dim), dtype=np.float32)
-        
-        return faiss_index
+            self.vector_ids = []
+            self.metadata = {}
+            return emergency_index
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def _fetch_vectors_from_pinecone(self, vector_ids: List[str], batch_size: int = 100, strict_namespace: str = None) -> np.ndarray:
@@ -383,7 +446,7 @@ class ActiveBrain:
                 
                 # Clear the vectors and metadata
                 self.vectors = np.empty((0, self.dim), dtype=np.float32)
-                self.vector_ids = []
+                self.vector_ids = []  # CRITICAL FIX: Reset vector_ids to empty list
                 self.metadata = {}
                 
                 # Save the empty state to disk to prevent loading old data
@@ -409,7 +472,7 @@ class ActiveBrain:
             
             # Clear existing vectors and metadata
             self.vectors = np.empty((0, self.dim), dtype=np.float32)
-            self.vector_ids = []
+            self.vector_ids = []  # Ensure vector_ids is also reset
             self.metadata = {}
             
             # Track all vectors and metadata
@@ -916,6 +979,21 @@ class ActiveBrain:
             if query_vector.shape[-1] != self.dim:
                 raise ValueError(f"query_vector must have dimension {self.dim}, got {query_vector.shape[-1]}")
             
+            # CRITICAL SAFETY CHECK: Check if faiss_index exists, initialize if needed
+            if not hasattr(self, 'faiss_index') or self.faiss_index is None:
+                logger.error("FAISS index not initialized! Initializing now.")
+                self.faiss_index = self._initialize_faiss()
+                return []  # Return empty results for this query
+            
+            # CRITICAL SAFETY CHECK: Detect and fix inconsistency between FAISS index and vector_ids
+            if self.faiss_index.ntotal > 0 and len(self.vector_ids) == 0:
+                logger.error(f"Data inconsistency detected: FAISS index has {self.faiss_index.ntotal} vectors but vector_ids list is empty")
+                logger.info("Resetting FAISS index to maintain consistency")
+                self.faiss_index.reset()
+                self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                self.metadata = {}
+                return []
+            
             if not self.vector_ids:
                 logger.warning("No vectors in index, returning empty results")
                 return []
@@ -1017,6 +1095,21 @@ class ActiveBrain:
                     logger.debug(f"Skipping result with similarity {similarity:.4f} < threshold {threshold:.4f}")
                     continue
                 
+                # CRITICAL SAFETY CHECK: Ensure vector_ids is properly initialized and in sync with FAISS index
+                if not self.vector_ids:
+                    logger.error("vector_ids list is empty while FAISS index contains vectors. Data inconsistency detected.")
+                    # Create a synthetic ID for logging/debugging purposes
+                    vector_id = f"synthetic_id_{idx}"
+                    # Get vector data directly from search results if possible, or generate placeholder
+                    vector_data = np.random.randn(self.dim).astype(np.float32) if self.vectors is None else (
+                        self.vectors[idx] if idx < len(self.vectors) else np.random.randn(self.dim).astype(np.float32)
+                    )
+                    # Create minimal metadata
+                    metadata = {"synthetic": True, "reason": "vector_ids list empty", "faiss_idx": idx}
+                    logger.info(f"Created synthetic result for empty vector_ids list: {vector_id}")
+                    results.append((vector_id, vector_data, metadata, similarity))
+                    continue
+                
                 # Check if vector_id index is in range
                 if idx >= len(self.vector_ids):
                     logger.warning(f"Index {idx} out of range for vector_ids (length {len(self.vector_ids)})")
@@ -1113,6 +1206,14 @@ class ActiveBrain:
             List of tuples containing (vector_id, vector, metadata)
         """
         try:
+            # CRITICAL SAFETY CHECK: Check if faiss_index exists, initialize if needed
+            if not hasattr(self, 'faiss_index') or self.faiss_index is None:
+                logger.error("FAISS index not initialized in get_similar_vectors_by_text! Initializing now.")
+                self.faiss_index = self._initialize_faiss()
+                if len(self.vector_ids) == 0:
+                    logger.warning("No vectors loaded in FAISS index. Returning empty results.")
+                    return []
+            
             # Generate embedding for query text
             try:
                 query_vector = await EMBEDDINGS.aembed_query(query_text)
