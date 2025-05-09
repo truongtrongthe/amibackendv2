@@ -11,6 +11,16 @@ from brain_singleton import get_brain, set_graph_version, is_brain_loaded, load_
 
 brain = get_brain()
 
+# Track the currently loaded graph version to avoid redundant reloading
+_current_loaded_version = None
+
+# Keep track of the last load time to prevent thrashing
+_last_load_time = 0
+MIN_LOAD_INTERVAL = 30  # seconds
+
+# Track load status to avoid duplicate loading
+_load_in_progress = False
+
 def extract_structured_data_from_raw(raw_text: str) -> Dict[str, Any]:
     """
     DEPRECATED: This function is kept for backward compatibility but no longer used in the main pipeline.
@@ -386,34 +396,79 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
             
         return fallback_content
 
-async def ensure_brain_loaded(graph_version_id: str = "") -> bool:
+async def ensure_brain_loaded(graph_version_id: str) -> bool:
     """
-    Ensure the brain is loaded and ready to use.
+    Ensure the brain is loaded with the correct graph version.
     
     Args:
-        graph_version_id: Optional graph version ID
+        graph_version_id: The graph version ID to load into the brain
         
     Returns:
-        True if brain is loaded successfully, False otherwise
+        bool: True if brain is loaded and ready, False otherwise
     """
+    global _current_loaded_version, _last_load_time, _load_in_progress
+    
+    # Skip loading if no graph_version_id provided
+    if not graph_version_id:
+        logger.warning("No graph version ID provided, cannot load brain")
+        return False
+    
     try:
-        # Set graph version if provided
-        if graph_version_id:
-            current = get_current_graph_version()
-            if current != graph_version_id:
-                set_graph_version(graph_version_id)
-                logger.info(f"Set graph version to {graph_version_id}")
+        # Avoid duplicate loading
+        if _load_in_progress:
+            logger.info(f"Brain loading already in progress, waiting for completion")
+            await asyncio.sleep(0.5)  # Brief sleep to allow other tasks to progress
+            return _current_loaded_version == graph_version_id
         
-        # Check if brain is already loaded
-        if is_brain_loaded():
+        # Get the currently loaded version from the brain
+        from brain_singleton import get_brain, get_current_graph_version
+        
+        # Get the current version from the brain
+        current_version = get_current_graph_version()
+        
+        # Check if we need to load a new version
+        if current_version == graph_version_id:
+            # Already loaded with the correct version
             return True
         
-        # Otherwise load the brain
-        await load_brain_vectors()
-        return is_brain_loaded()
+        # If we've loaded recently, wait to avoid thrashing
+        current_time = time.time()
+        if current_time - _last_load_time < MIN_LOAD_INTERVAL:
+            # If too recent, log but still proceed
+            load_age = current_time - _last_load_time
+            logger.info(f"Recent brain load ({load_age:.2f}s ago), proceeding but may be redundant")
         
+        # Mark loading as in progress
+        _load_in_progress = True
+        
+        try:
+            # Get the brain instance with this version
+            logger.info(f"Loading brain with graph version {graph_version_id}")
+            brain = await get_brain(graph_version_id)
+            
+            if brain is None:
+                logger.error("Failed to get brain instance")
+                return False
+            
+            # Update tracking variables
+            _current_loaded_version = graph_version_id
+            _last_load_time = time.time()
+            
+            # Wait a moment for loading to complete in the background
+            await asyncio.sleep(0.1)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading brain with graph version {graph_version_id}: {e}")
+            logger.error(traceback.format_exc())
+            return False
+        finally:
+            _load_in_progress = False
+            
     except Exception as e:
-        logger.error(f"Error ensuring brain loaded: {str(e)}")
+        logger.error(f"Unexpected error in ensure_brain_loaded: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 def detect_language(text: str) -> str:

@@ -1172,13 +1172,42 @@ class ActiveBrain:
             if not hasattr(self, 'faiss_index') or self.faiss_index is None:
                 logger.error("FAISS index not initialized in get_similar_vectors_by_text! Initializing now.")
                 self.faiss_index = self._initialize_faiss()
+                
+                # CRITICAL: Track if reinitializing caused a loss of vectors
+                if hasattr(self, 'vector_ids') and self.vector_ids and self.faiss_index.ntotal == 0:
+                    logger.error(f"CRITICAL ERROR: Lost {len(self.vector_ids)} vectors during reinitialization. FAISS index is empty.")
+                    # Try to re-add vectors to FAISS
+                    try:
+                        if hasattr(self, 'vectors') and self.vectors is not None and self.vectors.size > 0:
+                            logger.info(f"Attempting to re-add {len(self.vector_ids)} vectors to the newly initialized FAISS index")
+                            self.faiss_index.reset()
+                            # Create normalized copies for FAISS
+                            normalized_vectors = self.vectors.copy()
+                            faiss.normalize_L2(normalized_vectors)
+                            self.faiss_index.add(normalized_vectors)
+                            logger.info(f"Successfully re-added vectors to FAISS: {self.faiss_index.ntotal} vectors now available")
+                    except Exception as recovery_error:
+                        logger.error(f"Failed to recover vectors after reinitialization: {recovery_error}")
+                        logger.error(traceback.format_exc())
+                
                 if len(self.vector_ids) == 0:
                     logger.warning("No vectors loaded in FAISS index. Returning empty results.")
                     return []
             
+            # Log vector state for debugging
+            logger.info(f"Current state: FAISS index has {self.faiss_index.ntotal} vectors, vector_ids list has {len(self.vector_ids)} items")
+            
             # Generate embedding for query text
             try:
-                query_vector = await EMBEDDINGS.aembed_query(query_text)
+                # Get embedding - make sure to await if this is a coroutine
+                embed_result = EMBEDDINGS.aembed_query(query_text)
+                
+                # Handle coroutine case
+                if asyncio.iscoroutine(embed_result):
+                    query_vector = await embed_result
+                else:
+                    query_vector = embed_result
+                
             except AttributeError as attr_error:
                 # Handle the specific attribute errors we're targeting
                 if "'list' object has no attribute 'get'" in str(attr_error) or "'numpy.ndarray' object has no attribute 'get'" in str(attr_error):

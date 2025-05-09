@@ -7,11 +7,22 @@ import fcntl
 import pickle
 import faiss
 import json
+from typing import Optional, Union, Any
+from utilities import logger
+import traceback
 
 # Global brain instance - initially None
 _brain_instance = None
 # Flag to track if brain has been loaded with vectors
 _brain_loaded = False
+_brain_graph_version = None
+_brain_lock = asyncio.Lock()
+_last_reset_time = 0
+_reset_in_progress = False
+_pending_reset = False
+
+# Minimum time between resets (seconds) to prevent rapid resets
+MIN_RESET_INTERVAL = 30
 
 # Default configuration values
 _default_config = {
@@ -50,78 +61,193 @@ def init_brain(dim=1536, namespace="", graph_version_ids=None, pinecone_index_na
         )
     return _brain_instance
 
-def get_brain():
-    """Get the global brain instance. Initialize with defaults if not already initialized."""
-    global _brain_instance
-    if _brain_instance is None:
-        _brain_instance = ActiveBrain(
-            dim=_current_config["dim"], 
-            namespace=_current_config["namespace"],
-            graph_version_ids=_current_config["graph_version_ids"],
-            pinecone_index_name=_current_config["pinecone_index_name"]
-        )
-        
-        # Try to load from disk if available and not in active loading mode
-        if not hasattr(_current_config, "_skip_disk_load") or not _current_config["_skip_disk_load"]:
-            try_load_from_disk()
+# Initialize this at module level to avoid import errors
+def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
+    """
+    Synchronous version of get_brain for compatibility with non-async code
     
-    # Ensure metadata is always a dictionary
-    if hasattr(_brain_instance, 'metadata'):
-        if not isinstance(_brain_instance.metadata, dict):
-            print("Converting metadata from list to dictionary")
-            # Convert list to dictionary using vector_ids as keys if available
-            if hasattr(_brain_instance, 'vector_ids') and len(_brain_instance.vector_ids) == len(_brain_instance.metadata):
-                _brain_instance.metadata = dict(zip(_brain_instance.vector_ids, _brain_instance.metadata))
-            else:
-                # Fallback: create dictionary with numeric keys
-                _brain_instance.metadata = {str(i): meta for i, meta in enumerate(_brain_instance.metadata)}
-    else:
-        _brain_instance.metadata = {}
+    Args:
+        graph_version_id: Optional graph version ID to load
         
-    return _brain_instance
+    Returns:
+        ActiveBrain instance
+    """
+    global _brain_instance, _brain_graph_version, _pending_reset
+    
+    try:
+        # Import inside function to avoid circular imports
+        from active_brain import ActiveBrain
+        
+        # Create brain if it doesn't exist yet
+        if _brain_instance is None:
+            logger.info("Creating new brain instance (sync)")
+            _brain_instance = ActiveBrain(pinecone_index_name="9well")
+            _brain_graph_version = None
+        
+        # Check if we need to reset and load a specific graph version
+        if graph_version_id and _brain_graph_version != graph_version_id:
+            logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
+            logger.warning("Sync brain access can't properly load a specific version - use async version when possible")
+            _brain_graph_version = graph_version_id
+            
+        return _brain_instance
+    except Exception as e:
+        logger.error(f"Error getting brain (sync): {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+# Backwards compatibility alias - still needed for code that uses the original signature
+def get_brain() -> Any:
+    """
+    Backwards compatible function to get the brain
+    """
+    return get_brain_sync()
+
+async def get_brain(graph_version_id: Optional[str] = None) -> Any:
+    """
+    Get or create brain singleton instance (async version)
+    
+    If graph_version_id is provided, will verify that the brain is loaded with the correct graph version.
+    If not, will reset the brain and load the specified graph version.
+    
+    Args:
+        graph_version_id: Optional graph version ID to load
+        
+    Returns:
+        ActiveBrain instance
+    """
+    global _brain_instance, _brain_graph_version, _pending_reset
+    
+    try:
+        # Import inside function to avoid circular imports
+        from active_brain import ActiveBrain
+        
+        # Create brain if it doesn't exist yet
+        if _brain_instance is None:
+            logger.info("Creating new brain instance")
+            _brain_instance = ActiveBrain(pinecone_index_name="9well")
+            _brain_graph_version = None
+        
+        # Check if we need to reset and load a specific graph version
+        if graph_version_id and _brain_graph_version != graph_version_id:
+            logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
+            
+            # Only schedule a reset if one is not already in progress or pending
+            if not _pending_reset:
+                _pending_reset = True
+                
+                # Perform reset in background to not block the request
+                asyncio.create_task(reset_brain_and_load_version(graph_version_id))
+            else:
+                logger.info(f"Reset already pending, will load version {graph_version_id} when complete")
+            
+        return _brain_instance
+    except Exception as e:
+        logger.error(f"Error getting brain: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+async def reset_brain_and_load_version(graph_version_id: str):
+    """
+    Reset brain and load a specific graph version
+    
+    Args:
+        graph_version_id: Graph version ID to load
+    """
+    global _brain_instance, _brain_graph_version, _brain_lock, _last_reset_time, _reset_in_progress, _pending_reset
+    
+    # Prevent multiple resets from running concurrently
+    if _reset_in_progress:
+        logger.info(f"Reset already in progress, skipping redundant reset for version {graph_version_id}")
+        return
+    
+    try:
+        _reset_in_progress = True
+        _pending_reset = False
+        
+        # Check if we've reset recently to avoid thrashing
+        current_time = time.time()
+        if current_time - _last_reset_time < MIN_RESET_INTERVAL:
+            wait_time = MIN_RESET_INTERVAL - (current_time - _last_reset_time)
+            logger.info(f"Reset attempted too soon, waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+        
+        # Acquire lock to prevent concurrent modification
+        async with _brain_lock:
+            logger.info(f"Resetting brain instance (PID: {os.getpid()})")
+            
+            # Log existing state before reset
+            vector_count = 0
+            if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
+                vector_count = _brain_instance.faiss_index.ntotal
+                logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
+            
+            try:
+                # Set graph version
+                _brain_graph_version = graph_version_id
+                logger.info(f"Set graph version to {graph_version_id}")
+                
+                # Load vectors for this graph version
+                if _brain_instance:
+                    logger.info(f"Starting brain vector loading process [time: {time.time()}]")
+                    await _brain_instance.load_all_vectors_from_graph_version(graph_version_id)
+                    
+                    # Update last reset time
+                    _last_reset_time = time.time()
+                    
+                    # Verify vectors were loaded
+                    if hasattr(_brain_instance, 'faiss_index'):
+                        new_vector_count = _brain_instance.faiss_index.ntotal
+                        logger.info(f"Brain reset complete. FAISS index now has {new_vector_count} vectors")
+                        
+                        # If vectors were lost, log a warning
+                        if vector_count > 0 and new_vector_count == 0:
+                            logger.error(f"CRITICAL: Lost all vectors during reset! Previous: {vector_count}, Current: {new_vector_count}")
+                    
+                    logger.info("Brain instance reset complete")
+                else:
+                    logger.error("Cannot load vectors - brain instance is None")
+                    
+            except Exception as load_error:
+                logger.error(f"Error loading vectors: {load_error}")
+                logger.error(traceback.format_exc())
+    except Exception as e:
+        logger.error(f"Error during brain reset: {e}")
+        logger.error(traceback.format_exc())
+    finally:
+        _reset_in_progress = False
 
 def reset_brain():
-    """Reset the global brain instance to None and release any resources."""
-    global _brain_instance, _brain_loaded
+    """Synchronous function to reset the brain singleton"""
+    global _brain_instance, _brain_graph_version, _last_reset_time, _pending_reset
     
-    # Log the reset operation
-    print(f"Resetting brain instance (PID: {os.getpid()})")
-    
-    # If the brain instance exists, try to clean up any resources
-    if _brain_instance is not None:
-        try:
-            # If there's a FAISS index, make sure we don't leave it in a bad state
-            if hasattr(_brain_instance, 'faiss_index') and _brain_instance.faiss_index is not None:
-                try:
-                    print(f"Existing FAISS index has {_brain_instance.faiss_index.ntotal} vectors before reset")
-                except Exception as e:
-                    print(f"Error accessing FAISS index properties: {e}")
-            
-            # Explicitly release large data structures
-            if hasattr(_brain_instance, 'vectors') and _brain_instance.vectors is not None:
-                del _brain_instance.vectors
-            
-            if hasattr(_brain_instance, 'metadata') and _brain_instance.metadata is not None:
-                del _brain_instance.metadata
-            
-            if hasattr(_brain_instance, 'vector_ids') and _brain_instance.vector_ids is not None:
-                del _brain_instance.vector_ids
-            
-            # Try to explicitly release the FAISS index
-            if hasattr(_brain_instance, 'faiss_index') and _brain_instance.faiss_index is not None:
-                try:
-                    del _brain_instance.faiss_index
-                except Exception as e:
-                    print(f"Error releasing FAISS index: {e}")
-        except Exception as e:
-            print(f"Error during brain cleanup: {e}")
-            import traceback
-            print(traceback.format_exc())
-    
-    # Finally set the instance to None
-    _brain_instance = None
-    _brain_loaded = False
-    print("Brain instance reset complete")
+    try:
+        logger.info(f"Resetting brain instance (PID: {os.getpid()})")
+        
+        # Log existing state before reset
+        vector_count = 0
+        if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
+            vector_count = _brain_instance.faiss_index.ntotal
+            logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
+        
+        # Create a new brain instance
+        from active_brain import ActiveBrain
+        _brain_instance = ActiveBrain(pinecone_index_name="9well")
+        _brain_graph_version = None
+        _pending_reset = False
+        
+        # Update last reset time
+        _last_reset_time = time.time()
+        
+        logger.info("Brain instance reset complete")
+    except Exception as e:
+        logger.error(f"Error resetting brain: {e}")
+        logger.error(traceback.format_exc())
+
+def get_current_graph_version() -> Optional[str]:
+    """Get the current graph version ID"""
+    global _brain_graph_version
+    return _brain_graph_version
 
 def set_graph_version(graph_version_id):
     """

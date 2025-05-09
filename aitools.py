@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, Optional
 from langchain_openai import ChatOpenAI
 from utilities import logger
-from brain_singleton import get_brain
+from brain_singleton import get_brain_sync, get_brain
 import json
 import re
 import time
@@ -9,8 +9,8 @@ import asyncio
 import traceback
 from tool_helpers import ensure_brain_loaded
 
-# Access brain singleton
-brain = get_brain()
+# Get access to brain for the module scope - will be replaced when using it inside async functions
+brain = get_brain_sync()
 
 
 async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optional[Dict] = None) -> Dict:
@@ -27,6 +27,11 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
             logger.info(f"No graph version ID provided")
             return ""
         if await ensure_brain_loaded(graph_version_id):
+            # Get brain with the correct graph version - this is important for async operations
+            brain = await get_brain(graph_version_id)
+            if not brain:
+                logger.error("Failed to get brain instance")
+                return ""
         
             knowledge_entries = []
                 
@@ -84,6 +89,7 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
                             })
             except Exception as e:
                     logger.warning(f"Error retrieving knowledge: {query}, {str(e)}")
+                    logger.warning(traceback.format_exc())
              
         # Process knowledge entries
         if knowledge_entries:
