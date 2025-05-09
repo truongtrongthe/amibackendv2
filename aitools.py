@@ -41,8 +41,13 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
                     if any(entry.get("id") == vector_id for entry in knowledge_entries):
                         logger.info(f"Skipping duplicate knowledge entry: {vector_id}")
                         continue
-                            
-                    raw_text = metadata.get("raw", "")
+                    
+                    # Handle the case where metadata is a numpy.ndarray instead of a dictionary
+                    if isinstance(metadata, dict):
+                        raw_text = metadata.get("raw", "")
+                    else:
+                        logger.warning(f"Metadata for vector {vector_id} is not a dictionary but {type(metadata)}. Converting to empty string.")
+                        raw_text = ""
                         
                     knowledge_entries.append({
                                 "id": vector_id,
@@ -56,8 +61,7 @@ async def fetch_knowledge(query: str, graph_version_id: str = "", state: Optiona
         # Process knowledge entries
         if knowledge_entries:
             sorted_entries = sorted(knowledge_entries, key=lambda x: (-x.get("priority", 0), -x.get("similarity", 0)))
-            selected_entries = sorted_entries[:5]  # Take top 3 entries
-            #logger.info(f"Selected knowledge entries for profiling: {len(selected_entries)}")
+            selected_entries = sorted_entries[:5]  # Take top 5 entries
             
             knowledge_context = prepare_knowledge(
                 selected_entries,

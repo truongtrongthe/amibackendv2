@@ -52,7 +52,13 @@ class CoTProcessor:
     def __init__(self):
         self.user_profiles = TTLCache(maxsize=1000, ttl=3600)
         self.graph_version_id = get_current_graph_version() or str(uuid4())
-        self.profiling_skills = asyncio.run(self._load_profiling_skills())
+        # Initialize profiling_skills with empty dict, will be loaded asynchronously
+        self.profiling_skills = {"knowledge_context": "Loading...", "metadata": {}}
+
+    async def initialize(self):
+        """Initialize the processor asynchronously"""
+        self.profiling_skills = await self._load_profiling_skills()
+        return self
 
     async def _load_profiling_skills(self) -> Dict[str, Any]:
         """Load knowledge base concurrently using fetch_knowledge."""
@@ -137,6 +143,11 @@ class CoTProcessor:
         """
         logger.info(f"Processing message from user {user_id}")
         try:
+            # Ensure profiling skills are loaded
+            if "knowledge_context" in self.profiling_skills and self.profiling_skills["knowledge_context"] == "Loading...":
+                logger.info("Profiling skills not loaded yet, loading now...")
+                self.profiling_skills = await self._load_profiling_skills()
+            
             # Emit initial analysis event
             if thread_id:
                 emit_analysis_event(thread_id, {
@@ -420,9 +431,28 @@ class CoTProcessor:
                 # Use the query tool to fetch specific knowledge
                 knowledge = await fetch_knowledge(query, self.graph_version_id)
                 if knowledge:
+                    # Handle different types of knowledge data
+                    if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
+                        logger.warning(f"Error in knowledge for query '{query}': {knowledge.get('message', 'Unknown error')}")
+                        continue
+                    
+                    # Process the knowledge content based on its type
+                    knowledge_content = ""
+                    if isinstance(knowledge, str):
+                        knowledge_content = knowledge
+                    elif isinstance(knowledge, dict):
+                        if "content" in knowledge:
+                            knowledge_content = knowledge["content"]
+                        else:
+                            # Serialize the dictionary as a fallback
+                            knowledge_content = json.dumps(knowledge)
+                    else:
+                        # Convert to string as a last resort
+                        knowledge_content = str(knowledge)
+                    
                     knowledge_entries.append({
                         "query": query,
-                        "knowledge": knowledge
+                        "knowledge": knowledge_content
                     })
             except Exception as e:
                 logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
@@ -787,8 +817,16 @@ async def process_llm_with_tools(
         [f"{'AI' if msg['role'] == 'assistant' else 'User'}: {msg['content']}"
          for msg in conversation_history[-15:-1] if msg.get("role") and msg.get("content")]
     ) + f"\nUser: {user_message}\n"
-    cot_processor = state.get('cot_processor', CoTProcessor())
-    state['cot_processor'] = cot_processor
+    
+    # Get or create a CoTProcessor instance
+    if 'cot_processor' not in state:
+        cot_processor = CoTProcessor()
+        # Initialize properly
+        await cot_processor.initialize()
+        state['cot_processor'] = cot_processor
+    else:
+        cot_processor = state['cot_processor']
+    
     state['graph_version_id'] = graph_version_id
     
     try:
@@ -829,11 +867,53 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     logger.info(f"Querying knowledge: {query}")
     try:
         knowledge_data = await fetch_knowledge(query, graph_version_id)
+        
+        # Handle different return types from fetch_knowledge
+        if isinstance(knowledge_data, dict) and "status" in knowledge_data and knowledge_data["status"] == "error":
+            # If fetch_knowledge returned an error dictionary
+            return knowledge_data
+        
+        # Handle string or other return types
+        result_data = {}
+        if isinstance(knowledge_data, str):
+            try:
+                # Try to parse as JSON if it's a string that contains JSON
+                result_data = json.loads(knowledge_data)
+            except json.JSONDecodeError:
+                # If not valid JSON, use as raw text
+                result_data = {"content": knowledge_data}
+        else:
+            # If it's already a dict or other type, use directly
+            result_data = knowledge_data if isinstance(knowledge_data, dict) else {"content": str(knowledge_data)}
+        
         return {
             "status": "success",
             "message": f"Knowledge queried for {query}",
-            "data": json.loads(knowledge_data) if isinstance(knowledge_data, str) else knowledge_data
+            "data": result_data
         }
     except Exception as e:
         logger.error(f"Error fetching knowledge: {str(e)}")
         return {"status": "error", "message": f"Failed to fetch knowledge: {str(e)}"}
+
+async def test_vietnamese_greeting():
+    """Test function to run the Vietnamese greeting flow."""
+    logger.info("Testing Vietnamese greeting flow")
+    
+    # Create and initialize the processor properly
+    processor = CoTProcessor()
+    await processor.initialize()
+    logger.info("Processor initialized")
+    
+    # Simulate the message processing
+    result = await processor.process_incoming_message(
+        message="chào em",
+        conversation_context="This is a test conversation",
+        user_id="test_user_123"
+    )
+    
+    logger.info(f"Test completed with status: {result.get('status', 'unknown')}")
+    logger.info(f"Response message: {result.get('message', 'No message')[:100]}...")
+    
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(test_vietnamese_greeting())

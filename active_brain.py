@@ -997,194 +997,86 @@ class ActiveBrain:
             if not self.vector_ids:
                 logger.warning("No vectors in index, returning empty results")
                 return []
-
-            # Ensure we have vectors loaded
-            if self.vectors is None or len(self.vectors) == 0:
-                logger.warning("Vector data is not available, cannot return actual vectors")
-                # Initialize empty array if needed
-                if self.vectors is None:
-                    self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                
+            # Normalize query_vector
+            if len(query_vector.shape) == 1:
+                query_vector = query_vector.reshape(1, -1)
             
-            # If vectors are all zeros or near-zeros, generate test vectors for better search results
-            vectors_generated = self._generate_test_vectors_if_needed()
-            if vectors_generated:
-                logger.info("Using generated test vectors for similarity search")
-            
-            # Check if FAISS index is empty but we have vectors
-            if self.faiss_index.ntotal == 0 and len(self.vectors) > 0:
-                logger.warning("FAISS index is empty but vectors are available. Rebuilding index...")
-                # Reset and rebuild the index
-                self.faiss_index.reset()
-                vectors_to_add = self.vectors
-                # Make a copy to avoid modifying the original
-                vectors_copy = vectors_to_add.copy()
-                # Normalize vectors
-                faiss.normalize_L2(vectors_copy)
-                # Add to index
-                self.faiss_index.add(vectors_copy)
-                logger.info(f"Rebuilt FAISS index with {self.faiss_index.ntotal} vectors")
-            
-            # Track memory usage before search
-            mem_before = self.get_memory_usage()
-            
-            # Validate query vector (check for NaN or all zeros)
-            if np.isnan(query_vector).any():
-                logger.warning("Query vector contains NaN values, replacing with small random values")
-                # Replace NaN with small random values
-                nan_mask = np.isnan(query_vector)
-                np.random.seed(42)  # For reproducibility
-                query_vector[nan_mask] = np.random.randn(*query_vector[nan_mask].shape) * 0.01
-            
-            # Check for zero vector
-            if np.all(np.abs(query_vector).sum() < 0.001):
-                logger.warning("Query vector is all zeros, using random query vector instead")
-                np.random.seed(42)  # For reproducibility
-                query_vector = np.random.randn(self.dim).astype(np.float32)
-            
-            # Reshape and normalize query vector
-            query_vector = query_vector.reshape(1, -1).astype(np.float32)
+            # Normalize the vector
             faiss.normalize_L2(query_vector)
             
             # Adjust top_k if it's larger than the number of vectors
-            actual_top_k = min(top_k, self.faiss_index.ntotal)
+            actual_top_k = min(top_k, len(self.vector_ids))
             if actual_top_k < top_k:
                 logger.warning(f"Requested top_k={top_k} but only {actual_top_k} vectors available")
-                
-            if actual_top_k == 0:
-                logger.warning("No vectors in FAISS index, cannot perform search")
-                return []
             
             # Perform FAISS search
+            if actual_top_k == 0:
+                logger.warning("Skipping search because actual_top_k=0")
+                return []
+                
             distances, indices = self.faiss_index.search(query_vector, k=actual_top_k)
             
-            # Log the raw distances for debugging
-            logger.info(f"Raw FAISS distances: {distances[0]}")
+            # Log raw distances for debugging
+            logger.info(f"Raw FAISS distances: {distances}")
             
-            # Track memory usage after search
-            mem_after = self.get_memory_usage()
-            if mem_after - mem_before > 100:  # If memory increased by more than 100MB
-                logger.warning(f"Large memory increase during search: {mem_after - mem_before:.2f}MB")
-            
+            # Process search results
             results = []
-            # Track metrics for diagnostics
-            below_threshold_count = 0
-            invalid_index_count = 0
-            missing_metadata_count = 0
-            
-            # Temporarily lower the threshold if we're getting no results and this appears to be a test query
-            original_threshold = threshold
-            if len(indices[0]) > 0 and max(distances[0]) < threshold and threshold > 0:
-                logger.warning(f"All similarity scores below threshold {threshold}. Temporarily lowering threshold for this query.")
-                # Use the highest similarity we have as the new threshold, with a small buffer
-                threshold = max(0.0, max(distances[0]) - 0.05)
-                logger.info(f"Adjusted threshold to {threshold} for this query only")
             
             for i, idx in enumerate(indices[0]):
-                # Check if index is valid
-                if idx < 0:
+                if idx < 0 or idx >= len(self.vector_ids):
                     logger.warning(f"Invalid index {idx} returned by FAISS")
-                    invalid_index_count += 1
                     continue
+                    
+                distance = distances[0][i]
                 
-                # Calculate similarity score (convert distance to similarity)
-                similarity = float(distances[0][i])
+                # Convert distance to cosine similarity (FAISS uses L2 distance for normalized vectors)
+                # Similarity = 1 - distance/2
+                similarity = 1.0 - distance/2.0
                 
-                # Skip if below threshold, but log it
+                # Skip if below threshold
                 if similarity < threshold:
-                    below_threshold_count += 1
-                    logger.debug(f"Skipping result with similarity {similarity:.4f} < threshold {threshold:.4f}")
                     continue
-                
-                # CRITICAL SAFETY CHECK: Ensure vector_ids is properly initialized and in sync with FAISS index
-                if not self.vector_ids:
-                    logger.error("vector_ids list is empty while FAISS index contains vectors. Data inconsistency detected.")
-                    # Create a synthetic ID for logging/debugging purposes
-                    vector_id = f"synthetic_id_{idx}"
-                    # Get vector data directly from search results if possible, or generate placeholder
-                    vector_data = np.random.randn(self.dim).astype(np.float32) if self.vectors is None else (
-                        self.vectors[idx] if idx < len(self.vectors) else np.random.randn(self.dim).astype(np.float32)
-                    )
-                    # Create minimal metadata
-                    metadata = {"synthetic": True, "reason": "vector_ids list empty", "faiss_idx": idx}
-                    logger.info(f"Created synthetic result for empty vector_ids list: {vector_id}")
-                    results.append((vector_id, vector_data, metadata, similarity))
-                    continue
-                
-                # Check if vector_id index is in range
-                if idx >= len(self.vector_ids):
-                    logger.warning(f"Index {idx} out of range for vector_ids (length {len(self.vector_ids)})")
-                    invalid_index_count += 1
-                    continue
-                
+                    
+                # Get vector ID and data
                 vector_id = self.vector_ids[idx]
                 
-                # Check if we have metadata for this vector
-                if vector_id not in self.metadata:
-                    logger.warning(f"No metadata found for vector {vector_id}")
-                    missing_metadata_count += 1
+                try:
+                    vector_data = self.vectors[idx]
+                except Exception as vector_error:
+                    logger.warning(f"Vector data not available for index {idx}")
                     continue
                 
-                # Get vector data safely
-                vector_data = None
-                if idx < len(self.vectors):
-                    vector_data = self.vectors[idx]
-                    
-                    # Ensure vector is not all zeros 
-                    if np.all(np.abs(vector_data).sum() < 0.001):
-                        logger.warning(f"Vector {vector_id} has all zeros, generating random values")
-                        # Generate a random vector as placeholder
-                        np.random.seed(hash(vector_id) % 2**32)  # Deterministic seed based on ID
-                        vector_data = np.random.randn(self.dim).astype(np.float32)
-                        # Normalize the vector
-                        vector_data = vector_data / np.linalg.norm(vector_data)
-                else:
-                    logger.warning(f"Vector data not available for index {idx}")
-                    # Use a random vector as fallback
-                    np.random.seed(hash(str(idx)) % 2**32)  # Deterministic seed based on index
-                    vector_data = np.random.randn(self.dim).astype(np.float32)
-                    # Normalize the vector
-                    vector_data = vector_data / np.linalg.norm(vector_data)
+                # Get metadata, ensuring it's a dictionary
+                metadata_dict = {}
+                try:
+                    if vector_id in self.metadata:
+                        if isinstance(self.metadata[vector_id], dict):
+                            metadata_dict = self.metadata[vector_id]
+                        else:
+                            # If metadata is not a dictionary, convert it to a simple dict with a 'data' field
+                            logger.warning(f"Metadata for vector {vector_id} is not a dictionary but {type(self.metadata[vector_id])}")
+                            metadata_dict = {"data": str(self.metadata[vector_id])}
+                    else:
+                        logger.warning(f"No metadata found for vector {vector_id}")
+                except Exception as metadata_error:
+                    logger.warning(f"Error retrieving metadata for vector {vector_id}: {metadata_error}")
                 
+                # Add result with metadata dictionary
                 results.append((
                     vector_id,
                     vector_data,
-                    self.metadata[vector_id],
+                    metadata_dict,  # Ensure this is always a dict
                     similarity
                 ))
-            
-            # Log summary statistics
-            if not results:
-                logger.warning(f"No valid results found in FAISS search. Statistics: {below_threshold_count} below threshold, {invalid_index_count} invalid indices, {missing_metadata_count} missing metadata")
                 
-                # If this is a test query (threshold was adjusted) and we still have no results,
-                # try to return the best match regardless of threshold
-                if threshold != original_threshold and len(indices[0]) > 0:
-                    logger.info("Test query detected - returning best match regardless of threshold")
-                    best_idx = indices[0][0]  # The best match index
-                    
-                    if 0 <= best_idx < len(self.vector_ids):
-                        vector_id = self.vector_ids[best_idx]
-                        
-                        if vector_id in self.metadata and best_idx < len(self.vectors):
-                            vector_data = self.vectors[best_idx]
-                            
-                            # Ensure vector is not all zeros
-                            if np.all(np.abs(vector_data).sum() < 0.001):
-                                np.random.seed(hash(vector_id) % 2**32)
-                                vector_data = np.random.randn(self.dim).astype(np.float32)
-                                vector_data = vector_data / np.linalg.norm(vector_data)
-                            
-                            similarity = float(distances[0][0])
-                            logger.info(f"Returning best match with similarity {similarity:.4f}")
-                            
-                            results.append((
-                                vector_id,
-                                vector_data,
-                                self.metadata[vector_id],
-                                similarity
-                            ))
-            else:
-                logger.info(f"Found {len(results)} valid matches. Top similarity: {results[0][3]:.4f}")
+            # Sort by similarity (highest first)
+            results.sort(key=lambda x: x[3], reverse=True)
+            
+            # Log result count
+            valid_matches = len(results)
+            top_similarity = results[0][3] if valid_matches > 0 else 0
+            logger.info(f"Found {valid_matches} valid matches. Top similarity: {top_similarity:.4f}")
             
             return results
             
