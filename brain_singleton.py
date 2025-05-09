@@ -18,7 +18,7 @@ _default_config = {
     "dim": 1536,
     "namespace": "",
     "graph_version_ids": [],
-    "pinecone_index_name": "futurehome",  # Default index name
+    "pinecone_index_name": "9well",  # Default index name
     "_skip_disk_load": False
 }
 
