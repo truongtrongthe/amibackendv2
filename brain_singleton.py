@@ -190,7 +190,13 @@ async def reset_brain_and_load_version(graph_version_id: str):
                 # Load vectors for this graph version
                 if _brain_instance:
                     logger.info(f"Starting brain vector loading process [time: {time.time()}]")
-                    await _brain_instance.load_all_vectors_from_graph_version(graph_version_id)
+                    
+                    # Check if the load_all_vectors_from_graph_version method returns a coroutine
+                    load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id)
+                    
+                    # Await the result if it's a coroutine
+                    if asyncio.iscoroutine(load_result):
+                        await load_result
                     
                     # Update last reset time
                     _last_reset_time = time.time()
@@ -516,6 +522,7 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
     global _brain_instance, _brain_loaded, _current_config
     import time
     import numpy as np
+    import asyncio
     
     start_time = time.time()
     
@@ -655,8 +662,10 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
     # Set _brain_loaded to False to avoid using cached data
     _brain_loaded = False
     
-    # Ensure brain instance exists
-    brain = get_brain()
+    # Ensure brain instance exists - CRITICAL FIX: Await the coroutine from get_brain()
+    brain_coroutine = get_brain()
+    brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    
     if brain is None:
         print("Failed to initialize brain instance")
         # Remove disk load skip flag
@@ -678,7 +687,15 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
         try:
             import asyncio
             # Set a reasonable timeout for loading (5 minutes)
-            load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version))
+            # CRITICAL FIX: Ensure we're calling the method on the brain instance, not on a coroutine
+            if asyncio.iscoroutine(brain.load_all_vectors_from_graph_version):
+                # This shouldn't happen if get_brain() was properly awaited above
+                print("WARNING: brain.load_all_vectors_from_graph_version is a coroutine - this indicates an error")
+                load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version))
+            else:
+                # Normal case - the method returns a coroutine which we then create a task from
+                load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version))
+                
             await asyncio.wait_for(load_task, timeout=300)  # 5 minute timeout
         except asyncio.TimeoutError:
             print("Vector loading timed out after 5 minutes")
@@ -878,7 +895,11 @@ async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
         set_graph_version(graph_version_id)
     
     # Get the brain instance
-    brain = get_brain()
+    brain_coroutine = get_brain()
+    
+    # Properly handle coroutines - check and await if needed
+    import asyncio
+    brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
     
     # Ensure brain is loaded before querying
     if not is_brain_loaded() or not hasattr(brain, 'faiss_index') or (hasattr(brain, 'faiss_index') and brain.faiss_index.ntotal == 0):
@@ -893,7 +914,11 @@ async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
     
     # Now perform the query
     try:
-        results = await brain.get_similar_vectors_by_text(input_text, top_k=10)
+        # Check if the method returns a coroutine
+        result_or_coroutine = brain.get_similar_vectors_by_text(input_text, top_k=10)
+        
+        # Handle coroutine if necessary
+        results = await result_or_coroutine if asyncio.iscoroutine(result_or_coroutine) else result_or_coroutine
         
         # Convert results to a serializable format
         formatted_results = []
@@ -945,7 +970,9 @@ async def activate_brain_with_version(graph_version_id):
     
     if success:
         # Get updated brain instance
-        brain = get_brain()
+        import asyncio
+        brain_coroutine = get_brain()
+        brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
         
         # Return stats for verification
         return {

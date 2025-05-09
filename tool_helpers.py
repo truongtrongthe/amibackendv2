@@ -420,9 +420,6 @@ async def ensure_brain_loaded(graph_version_id: str) -> bool:
             await asyncio.sleep(0.5)  # Brief sleep to allow other tasks to progress
             return _current_loaded_version == graph_version_id
         
-        # Get the currently loaded version from the brain
-        from brain_singleton import get_brain, get_current_graph_version
-        
         # Get the current version from the brain
         current_version = get_current_graph_version()
         
@@ -444,7 +441,10 @@ async def ensure_brain_loaded(graph_version_id: str) -> bool:
         try:
             # Get the brain instance with this version
             logger.info(f"Loading brain with graph version {graph_version_id}")
-            brain = await get_brain(graph_version_id)
+            brain_coroutine = get_brain(graph_version_id)
+            
+            # FIX: Check if the result is a coroutine and await it if needed
+            brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
             
             if brain is None:
                 logger.error("Failed to get brain instance")
