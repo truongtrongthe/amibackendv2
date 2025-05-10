@@ -37,7 +37,7 @@ class UserProfileModel(BaseModel):
     skills: List[str] = Field(default_factory=list)
     requirements: List[str] = Field(default_factory=list)
     classification: str = "unknown"
-    business_goal_query: str = ""
+    business_goal: str = ""
     other_aspects: Dict[str, Any] = Field(default_factory=dict)
     analysis_summary: Dict[str, Any] = Field(default_factory=lambda: {
         "key_findings": [],
@@ -55,10 +55,12 @@ class CoTProcessor:
         self.graph_version_id = get_current_graph_version() or str(uuid4())
         # Initialize profiling_skills with empty dict, will be loaded asynchronously
         self.profiling_skills = {"knowledge_context": "Loading...", "metadata": {}}
+        self.ai_business_objectives = {"knowledge_context": "Loading...", "metadata": {}}
 
     async def initialize(self):
         """Initialize the processor asynchronously"""
         self.profiling_skills = await self._load_profiling_skills()
+        self.ai_business_objectives = await self._load_business_objectives_awareness()
         return self
 
     async def _load_profiling_skills(self) -> Dict[str, Any]:
@@ -91,6 +93,33 @@ class CoTProcessor:
                     except json.JSONDecodeError:
                         profiling_skills[query] = {"content": result}
             return self._process_profiling_skills(profiling_skills)
+        except Exception as e:
+            logger.error(f"Error loading profiling skills: {str(e)}")
+            return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
+        
+    async def _load_business_objectives_awareness(self) -> Dict[str, Any]:
+        """Load knowledge base concurrently using fetch_knowledge."""
+        logger.info("Loading knowledge base")
+        queries = [
+            "Mục tiêu cuộc thảo luận với khách hàng"
+        ]
+        
+        try:
+            results = await asyncio.gather(
+                *[fetch_knowledge(query, self.graph_version_id) for query in queries],
+                return_exceptions=True
+            )
+            business_objectives = {}
+            for query, result in zip(queries, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error fetching knowledge for query {query}: {str(result)}")
+                    business_objectives[query] = {}
+                else:
+                    try:
+                        business_objectives[query] = json.loads(result) if isinstance(result, str) else result
+                    except json.JSONDecodeError:
+                        business_objectives[query] = {"content": result}
+            return self._process_business_objectives_knowledge(business_objectives)
         except Exception as e:
             logger.error(f"Error loading profiling skills: {str(e)}")
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
@@ -132,6 +161,48 @@ class CoTProcessor:
             "knowledge_context": full_knowledge,
             "metadata": {
                 "source_queries": list(profiling_skills.keys()),
+                "entry_count": len(cleaned_context),
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+    
+    def _process_business_objectives_knowledge(self, business_objectives: Dict[str, Any]) -> Dict[str, Any]:
+        """Structure the fetched knowledge."""
+        # Extract and combine all knowledge entries
+        knowledge_context = []
+        
+        for query, knowledge in business_objectives.items():
+            if isinstance(knowledge, dict):
+                # If it's already a dict, use it directly
+                if "content" in knowledge:
+                    knowledge_context.append(knowledge["content"])
+            elif isinstance(knowledge, str):
+                # If it's a string, try to parse it
+                try:
+                    parsed = json.loads(knowledge)
+                    if isinstance(parsed, dict) and "content" in parsed:
+                        knowledge_context.append(parsed["content"])
+                except json.JSONDecodeError:
+                    # If not JSON, use the string directly
+                    knowledge_context.append(knowledge)
+
+        # Clean up the knowledge context
+        cleaned_context = []
+        for entry in knowledge_context:
+            # Remove excessive newlines and spaces
+            cleaned = re.sub(r'\n{3,}', '\n\n', entry)
+            cleaned = re.sub(r' +', ' ', cleaned)
+            cleaned = cleaned.strip()
+            if cleaned:
+                cleaned_context.append(cleaned)
+
+        # Combine all knowledge into a single context
+        full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
+        
+        return {
+            "knowledge_context": full_knowledge,
+            "metadata": {
+                "source_queries": list(business_objectives.keys()),
                 "entry_count": len(cleaned_context),
                 "timestamp": datetime.now().isoformat()
             }
@@ -274,6 +345,7 @@ class CoTProcessor:
         
         # Get the knowledge context
         knowledge_context = self.profiling_skills.get("knowledge_context", "")
+        business_objectives = self.ai_business_objectives.get("knowledge_context", "")
         
         # Add temporal context for resolving relative time references
         vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -313,6 +385,7 @@ class CoTProcessor:
                 USER: {message}
                 CONTEXT: {conversation_context}
                 TIME CONTEXT: {temporal_context}
+                BUSINESS OBJECTIVES: {business_objectives}
 
                 Analyze the message using classification techniques from the knowledge context.
                 Match your language style to the user's message.
@@ -332,7 +405,7 @@ class CoTProcessor:
                 3. Uncover hidden needs beyond stated requirements
                 4. Determine information gaps for better service
                 5. Plan next engagement steps
-                6. Generate a business goal query to understand what business objectives we should aim for with this user
+                6. Pay attention to BUSINESS OBJECTIVES, set a business objectives for this user
                 {f"7. Resolve any temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
                 For ANALYSIS_QUERIES:
@@ -342,11 +415,9 @@ class CoTProcessor:
                 - Add 1-2 queries in user's native language if appropriate
                 - Format as document titles/summaries (e.g., "Best approach for price-sensitive maternity patients")
 
-                For BUSINESS_GOAL_QUERY:
-                - Create a specific query to find business objectives for this type of user
-                - Consider user's classification, needs, and behavior
-                - Focus on finding relevant business goals and success metrics
-                - Query should help identify what business outcomes we should aim for
+                For BUSINESS_GOAL:
+                - Pay attention to BUSINESS OBJECTIVES, set a business objectives for this user
+                - Business objectives should be specific, measurable, achievable, relevant
 
                 RESPOND WITH JSON ONLY:
                 {{
@@ -354,7 +425,7 @@ class CoTProcessor:
                     "skills": ["identified skills/capabilities"],
                     "requirements": ["specific needs/requirements"],
                     "analysis_queries": ["vector search queries for Pinecone"],
-                    "business_goal_query": "string (query to find relevant business objectives)",
+                    "business_goal": "string (business objectives for this user)",
                     "other_aspects": {{
                         "behavioral_patterns": "observed behavior description",
                         "hidden_needs": "underlying needs analysis",
@@ -387,7 +458,7 @@ class CoTProcessor:
                     "skills": [],
                     "requirements": [],
                     "analysis_queries": [],
-                    "business_goal_query": "How to identify business objectives for unknown user type",
+                    "business_goal": "Keep user stayed engaged",
                     "other_aspects": {
                         "error": "Failed to parse LLM response",
                         "raw_content": content[:100] + "..." if len(content) > 100 else content
@@ -405,7 +476,7 @@ class CoTProcessor:
                 requirements=llm_response.get("requirements", []),
                 classification=llm_response.get("classification", "unknown"),
                 analysis_queries=llm_response.get("analysis_queries", []),
-                business_goal_query=llm_response.get("business_goal_query", ""),
+                business_goal=llm_response.get("business_goal", ""),
                 other_aspects={
                     **llm_response.get("other_aspects", {}),
                     "portrait_paragraph": portrait_paragraph
@@ -505,36 +576,19 @@ class CoTProcessor:
         criteria = user_profile.other_aspects.get("classification_criteria", "")
         required_info = ', '.join(user_profile.other_aspects.get("required_info", [])) or "None"
         next_steps = ', '.join(user_profile.other_aspects.get("next_steps", [])) or "None"
+        business_goal = user_profile.business_goal
         
         # Construct compact narrative
         return f"""This user is {classification} who {criteria}. {portrait} Their behavior shows {behavioral}, 
         suggesting {hidden_needs} as underlying needs. With {skills} skills, they're looking to {requirements}. 
-        Missing information we still need: {required_info}. Next best steps: {next_steps}"""
+        Missing information we still need: {required_info}. Next best steps: {next_steps}. AI business goal: {business_goal}"""
 
     async def _decide_action_plan_with_llm(self, user_profile: UserProfileModel, analysis_knowledge: Dict[str, Any]) -> Dict[str, Any]:
         """Create action plan using LLM based on user profile and analysis knowledge."""
         
-        # Extract knowledge context from analysis
-        knowledge_context = analysis_knowledge.get("knowledge_context", "")
-        analysis_queries = analysis_knowledge.get("analysis_methods", [])
-        
-        # Generate user story narrative
+        # Get the user story
         user_story = await self._user_story(user_profile)
         logger.info(f"USER STORY: {user_story}")
-        
-        # Get business goal query from user profile
-        business_goal_query = user_profile.business_goal_query
-        
-        # Fetch business goal knowledge
-        business_goal_knowledge = ""
-        if business_goal_query:
-            try:
-                business_goal_knowledge = await fetch_knowledge(business_goal_query, self.graph_version_id)
-                if isinstance(business_goal_knowledge, dict):
-                    business_goal_knowledge = business_goal_knowledge.get("content", "")
-                logger.info(f"Fetched business goal knowledge: {business_goal_knowledge[:100]}...")
-            except Exception as e:
-                logger.error(f"Error fetching business goal knowledge: {str(e)}")
         
         # Extract temporal references if available
         temporal_info = ""
@@ -577,17 +631,14 @@ class CoTProcessor:
         {user_story}
 
         ANALYSIS KNOWLEDGE:
-        {knowledge_context}
+        {analysis_knowledge.get('knowledge_context', '')}
 
         ANALYSIS QUERIES USED:
-        {', '.join(analysis_queries)}
+        {', '.join(analysis_knowledge.get('analysis_methods', []))}
 
         TIME CONTEXT:
         {temporal_context}
         {temporal_info}
-
-        BUSINESS GOAL KNOWLEDGE:
-        {business_goal_knowledge}
 
         LANGUAGE REQUIREMENTS:
         1. STRICTLY use the SAME LANGUAGE as the user's message
@@ -598,19 +649,22 @@ class CoTProcessor:
         6. Use natural expressions and terminology from the user's language
         7. Follow cultural communication patterns of the user's language
 
+        YOUR GOAL:
+        The business goal identified in the USER PROFILE NARRATIVE is YOUR goal for this interaction. Every action you plan must contribute to achieving this goal.
+
         Your task has two parts:
         
         PART 1: CREATE ACTION PLAN
-        First, create a detailed action plan that addresses the user's needs and requirements while aligning with the business goal.
+        First, create a detailed action plan that addresses the user's needs and requirements while ensuring it contributes to achieving YOUR goal identified in the USER PROFILE NARRATIVE.
         
         IMPORTANT: You MUST incorporate the "Next best steps" identified in the USER PROFILE NARRATIVE into your action plan. These steps were specifically identified for this user and should be prioritized in your planning.
         
         When creating the action plan:
         1. First, review the "Next best steps" from the user profile
-        2. Consider how these steps align with the business goal knowledge
+        2. Consider how these steps contribute to achieving YOUR goal identified in the USER PROFILE NARRATIVE
         3. Convert these steps into specific, actionable items
         4. Maintain their priority and order as identified in the profile
-        5. Add any additional actions needed based on the current context and business goal
+        5. Add any additional actions needed to achieve YOUR goal
         6. Ensure all actions have clear reasoning and expected outcomes
         7. Write all narrative sections in the same language style as the user's message
         8. If temporal references were detected, ensure the action plan explicitly addresses timing requirements
@@ -640,7 +694,7 @@ class CoTProcessor:
                     "reasoning": "string (why this action is needed)",
                     "expected_outcome": "string (what this action should achieve)",
                     "source": "string (whether this action came from user profile next steps or was added based on current context)",
-                    "business_goal_alignment": "string (how this action supports the business goal)"
+                    "business_goal_alignment": "string (how this action helps achieve YOUR goal identified in the user profile)"
                 }}
             ],
             "knowledge_queries": [
@@ -680,7 +734,7 @@ class CoTProcessor:
                 # Add metadata
                 action_plan["metadata"] = {
                     "timestamp": datetime.now().isoformat(),
-                    "analysis_query_count": len(analysis_queries),
+                    "analysis_query_count": len(analysis_knowledge.get('analysis_methods', [])),
                     "user_classification": user_profile.classification
                 }
                 
