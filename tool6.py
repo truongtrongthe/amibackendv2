@@ -764,11 +764,14 @@ class CoTProcessor:
             logger.info(f"Fetching additional knowledge for {len(knowledge_queries)} queries")
             try:
                 knowledge_results = []
-                for query in knowledge_queries[:3]:  # Limit to top 3 queries
+                for query_info in knowledge_queries[:3]:  # Limit to top 3 queries
                     try:
-                        knowledge = await fetch_knowledge(query, self.graph_version_id)
-                        if knowledge:
-                            knowledge_results.append(f"Query: {query}\nResult: {knowledge}")
+                        # Extract just the query string from the query info dictionary
+                        query = query_info.get('query', '') if isinstance(query_info, dict) else query_info
+                        if query:
+                            knowledge = await fetch_knowledge(query, self.graph_version_id)
+                            if knowledge:
+                                knowledge_results.append(f"Query: {query}\nResult: {knowledge}")
                     except Exception as e:
                         logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
                 
