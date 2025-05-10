@@ -37,6 +37,7 @@ class UserProfileModel(BaseModel):
     skills: List[str] = Field(default_factory=list)
     requirements: List[str] = Field(default_factory=list)
     classification: str = "unknown"
+    business_goal_query: str = ""
     other_aspects: Dict[str, Any] = Field(default_factory=dict)
     analysis_summary: Dict[str, Any] = Field(default_factory=lambda: {
         "key_findings": [],
@@ -316,20 +317,36 @@ class CoTProcessor:
                 Analyze the message using classification techniques from the knowledge context.
                 Match your language style to the user's message.
 
+                LANGUAGE REQUIREMENTS:
+                1. STRICTLY use the SAME LANGUAGE as the user's message
+                2. If the message is in Vietnamese, respond COMPLETELY in Vietnamese
+                3. If the message is in English, respond COMPLETELY in English
+                4. DO NOT mix languages in your response
+                5. Maintain consistent language throughout all sections
+                6. Use natural expressions and terminology from the user's language
+                7. Follow cultural communication patterns of the user's language
+
                 Key focus areas:
                 1. Apply classification techniques from knowledge context
                 2. Identify behavioral patterns and classification signals
                 3. Uncover hidden needs beyond stated requirements
                 4. Determine information gaps for better service
                 5. Plan next engagement steps
-                {f"6. Resolve any temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
+                6. Generate a business goal query to understand what business objectives we should aim for with this user
+                {f"7. Resolve any temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
                 For ANALYSIS_QUERIES:
-                - Create 5-7 natural language queries for Pinecone vector search
+                - Create 3-5 natural language queries for Pinecone vector search
                 - Include domain terms, user type, and specific needs
                 - Mix general approaches with specific details
                 - Add 1-2 queries in user's native language if appropriate
                 - Format as document titles/summaries (e.g., "Best approach for price-sensitive maternity patients")
+
+                For BUSINESS_GOAL_QUERY:
+                - Create a specific query to find business objectives for this type of user
+                - Consider user's classification, needs, and behavior
+                - Focus on finding relevant business goals and success metrics
+                - Query should help identify what business outcomes we should aim for
 
                 RESPOND WITH JSON ONLY:
                 {{
@@ -337,6 +354,7 @@ class CoTProcessor:
                     "skills": ["identified skills/capabilities"],
                     "requirements": ["specific needs/requirements"],
                     "analysis_queries": ["vector search queries for Pinecone"],
+                    "business_goal_query": "string (query to find relevant business objectives)",
                     "other_aspects": {{
                         "behavioral_patterns": "observed behavior description",
                         "hidden_needs": "underlying needs analysis",
@@ -369,6 +387,7 @@ class CoTProcessor:
                     "skills": [],
                     "requirements": [],
                     "analysis_queries": [],
+                    "business_goal_query": "How to identify business objectives for unknown user type",
                     "other_aspects": {
                         "error": "Failed to parse LLM response",
                         "raw_content": content[:100] + "..." if len(content) > 100 else content
@@ -386,6 +405,7 @@ class CoTProcessor:
                 requirements=llm_response.get("requirements", []),
                 classification=llm_response.get("classification", "unknown"),
                 analysis_queries=llm_response.get("analysis_queries", []),
+                business_goal_query=llm_response.get("business_goal_query", ""),
                 other_aspects={
                     **llm_response.get("other_aspects", {}),
                     "portrait_paragraph": portrait_paragraph
@@ -406,6 +426,7 @@ class CoTProcessor:
             logger.error(f"Error building user portrait: {str(e)}")
             return UserProfileModel(
                 user_id=user_id,
+                business_goal_query="How to identify business objectives for error case",
                 other_aspects={
                     "error": str(e),
                     "portrait_paragraph": "Error occurred while generating portrait."
@@ -499,6 +520,21 @@ class CoTProcessor:
         
         # Generate user story narrative
         user_story = await self._user_story(user_profile)
+        logger.info(f"USER STORY: {user_story}")
+        
+        # Get business goal query from user profile
+        business_goal_query = user_profile.business_goal_query
+        
+        # Fetch business goal knowledge
+        business_goal_knowledge = ""
+        if business_goal_query:
+            try:
+                business_goal_knowledge = await fetch_knowledge(business_goal_query, self.graph_version_id)
+                if isinstance(business_goal_knowledge, dict):
+                    business_goal_knowledge = business_goal_knowledge.get("content", "")
+                logger.info(f"Fetched business goal knowledge: {business_goal_knowledge[:100]}...")
+            except Exception as e:
+                logger.error(f"Error fetching business goal knowledge: {str(e)}")
         
         # Extract temporal references if available
         temporal_info = ""
@@ -550,44 +586,68 @@ class CoTProcessor:
         {temporal_context}
         {temporal_info}
 
+        BUSINESS GOAL KNOWLEDGE:
+        {business_goal_knowledge}
+
+        LANGUAGE REQUIREMENTS:
+        1. STRICTLY use the SAME LANGUAGE as the user's message
+        2. If the message is in Vietnamese, respond COMPLETELY in Vietnamese
+        3. If the message is in English, respond COMPLETELY in English
+        4. DO NOT mix languages in your response
+        5. Maintain consistent language throughout all sections
+        6. Use natural expressions and terminology from the user's language
+        7. Follow cultural communication patterns of the user's language
+
         Your task has two parts:
         
-        PART 1: IDENTIFY KNOWLEDGE GAPS
-        First, identify 3-5 specific knowledge queries we should run to get additional information before finalizing the action plan.
+        PART 1: CREATE ACTION PLAN
+        First, create a detailed action plan that addresses the user's needs and requirements while aligning with the business goal.
         
-        Notice in the USER PROFILE NARRATIVE where it mentions "Missing information we still need: [...]" - these are specific information gaps about the user that we've identified as missing. Your knowledge queries should:
-        1. Prioritize finding information that can fill these specific gaps about the user
-        2. Focus on knowledge that would help us better understand or serve this user without having to ask them directly
-        3. Include queries that would retrieve helpful context, explanations, or approaches for addressing users with these information gaps
+        IMPORTANT: You MUST incorporate the "Next best steps" identified in the USER PROFILE NARRATIVE into your action plan. These steps were specifically identified for this user and should be prioritized in your planning.
         
-        Your queries should address:
-        - The user's specific situation or needs
-        - Relevant products, services, or solutions
-        - Best practices for this type of user
-        - Potential objections or concerns
-        - Specific date/time requirements if temporal references were detected
+        When creating the action plan:
+        1. First, review the "Next best steps" from the user profile
+        2. Consider how these steps align with the business goal knowledge
+        3. Convert these steps into specific, actionable items
+        4. Maintain their priority and order as identified in the profile
+        5. Add any additional actions needed based on the current context and business goal
+        6. Ensure all actions have clear reasoning and expected outcomes
+        7. Write all narrative sections in the same language style as the user's message
+        8. If temporal references were detected, ensure the action plan explicitly addresses timing requirements
+
+        PART 2: IDENTIFY KNOWLEDGE GAPS
+        After creating the action plan, identify 3-5 specific knowledge queries we should run to get additional information needed to execute the plan effectively.
         
-        PART 2: CREATE ACTION PLAN
-        Based on this information, create a detailed action plan that addresses the user's needs and requirements.
-        Focus on providing clear, actionable steps that will help the user achieve their goals.
-        Each action should have a clear priority, reasoning, and expected outcome.
-        Write all narrative sections in the same language style as the user's message.
-        If temporal references were detected, ensure the action plan explicitly addresses timing requirements.
+        When identifying knowledge gaps:
+        1. Review each action in your plan
+        2. For each action, identify what additional knowledge would help execute it better
+        3. Create specific queries to gather this knowledge
+        4. Prioritize queries that would help:
+           - Better understand the user's specific situation
+           - Find relevant products, services, or solutions
+           - Learn best practices for this type of user
+           - Address potential objections or concerns
+           - Handle specific date/time requirements if temporal references were detected
+        5. Ensure queries are in the same language as the user's message
 
         IMPORTANT: You MUST respond with a valid JSON object only. Do not include any other text or explanation.
         The JSON must follow this exact structure:
         {{
-            "knowledge_queries": [
-                "specific query 1 to get more information",
-                "specific query 2 to get more information",
-                "specific query 3 to get more information"
-            ],
             "next_actions": [
                 {{
                     "action": "string (specific action to take)",
                     "priority": "high|medium|low",
                     "reasoning": "string (why this action is needed)",
-                    "expected_outcome": "string (what this action should achieve)"
+                    "expected_outcome": "string (what this action should achieve)",
+                    "source": "string (whether this action came from user profile next steps or was added based on current context)",
+                    "business_goal_alignment": "string (how this action supports the business goal)"
+                }}
+            ],
+            "knowledge_queries": [
+                {{
+                    "query": "string (specific query to get more information)",
+                    "purpose": "string (which action this query supports)",
+                    "expected_knowledge": "string (what information we expect to get)"
                 }}
             ],
             "analysis_summary": {{
@@ -633,8 +693,8 @@ class CoTProcessor:
                 logger.error(f"Failed to parse LLM action plan: {str(e)}")
                 logger.error(f"Raw content: {content}")
                 return {
-                    "knowledge_queries": [],
                     "next_actions": [],
+                    "knowledge_queries": [],
                     "analysis_summary": {
                         "key_findings": [],
                         "user_needs": [],
@@ -655,8 +715,8 @@ class CoTProcessor:
         except Exception as e:
             logger.error(f"Error in action plan: {str(e)}")
             return {
-                "knowledge_queries": [],
                 "next_actions": [],
+                "knowledge_queries": [],
                 "analysis_summary": {
                     "key_findings": [],
                     "user_needs": [],
@@ -761,12 +821,13 @@ class CoTProcessor:
         INFO: {additional_knowledge}
 
         EXECUTION STRATEGY:
-        1. EXTRACT KEY INFORMATION - Thoroughly examine all sources (conversation, knowledge, analysis) for data needed to execute the plan
-        2. IDENTIFY INFORMATION GAPS - If information needed for next_actions isn't available, acknowledge this fact
-        3. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
-        4. APPLY DOMAIN EXPERTISE - For any next_action, include specific details identified from the available sources
-        5. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
-        6. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
+        1. STRICT ACTION SEQUENCE - Execute actions in EXACT order as specified in the PLAN
+        2. NO SKIPPING - Do not skip any actions in the sequence
+        3. NO ADDITIONS - Do not add actions that are not in the PLAN
+        4. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
+        5. APPLY DOMAIN EXPERTISE - For any next_action, include specific details identified from the available sources
+        6. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
+        7. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
 
         REQUIREMENTS:
         1. BE CONCISE - Keep response under 100 words
@@ -780,6 +841,22 @@ class CoTProcessor:
         9. BE NATURAL - Write as a human expert would, not as an AI assistant
         10. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
         11. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
+
+        ACTION EXECUTION RULES:
+        1. Execute each action in the PLAN in sequence
+        2. For each action:
+           - First, execute the action as specified
+           - Then, wait for user response if the action requires it
+           - Do not proceed to next action until current one is complete
+        3. If an action requires asking questions:
+           - Ask the questions as specified
+           - Do not provide solutions until questions are answered
+        4. If an action requires providing information:
+           - Provide only the information specified
+           - Do not add additional suggestions
+        5. If an action requires making recommendations:
+           - Make only the recommendations specified
+           - Do not add alternative options
 
         LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
         """
@@ -921,26 +998,3 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     except Exception as e:
         logger.error(f"Error fetching knowledge: {str(e)}")
         return {"status": "error", "message": f"Failed to fetch knowledge: {str(e)}"}
-
-async def test_vietnamese_greeting():
-    """Test function to run the Vietnamese greeting flow."""
-    logger.info("Testing Vietnamese greeting flow")
-    
-    # Create and initialize the processor properly
-    processor = CoTProcessor()
-    await processor.initialize()
-    logger.info("Processor initialized")
-    
-    # Simulate the message processing
-    result = await processor.process_incoming_message(
-        message="chào em",
-        conversation_context="This is a test conversation",
-        user_id="test_user_123"
-    )
-    
-    logger.info(f"Test completed with status: {result.get('status', 'unknown')}")
-    logger.info(f"Response message: {result.get('message', 'No message')[:100]}...")
-    
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(test_vietnamese_greeting())
