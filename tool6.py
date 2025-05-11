@@ -947,10 +947,33 @@ async def process_llm_with_tools(
 ) -> AsyncGenerator[Union[str, Dict], None]:
     """Process user message with tools."""
     logger.info(f"Processing message for user {state.get('user_id', 'unknown')}")
-    conversation_context = "\n".join(
-        [f"{'AI' if msg['role'] == 'assistant' else 'User'}: {msg['content']}"
-         for msg in conversation_history[-15:-1] if msg.get("role") and msg.get("content")]
-    ) + f"\nUser: {user_message}\n"
+    # Initialize conversation context with current message
+    conversation_context = f"User: {user_message}\n"
+    
+    # Include up to 30 previous messages for context
+    if conversation_history:
+        # Extract the last 30 messages excluding the current
+        recent_messages = []
+        message_count = 0
+        max_messages = 30
+        
+        for msg in reversed(conversation_history[:-1]):  # Skip the current message
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if role and content:
+                if role == "assistant":
+                    recent_messages.append(f"AI: {content}")
+                elif role == "user":
+                    recent_messages.append(f"User: {content}")
+                
+                message_count += 1
+                if message_count >= max_messages:
+                    break
+        
+        # Add messages in chronological order
+        if recent_messages:
+            conversation_context = "\n".join(reversed(recent_messages)) + "\n" + conversation_context
     
     # Get or create a CoTProcessor instance
     if 'cot_processor' not in state:
