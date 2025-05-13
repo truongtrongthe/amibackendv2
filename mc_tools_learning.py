@@ -12,7 +12,7 @@ import json
 
 #from tools import process_llm_with_tools, tool_registry
 #from tools_new import process_llm_with_tools
-from tool6 import process_llm_with_tools
+from tool_learning import process_llm_with_tools
 from personality import PersonalityManager
 from response_optimization import ResponseFilter, ResponseProcessor
 
@@ -203,50 +203,6 @@ class MCWithTools:
                                     yield result
                             except Exception as socket_error:
                                 logger.error(f"Socket emission error for analysis: {socket_error}")
-                                # Fall back to yielding the event
-                                yield result
-                        else:
-                            # Not using WebSocket, just yield the event
-                            yield result
-                            
-                    elif event_type == "knowledge":
-                        # For knowledge chunks, handle WebSocket communication if configured
-                        knowledge_events_sent += 1
-                        
-                        if use_websocket and thread_id_for_analysis and socket_imports_success:
-                            try:
-                                # Directly emit to WebSocket using socketio_manager
-                                was_delivered = emit_knowledge_event(thread_id_for_analysis, result)
-                                if was_delivered:
-                                    logger.info(f"Knowledge event #{knowledge_events_sent} emitted to WebSocket")
-                                else:
-                                    logger.warning(f"Knowledge event #{knowledge_events_sent} FAILED to deliver - no active sessions")
-                                    # Still yield the result for other consumers
-                                    yield result
-                            except Exception as socket_error:
-                                logger.error(f"Socket emission error for knowledge: {socket_error}")
-                                # Fall back to yielding the event
-                                yield result
-                        else:
-                            # Not using WebSocket, just yield the event
-                            yield result
-                            
-                    elif event_type == "next_actions":
-                        # For next actions chunks, handle WebSocket communication if configured
-                        next_action_events_sent += 1
-                        
-                        if use_websocket and thread_id_for_analysis and socket_imports_success:
-                            try:
-                                # Directly emit to WebSocket using socketio_manager
-                                was_delivered = emit_next_action_event(thread_id_for_analysis, result)
-                                if was_delivered:
-                                    logger.info(f"Next action event #{next_action_events_sent} emitted to WebSocket")
-                                else:
-                                    logger.warning(f"Next action event #{next_action_events_sent} FAILED to deliver - no active sessions")
-                                    # Still yield the result for other consumers
-                                    yield result
-                            except Exception as socket_error:
-                                logger.error(f"Socket emission error for next_action: {socket_error}")
                                 # Fall back to yielding the event
                                 yield result
                         else:

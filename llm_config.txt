@@ -1,1 +1,0 @@
-LLM = ChatOpenAI(model="gpt-4o", temperature=0.2, streaming=False, response_format={"type": "json_object"})

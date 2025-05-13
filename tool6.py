@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from aitools import fetch_knowledge, brain, emit_analysis_event  # Assuming these are available
 from brain_singleton import get_current_graph_version
+from utilities import logger
 
 # Custom JSON encoder to handle datetime objects
 class DateTimeEncoder(json.JSONEncoder):
@@ -25,8 +26,7 @@ def serialize_model(model: BaseModel) -> Dict[str, Any]:
     """Serialize a Pydantic model to a JSON-serializable dict."""
     return json.loads(json.dumps(model.model_dump(), cls=DateTimeEncoder))
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+
 
 # Initialize LLM
 LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.01)
@@ -866,7 +866,7 @@ class CoTProcessor:
                         temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
         
         # Build prompt for LLM to generate response
-        prompt = f"""Generate a concise, culturally appropriate response to this user based on:
+        prompt = f"""Generate a culturally appropriate response to this user based on:
 
         CURRENT MESSAGE: {message}
         CONVERSATION: {conversation_context}
@@ -878,16 +878,14 @@ class CoTProcessor:
         INFO: {additional_knowledge}
 
         EXECUTION STRATEGY:
-        1. STRICT ACTION SEQUENCE - Execute actions in EXACT order as specified in the PLAN
-        2. NO SKIPPING - Do not skip any actions in the sequence
-        3. NO ADDITIONS - Do not add actions that are not in the PLAN
-        4. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
-        5. APPLY DOMAIN EXPERTISE - For any next_action, include specific details identified from the available sources
-        6. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
-        7. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
+        0. PRIORITIZE BUSINESS GOAL - Focus on achieving the stated business objective (e.g., having 40% of users provide necessary information), even if it means adjusting the action sequence
+        1. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
+        2. APPLY DOMAIN EXPERTISE - For any action, include specific details identified from the available sources
+        3. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
+        4. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
 
         REQUIREMENTS:
-        1. BE CONCISE - Keep response under 100 words
+        1. BE CONCISE - Provide a thorough response without unnecessary length
         2. APPLY CULTURAL INTELLIGENCE - Use culturally appropriate forms of address and relationship terms that reflect the user's language context
         3. MATCH LANGUAGE SOPHISTICATION - Sound like a domain expert in their language
         4. MAINTAIN TONE - Friendly but professional
@@ -900,22 +898,34 @@ class CoTProcessor:
         11. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
 
         ACTION EXECUTION RULES:
-        1. Execute each action in the PLAN in sequence
+        1. Execute actions from the PLAN that best achieve the business goal
         2. For each action:
-           - First, execute the action as specified
+           - Execute the action as specified
            - Then, wait for user response if the action requires it
-           - Do not proceed to next action until current one is complete
         3. If an action requires asking questions:
            - Ask the questions as specified
            - Do not provide solutions until questions are answered
         4. If an action requires providing information:
-           - Provide only the information specified
-           - Do not add additional suggestions
+           - Provide the information specified
+           - Link information to user's specific needs
         5. If an action requires making recommendations:
-           - Make only the recommendations specified
-           - Do not add alternative options
+           - Make recommendations specified
+           - Tailor recommendations to user's specific context
 
-        LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
+        LINGUISTIC MIRRORING PRINCIPLE: Identify self-referential pronouns used by the user and respond with the appropriate complementary pronoun in the detected language. This requires understanding the social, hierarchical, and relational implications of pronoun choices in each language. For example:
+        - In Vietnamese: If user uses "Anh/Chị" for self-reference, respond with "Em"; if user uses "Em", respond with "Anh/Chị" as appropriate to gender
+        - In Thai: Match the politeness level and appropriate personal pronouns (phom/dichan/chan/rao responding with khun/than)
+        - In Japanese: Match formality level with appropriate personal pronouns (watashi/boku/ore responding with anata/kimi/omae)
+        - Apply similar principles to other languages with complex pronoun systems
+        
+        LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Pay special attention to:
+        1. PERSONAL PRONOUNS - Use appropriate relational pronouns based on detected language
+        2. HIERARCHICAL RELATIONSHIPS - Honor language-specific social hierarchies in your response
+        3. CULTURAL NUANCE - Incorporate cultural context that demonstrates native-level understanding
+        4. RELATIONAL MARKERS - Use language-specific relationship terms appropriate to the context
+        5. NATURAL FLOW - Ensure responses follow natural linguistic patterns of the detected language
+
+        Do not translate concepts directly between languages - reconstruct the message using native patterns and expressions. Adapt your entire response strategy to align with the cultural context of the detected language.
         """
 
         try:
