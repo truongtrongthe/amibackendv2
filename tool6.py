@@ -386,6 +386,15 @@ class CoTProcessor:
         
         prompt = f"""Build a comprehensive user profile by THOROUGHLY ANALYZING the ENTIRE conversation history:
 
+                ===== CRITICAL LANGUAGE INSTRUCTION =====
+                YOU MUST RESPOND ENTIRELY IN THE SAME LANGUAGE AS THE USER'S MESSAGE:
+                - If the user wrote in Vietnamese → RESPOND 100% IN VIETNAMESE 
+                - If the user wrote in English → RESPOND 100% IN ENGLISH
+                - DO NOT mix languages in your response
+                - EVERY part of your JSON output must be in the user's language
+                - This includes ALL fields, descriptions, queries, and analysis
+                ============================================
+
                 KNOWLEDGE: {knowledge_context}
                 CONVERSATION HISTORY: {conversation_context}
                 CURRENT MESSAGE: {message}
@@ -402,8 +411,7 @@ class CoTProcessor:
                 7. Look for previous questions that may not have been fully answered
 
                 Analyze the conversation using classification techniques from the knowledge context.
-                STRICTLY match your language style to the user's message. If the user wrote in Vietnamese, respond ENTIRELY in Vietnamese. If in English, respond ENTIRELY in English.
-
+                
                 CONVERSATION STAGE AWARENESS:
                 Identify the current stage (first contact, information gathering, problem identification, etc.) and adapt your approach accordingly. Consider whether the conversation is progressing naturally or needs redirection.
 
@@ -425,20 +433,21 @@ class CoTProcessor:
                 6. PROVIDE A DETAILED JUSTIFICATION explaining WHY this objective is the most appropriate choice
 
                 GENERATE 3-5 ANALYSIS_QUERIES:
-                [OBJECTIVE-SPECIFIC QUERIES]
-                1. "Definition of selected business objective"
-                2. "Implementation strategies for the selected business objective"
+                [OBJECTIVE-SPECIFIC QUERIES - generate your own based on context]
+                - Generate a query about the definition of the selected business objective
+                - Generate a query about implementation strategies for the selected objective
 
-                [USER-SPECIFIC QUERIES]
-                3. "Analyse the user with classification identified"
-                4. "Solutions for user need/problem identified"
+                [USER-SPECIFIC QUERIES - generate your own based on context]
+                - Generate a query to analyze the user with their identified classification
+                - Generate a query about solutions for the specific user need/problem identified
+                - Optionally add one more context-specific query if needed
 
-                RESPOND WITH JSON in the SAME LANGUAGE as the user message:
+                RESPOND WITH JSON (following the language instruction at the top of this prompt):
                 {{
                     "classification": "string (from knowledge context)",
                     "skills": ["identified skills/capabilities"],
                     "requirements": ["specific needs/requirements"],
-                    "analysis_queries": ["5 precise queries as instructed above"],
+                    "analysis_queries": ["3-5 precise queries as instructed above"],
                     "business_goal": "**SELECTED OBJECTIVE: clearly formatted SMART goal statement**",
                     "other_aspects": {{
                         "conversation_stage": "identified stage of the conversation",

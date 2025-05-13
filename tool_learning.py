@@ -11,7 +11,7 @@ import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from aitools import fetch_knowledge, brain, emit_analysis_event, save_knowledge  # Added save_knowledge import
+from aitools import fetch_knowledge_with_similarity, brain, emit_analysis_event, save_knowledge  # Updated import
 from brain_singleton import get_current_graph_version
 from utilities import logger
 
@@ -42,52 +42,33 @@ class LearningProcessor:
         return self
 
     async def process_incoming_message(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None) -> Dict[str, Any]:
-        """Process incoming message with CoT flow.
-        This function is the main function that processes the incoming message.
-        It will get or build user profile, search analysis knowledge, propose an action plan, and execute the action plan.  
-        """
+        """Process incoming message with active learning flow."""
         logger.info(f"Processing message from user {user_id}")
         try:
+            # Step 1: Search for relevant knowledge
             logger.info(f"Searching for knowledge based on message...")
             analysis_knowledge = await self._search_knowledge(message)
             
-            # Log detailed knowledge search results
-            if "similarity" in analysis_knowledge:
-                similarity = analysis_knowledge["similarity"]
-                logger.info(f"Found analysis knowledge with similarity score: {similarity}")
-                
-                # Check log parsing vs. extraction method
-                if similarity == 0.0 and "knowledge_context" in analysis_knowledge:
-                    knowledge_context = analysis_knowledge.get("knowledge_context", "")
-                    if "Top similarity" in knowledge_context:
-                        logger.warning("Possible similarity extraction issue: 'Top similarity' found in knowledge but score is 0.0")
-                        # Try one more time to extract it directly
-                        sim_match = re.search(r'Top similarity:\s+([0-9.]+)', knowledge_context)
-                        if sim_match:
-                            try:
-                                extracted_sim = float(sim_match.group(1))
-                                logger.info(f"Re-extracted similarity from knowledge context: {extracted_sim}")
-                                analysis_knowledge["similarity"] = extracted_sim
-                                analysis_knowledge["metadata"]["similarity"] = extracted_sim
-                            except (ValueError, KeyError):
-                                pass
+            # Step 2: Log the similarity score
+            similarity = analysis_knowledge.get("similarity", 0.0)
+            logger.info(f"💯 Found knowledge with similarity score: {similarity}")
             
+            # Step 3: Generate response using active learning approach
             logger.info(f"Generating response based on knowledge...")
             response = await self._active_learning(message, conversation_context, analysis_knowledge, user_id)
             logger.info(f"Response generated with status: {response.get('status', 'unknown')}")
             
-            # Log the AI's active learning mode
+            # Step 4: Log the mode used for debugging
             if "metadata" in response and "active_learning_mode" in response["metadata"]:
                 logger.info(f"Active learning mode used: {response['metadata']['active_learning_mode']}")
                 
             return response
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
-            # Include stack trace for better debugging
             import traceback
             logger.error(f"Stack trace: {traceback.format_exc()}")
             
-            # Emit error event
+            # Handle errors gracefully
             if thread_id:
                 emit_analysis_event(thread_id, {
                     "type": "analysis",
@@ -99,116 +80,61 @@ class LearningProcessor:
    
     async def _search_knowledge(self, message: str) -> Dict[str, Any]:
         """Search for similar vectors from knowledge base corresponding to the message."""
-        
-        # Fetch knowledge for message
-        knowledge_entries = []
-        similarity_scores = []
         logger.info(f"Searching for analysis knowledge based on message: {message[:100]}...")
         
         try:
-            # Use the message directly as a query to fetch knowledge
-            knowledge = await fetch_knowledge(message, self.graph_version_id)
+            # Use the specialized function that directly provides similarity scores in the output
+            knowledge = await fetch_knowledge_with_similarity(message, self.graph_version_id)
+            logger.info(f"Raw knowledge search results: {knowledge}")
+            
+            # Initialize default values
+            knowledge_content = ""
+            similarity = 0.0
+            
+            # Process knowledge and extract similarity
             if knowledge:
-                # Handle different types of knowledge data
-                if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
-                    logger.warning(f"Error in knowledge for message: {knowledge.get('message', 'Unknown error')}")
+                # Convert to string if needed
+                knowledge_content = str(knowledge)
+                
+                # Extract the top similarity score from the first line of output
+                # "Found X valid matches. Top similarity: X.XXXX"
+                sim_match = re.search(r'Top similarity:\s+([0-9]+\.?[0-9]*)', knowledge_content)
+                
+                # If a match was found, extract the similarity score
+                if sim_match:
+                    try:
+                        similarity = float(sim_match.group(1))
+                        logger.info(f"✓ FOUND SIMILARITY SCORE: {similarity}")
+                    except ValueError:
+                        logger.warning(f"Could not convert similarity '{sim_match.group(1)}' to float")
                 else:
-                    # Process the knowledge content based on its type
-                    knowledge_content = ""
-                    similarity = 0.0
-                    
-                    # Try to extract similarity score if available
-                    if isinstance(knowledge, dict):
-                        if "similarity" in knowledge:
-                            similarity = float(knowledge["similarity"])
-                        elif "metadata" in knowledge and "similarity" in knowledge["metadata"]:
-                            similarity = float(knowledge["metadata"]["similarity"])
-                        
-                        if "content" in knowledge:
-                            knowledge_content = knowledge["content"]
-                        else:
-                            # Serialize the dictionary as a fallback
-                            knowledge_content = json.dumps(knowledge)
-                    elif isinstance(knowledge, str):
-                        knowledge_content = knowledge
-                        # Try to extract similarity from string response if in a known format
-                        
-                        # Try different patterns to extract similarity score
-                        similarity_patterns = [
-                            r'similarity[:\s]+([0-9.]+)',
-                            r'top similarity[:\s]+([0-9.]+)',
-                            r'similarity score[:\s]+([0-9.]+)'
-                        ]
-                        
-                        for pattern in similarity_patterns:
-                            similarity_match = re.search(pattern, knowledge_content.lower())
-                            if similarity_match:
-                                try:
-                                    similarity = float(similarity_match.group(1))
-                                    logger.info(f"Extracted similarity score {similarity} using pattern {pattern}")
-                                    break
-                                except ValueError:
-                                    continue
-                        
-                        # Check for lines with "Top similarity: 0.xxxx" format in logs
-                        top_sim_match = re.search(r'top similarity:\s+([0-9.]+)', knowledge_content.lower())
-                        if top_sim_match:
-                            try:
-                                top_sim = float(top_sim_match.group(1))
-                                if top_sim > similarity:  # Use the higher value
-                                    similarity = top_sim
-                                    logger.info(f"Found higher similarity score: {similarity} from Top similarity pattern")
-                            except ValueError:
-                                pass
-                    else:
-                        # Convert to string as a last resort
-                        knowledge_content = str(knowledge)
-                    
-                    knowledge_entries.append({
-                        "query": message[:100] + "...",  # Truncate for logging
-                        "knowledge": knowledge_content,
-                        "similarity": similarity
-                    })
-                    similarity_scores.append(similarity)
+                    logger.warning(f"No similarity score found in knowledge response using regex patterns")
+            
+            # Return simplified knowledge object with content and similarity
+            logger.info(f"Final extracted similarity score: {similarity}")
+            return {
+                "knowledge_context": knowledge_content,
+                "similarity": similarity,
+                "query_count": 1 if knowledge else 0,
+                "metadata": {
+                    "similarity": similarity
+                }
+            }
+            
         except Exception as e:
             logger.error(f"Error fetching knowledge for message: {str(e)}")
-
-        # Combine all knowledge entries
-        combined_knowledge = "\n\n".join([
-            f"Query: {entry['query']}\nKnowledge: {entry['knowledge']}\nSimilarity: {entry.get('similarity', 0.0)}"
-            for entry in knowledge_entries
-        ])
-        
-        # Calculate average similarity score if we have entries
-        avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
-        max_similarity = max(similarity_scores) if similarity_scores else 0.0
-        
-        # If we still have zero similarity but the knowledge content contains a reference to similarity,
-        # try one more time with broader pattern matching
-        if max_similarity == 0.0 and combined_knowledge:
-            # Look for any number after variations of "similarity" with more flexible spacing
-            broader_sim_match = re.search(r'[sS]imilarity.*?([0-9]+\.[0-9]+)', combined_knowledge)
-            if broader_sim_match:
-                try:
-                    extracted_sim = float(broader_sim_match.group(1))
-                    if 0 <= extracted_sim <= 1:  # Make sure it's a valid similarity score
-                        max_similarity = extracted_sim
-                        logger.info(f"Using broader pattern matching, found similarity: {max_similarity}")
-                except ValueError:
-                    pass
-
-        return {
-            "analysis_methods": [entry["query"] for entry in knowledge_entries],
-            "knowledge_context": combined_knowledge,
-            "query_count": len(knowledge_entries),
-            "similarity": max_similarity,  # Use the highest similarity score
-            "avg_similarity": avg_similarity,
-            "metadata": {
-                "similarity": max_similarity,
-                "similarity_scores": similarity_scores
-            },
-            "rationale": f"Analyzed message for similar vectors in knowledge base"
-        }
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            
+            # Return empty result on error
+            return {
+                "knowledge_context": "",
+                "similarity": 0.0,
+                "query_count": 0,
+                "metadata": {
+                    "similarity": 0.0
+                }
+            }
 
     async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown") -> Dict[str, Any]:
         """Generate user-friendly response based on the message and conversation context."""
@@ -232,50 +158,28 @@ class LearningProcessor:
         similarity_score = 0.0
         
         if analysis_knowledge:
+            # Get knowledge context
             if "knowledge_context" in analysis_knowledge:
                 knowledge_context = analysis_knowledge["knowledge_context"]
                 if knowledge_context:
                     logger.info(f"Including knowledge context: {len(knowledge_context)} chars")
             
-            # Extract similarity score - check all possible locations
-            if "metadata" in analysis_knowledge and "similarity" in analysis_knowledge["metadata"]:
-                similarity_score = float(analysis_knowledge["metadata"]["similarity"])
-                logger.info(f"Found similarity score in metadata: {similarity_score}")
-            elif "similarity" in analysis_knowledge:
+            # Get the similarity score directly
+            if "similarity" in analysis_knowledge:
                 similarity_score = float(analysis_knowledge["similarity"])
-                logger.info(f"Found similarity score directly in analysis_knowledge: {similarity_score}")
-            elif "query_count" in analysis_knowledge and analysis_knowledge["query_count"] > 0:
-                # If we have results but no explicit similarity score, check for similarity in the knowledge context
-                if knowledge_context:
-                    # Try to extract similarity from the knowledge context
-                    sim_match = re.search(r'[tT]op similarity:\s+([0-9.]+)', knowledge_context)
-                    if sim_match:
-                        try:
-                            extracted_sim = float(sim_match.group(1))
-                            if 0 <= extracted_sim <= 1:  # Make sure it's a valid similarity score
-                                similarity_score = extracted_sim
-                                logger.info(f"Extracted similarity from knowledge context: {similarity_score}")
-                        except ValueError:
-                            pass
-                
-                # If still zero, use a moderate default
-                if similarity_score == 0.0:
-                    similarity_score = 0.5
-                    logger.info(f"Using default moderate similarity score: {similarity_score}")
-            
-            logger.info(f"Final similarity score: {similarity_score}")
+                logger.info(f"⭐ USING SIMILARITY SCORE FOR RESPONSE: {similarity_score}")
         
         # Determine active learning response mode based on similarity score
-        active_learning_mode = "USE_KNOWLEDGE"  # Default
-        
-        if similarity_score < 0.4:
-            active_learning_mode = "NEW_KNOWLEDGE"
-            logger.info("Low similarity detected - treating as potentially new knowledge")
-        elif similarity_score < 0.7:
+        # Ensure we're using the correct numerical comparison (≥0.7 for high confidence, ≥0.4 for medium)
+        if similarity_score >= 0.7:
+            active_learning_mode = "USE_KNOWLEDGE"
+            logger.info(f"⭐ HIGH SIMILARITY DETECTED ({similarity_score}) - using existing knowledge")
+        elif similarity_score >= 0.4:
             active_learning_mode = "CLARIFY"
-            logger.info("Medium similarity detected - will ask for clarification")
+            logger.info(f"⭐ MEDIUM SIMILARITY DETECTED ({similarity_score}) - will ask for clarification")
         else:
-            logger.info("High similarity detected - using existing knowledge")
+            active_learning_mode = "NEW_KNOWLEDGE"
+            logger.info(f"⭐ LOW SIMILARITY DETECTED ({similarity_score}) - treating as potentially new knowledge")
         
         # Build prompt for LLM to generate response
         prompt = f"""Generate a concise, culturally appropriate response as an active learner with knowledge:
@@ -320,6 +224,7 @@ class LearningProcessor:
 
         try:
             response = await LLM.ainvoke(prompt)
+            logger.info(f"LLM response generated with similarity score: {similarity_score}")
             return {
                 "status": "success",
                 "message": response.content.strip(),
@@ -328,8 +233,7 @@ class LearningProcessor:
                     "user_id": user_id,
                     "additional_knowledge_found": bool(knowledge_context),
                     "similarity_score": similarity_score,
-                    "active_learning_mode": active_learning_mode,
-                    "temporal_references": None
+                    "active_learning_mode": active_learning_mode
                 }
             }
         except Exception as e:
@@ -351,31 +255,50 @@ async def process_llm_with_tools(
     # Initialize conversation context with current message
     conversation_context = f"User: {user_message}\n"
     
-    # Include up to 30 previous messages for context
+    # Include previous messages for context (increased from 30 to 50 for more comprehensive history)
     if conversation_history:
-        # Extract the last 30 messages excluding the current
+        # Extract the messages excluding the current message
         recent_messages = []
         message_count = 0
-        max_messages = 30
+        max_messages = 50  # Increased from 30 to 50 messages
         
         for msg in reversed(conversation_history[:-1]):  # Skip the current message
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            
-            if role and content:
-                if role == "assistant":
-                    recent_messages.append(f"AI: {content}")
-                elif role == "user":
-                    recent_messages.append(f"User: {content}")
+            try:
+                role = msg.get("role", "").lower()
+                content = msg.get("content", "")
                 
-                message_count += 1
+                if role and content:
+                    # Format based on role with clear separation between messages
+                    if role in ["assistant", "ai"]:
+                        recent_messages.append(f"AI: {content.strip()}")
+                        message_count += 1
+                    elif role in ["user", "human"]:
+                        recent_messages.append(f"User: {content.strip()}")
+                        message_count += 1
+                    # All other roles are now explicitly skipped
                 if message_count >= max_messages:
+                    # We've reached our limit, but add a note about truncation
+                    if len(conversation_history) > max_messages + 1:  # +1 accounts for current message
+                        recent_messages.append(f"[Note: Conversation history truncated. Total messages: {len(conversation_history)}]")
                     break
+            except Exception as e:
+                logger.warning(f"Error processing message in conversation history: {e}")
+                continue
         
-        # Add messages in chronological order
+        # Add messages in chronological order with clear formatting
         if recent_messages:
-            conversation_context = "\n".join(reversed(recent_messages)) + "\n" + conversation_context
-    
+            # Add a header to highlight the importance of the conversation history
+            header = "==== CONVERSATION HISTORY (CHRONOLOGICAL ORDER) ====\n"
+            # Reverse the list to get chronological order and join with double newlines for better separation
+            conversation_history_text = "\n\n".join(reversed(recent_messages))
+            # Add a separator between history and current message
+            separator = "\n==== CURRENT INTERACTION ====\n"
+            
+            conversation_context = f"{header}{conversation_history_text}{separator}\nUser: {user_message}\n"
+            
+            logger.info(f"Added {len(recent_messages)} messages from conversation history")
+        else:
+            logger.warning("No usable messages found in conversation history")
 
     if 'learning_processor' not in state:
         learning_processor = LearningProcessor()
@@ -430,7 +353,7 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     """Query knowledge base."""
     logger.info(f"Querying knowledge: {query}")
     try:
-        knowledge_data = await fetch_knowledge(query, graph_version_id)
+        knowledge_data = await fetch_knowledge_with_similarity(query, graph_version_id)
         
         # Initialize result_data as empty dict to ensure it's always defined
         result_data = {}
