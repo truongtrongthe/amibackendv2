@@ -276,3 +276,23 @@ def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"Error emitting next action event: {str(e)}")
         return False
+
+async def save_knowledge(query: str, knowledge: str, graph_version_id: str = "") -> bool:
+    """
+    Save knowledge to the knowledge graph
+    
+    Args:
+        query: The query that was used to retrieve the knowledge
+        knowledge: The knowledge to save
+        graph_version_id: The graph version ID to save the knowledge to
+        
+    Returns:
+        bool: True if knowledge was saved, False otherwise
+    """
+    try:
+        from database import save_training_with_chunk
+        return save_training_with_chunk(query, knowledge, graph_version_id)
+    except Exception as e:
+        logger.error(f"Error saving knowledge: {str(e)}")
+        return False
+    

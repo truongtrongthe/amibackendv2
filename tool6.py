@@ -405,36 +405,41 @@ class CoTProcessor:
                 3. Uncover hidden needs beyond stated requirements
                 4. Determine information gaps for better service
                 5. Plan next engagement steps
-                6. Pay attention to BUSINESS OBJECTIVES, set a business objectives for this user
+                6. Analyze user message for alignment with business objectives
                 {f"7. Resolve any temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
+                For BUSINESS_GOAL:
+                - Carefully scan the BUSINESS OBJECTIVES list for objectives that align with this user's needs and profile
+                - Select 1-2 specific business objectives that are most appropriate for this user
+                - Business objectives should be specific, measurable, achievable, relevant, and time-bound
+                - Format as a clear goal statement (e.g., "Convert user to premium subscription within 30 days")
+
                 For ANALYSIS_QUERIES:
-                - Create 3-5 natural language queries for Pinecone vector search
-                - Include domain terms, user type, and specific needs
+                - Create 5-7 natural language queries for Pinecone vector search
+                - Include 2-3 queries SPECIFICALLY about the selected business objectives for this user. This query should help to find key results and key activities of the business objective
+                - Include domain terms, user type, and specific needs in other queries
                 - Mix general approaches with specific details
                 - Add 1-2 queries in user's native language if appropriate
                 - Format as document titles/summaries (e.g., "Best approach for price-sensitive maternity patients")
-
-                For BUSINESS_GOAL:
-                - Pay attention to BUSINESS OBJECTIVES, set a business objectives for this user
-                - Business objectives should be specific, measurable, achievable, relevant
+                - Include queries like "How to implement [specific business objective] for [user classification]"
 
                 RESPOND WITH JSON ONLY:
                 {{
                     "classification": "string (from knowledge context)",
                     "skills": ["identified skills/capabilities"],
                     "requirements": ["specific needs/requirements"],
-                    "analysis_queries": ["vector search queries for Pinecone"],
-                    "business_goal": "string (business objectives for this user)",
+                    "analysis_queries": ["vector search queries for Pinecone, including business objective queries"],
+                    "business_goal": "string (selected specific business objectives for this user)",
                     "other_aspects": {{
                         "behavioral_patterns": "observed behavior description",
                         "hidden_needs": "underlying needs analysis",
                         "required_info": ["missing information we need from/about the user"],
                         "next_steps": ["engagement steps"],
-                        "classification_criteria": "classification rationale"
+                        "classification_criteria": "classification rationale",
+                        "business_objective_alignment": "explanation of how selected business objectives align with user"
                         {temporal_resolution_instruction if needs_temporal_resolution else ""}
                     }},
-                    "portrait_paragraph": "Comprehensive profile narrative including classification, needs, and behavior."
+                    "portrait_paragraph": "Comprehensive profile narrative including classification, needs, behavior, and alignment with business objectives."
                 }}
                 """
         
@@ -546,6 +551,7 @@ class CoTProcessor:
                         "query": query,
                         "knowledge": knowledge_content
                     })
+                    logger.info(f"Knowledge found for Analysis: {knowledge_entries}")
             except Exception as e:
                 logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
 

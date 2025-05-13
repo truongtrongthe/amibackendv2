@@ -8,7 +8,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, AIMessage
 
 from pilot import Pilot
-from mc_tools import MCWithTools  # Import MCWithTools instead of MC
+from mc_tools import MCWithTools  # Standard tools
+from mc_tools_learning import MCWithTools as MCWithLearningTools  # Import learning-based tools
 from utilities import logger
 import asyncio
 
@@ -265,3 +266,99 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
             await asyncio.sleep(0.05)
     
     logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")
+
+# Add new learning-based stream function
+async def convo_stream_learning(user_input: str = None, user_id: str = None, thread_id: str = None, 
+              graph_version_id: str = "", mode: str = "learning", 
+              use_websocket: bool = False, thread_id_for_analysis: str = None):
+    """
+    Process user input using the learning-based tools and stream the response.
+    
+    This function uses tool_learning.py's process_llm_with_tools function which implements
+    active learning: understanding user messages, checking similarity with existing knowledge,
+    and offering to save new knowledge.
+    
+    Args:
+        user_input: The user's message
+        user_id: User identifier
+        thread_id: Conversation thread identifier
+        graph_version_id: Graph version identifier for knowledge retrieval
+        mode: Processing mode ('learning')
+        use_websocket: Whether to use WebSocket for analysis streaming
+        thread_id_for_analysis: Thread ID to use for WebSocket analysis events
+    
+    Returns:
+        A generator yielding response chunks
+    """
+    start_time = time.time()
+    thread_id = thread_id or f"learning_thread_{int(time.time())}"
+    user_id = user_id or "user"
+
+    # Create a learning-based MC instance
+    mc_learning = MCWithLearningTools(user_id=user_id, convo_id=thread_id)
+    await mc_learning.initialize()
+
+    # Convert conversation history to the format expected by tool_learning
+    conversation_history = []
+    
+    # Load conversation checkpoint if available
+    checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
+    if checkpoint and "channel_values" in checkpoint and "messages" in checkpoint["channel_values"]:
+        messages = checkpoint["channel_values"]["messages"]
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                conversation_history.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                conversation_history.append({"role": "assistant", "content": msg.content})
+    
+    # Initialize state
+    state = {
+        "messages": conversation_history,
+        "user_id": user_id,
+        "graph_version_id": graph_version_id,
+        "use_websocket": use_websocket,
+        "thread_id_for_analysis": thread_id_for_analysis
+    }
+    
+    logger.info(f"convo_stream_learning - User: {user_id}, Input: '{user_input}', Thread: {thread_id}")
+    
+    # Use our tool_learning.py's process_llm_with_tools function to process the message
+    try:
+        # Import directly from tool_learning to ensure we're using the updated version
+        from tool_learning import process_llm_with_tools
+        
+        async for result in process_llm_with_tools(
+            user_input,
+            conversation_history,
+            state,
+            graph_version_id,
+            thread_id
+        ):
+            # Format the result for streaming
+            if isinstance(result, dict):
+                if "state" in result:
+                    # State update, don't yield this
+                    pass
+                elif "status" in result and "message" in result:
+                    # Response from LLM
+                    yield f"data: {json.dumps({'message': result['message']})}\n\n"
+                elif "type" in result and result["type"] == "analysis":
+                    # Analysis event
+                    yield f"data: {json.dumps(result)}\n\n"
+                else:
+                    # Other events
+                    yield f"data: {json.dumps(result)}\n\n"
+            else:
+                # Plain text response
+                yield f"data: {json.dumps({'message': str(result)})}\n\n"
+            
+            # Small delay to prevent overwhelming the client
+            await asyncio.sleep(0.05)
+    
+    except Exception as e:
+        logger.error(f"Error in convo_stream_learning: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    logger.debug(f"convo_stream_learning took {time.time() - start_time:.2f}s")

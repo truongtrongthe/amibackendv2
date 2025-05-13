@@ -3479,6 +3479,143 @@ def understand_cluster_endpoint():
             "error_type": type(e).__name__
         }), 500
 
+@app.route('/conversation/learning', methods=['POST', 'OPTIONS'])
+def conversation_learning():
+    """
+    Handle conversation requests using the learning-based conversation system.
+    This endpoint uses tool_learning.py for knowledge similarity checks and active learning.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN LEARNING CONVERSATION request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    user_id = data.get("user_id", "learner")
+    thread_id = data.get("thread_id", "learning_thread")
+    graph_version_id = data.get("graph_version_id", "")
+    use_websocket = data.get("use_websocket", False)
+    
+    # Get or create a lock for this thread_id
+    thread_lock = None
+    with thread_locks_lock:
+        if thread_id not in thread_locks:
+            thread_locks[thread_id] = threading.RLock()
+        thread_lock = thread_locks[thread_id]
+        thread_lock_last_used[thread_id] = time.time()
+    
+    # Update session info if using WebSockets
+    if use_websocket:
+        active_session_exists = False
+        
+        with session_lock:
+            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+            active_session_exists = len(thread_sessions) > 0            
+            if active_session_exists:
+                for sid in thread_sessions:
+                    ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                    ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
+                    ws_sessions[sid]['has_pending_request'] = True
+    
+    # Prepare stream parameters
+    stream_params = {
+        "user_input": user_input,
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "graph_version_id": graph_version_id,
+        "mode": "learning"
+    }
+    
+    if use_websocket:
+        stream_params["use_websocket"] = True
+        stream_params["thread_id_for_analysis"] = thread_id
+    
+    # Function to run the stream processing with proper locking
+    async def process_stream_with_lock():
+        outputs = []
+        # Acquire the thread-specific lock only for the processing part
+        with thread_lock:
+            try:
+                # Import directly here to ensure fresh imports
+                from ami import convo_stream_learning
+                
+                # Define the async process function
+                async def process_stream():
+                    """Process the stream and return all items."""
+                    try:
+                        # Get the stream using our learning-based stream function
+                        stream = convo_stream_learning(**stream_params)
+                        
+                        # Process all the output
+                        async for item in stream:
+                            outputs.append(item)
+                    except Exception as e:
+                        error_msg = f"Error processing learning stream: {str(e)}"
+                        logger.error(error_msg)
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                    
+                    return True
+                
+                # Run the async function
+                await process_stream()
+                
+                # Update thread lock last used time
+                with thread_locks_lock:
+                    thread_lock_last_used[thread_id] = time.time()
+                
+                # If using WebSockets, update session to indicate request is done
+                if use_websocket:
+                    with session_lock:
+                        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                        for sid in thread_sessions:
+                            if 'has_pending_request' in ws_sessions[sid]:
+                                ws_sessions[sid]['has_pending_request'] = False
+                
+            except Exception as e:
+                error_msg = f"Error in learning stream processing: {str(e)}"
+                logger.error(error_msg)
+                import traceback
+                logger.error(traceback.format_exc())
+                outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+        
+        return outputs
+    
+    # Create a synchronous response streaming solution that runs the async processing
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Run the async processing with proper locking
+            outputs = run_async_in_thread(process_stream_with_lock)
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+            
+            # Log completion
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            logger.info(f"[SESSION_TRACE] === END LEARNING CONVERSATION request - total time: {elapsed:.2f}s ===")
+            
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in learning response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
+    
+    # Create a streaming response with our generator
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
+
 # Run the server when executed directly
 if __name__ == '__main__':
     # Start the brain loading in a background thread

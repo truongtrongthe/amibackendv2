@@ -11,7 +11,7 @@ import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from aitools import fetch_knowledge, brain, emit_analysis_event  # Assuming these are available
+from aitools import fetch_knowledge, brain, emit_analysis_event, save_knowledge  # Added save_knowledge import
 from brain_singleton import get_current_graph_version
 from utilities import logger
 
@@ -48,12 +48,10 @@ class LearningProcessor:
         """
         logger.info(f"Processing message from user {user_id}")
         try:
-            
-            
-            logger.info(f"I am searching knowledge follow the queries ...")
+            logger.info(f"Searching for knowledge based on message...")
             analysis_knowledge = await self._search_knowledge(message)
-            logger.info(f"I found analysis knowledge: {analysis_knowledge}")
-            response = await self._active_learning(message, conversation_context)
+            logger.info(f"Found analysis knowledge: {analysis_knowledge}")
+            response = await self._active_learning(message, conversation_context, analysis_knowledge, user_id)
             logger.info(f"Now I have response: {response}")
             return response
         except Exception as e:
@@ -69,95 +67,86 @@ class LearningProcessor:
             return {"status": "error", "message": f"Error: {str(e)}"}
    
     async def _search_knowledge(self, message: str) -> Dict[str, Any]:
-        """Search for analysis methods based on user profile's analysis queries."""
+        """Search for similar vectors from knowledge base corresponding to the message."""
         
-        # Fetch knowledge for each analysis query
+        # Fetch knowledge for message
         knowledge_entries = []
-        logger.info(f"Searching for analysis knowledge: {user_profile.analysis_queries}")
-        for query in user_profile.analysis_queries:
-            try:
-                # Use the query tool to fetch specific knowledge
-                knowledge = await fetch_knowledge(query, self.graph_version_id)
-                if knowledge:
-                    # Handle different types of knowledge data
-                    if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
-                        logger.warning(f"Error in knowledge for query '{query}': {knowledge.get('message', 'Unknown error')}")
-                        continue
-                    
+        similarity_scores = []
+        logger.info(f"Searching for analysis knowledge based on message: {message[:100]}...")
+        
+        try:
+            # Use the message directly as a query to fetch knowledge
+            knowledge = await fetch_knowledge(message, self.graph_version_id)
+            if knowledge:
+                # Handle different types of knowledge data
+                if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
+                    logger.warning(f"Error in knowledge for message: {knowledge.get('message', 'Unknown error')}")
+                else:
                     # Process the knowledge content based on its type
                     knowledge_content = ""
-                    if isinstance(knowledge, str):
-                        knowledge_content = knowledge
-                    elif isinstance(knowledge, dict):
+                    similarity = 0.0
+                    
+                    # Try to extract similarity score if available
+                    if isinstance(knowledge, dict):
+                        if "similarity" in knowledge:
+                            similarity = float(knowledge["similarity"])
+                        elif "metadata" in knowledge and "similarity" in knowledge["metadata"]:
+                            similarity = float(knowledge["metadata"]["similarity"])
+                        
                         if "content" in knowledge:
                             knowledge_content = knowledge["content"]
                         else:
                             # Serialize the dictionary as a fallback
                             knowledge_content = json.dumps(knowledge)
+                    elif isinstance(knowledge, str):
+                        knowledge_content = knowledge
+                        # Try to extract similarity from string response if in a known format
+                        similarity_match = re.search(r'similarity[:\s]+([0-9.]+)', knowledge_content.lower())
+                        if similarity_match:
+                            try:
+                                similarity = float(similarity_match.group(1))
+                            except ValueError:
+                                similarity = 0.0
                     else:
                         # Convert to string as a last resort
                         knowledge_content = str(knowledge)
                     
                     knowledge_entries.append({
-                        "query": query,
-                        "knowledge": knowledge_content
+                        "query": message[:100] + "...",  # Truncate for logging
+                        "knowledge": knowledge_content,
+                        "similarity": similarity
                     })
-            except Exception as e:
-                logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
+                    similarity_scores.append(similarity)
+        except Exception as e:
+            logger.error(f"Error fetching knowledge for message: {str(e)}")
 
         # Combine all knowledge entries
         combined_knowledge = "\n\n".join([
-            f"Query: {entry['query']}\nKnowledge: {entry['knowledge']}"
+            f"Query: {entry['query']}\nKnowledge: {entry['knowledge']}\nSimilarity: {entry.get('similarity', 0.0)}"
             for entry in knowledge_entries
         ])
+        
+        # Calculate average similarity score if we have entries
+        avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
+        max_similarity = max(similarity_scores) if similarity_scores else 0.0
 
         return {
             "analysis_methods": [entry["query"] for entry in knowledge_entries],
             "knowledge_context": combined_knowledge,
             "query_count": len(knowledge_entries),
-            "rationale": f"Analyzed {len(knowledge_entries)} queries for user profile"
+            "similarity": max_similarity,  # Use the highest similarity score
+            "avg_similarity": avg_similarity,
+            "metadata": {
+                "similarity": max_similarity,
+                "similarity_scores": similarity_scores
+            },
+            "rationale": f"Analyzed message for similar vectors in knowledge base"
         }
 
-    async def _active_learning(self, message: str, conversation_context: str = "") -> Dict[str, Any]:
-        """Generate user-friendly response based on the action plan."""
-        logger.info("Answering user question")
+    async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown") -> Dict[str, Any]:
+        """Generate user-friendly response based on the message and conversation context."""
+        logger.info("Answering user question with active learning approach")
         
-
-        # Get the action plan details
-        action_plan = user_profile.action_plan
-        analysis_summary = action_plan.get("analysis_summary", {})
-        important_notes = action_plan.get("important_notes", {})
-        next_actions = action_plan.get("next_actions", [])
-        knowledge_queries = action_plan.get("knowledge_queries", [])
-        
-        # Extract resolved temporal references if available
-        temporal_references = {}
-        if "temporal_references" in user_profile.other_aspects:
-            temporal_references = user_profile.other_aspects.get("temporal_references", {})
-            logger.info(f"Including temporal references in response generation: {json.dumps(temporal_references, indent=2)}")
-        
-        # Fetch additional knowledge if queries are provided
-        additional_knowledge = ""
-        if knowledge_queries:
-            logger.info(f"Fetching additional knowledge for {len(knowledge_queries)} queries")
-            try:
-                knowledge_results = []
-                for query_info in knowledge_queries[:3]:  # Limit to top 3 queries
-                    try:
-                        # Extract just the query string from the query info dictionary
-                        query = query_info.get('query', '') if isinstance(query_info, dict) else query_info
-                        if query:
-                            knowledge = await fetch_knowledge(query, self.graph_version_id)
-                            if knowledge:
-                                knowledge_results.append(f"Query: {query}\nResult: {knowledge}")
-                    except Exception as e:
-                        logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
-                
-                additional_knowledge = "\n\n".join(knowledge_results)
-                logger.info(f"Fetched additional knowledge: {len(additional_knowledge)} chars")
-            except Exception as e:
-                logger.error(f"Error fetching additional knowledge: {str(e)}")
-
         # Include current date/time information for temporal context
         from datetime import datetime
         import pytz
@@ -171,23 +160,39 @@ class LearningProcessor:
         # Create a temporal context string
         temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
         
-        # Format temporal references for inclusion in the prompt if available
-        temporal_info = ""
-        if temporal_references:
-            original_mentions = temporal_references.get("original_mentions", [])
-            resolved_dates = temporal_references.get("resolved_dates", [])
-            resolved_times = temporal_references.get("resolved_times", [])
+        # Extract knowledge context and similarity if available
+        knowledge_context = ""
+        similarity_score = 0.0
+        
+        if analysis_knowledge:
+            if "knowledge_context" in analysis_knowledge:
+                knowledge_context = analysis_knowledge["knowledge_context"]
+                if knowledge_context:
+                    logger.info(f"Including knowledge context: {len(knowledge_context)} chars")
             
-            temporal_info = "TEMPORAL REFERENCES:\n"
-            if original_mentions and resolved_dates:
-                for i, mention in enumerate(original_mentions):
-                    resolved_date = resolved_dates[i] if i < len(resolved_dates) else "unknown"
-                    resolved_time = resolved_times[i] if resolved_times and i < len(resolved_times) else ""
-                    
-                    if resolved_time:
-                        temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date} at {resolved_time}\n"
-                    else:
-                        temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
+            # Extract similarity score if available
+            # This assumes fetch_knowledge returns similarity scores, otherwise we'll use a default value
+            if "metadata" in analysis_knowledge and "similarity" in analysis_knowledge["metadata"]:
+                similarity_score = float(analysis_knowledge["metadata"]["similarity"])
+            elif "similarity" in analysis_knowledge:
+                similarity_score = float(analysis_knowledge["similarity"])
+            elif "query_count" in analysis_knowledge and analysis_knowledge["query_count"] > 0:
+                # If we have results but no explicit similarity score, assume moderate similarity
+                similarity_score = 0.6
+            
+            logger.info(f"Similarity score: {similarity_score}")
+        
+        # Determine active learning response mode based on similarity score
+        active_learning_mode = "USE_KNOWLEDGE"  # Default
+        
+        if similarity_score < 0.4:
+            active_learning_mode = "NEW_KNOWLEDGE"
+            logger.info("Low similarity detected - treating as potentially new knowledge")
+        elif similarity_score < 0.7:
+            active_learning_mode = "CLARIFY"
+            logger.info("Medium similarity detected - will ask for clarification")
+        else:
+            logger.info("High similarity detected - using existing knowledge")
         
         # Build prompt for LLM to generate response
         prompt = f"""Generate a concise, culturally appropriate response to this user based on:
@@ -195,20 +200,9 @@ class LearningProcessor:
         CURRENT MESSAGE: {message}
         CONVERSATION: {conversation_context}
         TIME CONTEXT: {temporal_context}
-        {temporal_info if temporal_info else ""}
-        ANALYSIS: {json.dumps(analysis_summary, indent=2) if analysis_summary else "N/A"}
-        PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
-        CONTEXT: Class={user_profile.classification}, Skills={', '.join(user_profile.skills)}, Needs={', '.join(user_profile.requirements)}
-        INFO: {additional_knowledge}
-
-        EXECUTION STRATEGY:
-        1. STRICT ACTION SEQUENCE - Execute actions in EXACT order as specified in the PLAN
-        2. NO SKIPPING - Do not skip any actions in the sequence
-        3. NO ADDITIONS - Do not add actions that are not in the PLAN
-        4. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
-        5. APPLY DOMAIN EXPERTISE - For any next_action, include specific details identified from the available sources
-        6. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
-        7. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
+        KNOWLEDGE: {knowledge_context}
+        SIMILARITY_SCORE: {similarity_score}
+        ACTIVE_LEARNING_MODE: {active_learning_mode}
 
         REQUIREMENTS:
         1. BE CONCISE - Keep response under 100 words
@@ -216,16 +210,15 @@ class LearningProcessor:
         3. MATCH LANGUAGE SOPHISTICATION - Sound like a domain expert in their language
         4. MAINTAIN TONE - Friendly but professional
         5. PERSONALIZE - Address specific user needs without repeating their question
-        6. INCORPORATE KNOWLEDGE - Use additional info where relevant
-        7. PRIORITIZE CLARITY - Focus on next steps and solutions
-        8. MAINTAIN CONVERSATION FLOW - Reference prior exchanges when relevant
-        9. BE NATURAL - Write as a human expert would, not as an AI assistant
-        10. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
-        11. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
-
-        ACTION EXECUTION RULES:
-        1. Execute each action in the PLAN in sequence
-
+        6. PRIORITIZE CLARITY - Focus on next steps and solutions
+        7. MAINTAIN CONVERSATION FLOW - Reference prior exchanges when relevant
+        8. BE NATURAL - Write as a human expert would, not as an AI assistant
+        9. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
+        10. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
+        11. ACTIVE LEARNING - Follow these guidelines:
+           - If ACTIVE_LEARNING_MODE is USE_KNOWLEDGE (similarity > 0.7): Respond confidently using the provided knowledge.
+           - If ACTIVE_LEARNING_MODE is CLARIFY (similarity 0.4-0.7): Ask for clarification or additional details to better understand the user's intent.
+           - If ACTIVE_LEARNING_MODE is NEW_KNOWLEDGE (similarity < 0.4): Treat this as potentially new knowledge, ask if they want to save this information for future reference.
 
         LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
         """
@@ -237,10 +230,11 @@ class LearningProcessor:
                 "message": response.content.strip(),
                 "metadata": {
                     "timestamp": datetime.now().isoformat(),
-                    "user_id": user_profile.user_id,
-                    "knowledge_queries_used": knowledge_queries,
-                    "additional_knowledge_found": bool(additional_knowledge),
-                    "temporal_references": temporal_references if temporal_references else None
+                    "user_id": user_id,
+                    "additional_knowledge_found": bool(knowledge_context),
+                    "similarity_score": similarity_score,
+                    "active_learning_mode": active_learning_mode,
+                    "temporal_references": None
                 }
             }
         except Exception as e:
@@ -326,6 +320,12 @@ async def execute_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, 
                 parameters.get("context", ""),
                 parameters.get("graph_version_id", "")
             )
+        elif tool_name == "save_knowledge":
+            return await save_new_knowledge(
+                parameters.get("query", ""),
+                parameters.get("content", ""),
+                parameters.get("graph_version_id", "")
+            )
         return {"status": "error", "message": f"Unknown tool: {tool_name}"}
     except Exception as e:
         logger.error(f"Error executing tool {tool_name}: {str(e)}")
@@ -337,13 +337,15 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     try:
         knowledge_data = await fetch_knowledge(query, graph_version_id)
         
+        # Initialize result_data as empty dict to ensure it's always defined
+        result_data = {}
+        
         # Handle different return types from fetch_knowledge
         if isinstance(knowledge_data, dict) and "status" in knowledge_data and knowledge_data["status"] == "error":
             # If fetch_knowledge returned an error dictionary
             return knowledge_data
         
         # Handle string or other return types
-        result_data = {}
         if isinstance(knowledge_data, str):
             # Check if the knowledge_data contains vector representations
             if knowledge_data and ("[" in knowledge_data and "]" in knowledge_data):
@@ -390,3 +392,26 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     except Exception as e:
         logger.error(f"Error fetching knowledge: {str(e)}")
         return {"status": "error", "message": f"Failed to fetch knowledge: {str(e)}"}
+
+async def save_new_knowledge(query: str, knowledge_content: str, graph_version_id: str) -> Dict[str, Any]:
+    """Save new knowledge to the knowledge base."""
+    logger.info(f"Saving new knowledge for query: {query[:100]}...")
+    try:
+        # Format the knowledge for saving
+        save_result = await save_knowledge(
+            query=query,
+            content=knowledge_content,
+            graph_version_id=graph_version_id
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Knowledge saved for {query}",
+            "data": save_result
+        }
+    except Exception as e:
+        logger.error(f"Error saving knowledge: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Failed to save knowledge: {str(e)}"
+        }
