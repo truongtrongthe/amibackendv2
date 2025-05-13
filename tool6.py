@@ -421,18 +421,17 @@ class CoTProcessor:
                 2. SELECT EXACTLY ONE objective that best matches this user and conversation stage
                 3. Your selection MUST be based on explicit objectives found in the knowledge context
                 4. Format the selected objective as a clear, SMART goal statement 
-                5. In your output, the business_goal MUST be BOLD and CLEARLY VISIBLE
+                5. In your output, bold the business_goal
                 6. PROVIDE A DETAILED JUSTIFICATION explaining WHY this objective is the most appropriate choice
 
-                ANALYSIS_QUERIES (GENERATE EXACTLY 5):
+                GENERATE 3-5 ANALYSIS_QUERIES:
                 [OBJECTIVE-SPECIFIC QUERIES]
-                1. "<Selected objective> definition, metrics, and key results"
-                2. "Implementation strategies for <selected objective> with <user classification>"
+                1. "Definition of selected business objective"
+                2. "Implementation strategies for the selected business objective"
 
                 [USER-SPECIFIC QUERIES]
-                3. "<User classification> characteristics and typical needs"
-                4. "Solutions for <specific user need/problem identified>"
-                5. "Next steps for <conversation stage> with <user classification>"
+                3. "Analyse the user with classification identified"
+                4. "Solutions for user need/problem identified"
 
                 RESPOND WITH JSON in the SAME LANGUAGE as the user message:
                 {{
@@ -698,15 +697,9 @@ class CoTProcessor:
         
         When identifying knowledge gaps:
         1. Review each action in your plan
-        2. For each action, identify what additional knowledge would help execute it better
-        3. Create specific queries to gather this knowledge
-        4. Prioritize queries that would help:
-           - Better understand the user's specific situation
-           - Find relevant products, services, or solutions
-           - Learn best practices for this type of user
-           - Address potential objections or concerns
-           - Handle specific date/time requirements if temporal references were detected
-        5. Ensure queries are in the same language as the user's message
+        2. For each action, identify what additional knowledge would help finding how to execute.
+        3. Create specific queries to gather this knowledge by adding "How to" or "What is" to the action
+        4. Ensure queries are in the same language as the user's message
 
         IMPORTANT: You MUST respond with a valid JSON object only. Do not include any other text or explanation.
         The JSON must follow this exact structure:
