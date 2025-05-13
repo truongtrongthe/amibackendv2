@@ -50,12 +50,43 @@ class LearningProcessor:
         try:
             logger.info(f"Searching for knowledge based on message...")
             analysis_knowledge = await self._search_knowledge(message)
-            logger.info(f"Found analysis knowledge: {analysis_knowledge}")
+            
+            # Log detailed knowledge search results
+            if "similarity" in analysis_knowledge:
+                similarity = analysis_knowledge["similarity"]
+                logger.info(f"Found analysis knowledge with similarity score: {similarity}")
+                
+                # Check log parsing vs. extraction method
+                if similarity == 0.0 and "knowledge_context" in analysis_knowledge:
+                    knowledge_context = analysis_knowledge.get("knowledge_context", "")
+                    if "Top similarity" in knowledge_context:
+                        logger.warning("Possible similarity extraction issue: 'Top similarity' found in knowledge but score is 0.0")
+                        # Try one more time to extract it directly
+                        sim_match = re.search(r'Top similarity:\s+([0-9.]+)', knowledge_context)
+                        if sim_match:
+                            try:
+                                extracted_sim = float(sim_match.group(1))
+                                logger.info(f"Re-extracted similarity from knowledge context: {extracted_sim}")
+                                analysis_knowledge["similarity"] = extracted_sim
+                                analysis_knowledge["metadata"]["similarity"] = extracted_sim
+                            except (ValueError, KeyError):
+                                pass
+            
+            logger.info(f"Generating response based on knowledge...")
             response = await self._active_learning(message, conversation_context, analysis_knowledge, user_id)
-            logger.info(f"Now I have response: {response}")
+            logger.info(f"Response generated with status: {response.get('status', 'unknown')}")
+            
+            # Log the AI's active learning mode
+            if "metadata" in response and "active_learning_mode" in response["metadata"]:
+                logger.info(f"Active learning mode used: {response['metadata']['active_learning_mode']}")
+                
             return response
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
+            # Include stack trace for better debugging
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            
             # Emit error event
             if thread_id:
                 emit_analysis_event(thread_id, {
@@ -101,12 +132,34 @@ class LearningProcessor:
                     elif isinstance(knowledge, str):
                         knowledge_content = knowledge
                         # Try to extract similarity from string response if in a known format
-                        similarity_match = re.search(r'similarity[:\s]+([0-9.]+)', knowledge_content.lower())
-                        if similarity_match:
+                        
+                        # Try different patterns to extract similarity score
+                        similarity_patterns = [
+                            r'similarity[:\s]+([0-9.]+)',
+                            r'top similarity[:\s]+([0-9.]+)',
+                            r'similarity score[:\s]+([0-9.]+)'
+                        ]
+                        
+                        for pattern in similarity_patterns:
+                            similarity_match = re.search(pattern, knowledge_content.lower())
+                            if similarity_match:
+                                try:
+                                    similarity = float(similarity_match.group(1))
+                                    logger.info(f"Extracted similarity score {similarity} using pattern {pattern}")
+                                    break
+                                except ValueError:
+                                    continue
+                        
+                        # Check for lines with "Top similarity: 0.xxxx" format in logs
+                        top_sim_match = re.search(r'top similarity:\s+([0-9.]+)', knowledge_content.lower())
+                        if top_sim_match:
                             try:
-                                similarity = float(similarity_match.group(1))
+                                top_sim = float(top_sim_match.group(1))
+                                if top_sim > similarity:  # Use the higher value
+                                    similarity = top_sim
+                                    logger.info(f"Found higher similarity score: {similarity} from Top similarity pattern")
                             except ValueError:
-                                similarity = 0.0
+                                pass
                     else:
                         # Convert to string as a last resort
                         knowledge_content = str(knowledge)
@@ -129,6 +182,20 @@ class LearningProcessor:
         # Calculate average similarity score if we have entries
         avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 0.0
         max_similarity = max(similarity_scores) if similarity_scores else 0.0
+        
+        # If we still have zero similarity but the knowledge content contains a reference to similarity,
+        # try one more time with broader pattern matching
+        if max_similarity == 0.0 and combined_knowledge:
+            # Look for any number after variations of "similarity" with more flexible spacing
+            broader_sim_match = re.search(r'[sS]imilarity.*?([0-9]+\.[0-9]+)', combined_knowledge)
+            if broader_sim_match:
+                try:
+                    extracted_sim = float(broader_sim_match.group(1))
+                    if 0 <= extracted_sim <= 1:  # Make sure it's a valid similarity score
+                        max_similarity = extracted_sim
+                        logger.info(f"Using broader pattern matching, found similarity: {max_similarity}")
+                except ValueError:
+                    pass
 
         return {
             "analysis_methods": [entry["query"] for entry in knowledge_entries],
@@ -170,17 +237,33 @@ class LearningProcessor:
                 if knowledge_context:
                     logger.info(f"Including knowledge context: {len(knowledge_context)} chars")
             
-            # Extract similarity score if available
-            # This assumes fetch_knowledge returns similarity scores, otherwise we'll use a default value
+            # Extract similarity score - check all possible locations
             if "metadata" in analysis_knowledge and "similarity" in analysis_knowledge["metadata"]:
                 similarity_score = float(analysis_knowledge["metadata"]["similarity"])
+                logger.info(f"Found similarity score in metadata: {similarity_score}")
             elif "similarity" in analysis_knowledge:
                 similarity_score = float(analysis_knowledge["similarity"])
+                logger.info(f"Found similarity score directly in analysis_knowledge: {similarity_score}")
             elif "query_count" in analysis_knowledge and analysis_knowledge["query_count"] > 0:
-                # If we have results but no explicit similarity score, assume moderate similarity
-                similarity_score = 0.6
+                # If we have results but no explicit similarity score, check for similarity in the knowledge context
+                if knowledge_context:
+                    # Try to extract similarity from the knowledge context
+                    sim_match = re.search(r'[tT]op similarity:\s+([0-9.]+)', knowledge_context)
+                    if sim_match:
+                        try:
+                            extracted_sim = float(sim_match.group(1))
+                            if 0 <= extracted_sim <= 1:  # Make sure it's a valid similarity score
+                                similarity_score = extracted_sim
+                                logger.info(f"Extracted similarity from knowledge context: {similarity_score}")
+                        except ValueError:
+                            pass
+                
+                # If still zero, use a moderate default
+                if similarity_score == 0.0:
+                    similarity_score = 0.5
+                    logger.info(f"Using default moderate similarity score: {similarity_score}")
             
-            logger.info(f"Similarity score: {similarity_score}")
+            logger.info(f"Final similarity score: {similarity_score}")
         
         # Determine active learning response mode based on similarity score
         active_learning_mode = "USE_KNOWLEDGE"  # Default
@@ -195,14 +278,22 @@ class LearningProcessor:
             logger.info("High similarity detected - using existing knowledge")
         
         # Build prompt for LLM to generate response
-        prompt = f"""Generate a concise, culturally appropriate response to this user based on:
+        prompt = f"""Generate a concise, culturally appropriate response as an active learner with knowledge:
 
         CURRENT MESSAGE: {message}
         CONVERSATION: {conversation_context}
         TIME CONTEXT: {temporal_context}
-        KNOWLEDGE: {knowledge_context}
+        YOUR EXISTING KNOWLEDGE: {knowledge_context}
         SIMILARITY_SCORE: {similarity_score}
         ACTIVE_LEARNING_MODE: {active_learning_mode}
+
+        ACTIVE LEARNER PERSONA:
+        You are an AI with memory and learning capabilities. The "YOUR EXISTING KNOWLEDGE" section above contains everything you currently know about this topic. The SIMILARITY_SCORE indicates how closely the user's query matches your existing knowledge base.
+
+        HOW TO INTERPRET SIMILARITY SCORE:
+        - SIMILARITY_SCORE > 0.7: You have high confidence that you already know about this topic.
+        - SIMILARITY_SCORE between 0.4-0.7: You have some knowledge that might be related, but you're not entirely certain.
+        - SIMILARITY_SCORE < 0.4: This appears to be new information that isn't yet in your knowledge base.
 
         REQUIREMENTS:
         1. BE CONCISE - Keep response under 100 words
@@ -215,12 +306,16 @@ class LearningProcessor:
         8. BE NATURAL - Write as a human expert would, not as an AI assistant
         9. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
         10. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
-        11. ACTIVE LEARNING - Follow these guidelines:
-           - If ACTIVE_LEARNING_MODE is USE_KNOWLEDGE (similarity > 0.7): Respond confidently using the provided knowledge.
-           - If ACTIVE_LEARNING_MODE is CLARIFY (similarity 0.4-0.7): Ask for clarification or additional details to better understand the user's intent.
-           - If ACTIVE_LEARNING_MODE is NEW_KNOWLEDGE (similarity < 0.4): Treat this as potentially new knowledge, ask if they want to save this information for future reference.
+        11. ACTIVE LEARNING - Base your response style on the similarity score:
+           - If SIMILARITY_SCORE > 0.7: Begin with phrases like "I remember this..." or "I'm familiar with this..." then confidently share what you know from YOUR EXISTING KNOWLEDGE.
+           - If SIMILARITY_SCORE between 0.4-0.7: Begin with phrases like "I wonder if this is about..." or "This seems similar to..." then share what might be relevant from YOUR EXISTING KNOWLEDGE and ask clarifying questions.
+           - If SIMILARITY_SCORE < 0.4: Begin with phrases like "I don't have information about this yet" or "This seems new to me" and explicitly ask "Would you like me to save this for future reference?"
 
         LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
+
+        IMPORTANT: Your identity as an active learner should be subtly conveyed through your response style, not through explicit statements about being an AI. Focus on the knowledge and your familiarity with it rather than describing yourself.
+
+        THE MOST IMPORTANT RULE: Base your response on the similarity score! This is crucial for proper active learning behavior. You MUST use different response patterns for different similarity ranges as instructed above.
         """
 
         try:

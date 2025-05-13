@@ -380,66 +380,79 @@ class CoTProcessor:
             """
             logger.info(f"Detected temporal references in message. Adding temporal resolution instructions.")
         
-        prompt = f"""Build a user profile from:
+        # Log conversation context length to help with debugging
+        conversation_lines = conversation_context.count('\n') if conversation_context else 0
+        logger.info(f"Building user portrait with {conversation_lines} lines of conversation context")
+        
+        prompt = f"""Build a comprehensive user profile by THOROUGHLY ANALYZING the ENTIRE conversation history:
+
                 KNOWLEDGE: {knowledge_context}
-                USER: {message}
-                CONTEXT: {conversation_context}
+                CONVERSATION HISTORY: {conversation_context}
+                CURRENT MESSAGE: {message}
                 TIME CONTEXT: {temporal_context}
                 BUSINESS OBJECTIVES: {business_objectives}
 
-                Analyze the message using classification techniques from the knowledge context.
-                Match your language style to the user's message.
+                DEEP CONVERSATION ANALYSIS INSTRUCTIONS:
+                1. THOROUGHLY EXAMINE the COMPLETE conversation history - NOT just the current message
+                2. Identify patterns, topics, and key information across ALL messages
+                3. Track changes in user's tone, needs, and requirements throughout the conversation
+                4. Look for implicit information and context clues across the ENTIRE conversation
+                5. Pay special attention to consistency/inconsistency in user statements over time
+                6. Consider how earlier messages provide context for later statements
+                7. Look for previous questions that may not have been fully answered
 
-                LANGUAGE REQUIREMENTS:
-                1. STRICTLY use the SAME LANGUAGE as the user's message
-                2. If the message is in Vietnamese, respond COMPLETELY in Vietnamese
-                3. If the message is in English, respond COMPLETELY in English
-                4. DO NOT mix languages in your response
-                5. Maintain consistent language throughout all sections
-                6. Use natural expressions and terminology from the user's language
-                7. Follow cultural communication patterns of the user's language
+                Analyze the conversation using classification techniques from the knowledge context.
+                STRICTLY match your language style to the user's message. If the user wrote in Vietnamese, respond ENTIRELY in Vietnamese. If in English, respond ENTIRELY in English.
 
-                Key focus areas:
-                1. Apply classification techniques from knowledge context
-                2. Identify behavioral patterns and classification signals
-                3. Uncover hidden needs beyond stated requirements
-                4. Determine information gaps for better service
-                5. Plan next engagement steps
-                6. Analyze user message for alignment with business objectives
-                {f"7. Resolve any temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
+                CONVERSATION STAGE AWARENESS:
+                Identify the current stage (first contact, information gathering, problem identification, etc.) and adapt your approach accordingly. Consider whether the conversation is progressing naturally or needs redirection.
 
-                For BUSINESS_GOAL:
-                - Carefully scan the BUSINESS OBJECTIVES list for objectives that align with this user's needs and profile
-                - Select 1-2 specific business objectives that are most appropriate for this user
-                - Business objectives should be specific, measurable, achievable, relevant, and time-bound
-                - Format as a clear goal statement (e.g., "Convert user to premium subscription within 30 days")
+                KEY FOCUS AREAS:
+                • Apply classification techniques from knowledge context
+                • Identify behavioral patterns and hidden needs beyond stated requirements
+                • Determine information gaps and plan appropriate next steps
+                • Analyze alignment with business objectives
+                • Identify recurring themes or topics throughout the conversation
+                • Track any evolution in the user's needs or priorities across messages
+                {f"• Resolve temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
-                For ANALYSIS_QUERIES:
-                - Create 5-7 natural language queries for Pinecone vector search
-                - Include 2-3 queries SPECIFICALLY about the selected business objectives for this user. This query should help to find key results and key activities of the business objective
-                - Include domain terms, user type, and specific needs in other queries
-                - Mix general approaches with specific details
-                - Add 1-2 queries in user's native language if appropriate
-                - Format as document titles/summaries (e.g., "Best approach for price-sensitive maternity patients")
-                - Include queries like "How to implement [specific business objective] for [user classification]"
+                BUSINESS_GOAL SELECTION (CRITICAL):
+                1. CAREFULLY EXAMINE the KNOWLEDGE and BUSINESS OBJECTIVES sections to identify ALL available business objectives
+                2. SELECT EXACTLY ONE objective that best matches this user and conversation stage
+                3. Your selection MUST be based on explicit objectives found in the knowledge context
+                4. Format the selected objective as a clear, SMART goal statement 
+                5. In your output, the business_goal MUST be BOLD and CLEARLY VISIBLE
+                6. PROVIDE A DETAILED JUSTIFICATION explaining WHY this objective is the most appropriate choice
 
-                RESPOND WITH JSON ONLY:
+                ANALYSIS_QUERIES (GENERATE EXACTLY 5):
+                [OBJECTIVE-SPECIFIC QUERIES]
+                1. "<Selected objective> definition, metrics, and key results"
+                2. "Implementation strategies for <selected objective> with <user classification>"
+
+                [USER-SPECIFIC QUERIES]
+                3. "<User classification> characteristics and typical needs"
+                4. "Solutions for <specific user need/problem identified>"
+                5. "Next steps for <conversation stage> with <user classification>"
+
+                RESPOND WITH JSON in the SAME LANGUAGE as the user message:
                 {{
                     "classification": "string (from knowledge context)",
                     "skills": ["identified skills/capabilities"],
                     "requirements": ["specific needs/requirements"],
-                    "analysis_queries": ["vector search queries for Pinecone, including business objective queries"],
-                    "business_goal": "string (selected specific business objectives for this user)",
+                    "analysis_queries": ["5 precise queries as instructed above"],
+                    "business_goal": "**SELECTED OBJECTIVE: clearly formatted SMART goal statement**",
                     "other_aspects": {{
+                        "conversation_stage": "identified stage of the conversation",
                         "behavioral_patterns": "observed behavior description",
                         "hidden_needs": "underlying needs analysis",
-                        "required_info": ["missing information we need from/about the user"],
-                        "next_steps": ["engagement steps"],
+                        "required_info": ["missing information needed from the user"],
+                        "next_steps": ["engagement steps appropriate for conversation stage"],
                         "classification_criteria": "classification rationale",
-                        "business_objective_alignment": "explanation of how selected business objectives align with user"
+                        "conversation_history_insights": "Key insights extracted from analyzing the COMPLETE conversation history",
+                        "business_objective_justification": "DETAILED explanation of why this business objective is most appropriate"
                         {temporal_resolution_instruction if needs_temporal_resolution else ""}
                     }},
-                    "portrait_paragraph": "Comprehensive profile narrative including classification, needs, behavior, and alignment with business objectives."
+                    "portrait_paragraph": "Comprehensive profile including classification, needs, behavior, and business objective alignment, incorporating insights from the ENTIRE conversation history."
                 }}
                 """
         
@@ -584,9 +597,14 @@ class CoTProcessor:
         next_steps = ', '.join(user_profile.other_aspects.get("next_steps", [])) or "None"
         business_goal = user_profile.business_goal
         
-        # Construct compact narrative
+        # Extract conversation history insights if available
+        conversation_insights = user_profile.other_aspects.get("conversation_history_insights", "")
+        conversation_stage = user_profile.other_aspects.get("conversation_stage", "")
+        
+        # Construct compact narrative with conversation history insights
         return f"""This user is {classification} who {criteria}. {portrait} Their behavior shows {behavioral}, 
         suggesting {hidden_needs} as underlying needs. With {skills} skills, they're looking to {requirements}. 
+        The conversation is currently in the {conversation_stage} stage. {conversation_insights if conversation_insights else ""}
         Missing information we still need: {required_info}. Next best steps: {next_steps}. AI business goal: {business_goal}"""
 
     async def _decide_action_plan_with_llm(self, user_profile: UserProfileModel, analysis_knowledge: Dict[str, Any]) -> Dict[str, Any]:
@@ -872,66 +890,32 @@ class CoTProcessor:
                         temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
         
         # Build prompt for LLM to generate response
-        prompt = f"""Generate a culturally appropriate response to this user based on:
+        prompt = f"""Generate a response to the user that STRICTLY FOLLOWS the action plan:
 
         CURRENT MESSAGE: {message}
         CONVERSATION: {conversation_context}
         TIME CONTEXT: {temporal_context}
         {temporal_info if temporal_info else ""}
         ANALYSIS: {json.dumps(analysis_summary, indent=2) if analysis_summary else "N/A"}
-        PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
-        CONTEXT: Class={user_profile.classification}, Skills={', '.join(user_profile.skills)}, Needs={', '.join(user_profile.requirements)}
-        INFO: {additional_knowledge}
+        ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
+        USER CONTEXT: Classification={user_profile.classification}, Business Goal={user_profile.business_goal}
+        ADDITIONAL INFO: {additional_knowledge}
 
-        EXECUTION STRATEGY:
-        0. PRIORITIZE BUSINESS GOAL - Focus on achieving the stated business objective (e.g., having 40% of users provide necessary information), even if it means adjusting the action sequence
-        1. USE AVAILABLE INFORMATION - Prioritize factual information from knowledge sources over assumptions
-        2. APPLY DOMAIN EXPERTISE - For any action, include specific details identified from the available sources
-        3. CONNECT DOTS - Link insights from different sources to provide comprehensive execution of the plan
-        4. INCORPORATE TIME CONTEXT - Use the resolved temporal references when discussing dates and times
+        STRICT EXECUTION REQUIREMENTS:
+        1. ONLY implement the actions listed in the ACTION PLAN - nothing more, nothing less
+        2. DO NOT introduce any external services, specialists, websites, or social media not mentioned in the plan
+        3. DO NOT mention or suggest Facebook, messengers, or any external contacts unless explicitly in the plan
+        4. Follow the exact priority order of the actions as they appear in the plan
+        5. Use the same language as the user (Vietnamese/English/etc.) throughout
 
-        REQUIREMENTS:
-        1. BE CONCISE - Provide a thorough response without unnecessary length
-        2. APPLY CULTURAL INTELLIGENCE - Use culturally appropriate forms of address and relationship terms that reflect the user's language context
-        3. MATCH LANGUAGE SOPHISTICATION - Sound like a domain expert in their language
-        4. MAINTAIN TONE - Friendly but professional
-        5. PERSONALIZE - Address specific user needs without repeating their question
-        6. INCORPORATE KNOWLEDGE - Use additional info where relevant
-        7. PRIORITIZE CLARITY - Focus on next steps and solutions
-        8. MAINTAIN CONVERSATION FLOW - Reference prior exchanges when relevant
-        9. BE NATURAL - Write as a human expert would, not as an AI assistant
-        10. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
-        11. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
+        FORMAT GUIDELINES:
+        • Be concise and professional
+        • Match the user's language and cultural context
+        • Use appropriate pronouns (e.g., in Vietnamese: Anh/Chị/Em) based on detected language
+        • Skip formulaic greetings and focus on delivering the actions
+        • Adapt to the specific user needs indicated in the analysis
 
-        ACTION EXECUTION RULES:
-        1. Execute actions from the PLAN that best achieve the business goal
-        2. For each action:
-           - Execute the action as specified
-           - Then, wait for user response if the action requires it
-        3. If an action requires asking questions:
-           - Ask the questions as specified
-           - Do not provide solutions until questions are answered
-        4. If an action requires providing information:
-           - Provide the information specified
-           - Link information to user's specific needs
-        5. If an action requires making recommendations:
-           - Make recommendations specified
-           - Tailor recommendations to user's specific context
-
-        LINGUISTIC MIRRORING PRINCIPLE: Identify self-referential pronouns used by the user and respond with the appropriate complementary pronoun in the detected language. This requires understanding the social, hierarchical, and relational implications of pronoun choices in each language. For example:
-        - In Vietnamese: If user uses "Anh/Chị" for self-reference, respond with "Em"; if user uses "Em", respond with "Anh/Chị" as appropriate to gender
-        - In Thai: Match the politeness level and appropriate personal pronouns (phom/dichan/chan/rao responding with khun/than)
-        - In Japanese: Match formality level with appropriate personal pronouns (watashi/boku/ore responding with anata/kimi/omae)
-        - Apply similar principles to other languages with complex pronoun systems
-        
-        LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Pay special attention to:
-        1. PERSONAL PRONOUNS - Use appropriate relational pronouns based on detected language
-        2. HIERARCHICAL RELATIONSHIPS - Honor language-specific social hierarchies in your response
-        3. CULTURAL NUANCE - Incorporate cultural context that demonstrates native-level understanding
-        4. RELATIONAL MARKERS - Use language-specific relationship terms appropriate to the context
-        5. NATURAL FLOW - Ensure responses follow natural linguistic patterns of the detected language
-
-        Do not translate concepts directly between languages - reconstruct the message using native patterns and expressions. Adapt your entire response strategy to align with the cultural context of the detected language.
+        CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN. Do not suggest connecting with specialists, visiting websites, or using external services unless these are explicitly listed as actions in the plan.
         """
 
         try:
@@ -966,30 +950,50 @@ async def process_llm_with_tools(
     # Initialize conversation context with current message
     conversation_context = f"User: {user_message}\n"
     
-    # Include up to 30 previous messages for context
+    # Include previous messages for context (increased from 30 to 50 for more comprehensive history)
     if conversation_history:
-        # Extract the last 30 messages excluding the current
+        # Extract the messages excluding the current message
         recent_messages = []
         message_count = 0
-        max_messages = 30
+        max_messages = 50  # Increased from 30 to 50 messages
         
         for msg in reversed(conversation_history[:-1]):  # Skip the current message
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            
-            if role and content:
-                if role == "assistant":
-                    recent_messages.append(f"AI: {content}")
-                elif role == "user":
-                    recent_messages.append(f"User: {content}")
+            try:
+                role = msg.get("role", "").lower() 
+                content = msg.get("content", "")
                 
-                message_count += 1
+                if role and content:
+                    # Format based on role with clear separation between messages
+                    if role in ["assistant", "ai"]:
+                        recent_messages.append(f"AI: {content.strip()}")
+                        message_count += 1
+                    elif role in ["user", "human"]:
+                        recent_messages.append(f"User: {content.strip()}")
+                        message_count += 1
+                    # All other roles are now explicitly skipped
                 if message_count >= max_messages:
+                    # We've reached our limit, but add a note about truncation
+                    if len(conversation_history) > max_messages + 1:  # +1 accounts for current message
+                        recent_messages.append(f"[Note: Conversation history truncated. Total messages: {len(conversation_history)}]")
                     break
+            except Exception as e:
+                logger.warning(f"Error processing message in conversation history: {e}")
+                continue
         
-        # Add messages in chronological order
+        # Add messages in chronological order with clear formatting
         if recent_messages:
-            conversation_context = "\n".join(reversed(recent_messages)) + "\n" + conversation_context
+            # Add a header to highlight the importance of the conversation history
+            header = "==== CONVERSATION HISTORY (CHRONOLOGICAL ORDER) ====\n"
+            # Reverse the list to get chronological order and join with double newlines for better separation
+            conversation_history_text = "\n\n".join(reversed(recent_messages))
+            # Add a separator between history and current message
+            separator = "\n==== CURRENT INTERACTION ====\n"
+            
+            conversation_context = f"{header}{conversation_history_text}{separator}\nUser: {user_message}\n"
+            
+            logger.info(f"Added {len(recent_messages)} messages from conversation history")
+        else:
+            logger.warning("No usable messages found in conversation history")
     
     # Get or create a CoTProcessor instance
     if 'cot_processor' not in state:
