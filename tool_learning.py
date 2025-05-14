@@ -11,7 +11,8 @@ import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from aitools import fetch_knowledge_with_similarity, brain, emit_analysis_event, save_knowledge  # Updated import
+from aitools import emit_analysis_event, save_knowledge  # Updated import
+from ai_tools import fetch_knowledge_with_similarity
 from brain_singleton import get_current_graph_version
 from utilities import logger
 

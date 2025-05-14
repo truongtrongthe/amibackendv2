@@ -92,6 +92,9 @@ class ActiveBrain:
         """Initialize or load FAISS index from disk."""
         try:
             logger.info("Initializing FAISS index")
+            
+            # Use Inner Product index (IP) for direct cosine similarity with normalized vectors
+            # This way, the similarity score IS the cosine similarity when vectors are normalized
             faiss_index = faiss.IndexFlatIP(self.dim)
             
             if os.path.exists("faiss_index.bin") and os.path.exists("metadata.pkl"):
@@ -801,10 +804,15 @@ class ActiveBrain:
             # Make a copy before normalization to avoid modifying the original
             vectors_to_add = vectors.copy()
             
-            # Normalize the vectors for FAISS
+            # Normalize the vectors for FAISS - critical for cosine similarity via inner product
             try:
                 logger.info("Normalizing vectors before adding to FAISS")
-                faiss.normalize_L2(vectors_to_add)
+                # Normalize each vector to unit length for correct cosine similarity
+                # Using manual normalization instead of faiss.normalize_L2 for more control
+                norms = np.linalg.norm(vectors_to_add, axis=1, keepdims=True)
+                # Replace zero norms with 1 to avoid division by zero
+                norms[norms == 0] = 1.0
+                vectors_to_add = vectors_to_add / norms
             except Exception as norm_error:
                 logger.error(f"Error during vector normalization: {norm_error}")
                 # Fallback normalization - less efficient but more robust
@@ -1002,8 +1010,10 @@ class ActiveBrain:
             if len(query_vector.shape) == 1:
                 query_vector = query_vector.reshape(1, -1)
             
-            # Normalize the vector
-            faiss.normalize_L2(query_vector)
+            # Normalize the vector to unit length - critical for cosine similarity via inner product
+            norm = np.linalg.norm(query_vector)
+            if norm > 0:
+                query_vector = query_vector / norm
             
             # Adjust top_k if it's larger than the number of vectors
             actual_top_k = min(top_k, len(self.vector_ids))
@@ -1018,10 +1028,15 @@ class ActiveBrain:
             distances, indices = self.faiss_index.search(query_vector, k=actual_top_k)
             
             # Log raw distances for debugging
-            logger.info(f"Raw FAISS distances: {distances}")
+            logger.info(f"Raw FAISS scores: {distances}")
             
             # Process search results
             results = []
+            
+            # Calculate a more conservative similarity threshold based on the number of vectors
+            # This helps prevent high similarity scores for unrelated content in small datasets
+            adaptive_threshold = max(threshold, 0.1 + 0.2 * min(1.0, 10.0 / max(len(self.vector_ids), 1)))
+            logger.info(f"Using adaptive threshold: {adaptive_threshold} (base threshold: {threshold})")
             
             for i, idx in enumerate(indices[0]):
                 # Skip invalid indices
@@ -1029,24 +1044,16 @@ class ActiveBrain:
                     logger.warning(f"Invalid index {idx} returned by FAISS")
                     continue
                     
-                distance = distances[0][i]
+                # With normalized vectors and IP index, the FAISS distance IS the cosine similarity
+                # (scores range from -1 to 1, where 1 is identical and -1 is opposite)
+                similarity = float(distances[0][i])
                 
-                # Skip extreme negative values which indicate invalid results
-                if distance < -1.0:
-                    logger.warning(f"Skipping result with extreme negative distance: {distance}")
-                    continue
-                
-                # For normalized vectors, FAISS returns distances in the range [-1, 2]
-                # Distance = 2 - 2*cosine_similarity for normalized vectors
-                # Therefore: cosine_similarity = 1 - distance/2
-                similarity = 1.0 - distance/2.0
-                
-                # Ensure similarity is in valid range [0,1]
-                similarity = max(0.0, min(1.0, similarity))
+                # Log the raw similarity
+                logger.debug(f"Vector {i}: direct cosine similarity={similarity:.4f}")
                 
                 # Skip if below threshold
-                if similarity < threshold:
-                    logger.debug(f"Skipping result with similarity {similarity} below threshold {threshold}")
+                if similarity < adaptive_threshold:
+                    logger.debug(f"Skipping result with similarity {similarity:.4f} below threshold {adaptive_threshold:.4f}")
                     continue
                     
                 # Get vector ID and data
@@ -1155,7 +1162,47 @@ class ActiveBrain:
             logger.error(traceback.format_exc())
             raise RuntimeError(f"Failed to perform similarity search: {e}")
     
-    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 10, threshold: float = 0.05) -> List[Tuple[str, np.ndarray, Dict, float]]:
+    def _adjust_similarity_score(self, raw_similarity: float) -> float:
+        """
+        Apply a more realistic adjustment to similarity scores to prevent overconfidence.
+        
+        Args:
+            raw_similarity: The raw similarity score from FAISS (0.0 to 1.0)
+            
+        Returns:
+            Adjusted similarity score
+        """
+        # Apply a sigmoid-like curve that makes high similarities harder to achieve
+        # This function:
+        # - Makes scores above 0.85 increasingly harder to achieve
+        # - Makes moderate scores (0.5-0.8) more realistic
+        # - Keeps low scores (0-0.4) relatively unchanged
+        
+        # Parameters for adjustment
+        shift = 0.65  # Center of the sigmoid curve
+        scale = 10.0  # Steepness of the curve
+        
+        # Base sigmoid function: 1 / (1 + exp(-scale * (x - shift)))
+        # Rescaled to ensure 0->0 and 1->1 mapping
+        if raw_similarity <= 0.0:
+            return 0.0
+        elif raw_similarity >= 1.0:
+            return 1.0
+            
+        # Calculate sigmoid
+        sigmoid_zero = 1.0 / (1.0 + np.exp(scale * shift))  # Value at x=0
+        sigmoid_one = 1.0 / (1.0 + np.exp(-scale * (1.0 - shift)))  # Value at x=1
+        
+        # Apply sigmoid and rescale
+        sigmoid_value = 1.0 / (1.0 + np.exp(-scale * (raw_similarity - shift)))
+        
+        # Rescale the sigmoid to ensure 0->0 and 1->1 mapping
+        adjusted = (sigmoid_value - sigmoid_zero) / (sigmoid_one - sigmoid_zero)
+        
+        # Ensure the result is in [0,1]
+        return max(0.0, min(1.0, adjusted))
+    
+    async def get_similar_vectors_by_text(self, query_text: str, top_k: int = 10, threshold: float = 0.25, use_direct_similarity: bool = False) -> List[Tuple[str, np.ndarray, Dict, float]]:
         """
         Get similar vectors by text query.
         
@@ -1163,6 +1210,7 @@ class ActiveBrain:
             query_text: Text to get similar vectors for
             top_k: Number of similar vectors to return
             threshold: Minimum similarity score to include in results
+            use_direct_similarity: Whether to use direct cosine similarity calculation instead of FAISS
             
         Returns:
             List of tuples containing (vector_id, vector, metadata, similarity)
@@ -1197,41 +1245,64 @@ class ActiveBrain:
             # Log vector state for debugging
             logger.info(f"Current state: FAISS index has {self.faiss_index.ntotal} vectors, vector_ids list has {len(self.vector_ids)} items")
             
-            # Generate embedding for query text
-            try:
-                # Get embedding - make sure to await if this is a coroutine
-                embed_result = EMBEDDINGS.aembed_query(query_text)
-                
-                # Handle coroutine case
-                if asyncio.iscoroutine(embed_result):
-                    query_vector = await embed_result
+            # IMPROVED EMBEDDING APPROACH: Multiple embedding attempts with fallbacks
+            query_vector = None
+            embedding_methods = []
+            
+            # Method 1: Primary embedding method (EMBEDDINGS.aembed_query)
+            async def try_primary_embedding():
+                try:
+                    embed_result = EMBEDDINGS.aembed_query(query_text)
+                    if asyncio.iscoroutine(embed_result):
+                        return await embed_result
+                    return embed_result
+                except Exception as e:
+                    logger.warning(f"Primary embedding method failed: {e}")
+                    return None
+            
+            # Add all methods to the list
+            embedding_methods.append(try_primary_embedding)
+            
+            # Try each method in sequence until one works
+            for method in embedding_methods:
+                if asyncio.iscoroutinefunction(method):
+                    query_vector = await method()
                 else:
-                    query_vector = embed_result
+                    query_vector = method()
                 
-            except AttributeError as attr_error:
-                # Handle the specific attribute errors we're targeting
-                if "'list' object has no attribute 'get'" in str(attr_error) or "'numpy.ndarray' object has no attribute 'get'" in str(attr_error):
-                    logger.warning(f"Caught attribute error during embedding: {attr_error}")
-                    # Try to extract the actual embedding data from the error context
-                    import sys
-                    if hasattr(sys, 'exc_info') and len(sys.exc_info()) > 2:
-                        tb = sys.exc_info()[2]
-                        if tb.tb_frame.f_locals:
-                            # Try to get the embedding from the locals in the traceback
-                            for var_name, var_value in tb.tb_frame.f_locals.items():
-                                if isinstance(var_value, (list, np.ndarray)) and len(var_value) > 0:
-                                    logger.info(f"Found potential embedding in variable {var_name}")
-                                    query_vector = var_value
-                                    break
+                if query_vector is not None:
+                    logger.info(f"Successfully generated embedding with method: {method.__name__}")
+                    break
+            
+            # If all methods failed, use deterministic fallback based on text hash
+            if query_vector is None:
+                logger.warning("All embedding methods failed, using deterministic fallback based on text hash")
+                # Create a deterministic but reasonable embedding based on the text
+                import hashlib
+                hash_obj = hashlib.sha256(query_text.encode('utf-8'))
+                hash_digest = hash_obj.digest()
                 
-                    # If we couldn't extract it, generate a random embedding as fallback
-                    if 'query_vector' not in locals():
-                        logger.warning("Could not extract embedding from error context, using random embedding")
-                        np.random.seed(hash(query_text) % 2**32)
-                        query_vector = np.random.randn(self.dim).astype(np.float32)
-                else:
-                    # Re-raise other attribute errors
-                    raise
+                # Use the hash to seed a random number generator
+                np.random.seed(int.from_bytes(hash_digest[:4], byteorder='big'))
+                
+                # Create a vector with some structure rather than pure noise
+                query_vector = np.zeros(self.dim, dtype=np.float32)
+                
+                # Add some patterns based on the text
+                for i, char in enumerate(query_text[:min(50, len(query_text))]):
+                    pos = (ord(char) * (i+1)) % self.dim
+                    query_vector[pos] = 0.1 + (ord(char) % 10) / 100
+                
+                # Add some random components
+                random_component = np.random.randn(self.dim).astype(np.float32) * 0.01
+                query_vector += random_component
+                
+                # Normalize
+                norm = np.linalg.norm(query_vector)
+                if norm > 0:
+                    query_vector = query_vector / norm
+                    
+                logger.warning("Created deterministic fallback embedding")
             
             # Convert to numpy array if it's not already
             if not isinstance(query_vector, np.ndarray):
@@ -1239,9 +1310,8 @@ class ActiveBrain:
                     query_vector = np.array(query_vector, dtype=np.float32)
                 except Exception as e:
                     logger.error(f"Failed to convert query vector to numpy array: {e}")
-                    # Generate a fallback embedding if conversion fails
-                    np.random.seed(hash(query_text) % 2**32)
-                    query_vector = np.random.randn(self.dim).astype(np.float32)
+                    # If conversion fails completely, return empty results
+                    return []
             
             # Validate vector dimensions
             if query_vector.size != self.dim:
@@ -1260,65 +1330,74 @@ class ActiveBrain:
                 query_vector = np.nan_to_num(query_vector)
             
             if np.all(np.abs(query_vector).sum() < 0.001):
-                logger.warning(f"Query vector is all zeros, using random vector")
-                np.random.seed(hash(query_text) % 2**32)
-                query_vector = np.random.randn(self.dim).astype(np.float32)
-                query_vector = query_vector / np.linalg.norm(query_vector)
+                logger.warning(f"Query vector is all zeros, using structured fallback")
+                # Create a more structured fallback vector rather than pure random
+                query_vector = np.zeros(self.dim, dtype=np.float32)
+                
+                # Add a pattern based on the text length and content
+                for i in range(min(100, len(query_text))):
+                    if i < len(query_text):
+                        pos = (ord(query_text[i]) * 17) % self.dim
+                        query_vector[pos] = 0.1 + (i % 10) / 100
+                
+                # Ensure the vector is normalized
+                norm = np.linalg.norm(query_vector)
+                if norm > 0:
+                    query_vector = query_vector / norm
+                else:
+                    # Last resort: fixed pattern
+                    query_vector = np.zeros(self.dim, dtype=np.float32)
+                    query_vector[0] = 1.0
             
             # Perform the similarity search
             try:
-                # Call the get_similar_vectors method with a very low or zero threshold
-                # to allow results even with negative distances
-                results = self.get_similar_vectors(query_vector, top_k, threshold=0.0)
-                
-                # If no results found, try to add a diagnostic log
-                if not results:
-                    # Try direct FAISS search to see raw results
-                    if hasattr(self, 'faiss_index') and self.faiss_index is not None and self.faiss_index.ntotal > 0:
-                        logger.info("No vectors matched the similarity criteria. Performing diagnostic FAISS search.")
-                        
-                        # Ensure query_vector is properly shaped
-                        if len(query_vector.shape) == 1:
-                            query_vector = query_vector.reshape(1, -1)
-                            
-                        # Normalize
-                        faiss.normalize_L2(query_vector)
-                        
-                        # Search without filtering
-                        actual_top_k = min(top_k, self.faiss_index.ntotal)
-                        distances, indices = self.faiss_index.search(query_vector, k=actual_top_k)
-                        
-                        logger.info(f"Diagnostic FAISS search - distances: {distances}, indices: {indices}")
-                        
-                        # Try to create results for the first index if it's valid
-                        if indices.size > 0 and indices[0].size > 0 and indices[0][0] >= 0 and indices[0][0] < len(self.vector_ids):
-                            idx = indices[0][0]
-                            vector_id = self.vector_ids[idx]
-                            
-                            # Force create a result for this index
-                            logger.info(f"Creating a forced diagnostic result for vector_id {vector_id}")
-                            
-                            try:
-                                vector_data = self.vectors[idx] if idx < len(self.vectors) else np.zeros(self.dim, dtype=np.float32)
-                            except:
-                                vector_data = np.zeros(self.dim, dtype=np.float32)
+                if use_direct_similarity and hasattr(self, 'vectors') and self.vectors is not None and len(self.vectors) > 0:
+                    # Use direct cosine similarity calculation for more precision
+                    logger.info("Using direct cosine similarity calculation")
+                    
+                    # Ensure query vector is normalized
+                    query_vector = query_vector / np.linalg.norm(query_vector)
+                    
+                    # Calculate similarities with all vectors
+                    similarities = []
+                    for i, vector_id in enumerate(self.vector_ids):
+                        if i < len(self.vectors):
+                            similarity = self.calculate_cosine_similarity(query_vector, self.vectors[i])
+                            # Apply the similarity adjustment for consistency
+                            similarity = self._adjust_similarity_score(similarity)
+                            if similarity >= threshold:
+                                similarities.append((vector_id, i, similarity))
+                    
+                    # Sort by similarity (highest first)
+                    similarities.sort(key=lambda x: x[2], reverse=True)
+                    
+                    # Take top_k
+                    similarities = similarities[:top_k]
+                    
+                    # Format results
+                    results = []
+                    for vector_id, idx, similarity in similarities:
+                        try:
+                            vector_data = self.vectors[idx]
+                            # Get metadata
+                            metadata_dict = {}
+                            if vector_id in self.metadata:
+                                metadata_dict = self.metadata[vector_id] if isinstance(self.metadata[vector_id], dict) else {"data": str(self.metadata[vector_id])}
+                            else:
+                                metadata_dict = {"vector_id": vector_id}
                                 
-                            # Create minimal metadata
-                            try:
-                                metadata = self.metadata.get(vector_id, {"vector_id": vector_id, "diagnostic": True})
-                                if not isinstance(metadata, dict):
-                                    metadata = {"data": str(metadata), "vector_id": vector_id, "diagnostic": True}
-                            except:
-                                metadata = {"vector_id": vector_id, "diagnostic": True}
-                                
-                            # Calculate similarity - even if it's negative
-                            distance = float(distances[0][0])
-                            similarity = max(0.0, 1.0 - distance/2.0)  # Ensure non-negative
-                            
-                            # Add as diagnostic result
-                            results = [(vector_id, vector_data, metadata, similarity)]
+                            results.append((vector_id, vector_data, metadata_dict, similarity))
+                        except Exception as result_error:
+                            logger.error(f"Error creating result for vector {vector_id}: {result_error}")
+                    
+                    logger.info(f"Direct similarity calculation found {len(results)} results")
+                    return results
+                else:
+                    # Use FAISS for similarity search
+                    # IMPORTANT: Use the actual threshold parameter here
+                    results = self.get_similar_vectors(query_vector, top_k, threshold=threshold)
+                    return results
                 
-                return results
             except Exception as search_error:
                 logger.error(f"Error in similarity search: {search_error}")
                 logger.error(traceback.format_exc())
@@ -1603,7 +1682,7 @@ class ActiveBrain:
                         
                         # Perform similarity search
                         try:
-                            results = self.get_similar_vectors(query_vector, top_k, threshold)
+                            results = self.get_similar_vectors(query_vector, top_k, threshold=threshold)
                             results_dict[query] = results
                         except Exception as search_error:
                             logger.error(f"Error in similarity search for '{query}': {search_error}")
