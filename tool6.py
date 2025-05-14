@@ -73,7 +73,7 @@ class CoTProcessor:
             "how to analyze user profile",
             "Cách phân nhóm người dùng",
             "Cách xây dựng hồ sơ người dùng",
-            "Cách phânuyantich hồ sơ người dùng",
+            "Cách phân tích hồ sơ người dùng",
             "Cần có những gì trong hồ sơ người dùng",
         ]
         
@@ -101,7 +101,7 @@ class CoTProcessor:
         """Load knowledge base concurrently using fetch_knowledge."""
         logger.info("Loading knowledge base")
         queries = [
-            "Mục tiêu cuộc thảo luận với khách hàng"
+            "Các mục mục têu công việc"
         ]
         
         try:
