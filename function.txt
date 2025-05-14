@@ -1,0 +1,8 @@
+            # Method 1: Primary embedding method (EMBEDDINGS.aembed_query)
+            async def try_primary_embedding():
+                try:
+                    embed_result = EMBEDDINGS.aembed_query(query_text)
+                    if asyncio.iscoroutine(embed_result):
+                        return await embed_result
+                    return embed_result
+                except Exception as e:

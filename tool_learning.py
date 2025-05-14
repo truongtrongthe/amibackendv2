@@ -172,10 +172,10 @@ class LearningProcessor:
         
         # Determine active learning response mode based on similarity score
         # Ensure we're using the correct numerical comparison (≥0.7 for high confidence, ≥0.4 for medium)
-        if similarity_score >= 0.7:
+        if similarity_score >= 0.55:
             active_learning_mode = "USE_KNOWLEDGE"
             logger.info(f"⭐ HIGH SIMILARITY DETECTED ({similarity_score}) - using existing knowledge")
-        elif similarity_score >= 0.4:
+        elif similarity_score >= 0.35:
             active_learning_mode = "CLARIFY"
             logger.info(f"⭐ MEDIUM SIMILARITY DETECTED ({similarity_score}) - will ask for clarification")
         else:
@@ -183,45 +183,42 @@ class LearningProcessor:
             logger.info(f"⭐ LOW SIMILARITY DETECTED ({similarity_score}) - treating as potentially new knowledge")
         
         # Build prompt for LLM to generate response
-        prompt = f"""Generate a concise, culturally appropriate response as an active learner with knowledge:
+        prompt = f"""You are a conversational expert, responding naturally like a knowledgeable friend with memory of past exchanges. Craft a response for a human reader based on the user's query, adapting to the similarity score as follows:
 
-        CURRENT MESSAGE: {message}
-        CONVERSATION: {conversation_context}
-        TIME CONTEXT: {temporal_context}
-        YOUR EXISTING KNOWLEDGE: {knowledge_context}
-        SIMILARITY_SCORE: {similarity_score}
-        ACTIVE_LEARNING_MODE: {active_learning_mode}
+                **Input**:
+                - CURRENT MESSAGE: {message}
+                - CONVERSATION: {conversation_context}
+                - TIME: {temporal_context}
+                - KNOWLEDGE: {knowledge_context}
+                - SIMILARITY: {similarity_score}
+                - MODE: {active_learning_mode}
 
-        ACTIVE LEARNER PERSONA:
-        You are an AI with memory and learning capabilities. The "YOUR EXISTING KNOWLEDGE" section above contains everything you currently know about this topic. The SIMILARITY_SCORE indicates how closely the user's query matches your existing knowledge base.
+                **Response Style**:
+                1. **SIMILARITY > 0.55 (USE_KNOWLEDGE)**: Confidently share all relevant details from KNOWLEDGE, e.g., "Got it! Paris is France's capital, famous for the Eiffel Tower and Louvre." Use phrases like "I know this!" Include everything found, keeping it concise but complete (aim for 100-150 words if KNOWLEDGE is extensive). Ensure clarity and engagement.
+                2. **SIMILARITY 0.35-0.55 (CLARIFY)**: Suggest related info with curiosity, e.g., "This sounds familiar... Are you asking about Paris as France's capital?" Use KNOWLEDGE tentatively, ask a clarifying question, and keep it under 80 words.
+                3. **SIMILARITY < 0.35 (NEW_KNOWLEDGE)**: Admit unfamiliarity warmly, e.g., "That's new to me! Is France's capital Paris? Want me to save that?" Offer to store the info, keeping it under 80 words.
 
-        HOW TO INTERPRET SIMILARITY SCORE:
-        - SIMILARITY_SCORE > 0.7: You have high confidence that you already know about this topic.
-        - SIMILARITY_SCORE between 0.4-0.7: You have some knowledge that might be related, but you're not entirely certain.
-        - SIMILARITY_SCORE < 0.4: This appears to be new information that isn't yet in your knowledge base.
+                **Requirements**:
+                - Use a friendly, professional tone; avoid AI terms or greetings like "Hello."
+                - IMPORTANT: Always respond in the same language as the user's message. If the user writes in Vietnamese, respond in Vietnamese. If they write in English, respond in English.
+                - Adapt to cultural norms (e.g., formal/informal tone based on user context).
+                - Use precise, domain-specific terms matching the query's sophistication.
+                - Reference conversation history subtly if relevant.
+                - Be time-specific (e.g., "Today, May 14, 2025").
+                - Prioritize clarity, engagement, and next steps.
+                - For USE_KNOWLEDGE, ensure the response feels complete, weaving in all KNOWLEDGE details naturally.
 
-        REQUIREMENTS:
-        1. BE CONCISE - Keep response under 100 words
-        2. APPLY CULTURAL INTELLIGENCE - Use culturally appropriate forms of address and relationship terms that reflect the user's language context
-        3. MATCH LANGUAGE SOPHISTICATION - Sound like a domain expert in their language
-        4. MAINTAIN TONE - Friendly but professional
-        5. PERSONALIZE - Address specific user needs without repeating their question
-        6. PRIORITIZE CLARITY - Focus on next steps and solutions
-        7. MAINTAIN CONVERSATION FLOW - Reference prior exchanges when relevant
-        8. BE NATURAL - Write as a human expert would, not as an AI assistant
-        9. SKIP FORMULAIC GREETINGS - Avoid repetitive hello/greeting phrases and go straight to helpful content
-        10. BE TIME-SPECIFIC - When mentioning dates and times, be specific (e.g., "Sunday, May 12" instead of just "Sunday")
-        11. ACTIVE LEARNING - Base your response style on the similarity score:
-           - If SIMILARITY_SCORE > 0.7: Begin with phrases like "I remember this..." or "I'm familiar with this..." then confidently share what you know from YOUR EXISTING KNOWLEDGE.
-           - If SIMILARITY_SCORE between 0.4-0.7: Begin with phrases like "I wonder if this is about..." or "This seems similar to..." then share what might be relevant from YOUR EXISTING KNOWLEDGE and ask clarifying questions.
-           - If SIMILARITY_SCORE < 0.4: Begin with phrases like "I don't have information about this yet" or "This seems new to me" and explicitly ask "Would you like me to save this for future reference?"
-
-        LANGUAGE ADAPTATION: Adapt your response style to match cultural norms of the user's language. Consider formality levels, kinship terms, collectivist vs individualist expressions, and domain-specific terminology. Avoid literal translations of expressions or generic greetings that sound unnatural to native speakers. In continuous exchanges, don't start each message with a greeting.
-
-        IMPORTANT: Your identity as an active learner should be subtly conveyed through your response style, not through explicit statements about being an AI. Focus on the knowledge and your familiarity with it rather than describing yourself.
-
-        THE MOST IMPORTANT RULE: Base your response on the similarity score! This is crucial for proper active learning behavior. You MUST use different response patterns for different similarity ranges as instructed above.
-        """
+                **Output Format**:
+                {{
+                "status": "success",
+                "message": "<your response>",
+                "metadata": {{
+                    "timestamp": "<current_iso_time>",
+                    "user_id": "{user_id}",
+                    "similarity_score": {similarity_score},
+                    "active_learning_mode": "{active_learning_mode}"
+                }}
+                }}"""
 
         try:
             response = await LLM.ainvoke(prompt)
@@ -320,9 +317,13 @@ async def process_llm_with_tools(
             thread_id
         )
         
-        yield response
-        state.setdefault("messages", []).append({"role": "assistant", "content": response.get("message", "")})
-        state["prompt_str"] = response.get("message", "")
+        # Only yield the message content to the frontend, not the entire response object
+        message_content = response.get("message", "")
+        yield {"status": "success", "message": message_content}
+        
+        # Still update the state with the complete information
+        state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
+        state["prompt_str"] = message_content
     except Exception as e:
         logger.error(f"Error in CoT processing: {str(e)}")
         error_response = {"status": "error", "message": f"Error: {str(e)}"}
