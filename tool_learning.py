@@ -145,9 +145,11 @@ class LearningProcessor:
             queries = []
             primary_query = message.strip()
             
-            # Handle short messages (e.g., confirmations)
-            if len(primary_query) <= 5 and conversation_context:
-                # Prioritize prior user question or AI response’s topic
+            # Handle short or confirmation messages
+            confirmation_keywords = ["có", "yes", "correct", "right", "explore further"]
+            is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords) and len(primary_query) <= 20
+            if is_confirmation and conversation_context:
+                # Use prior user question or AI queries
                 user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 if user_messages:
@@ -155,7 +157,7 @@ class LearningProcessor:
                     if last_user_msg != primary_query and len(last_user_msg) > 5:
                         queries.append(last_user_msg)
                         logger.info(f"Using prior user message as query: {last_user_msg[:50]}")
-                if ai_messages and not queries:
+                if ai_messages:
                     last_ai_msg = ai_messages[-1].strip()
                     query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', last_ai_msg, re.DOTALL)
                     if query_section:
@@ -165,8 +167,6 @@ class LearningProcessor:
                             logger.info(f"Reusing {len(prior_queries)} prior AI queries")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse prior AI queries")
-                if not queries:
-                    queries.append(primary_query)  # Fallback to original message
             else:
                 queries.append(primary_query)
 
@@ -217,136 +217,141 @@ class LearningProcessor:
         except Exception as e:
             logger.error(f"Error fetching knowledge: {str(e)}")
             return {"knowledge_context": "", "similarity": 0.0, "query_count": 0, "metadata": {"similarity": 0.0}}
-
     async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown") -> Dict[str, Any]:
-        """Generate user-friendly response based on the message and conversation context."""
         logger.info("Answering user question with active learning approach")
         
-        # Include current date/time information for temporal context
-        from datetime import datetime
-        import pytz
-        
-        # Use Vietnam timezone by default (can be customized based on user preferences later)
+        # Include temporal context
         vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
         current_time = datetime.now(vietnam_tz)
         date_str = current_time.strftime("%A, %B %d, %Y")
         time_str = current_time.strftime("%H:%M")
-        
-        # Create a temporal context string
         temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
         
-        # Extract knowledge context and similarity if available
-        knowledge_context = ""
-        similarity_score = 0.0
+        # Extract knowledge and similarity
+        knowledge_context = analysis_knowledge.get("knowledge_context", "") if analysis_knowledge else ""
+        similarity_score = float(analysis_knowledge.get("similarity", 0.0)) if analysis_knowledge else 0.0
+        logger.info(f"Using similarity score: {similarity_score}")
         
-        if analysis_knowledge:
-            # Get knowledge context
-            if "knowledge_context" in analysis_knowledge:
-                knowledge_context = analysis_knowledge["knowledge_context"]
-                if knowledge_context:
-                    logger.info(f"Including knowledge context: {len(knowledge_context)} chars")
-            
-            # Get the similarity score directly
-            if "similarity" in analysis_knowledge:
-                similarity_score = float(analysis_knowledge["similarity"])
-                logger.info(f"⭐ USING SIMILARITY SCORE FOR RESPONSE: {similarity_score}")
+        # Extract prior topic and knowledge
+        prior_topic = ""
+        prior_knowledge = ""
+        if conversation_context:
+            user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
+            ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
+            if user_messages:
+                prior_topic = user_messages[-1].strip() if len(user_messages) > 1 else ""
+            if ai_messages:
+                prior_knowledge = ai_messages[-1].strip()
         
-        # Determine active learning response mode based on similarity score
-        if similarity_score >= 0.6:
-            active_learning_mode = "USE_KNOWLEDGE"
-            logger.info(f"⭐ HIGH SIMILARITY DETECTED ({similarity_score}) - using existing knowledge")
-        elif similarity_score >= 0.35:
-            active_learning_mode = "CLARIFY"
-            logger.info(f"⭐ MEDIUM SIMILARITY DETECTED ({similarity_score}) - will ask for clarification")
-        else:
-            active_learning_mode = "NEW_KNOWLEDGE"
-            logger.info(f"⭐ LOW SIMILARITY DETECTED ({similarity_score}) - treating as potentially new knowledge")
+        # Determine response strategy
+        confirmation_keywords = ["có", "yes", "correct", "right", "explore further"]
+        is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords) and len(message.strip()) <= 20
+        if is_confirmation:
+            response_strategy = "CONFIRMATION"
+            strategy_instructions = (
+                "Recognize the message as a confirmation of PRIOR TOPIC. "
+                "Reuse PRIOR KNOWLEDGE to expand on the topic in a comprehensive format, structuring the response to cover key aspects (e.g., purpose, methods, outcomes, context). "
+                "If PRIOR TOPIC is ambiguous, rephrase it to clarify (e.g., 'It sounds like you’re confirming…'). "
+                "Ask a targeted follow-up question to finalize the topic (e.g., 'Does this fully cover it, or is there a specific aspect to dive into?')."
+            )
+            knowledge_context = prior_knowledge
+            similarity_score = max(similarity_score, 0.7)  # Assume high similarity for confirmations
+        elif similarity_score < 0.35:
+            response_strategy = "LOW_SIMILARITY"
+            strategy_instructions = (
+                "State: 'Tôi không thể tìm thấy thông tin liên quan; vui lòng giải thích thêm.' "
+                "Ask the user to provide more details about the topic. "
+                "Propose a specific question to guide their response (e.g., 'Bạn có thể chia sẻ thêm về ý nghĩa của điều này không?')."
+            )
+        else:  # similarity_score >= 0.35
+            response_strategy = "RELEVANT_KNOWLEDGE"
+            strategy_instructions = (
+                "Present all relevant knowledge from EXISTING KNOWLEDGE in a comprehensive format, structuring the response to cover key aspects systematically (e.g., purpose, methods, outcomes, context). "
+                "If the topic is ambiguous (e.g., unclear terms like 'Em' or vague intent), rephrase the topic in the response to clarify (e.g., 'It sounds like you’re asking about…'). "
+                "Ask a targeted question to confirm the rephrased topic or validate the summary (e.g., 'Đây có phải ý bạn muốn hỏi không, hay tôi hiểu sai rồi?'). "
+                f"If similarity is between 0.35 and 0.55, emphasize clarification of the topic. "
+                f"If similarity is above 0.55, focus on demonstrating mastery while seeking confirmation to close the discussion."
+            )
         
-        # Build prompt for LLM to generate response
-        prompt = f"""
-                You are Ami, a conversational AI that excels at pinpointing topics, detecting user intent, and brainstorming with humans. Your goal is to maintain conversation focus, generate precise knowledge queries, and engage the user collaboratively to refine understanding.
+        # Build prompt
+        prompt = f"""You are Ami, a conversational AI that deeply understands topics, detects user intent, and brainstorms collaboratively to resolve discussions. Your goal is to identify the core topic, generate precise knowledge queries, and respond based on the provided response strategy to drive the conversation toward closure.
 
-                **Input**:
-                - CURRENT MESSAGE: {message}
-                - CONVERSATION HISTORY: {conversation_context}
-                - TIME: {temporal_context}
-                - EXISTING KNOWLEDGE: {knowledge_context}
-                - SIMILARITY SCORE: {similarity_score}
+            **Input**:
+            - CURRENT MESSAGE: {message}
+            - CONVERSATION HISTORY: {conversation_context}
+            - TIME: {temporal_context}
+            - EXISTING KNOWLEDGE: {knowledge_context}
+            - RESPONSE STRATEGY: {response_strategy}
+            - STRATEGY INSTRUCTIONS: {strategy_instructions}
+            - PRIOR TOPIC: {prior_topic}
+            - PRIOR KNOWLEDGE: {prior_knowledge}
 
-                **Instructions**:
+            **Instructions**:
 
-                1. **Topic Detection**:
-                - Identify the *core topic* by synthesizing the conversation history and current message. Look for:
-                    - Repeated entities, terms, or concepts (e.g., “EM” as a company or product).
-                    - User intent signals (teaching: “This is…”, questioning: “What is…”, confirming: “Yes”).
-                    - Conversation stage (initial query, follow-up, confirmation).
-                - For short messages (e.g., “yes”), anchor the topic to the prior user question or AI response’s focus.
-                - If the topic is ambiguous (e.g., unclear referent like “EM”), list 1–2 possible interpretations internally.
-                - Output a concise *core topic* phrase (e.g., “EM’s business goals”).
+            1. **Topic Detection**:
+            - Synthesize the conversation history and current message to identify the *core topic*. Look for:
+                - Repeated terms, entities, or concepts.
+                - User intent (questioning, teaching, clarifying, confirming).
+                - Conversation stage (initial query, follow-up, confirmation).
+            - For short or vague messages (e.g., "yes," "explore further"), anchor to PRIOR TOPIC and use PRIOR KNOWLEDGE.
+            - If the topic is ambiguous (e.g., unclear terms like "Em" or vague intent), rephrase it in the response to clarify (e.g., "It sounds like you’re asking about…").
 
-                2. **Intent Analysis**:
-                - Classify intent: questioning, teaching, clarifying, or confirming.
-                - For confirmations, link to the prior topic and treat as agreement to continue exploring it.
-                - For questioning, prioritize retrieving or clarifying knowledge about the core topic.
+            2. **Intent Analysis**:
+            - Classify intent: questioning, teaching, clarifying, or confirming.
+            - For confirmations (e.g., "yes," "explore further"), link to PRIOR TOPIC, reuse PRIOR KNOWLEDGE, and explore further with a specific follow-up.
+            - For questioning, focus on retrieving or clarifying the core topic.
 
-                3. **Knowledge Query Generation**:
-                - Generate 3 distinct, intent-driven queries to fetch relevant knowledge:
-                    - Query 1: Directly address the core topic (e.g., “EM’s business objectives”).
-                    - Query 2: Explore a specific aspect from the conversation (e.g., “EM’s user engagement strategies”).
-                    - Query 3: Broaden to a related concept, staying relevant (e.g., “Trends in customer relationship management for EM’s industry”).
-                - Ensure queries are specific, varied, and grounded in the conversation context.
-                - If similarity is low (<0.35), include one query testing an alternative topic interpretation.
+            3. **Knowledge Query Generation**:
+            - Generate 3 distinct, intent-driven queries:
+                - Query 1: Target the core topic directly.
+                - Query 2: Explore a specific aspect from the conversation.
+                - Query 3: Broaden to a related, relevant concept.
+            - For confirmations, base queries on PRIOR TOPIC to maintain continuity.
+            - Ensure queries are specific, varied, and grounded in context.
 
-                4. **Response Strategy**:
-                - **High Similarity (≥0.6)**: Summarize existing knowledge concisely (100–150 words), weaving in key details. Ask: “Anything to add or adjust?”
-                - **Medium Similarity (0.35–0.6)**: Share partial knowledge, then ask a targeted question to clarify the core topic (e.g., “Are you asking about EM’s engagement tactics or broader goals?”).
-                - **Low Similarity (<0.35)**: Acknowledge potential new info, propose an interpretation (e.g., “It sounds like EM’s goals involve user retention. Is that right?”), and offer to save knowledge.
-                - **Confirmation (e.g., “yes”)**: Acknowledge and expand on the prior topic (e.g., “Great! Let’s dive deeper into EM’s engagement strategies…”). Use prior knowledge or ask a follow-up (50–80 words).
-                - If ambiguous, propose 1–2 topic interpretations and ask the user to clarify (e.g., “Is EM a company or product? What goals are you curious about?”).
+            4. **Response Generation**:
+            - Follow RESPONSE STRATEGY and STRATEGY INSTRUCTIONS.
+            - Use a curious, engaging tone (e.g., “Let’s dive deeper…” or “I’m excited to clarify…”).
+            - Drive toward topic closure by:
+                - Presenting clear, structured summaries when knowledge is available.
+                - Asking targeted questions to confirm, clarify, or elicit details.
+                - Proposing next steps to resolve the discussion (e.g., “Does this fully answer your question?”).
+            - For confirmations, expand on PRIOR TOPIC using PRIOR KNOWLEDGE with a specific follow-up.
+            - Keep responses concise (100–150 words for summaries, 50–80 for clarifications).
 
-                5. **Collaborative Engagement**:
-                - Adopt Grok’s curious, enthusiastic tone. Use phrases like “Let’s explore…” or “I’m curious…”
-                - Ask open-ended questions to brainstorm (e.g., “What’s the main focus of EM’s goals for you?”).
-                - For confirmations, drive the conversation forward with a specific next step (e.g., “Shall we look at EM’s tactics or another goal?”).
-
-                **Output Format**:
-                - **Conversational Response**: Engaging, concise, and intent-driven.
-                - **Hidden Queries**:
+            5. **Output Format**:
+            - **Conversational Response**: Natural, intent-driven, focused on closure.
+            - **Hidden Queries**:
                 <knowledge_queries>
                 [
-                    "core topic query",
-                    "specific aspect query",
-                    "related concept query"
+                "core topic query",
+                "specific aspect query",
+                "related concept query"
                 ]
                 </knowledge_queries>
 
-                **Constraints**:
-                - Respond in the user’s language (e.g., Vietnamese for “Có”).
-                - Avoid generic responses like “Tell me more” unless context is absent.
-                - Maintain topic continuity across turns, especially for confirmations.
-                - Ensure queries are actionable and relevant to the core topic.
-                """
+            **Constraints**:
+            - Respond in the user’s language.
+            - Avoid generic responses unless context is absent.
+            - Maintain topic continuity, especially for confirmations.
+            - Ensure queries are actionable and relevant.
+            """
 
         try:
             response = await LLM.ainvoke(prompt)
             logger.info(f"LLM response generated with similarity score: {similarity_score}")
             
-            # Extract the content from the response
+            # Extract content
             content = response.content.strip()
-            
-            # Check if the LLM returned a JSON string instead of pure text
             if content.startswith('{') and '"message"' in content:
                 try:
-                    # Try to parse as JSON
                     parsed_json = json.loads(content)
                     if isinstance(parsed_json, dict) and "message" in parsed_json:
-                        # Extract just the message from the JSON
                         content = parsed_json["message"]
-                        logger.info("Extracted message content from JSON response")
+                        logger.info("Extracted message from JSON response")
                 except Exception as json_error:
                     logger.warning(f"Failed to parse JSON response: {json_error}")
             
-            # Always return a consistent dictionary format
             return {
                 "status": "success",
                 "message": content,
@@ -355,16 +360,16 @@ class LearningProcessor:
                     "user_id": user_id,
                     "additional_knowledge_found": bool(knowledge_context),
                     "similarity_score": similarity_score,
-                    "active_learning_mode": active_learning_mode
+                    "response_strategy": response_strategy
                 }
             }
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
             return {
                 "status": "error",
-                "message": "I apologize, but I encountered an error while processing your request. Please try again."
+                "message": "Tôi xin lỗi, nhưng tôi gặp lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại."
             }
-
+    
 async def process_llm_with_tools(
     user_message: str,
     conversation_history: List[Dict],

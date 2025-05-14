@@ -426,11 +426,24 @@ class CoTProcessor:
 
                 BUSINESS_GOAL SELECTION (CRITICAL):
                 1. CAREFULLY EXAMINE the KNOWLEDGE and BUSINESS OBJECTIVES sections to identify ALL available business objectives
-                2. SELECT EXACTLY ONE objective that best matches this user and conversation stage
-                3. Your selection MUST be based on explicit objectives found in the knowledge context
-                4. Format the selected objective as a clear, SMART goal statement 
+                2. For EACH objective found:
+                   a. Analyze its key components (purpose, target metrics, timeframe, requirements)
+                   b. Assess compatibility with user's current needs and profile
+                   c. Evaluate alignment with the identified conversation stage
+                   d. Consider implementation feasibility based on user's skills and resources
+                   e. Note any prerequisites that must be met before pursuing this objective
+                3. SELECT EXACTLY ONE objective that:
+                   a. Best addresses the user's primary problem or need
+                   b. Is appropriate for the current conversation stage
+                   c. Has the highest likelihood of successful implementation
+                   d. Provides clear value to the user based on their classification
+                4. Format the selected objective as a clear, SMART goal statement (Specific, Measurable, Achievable, Relevant, Time-bound)
                 5. In your output, bold the business_goal
-                6. PROVIDE A DETAILED JUSTIFICATION explaining WHY this objective is the most appropriate choice
+                6. PROVIDE A DETAILED JUSTIFICATION explaining:
+                   a. WHY this objective is the most appropriate choice over alternatives
+                   b. HOW it specifically addresses the user's current situation
+                   c. WHAT key factors made this objective stand out from others
+                   d. WHICH aspects of the user profile most strongly support this selection
 
                 GENERATE 3-5 ANALYSIS_QUERIES:
                 [OBJECTIVE-SPECIFIC QUERIES - generate your own based on context]
