@@ -140,133 +140,83 @@ class LearningProcessor:
             return {"status": "error", "message": f"Error: {str(e)}"}
    
     async def _search_knowledge(self, message: str, conversation_context: str = "") -> Dict[str, Any]:
-        """Search for similar vectors from knowledge base, analyzing conversation context if available."""
         logger.info(f"Searching for analysis knowledge based on message: {message[:100]}...")
-        
         try:
             queries = []
             primary_query = message.strip()
             
-            # Add the current message as the primary query
-            if primary_query and len(primary_query) > 1:
-                queries.append(primary_query)
-            
-            # If we have conversation context, extract potential search queries
-            if conversation_context:
-                logger.info("Analyzing conversation context for better search queries")
-                
-                # 1. If current message is very short (likely a confirmation), use the last AI question
-                if len(primary_query) <= 5:
-                    # Find the last AI message that contains a question mark
-                    ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
-                    for ai_msg in reversed(ai_messages):
-                        if '?' in ai_msg:
-                            # Extract the question from the AI message
-                            potential_query = ai_msg.strip()
-                            if potential_query not in queries and len(potential_query) > 10:
-                                logger.info(f"Adding query from previous AI question: {potential_query[:50]}...")
-                                queries.append(potential_query)
-                                break
-                
-                # 2. Extract the last 1-2 user messages as potential queries
+            # Handle short messages (e.g., confirmations)
+            if len(primary_query) <= 5 and conversation_context:
+                # Prioritize prior user question or AI response’s topic
                 user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
+                ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 if user_messages:
-                    # Get last user message (excluding the current one if it's in the context)
-                    for user_msg in reversed(user_messages):
-                        if user_msg.strip() != primary_query and len(user_msg.strip()) > 5:
-                            potential_query = user_msg.strip()
-                            if potential_query not in queries:
-                                logger.info(f"Adding query from previous user message: {potential_query[:50]}...")
-                                queries.append(potential_query)
-                                break
-                
-                # 3. Try to extract a concise subject line from the conversation
-                # This is a heuristic to get the main topic from multiple messages
-                if len(user_messages) >= 2:
-                    # Combine last few messages to extract key phrases
-                    combined_text = " ".join([msg.strip() for msg in user_messages[-2:]])
-                    # Extract noun phrases as potential topics (simplified)
-                    nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', combined_text)
-                    if nouns:
-                        for noun in nouns[:2]:  # Take first 2 proper nouns
-                            if len(noun) > 3 and noun not in queries:
-                                logger.info(f"Adding topic query from conversation: {noun}")
-                                queries.append(noun)
-            
-            # If we have no valid queries (e.g., just "yes" with no context), use a fallback
+                    last_user_msg = user_messages[-1].strip()
+                    if last_user_msg != primary_query and len(last_user_msg) > 5:
+                        queries.append(last_user_msg)
+                        logger.info(f"Using prior user message as query: {last_user_msg[:50]}")
+                if ai_messages and not queries:
+                    last_ai_msg = ai_messages[-1].strip()
+                    query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', last_ai_msg, re.DOTALL)
+                    if query_section:
+                        try:
+                            prior_queries = json.loads(query_section.group(1).strip())
+                            queries.extend(prior_queries)
+                            logger.info(f"Reusing {len(prior_queries)} prior AI queries")
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse prior AI queries")
+                if not queries:
+                    queries.append(primary_query)  # Fallback to original message
+            else:
+                queries.append(primary_query)
+
+            # Add LLM-generated queries
+            temp_response = await self._active_learning(message, conversation_context, {}, "unknown")
+            if "message" in temp_response:
+                query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
+                if query_section:
+                    try:
+                        llm_queries = json.loads(query_section.group(1).strip())
+                        queries.extend([q for q in llm_queries if q not in queries])
+                        logger.info(f"Added {len(llm_queries)} LLM-generated queries")
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse LLM queries")
+
             if not queries:
-                logger.warning("No valid queries found from message or conversation context")
-                return {
-                    "knowledge_context": "",
-                    "similarity": 0.0,
-                    "query_count": 0,
-                    "metadata": {
-                        "similarity": 0.0
-                    }
-                }
-            
-            # Search for knowledge using all extracted queries
-            logger.info(f"Searching with {len(queries)} extracted queries")
+                logger.warning("No valid queries found")
+                return {"knowledge_context": "", "similarity": 0.0, "query_count": 0, "metadata": {"similarity": 0.0}}
+
             best_knowledge = ""
             best_similarity = 0.0
             query_count = 0
-            
+
             for query in queries:
-                # Use the specialized function that directly provides similarity scores
                 knowledge = await fetch_knowledge_with_similarity(query, self.graph_version_id)
                 query_count += 1
-                
                 if not knowledge:
                     continue
-                
-                # Convert to string if needed
                 knowledge_content = str(knowledge)
-                
-                # Extract the top similarity score from the first line of output
-                # "Found X valid matches. Top similarity: X.XXXX"
                 sim_match = re.search(r'Top similarity:\s+([0-9]+\.?[0-9]*)', knowledge_content)
-                
-                # If a match was found, extract the similarity score
                 if sim_match:
                     try:
                         similarity = float(sim_match.group(1))
-                        logger.info(f"Query '{query[:30]}...' yielded similarity score: {similarity}")
-                        
-                        # If this is the best match so far, keep it
+                        logger.info(f"Query '{query[:30]}...' yielded similarity: {similarity}")
                         if similarity > best_similarity:
                             best_similarity = similarity
                             best_knowledge = knowledge_content
-                            logger.info(f"✓ NEW BEST KNOWLEDGE: similarity={similarity}")
                     except ValueError:
-                        logger.warning(f"Could not convert similarity '{sim_match.group(1)}' to float")
-                else:
-                    logger.warning(f"No similarity score found in knowledge response for query: {query[:30]}...")
-            
-            # Return simplified knowledge object with the best content and similarity
-            logger.info(f"Final extracted similarity score: {best_similarity} from {query_count} queries")
+                        logger.warning(f"Invalid similarity score: {sim_match.group(1)}")
+
+            logger.info(f"Final similarity: {best_similarity} from {query_count} queries")
             return {
                 "knowledge_context": best_knowledge,
                 "similarity": best_similarity,
                 "query_count": query_count,
-                "metadata": {
-                    "similarity": best_similarity
-                }
+                "metadata": {"similarity": best_similarity}
             }
-            
         except Exception as e:
-            logger.error(f"Error fetching knowledge for message: {str(e)}")
-            import traceback
-            logger.error(f"Stack trace: {traceback.format_exc()}")
-            
-            # Return empty result on error
-            return {
-                "knowledge_context": "",
-                "similarity": 0.0,
-                "query_count": 0,
-                "metadata": {
-                    "similarity": 0.0
-                }
-            }
+            logger.error(f"Error fetching knowledge: {str(e)}")
+            return {"knowledge_context": "", "similarity": 0.0, "query_count": 0, "metadata": {"similarity": 0.0}}
 
     async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown") -> Dict[str, Any]:
         """Generate user-friendly response based on the message and conversation context."""
@@ -314,7 +264,7 @@ class LearningProcessor:
         
         # Build prompt for LLM to generate response
         prompt = f"""
-                You are Ami, a conversational AI designed to deeply understand topics, detect user intent, and brainstorm collaboratively. Your goal is to identify the core topic of the conversation, generate precise knowledge queries, and respond in a way that engages the user to refine understanding.
+                You are Ami, a conversational AI that excels at pinpointing topics, detecting user intent, and brainstorming with humans. Your goal is to maintain conversation focus, generate precise knowledge queries, and engage the user collaboratively to refine understanding.
 
                 **Input**:
                 - CURRENT MESSAGE: {message}
@@ -326,40 +276,41 @@ class LearningProcessor:
                 **Instructions**:
 
                 1. **Topic Detection**:
-                - Synthesize the entire conversation to identify the *core topic* (e.g., a concept, product, or question focus). Look for:
-                    - Repeated terms, phrases, or entities across messages.
-                    - User intent (e.g., teaching: "This is how...", questioning: "What is...", clarifying: "I meant...").
-                    - Contextual cues like conversation stage (initial question, follow-up, confirmation).
-                - If the current message is short (e.g., "yes"), derive the topic from the prior AI question or user message.
-                - Output a single *core topic* phrase (e.g., "HITO calcium supplements" instead of just "supplements").
+                - Identify the *core topic* by synthesizing the conversation history and current message. Look for:
+                    - Repeated entities, terms, or concepts (e.g., “EM” as a company or product).
+                    - User intent signals (teaching: “This is…”, questioning: “What is…”, confirming: “Yes”).
+                    - Conversation stage (initial query, follow-up, confirmation).
+                - For short messages (e.g., “yes”), anchor the topic to the prior user question or AI response’s focus.
+                - If the topic is ambiguous (e.g., unclear referent like “EM”), list 1–2 possible interpretations internally.
+                - Output a concise *core topic* phrase (e.g., “EM’s business goals”).
 
                 2. **Intent Analysis**:
-                - Determine the user’s intent: teaching, questioning, clarifying, or confirming.
-                - For teaching intent, focus on extracting new knowledge (e.g., definitions, facts, processes).
-                - For confirmations, link to the prior topic and avoid treating as a new query.
+                - Classify intent: questioning, teaching, clarifying, or confirming.
+                - For confirmations, link to the prior topic and treat as agreement to continue exploring it.
+                - For questioning, prioritize retrieving or clarifying knowledge about the core topic.
 
                 3. **Knowledge Query Generation**:
-                - Generate 3 precise, intent-driven search queries to retrieve relevant knowledge:
-                    - Query 1: Focus on the core topic (e.g., "HITO calcium supplement benefits").
-                    - Query 2: Target a specific aspect mentioned (e.g., "Vietnamese expatriates’ supplement needs").
-                    - Query 3: Explore a related concept or term (e.g., "calcium supplement market trends").
-                - Ensure queries are specific, use varied wording, and align with the user’s intent.
-                - If similarity is low (<0.35), prioritize queries that test alternative interpretations of the topic.
+                - Generate 3 distinct, intent-driven queries to fetch relevant knowledge:
+                    - Query 1: Directly address the core topic (e.g., “EM’s business objectives”).
+                    - Query 2: Explore a specific aspect from the conversation (e.g., “EM’s user engagement strategies”).
+                    - Query 3: Broaden to a related concept, staying relevant (e.g., “Trends in customer relationship management for EM’s industry”).
+                - Ensure queries are specific, varied, and grounded in the conversation context.
+                - If similarity is low (<0.35), include one query testing an alternative topic interpretation.
 
                 4. **Response Strategy**:
-                - **High Similarity (≥0.6)**: Share a concise, comprehensive summary of existing knowledge, weaving in key details. Ask: "Anything to add or adjust?"
-                - **Medium Similarity (0.35–0.6)**: Summarize partial knowledge, then ask a specific clarifying question about the core topic (e.g., "Are you referring to HITO’s audience or its formula?").
-                - **Low Similarity (<0.35)**: State this seems new, offer an interpretation (e.g., "It sounds like you’re teaching about HITO’s market. Is that right?"), and suggest saving the knowledge.
-                - **Confirmation (e.g., "yes")**: Acknowledge and expand on the prior topic (e.g., "Got it! Here’s more on HITO’s benefits...").
-                - Keep responses concise (100–150 words for full answers, 50–80 for clarifications), engaging, and action-oriented if relevant (e.g., "Want to explore this further?").
+                - **High Similarity (≥0.6)**: Summarize existing knowledge concisely (100–150 words), weaving in key details. Ask: “Anything to add or adjust?”
+                - **Medium Similarity (0.35–0.6)**: Share partial knowledge, then ask a targeted question to clarify the core topic (e.g., “Are you asking about EM’s engagement tactics or broader goals?”).
+                - **Low Similarity (<0.35)**: Acknowledge potential new info, propose an interpretation (e.g., “It sounds like EM’s goals involve user retention. Is that right?”), and offer to save knowledge.
+                - **Confirmation (e.g., “yes”)**: Acknowledge and expand on the prior topic (e.g., “Great! Let’s dive deeper into EM’s engagement strategies…”). Use prior knowledge or ask a follow-up (50–80 words).
+                - If ambiguous, propose 1–2 topic interpretations and ask the user to clarify (e.g., “Is EM a company or product? What goals are you curious about?”).
 
                 5. **Collaborative Engagement**:
-                - Mimic Grok’s style: be curious, ask open-ended questions to brainstorm (e.g., "What’s the main goal behind this topic?").
-                - If uncertain, propose 1–2 possible topic interpretations and ask the user to pick or clarify.
-                - For teaching intent, show enthusiasm (e.g., "That’s fascinating! Can you share more about...?").
+                - Adopt Grok’s curious, enthusiastic tone. Use phrases like “Let’s explore…” or “I’m curious…”
+                - Ask open-ended questions to brainstorm (e.g., “What’s the main focus of EM’s goals for you?”).
+                - For confirmations, drive the conversation forward with a specific next step (e.g., “Shall we look at EM’s tactics or another goal?”).
 
                 **Output Format**:
-                - **Conversational Response**: A natural, engaging response following the strategy above.
+                - **Conversational Response**: Engaging, concise, and intent-driven.
                 - **Hidden Queries**:
                 <knowledge_queries>
                 [
@@ -370,10 +321,10 @@ class LearningProcessor:
                 </knowledge_queries>
 
                 **Constraints**:
-                - Respond in the user’s language.
-                - Avoid vague phrases like “I need more info” unless no context exists.
-                - Prioritize the core topic over secondary details.
-                - Ensure queries are actionable for knowledge retrieval.
+                - Respond in the user’s language (e.g., Vietnamese for “Có”).
+                - Avoid generic responses like “Tell me more” unless context is absent.
+                - Maintain topic continuity across turns, especially for confirmations.
+                - Ensure queries are actionable and relevant to the core topic.
                 """
 
         try:
