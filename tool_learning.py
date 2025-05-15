@@ -10,8 +10,7 @@ import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from ai_tools import fetch_knowledge_with_similarity
-from pccontroller import save_knowledge
+from pccontroller import save_knowledge, query_knowledge
 from brain_singleton import get_current_graph_version
 from utilities import logger
 
@@ -57,7 +56,6 @@ class LearningProcessor:
                             logger.info(f"Extracted {len(suggested_queries)} suggested knowledge queries")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse query section as JSON")
-                            suggested_queries = []
 
             # Step 2: Search for relevant knowledge
             logger.info(f"Searching for knowledge based on message...")
@@ -101,15 +99,51 @@ class LearningProcessor:
             response = await self._active_learning(message, conversation_context, analysis_knowledge, user_id, prior_data)
             logger.info(f"Response generated with status: {response.get('status', 'unknown')}")
             
-            if "metadata" in response and "active_learning_mode" in response["metadata"]:
-                logger.info(f"Active learning mode used: {response['metadata']['active_learning_mode']}")
-                
+            if "metadata" in response and "response_strategy" in response["metadata"]:
+                logger.info(f"Active learning mode used: {response['metadata']['response_strategy']}")
+            
+            # Step 6: Save knowledge for relevant responses
+            if response.get("status") == "success" and response["metadata"]["similarity_score"] >= 0.35:
+                topic = response["metadata"].get("core_prior_topic", "unknown")
+                categories = ["health_segmentation"] if any(term in message.lower() or topic.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
+                message_content = response["message"]
+                conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', message_content, re.DOTALL)
+                knowledge_queries = json.loads(query_section.group(1).strip()) if query_section else []
+
+                await save_knowledge(
+                    input=message,
+                    user_id=user_id,
+                    bank_name="health" if "health_segmentation" in categories else "default",
+                    thread_id=thread_id,
+                    topic=topic,
+                    categories=categories
+                )
+                await save_knowledge(
+                    input=conversational_response,
+                    user_id=user_id,
+                    bank_name="health" if "health_segmentation" in categories else "default",
+                    thread_id=thread_id,
+                    topic=topic,
+                    categories=categories + ["response"]
+                )
+                for query in knowledge_queries:
+                    await save_knowledge(
+                        input=query,
+                        user_id=user_id,
+                        bank_name="health" if "health_segmentation" in categories else "default",
+                        thread_id=thread_id,
+                        topic=topic,
+                        categories=categories + ["query"]
+                    )
+                logger.info(f"Saved knowledge: user input, response, and {len(knowledge_queries)} queries for topic '{topic}'")
+
             return response
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
             import traceback
             logger.error(f"Stack trace: {traceback.format_exc()}")
-            
+            return {"status": "error", "message": f"Error: {str(e)}"}
    
     async def _search_knowledge(self, message: str, conversation_context: str = "") -> Dict[str, Any]:
         logger.info(f"Searching for analysis knowledge based on message: {message[:100]}...")
@@ -119,7 +153,6 @@ class LearningProcessor:
             prior_topic = ""
             prior_knowledge = ""
 
-            # Extract prior topic and knowledge
             if conversation_context:
                 user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
@@ -130,12 +163,13 @@ class LearningProcessor:
                 if ai_messages:
                     prior_knowledge = ai_messages[-1].strip()
 
-            # Handle short or confirmation messages
-            confirmation_keywords = ["có", "yes", "correct", "right", "explore further"]
-            is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords) and len(primary_query) <= 20
-            if is_confirmation and prior_topic:
+            confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
+            is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords)
+            is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message.lower(), re.IGNORECASE) or message.lower().strip() in prior_topic.lower()
+            
+            if is_follow_up and prior_topic:
                 queries.append(prior_topic)
-                logger.info(f"Confirmation detected, reusing prior topic: {prior_topic[:50]}")
+                logger.info(f"Follow-up detected, reusing prior topic: {prior_topic[:50]}")
                 if prior_knowledge:
                     query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', prior_knowledge, re.DOTALL)
                     if query_section:
@@ -145,18 +179,16 @@ class LearningProcessor:
                             logger.info(f"Reusing {len(prior_queries)} prior AI queries")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse prior AI queries")
-                primary_query = f"{primary_query} about {prior_topic}"
-                queries.append(primary_query)
-                logger.info(f"Enriched confirmation query: {primary_query[:50]}")
+                    primary_query = f"{primary_query} about {prior_topic}"
+                    queries.append(primary_query)
+                    logger.info(f"Enriched follow-up query: {primary_query[:50]}")
             else:
                 queries.append(primary_query)
                 if prior_topic and prior_topic != primary_query:
                     queries.append(prior_topic)
                     logger.info(f"Added prior topic to queries: {prior_topic[:50]}")
 
-            # Add LLM-generated queries
             temp_response = await self._active_learning(message, conversation_context, {}, "unknown", {})
-
             if "message" in temp_response:
                 query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
                 if query_section:
@@ -170,7 +202,7 @@ class LearningProcessor:
                         queries.extend(valid_llm_queries)
                         logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries")
                     except json.JSONDecodeError:
-                        logger.warning("Failed to parse LLM queries")
+                        logger.warning("Failed to parse LLM queries, retrying once")
                         temp_response = await self._active_learning(message, conversation_context, {}, "unknown", {})
                         query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
                         if query_section:
@@ -186,50 +218,50 @@ class LearningProcessor:
                             except json.JSONDecodeError:
                                 logger.error("Failed to parse LLM queries after retry")
 
-            # Remove duplicates and low-value queries
             queries = list(dict.fromkeys(queries))
             queries = [q for q in queries if len(q.strip()) > 5]
             if not queries:
                 logger.warning("No valid queries found")
                 return {
-                    "knowledge_context": prior_knowledge if is_confirmation else "",
-                    "similarity": 0.7 if is_confirmation else 0.0,
+                    "knowledge_context": prior_knowledge if is_follow_up else "",
+                    "similarity": 0.7 if is_follow_up else 0.0,
                     "query_count": 0,
                     "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
-                    "metadata": {"similarity": 0.7 if is_confirmation else 0.0}
+                    "metadata": {"similarity": 0.7 if is_follow_up else 0.0}
                 }
 
-            best_knowledge = prior_knowledge if is_confirmation else ""
-            best_similarity = 0.7 if is_confirmation else 0.0
+            best_knowledge = prior_knowledge if is_follow_up else ""
+            best_similarity = 0.7 if is_follow_up else 0.0
             query_count = 0
-            vector_count = 4  # Placeholder; ideally fetch actual size
 
-            # Dynamic threshold
-            base_threshold = 0.35 if vector_count <= 10 else 0.4
-            logger.info(f"Using similarity threshold: {base_threshold} for {vector_count} vectors")
-
+            categories = ["health_segmentation"] if any(term in message.lower() or prior_topic.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
+            bank_name = "health" if "health_segmentation" in categories else "default"
+            
             for query in queries:
-                knowledge = await fetch_knowledge_with_similarity(query, self.graph_version_id)
+                results = await query_knowledge(
+                    query=query,
+                    bank_name=bank_name,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    topic=prior_topic or "unknown",
+                    top_k=5,
+                    min_similarity=0.3
+                )
                 query_count += 1
-                if not knowledge:
+                if not results:
                     continue
-                knowledge_content = str(knowledge)
-                sim_match = re.search(r'Top similarity:\s+([0-9]+\.?[0-9]*)', knowledge_content)
-                if sim_match:
-                    try:
-                        similarity = float(sim_match.group(1))
-                        weighted_similarity = similarity if similarity >= base_threshold else similarity * 0.8
-                        logger.info(f"Query '{query[:30]}...' yielded similarity: {similarity}, weighted: {weighted_similarity}")
-                        if weighted_similarity > best_similarity:
-                            best_similarity = weighted_similarity
-                            best_knowledge = knowledge_content
-                    except ValueError:
-                        logger.warning(f"Invalid similarity score: {sim_match.group(1)}")
+                top_result = results[0]
+                similarity = top_result["score"]
+                knowledge_content = top_result["raw"]
+                logger.info(f"Query '{query[:30]}...' yielded similarity: {similarity}")
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_knowledge = knowledge_content
+                    logger.info(f"Updated best knowledge with similarity: {best_similarity}")
 
-            # Vibe score boost for frequent topics
             vibe_score = 1.0
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
-                   for term in ["mục tiêu", "goals", "active learning"]):
+                   for term in ["mục tiêu", "goals", "active learning", "phân nhóm"]):
                 vibe_score = 1.1
                 best_similarity *= vibe_score
                 logger.info(f"Applied vibe score {vibe_score} for frequent topic")
@@ -245,11 +277,11 @@ class LearningProcessor:
         except Exception as e:
             logger.error(f"Error fetching knowledge: {str(e)}")
             return {
-                "knowledge_context": prior_knowledge if is_confirmation else "",
-                "similarity": 0.7 if is_confirmation else 0.0,
+                "knowledge_context": prior_knowledge if is_follow_up else "",
+                "similarity": 0.7 if is_follow_up else 0.0,
                 "query_count": 0,
                 "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
-                "metadata": {"similarity": 0.7 if is_confirmation else 0.0}
+                "metadata": {"similarity": 0.7 if is_follow_up else 0.0}
             }
 
     async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None) -> Dict[str, Any]:
@@ -268,16 +300,12 @@ class LearningProcessor:
         prior_topic = prior_data.get("topic", "") if prior_data else ""
         prior_knowledge = prior_data.get("knowledge", "") if prior_data else ""
         
-        # Expanded confirmation keywords
         confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
         is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords)
-        # Detect follow-ups or confirmations
         is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message.lower(), re.IGNORECASE) or message.lower().strip() in prior_topic.lower()
         
-        # Extract core topic for better continuity
         core_prior_topic = prior_topic
         if prior_topic:
-            # Extract specific concept (e.g., "phân nhóm khách hàng")
             match = re.search(r'(phân nhóm khách hàng|customer segmentation|phân loại người dùng)', prior_topic, re.IGNORECASE)
             if match:
                 core_prior_topic = match.group(1)
@@ -287,7 +315,6 @@ class LearningProcessor:
 
         if is_follow_up:
             response_strategy = "FOLLOW_UP"
-            # Enhanced: Deepen prior topic with specific details and actionable follow-ups
             strategy_instructions = (
                 "Recognize the message as a follow-up or confirmation of PRIOR TOPIC, referring to a specific concept or group from PRIOR KNOWLEDGE (e.g., customer segmentation methods). "
                 "Use PRIOR KNOWLEDGE to deepen the discussion, leveraging specific details (e.g., named groups like 'Nhóm Rối Loạn Cương Dương') and offering actionable insights (e.g., implementation methods, support strategies). "
@@ -306,7 +333,6 @@ class LearningProcessor:
             )
         else:
             response_strategy = "RELEVANT_KNOWLEDGE"
-            # Enhanced: Prioritize continuity for related topics
             strategy_instructions = (
                 "Present all relevant knowledge from EXISTING KNOWLEDGE in a comprehensive format, structuring the response to cover key aspects (e.g., purpose, methods, outcomes, context). "
                 "If the message likely continues PRIOR TOPIC (e.g., contains keywords like 'phân nhóm' or 'khách hàng'), prioritize deepening that topic with specific details and actionable insights. "
@@ -316,7 +342,7 @@ class LearningProcessor:
                 f"If above 0.55, focus on mastery and closure."
             )
         
-        prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
+        prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure. You have access to tools for querying and saving knowledge.
 
             **Input**:
             - CURRENT MESSAGE: {message}
@@ -327,26 +353,50 @@ class LearningProcessor:
             - STRATEGY INSTRUCTIONS: {strategy_instructions}
             - PRIOR TOPIC: {core_prior_topic}
             - PRIOR KNOWLEDGE: {prior_knowledge}
+            - USER ID: {user_id}
+
+            **Tools Available**:
+            - knowledge_query: Query the knowledge base.
+              Parameters: query (str, required), context (str), user_id (str, required), thread_id (str), topic (str), top_k (int, default 5), min_similarity (float, default 0.3)
+            - save_knowledge: Save knowledge to the database.
+              Parameters: query (str), content (str), user_id (str, required), thread_id (str), topic (str), categories (list of str, default ["general"])
 
             **Instructions**:
             1. **Topic Detection**: Identify the core topic from CONVERSATION HISTORY and CURRENT MESSAGE. For follow-ups or confirmations, anchor to PRIOR TOPIC and PRIOR KNOWLEDGE. Rephrase ambiguous terms (e.g., 'It sounds like you’re asking about…').
             2. **Intent Analysis**: Classify intent (questioning, confirming, follow-up, etc.). For follow-ups, expand PRIOR TOPIC with actionable insights based on PRIOR KNOWLEDGE’s specific details.
-            3. **Knowledge Queries**: Generate 3 specific queries: core topic, specific aspect, related concept. Ensure queries are JSON-parsable and relevant to PRIOR TOPIC.
-            4. **Response**: Follow RESPONSE STRATEGY with a curious tone. For follow-ups, deepen discussion with practical details and ask a targeted follow-up. Keep responses concise (100–150 words).
-            5. **Output**:
+            3. **Tool Usage**:
+               - Use knowledge_query if additional information is needed (e.g., for LOW_SIMILARITY or complex queries).
+               - Use save_knowledge to store important insights (e.g., after confirmations or high-relevance responses).
+               - Include tool calls in the output if needed.
+            4. **Knowledge Queries**: Generate 3 specific queries: core topic, specific aspect, related concept. Ensure queries are JSON-parsable and relevant to PRIOR TOPIC.
+            5. **Response**: Follow RESPONSE STRATEGY with a curious tone. For follow-ups, deepen discussion with practical details and ask a targeted follow-up. Keep responses concise (100–150 words).
+            6. **Output**:
                 - Conversational Response
                 - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
+                - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if tools are needed, JSON-parsable)
 
             **Constraints**:
             - Use user’s language (Vietnamese if applicable).
             - Ensure topic continuity for follow-ups and confirmations.
-            - Ensure knowledge queries are specific and JSON-parsable.
+            - Ensure knowledge queries and tool calls are JSON-parsable.
+            - Include user_id in all tool calls.
             """
         try:
             response = await LLM.ainvoke(prompt)
             logger.info(f"LLM response generated with similarity score: {similarity_score}")
             
             content = response.content.strip()
+            tool_calls = []
+            if "<tool_calls>" in content:
+                tool_section = re.search(r'<tool_calls>(.*?)</tool_calls>', content, re.DOTALL)
+                if tool_section:
+                    try:
+                        tool_calls = json.loads(tool_section.group(1).strip())
+                        content = re.sub(r'<tool_calls>.*?</tool_calls>', '', content, flags=re.DOTALL).strip()
+                        logger.info(f"Extracted {len(tool_calls)} tool calls")
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse tool calls")
+
             if content.startswith('{') and '"message"' in content:
                 try:
                     parsed_json = json.loads(content)
@@ -364,7 +414,9 @@ class LearningProcessor:
                     "user_id": user_id,
                     "additional_knowledge_found": bool(knowledge_context),
                     "similarity_score": similarity_score,
-                    "response_strategy": response_strategy
+                    "response_strategy": response_strategy,
+                    "core_prior_topic": core_prior_topic,
+                    "tool_calls": tool_calls
                 }
             }
         except Exception as e:
@@ -373,148 +425,158 @@ class LearningProcessor:
                 "status": "error",
                 "message": "Tôi xin lỗi, nhưng tôi gặp lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại."
             }
-    
+
 async def process_llm_with_tools(
-    user_message: str,
-    conversation_history: List[Dict],
-    state: Dict,
-    graph_version_id: str,
-    thread_id: Optional[str] = None
-) -> AsyncGenerator[Union[str, Dict], None]:
-    """Process user message with tools."""
-    logger.info(f"Processing message for user {state.get('user_id', 'unknown')}")
-    conversation_context = ""
-    if conversation_history:
-        recent_messages = []
-        message_count = 0
-        max_messages = 50
+        self,
+        user_message: str,
+        conversation_history: List[Dict],
+        state: Dict,
+        graph_version_id: str,
+        thread_id: Optional[str] = None
+    ) -> AsyncGenerator[Union[str, Dict], None]:
+        """Process user message with tools."""
+        logger.info(f"Processing message for user {state.get('user_id', 'unknown')}")
+        conversation_context = ""
+        if conversation_history:
+            recent_messages = []
+            message_count = 0
+            max_messages = 50
+            for msg in reversed(conversation_history):
+                try:
+                    role = msg.get("role", "").lower()
+                    content = msg.get("content", "")
+                    if role and content:
+                        if role in ["assistant", "ai"]:
+                            recent_messages.append(f"AI: {content.strip()}")
+                            message_count += 1
+                        elif role in ["user", "human"]:
+                            recent_messages.append(f"User: {content.strip()}")
+                            message_count += 1
+                    if message_count >= max_messages:
+                        if len(conversation_history) > max_messages:
+                            recent_messages.append(f"[Note: Conversation history truncated. Total messages: {len(conversation_history)}]")
+                        break
+                except Exception as e:
+                    logger.warning(f"Error processing message in conversation history: {e}")
+                    continue
+            if recent_messages:
+                header = "==== CONVERSATION HISTORY (CHRONOLOGICAL ORDER) ====\n"
+                conversation_history_text = "\n\n".join(reversed(recent_messages))
+                separator = "\n==== CURRENT INTERACTION ====\n"
+                conversation_context = f"{header}{conversation_history_text}{separator}\nUser: {user_message}\n"
+                logger.info(f"Added {len(recent_messages)} messages from conversation history")
         
-        for msg in reversed(conversation_history):
-            try:
-                role = msg.get("role", "").lower()
-                content = msg.get("content", "")
-                if role and content:
-                    if role in ["assistant", "ai"]:
-                        recent_messages.append(f"AI: {content.strip()}")
-                        message_count += 1
-                    elif role in ["user", "human"]:
-                        recent_messages.append(f"User: {content.strip()}")
-                        message_count += 1
-                if message_count >= max_messages:
-                    if len(conversation_history) > max_messages:
-                        recent_messages.append(f"[Note: Conversation history truncated. Total messages: {len(conversation_history)}]")
-                    break
-            except Exception as e:
-                logger.warning(f"Error processing message in conversation history: {e}")
-                continue
-        
-        if recent_messages:
-            header = "==== CONVERSATION HISTORY (CHRONOLOGICAL ORDER) ====\n"
-            conversation_history_text = "\n\n".join(reversed(recent_messages))
-            separator = "\n==== CURRENT INTERACTION ====\n"
-            conversation_context = f"{header}{conversation_history_text}{separator}\nUser: {user_message}\n"
-            logger.info(f"Added {len(recent_messages)} messages from conversation history")
+        if 'learning_processor' not in state:
+            learning_processor = LearningProcessor()
+            await learning_processor.initialize()
+            state['learning_processor'] = learning_processor
         else:
-            logger.warning("No usable messages found in conversation history")
-    
-    if 'learning_processor' not in state:
-        learning_processor = LearningProcessor()
-        await learning_processor.initialize()
-        state['learning_processor'] = learning_processor
-    else:
-        learning_processor = state['learning_processor']
-    
-    state['graph_version_id'] = graph_version_id
-    
-    try:
-        response = await learning_processor.process_incoming_message(
-            user_message, 
-            conversation_context, 
-            state.get('user_id', 'unknown'),
-            thread_id
-        )
+            learning_processor = state['learning_processor']
         
-        message_content = response["message"] if isinstance(response, dict) and "message" in response else str(response)
-        # Strip <knowledge_queries> for frontend
-        message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
-        logger.info("Stripped knowledge_queries from message for frontend")
+        state['graph_version_id'] = graph_version_id
         
-        yield {"status": "success", "message": message_content}
-        state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
-    except Exception as e:
-        logger.error(f"Error in CoT processing: {str(e)}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        error_response = {"status": "error", "message": f"Error: {str(e)}"}
-        yield error_response
-    yield {"state": state}
-
-async def execute_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute a tool."""
-    logger.info(f"Executing tool: {tool_name}")
-    try:
-        if tool_name == "knowledge_query":
-            return await knowledge_query_helper(
-                parameters.get("query", ""),
-                parameters.get("context", ""),
-                parameters.get("graph_version_id", "")
+        try:
+            response = await learning_processor.process_incoming_message(
+                user_message, 
+                conversation_context, 
+                state.get('user_id', 'unknown'),
+                thread_id
             )
-        elif tool_name == "save_knowledge":
-            return await save_new_knowledge(
-                parameters.get("query", ""),
-                parameters.get("content", ""),
-                parameters.get("graph_version_id", ""),
-                parameters.get("user_id", ""),
-                parameters.get("thread_id", ""),
-                parameters.get("topic", ""),
-                parameters.get("categories", [])
-            )
-        return {"status": "error", "message": f"Unknown tool: {tool_name}"}
-    except Exception as e:
-        logger.error(f"Error executing tool {tool_name}: {str(e)}")
-        return {"status": "error", "message": str(e)}
-
-async def knowledge_query_helper(query: str, context: str, graph_version_id: str) -> Dict[str, Any]:
-    """Query knowledge base."""
-    logger.info(f"Querying knowledge: {query}")
-    try:
-        knowledge_data = await fetch_knowledge_with_similarity(query, graph_version_id)
-        if isinstance(knowledge_data, dict) and "status" in knowledge_data and knowledge_data["status"] == "error":
-            return knowledge_data
-        return {
-            "status": "success",
-            "message": f"Knowledge queried for {query}",
-            "data": knowledge_data if isinstance(knowledge_data, dict) else {"content": str(knowledge_data)}
-        }
-    except Exception as e:
-        logger.error(f"Error fetching knowledge: {str(e)}")
-        return {"status": "error", "message": f"Failed to fetch knowledge: {str(e)}"}
-
-async def save_new_knowledge(query: str, knowledge_content: str, graph_version_id: str, user_id: str, thread_id: str, topic: str, categories: List[str]) -> Dict[str, Any]:
-    """Save new knowledge to the knowledge base."""
-    logger.info(f"Saving new knowledge for query: {query[:100]}...")
-    try:
-        save_result = await save_knowledge(
-            query=query,
-            content=knowledge_content,
-            graph_version_id=graph_version_id
-        )
-        await save_knowledge(
-            input=query,
-            user_id="learner",
-            bank_name="health",
-            thread_id="learning_thread_1747282472163",
-            topic="phân nhóm khách hàng",
-            categories=["health_segmentation"]
+            
+            message_content = response["message"] if isinstance(response, dict) and "message" in response else str(response)
+            message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
+            logger.info("Stripped knowledge_queries from message for frontend")
+            
+            tool_results = []
+            if "metadata" in response and "tool_calls" in response["metadata"]:
+                for tool_call in response["metadata"]["tool_calls"]:
+                    if isinstance(tool_call, dict) and "name" in tool_call and "parameters" in tool_call:
+                        tool_result = await self.execute_tool(
+                            tool_name=tool_call["name"],
+                            parameters=tool_call["parameters"]
                         )
-        return {
-            "status": "success",
-            "message": f"Knowledge saved for {query}",
-            "data": save_result
-        }
-    except Exception as e:
-        logger.error(f"Error saving knowledge: {str(e)}")
-        return {
-            "status": "error",
-            "message": f"Failed to save knowledge: {str(e)}"
-        }
+                        tool_results.append(tool_result)
+                        yield tool_result
+                        logger.info(f"Executed tool {tool_call['name']} with result: {tool_result}")
+                    else:
+                        logger.warning(f"Invalid tool call format: {tool_call}")
+
+            yield {"status": "success", "message": message_content}
+            state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
+
+            if tool_results:
+                state["last_tool_results"] = tool_results
+        except Exception as e:
+            logger.error(f"Error in CoT processing: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            error_response = {"status": "error", "message": f"Error: {str(e)}"}
+            yield error_response
+        yield {"state": state}
+
+async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a tool with enhanced parameter validation and metadata enrichment."""
+        logger.info(f"Executing tool: {tool_name} with parameters: {parameters}")
+        try:
+            user_id = parameters.get("user_id", "")
+            if not user_id:
+                return {"status": "error", "message": "Missing required parameter: user_id"}
+
+            if tool_name == "knowledge_query":
+                query = parameters.get("query", "")
+                if not query:
+                    return {"status": "error", "message": "Missing required parameter: query"}
+                context = parameters.get("context", "")
+                thread_id = parameters.get("thread_id", None)
+                topic = parameters.get("topic", None)
+                
+                categories = ["health_segmentation"] if any(term in query.lower() or term in context.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
+                bank_name = "health" if "health_segmentation" in categories else "default"
+
+                results = await query_knowledge(
+                    query=query,
+                    bank_name=bank_name,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    topic=topic,
+                    top_k=parameters.get("top_k", 5),
+                    min_similarity=parameters.get("min_similarity", 0.3)
+                )
+                return {
+                    "status": "success",
+                    "message": f"Queried knowledge for '{query}'",
+                    "data": results
+                }
+
+            elif tool_name == "save_knowledge":
+                query = parameters.get("query", "")
+                content = parameters.get("content", "")
+                input_text = f"{query} {content}".strip() if query and content else query or content
+                if not input_text:
+                    return {"status": "error", "message": "Missing required parameter: query or content"}
+                
+                thread_id = parameters.get("thread_id", None)
+                topic = parameters.get("topic", None)
+                categories = parameters.get("categories", ["general"])
+                
+                if not categories or categories == ["general"]:
+                    categories = ["health_segmentation"] if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
+                bank_name = "health" if "health_segmentation" in categories else "default"
+
+                success = await save_knowledge(
+                    input=input_text,
+                    user_id=user_id,
+                    bank_name=bank_name,
+                    thread_id=thread_id,
+                    topic=topic,
+                    categories=categories
+                )
+                return {
+                    "status": "success" if success else "error",
+                    "message": f"{'Saved' if success else 'Failed to save'} knowledge for '{input_text[:50]}...'"
+                }
+
+            return {"status": "error", "message": f"Unknown tool: {tool_name}"}
+        except Exception as e:
+            logger.error(f"Error executing tool {tool_name}: {str(e)}")
+            return {"status": "error", "message": f"Tool execution failed: {str(e)}"}

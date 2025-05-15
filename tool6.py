@@ -427,31 +427,12 @@ class CoTProcessor:
                 {f"• Resolve temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
                 BUSINESS_GOAL SELECTION (CRITICAL):
-                1. CAREFULLY EXAMINE the KNOWLEDGE and BUSINESS OBJECTIVES sections to identify ALL available business objectives
-                2. For EACH objective:
-                   a. Analyze its core components (purpose, metrics, timeframe)
-                   b. CHECK IF ANY PREREQUISITES or CONDITIONS are mentioned in the objective definition
-                   c. VALIDATE if these prerequisites are CURRENTLY MET based on the existing user portrait
-                   d. IMMEDIATELY DISQUALIFY any objective whose prerequisites are not currently satisfied
-                
-                3. SELECT EXACTLY ONE objective by INCORPORATING THE USER PORTRAIT you've created:
-                   a. STRICTLY FOLLOW any usage guidelines in the objective definition:
-                      - If an objective states "only perform/use when X", FIRST VERIFY if X is CURRENTLY TRUE in the user portrait
-                      - If X is NOT CURRENTLY TRUE (e.g., required information is missing), you MUST DISQUALIFY this objective ENTIRELY
-                      - EVALUATE all usage conditions AGAINST THE CURRENT STATE of the user portrait
-                      - CROSS-CHECK user classification, needs, stage, and capabilities with ALL guidelines
-                      - NEVER select an objective whose current prerequisites are not met, even if they could be met in the future
-                      - If ALL objectives have unmet prerequisites, select the objective "Continue information gathering" instead
-                      b. Choose an objective that is appropriate for the conversation stage identified in the portrait
-                
-                4. In your output, bold the business_goal
-                
-                5. JUSTIFY your selection by explaining:
-                   a. Why this objective best matches the user's situation
-                   b. How it complies with any usage guidelines
-                   c. Why it was chosen over alternatives
-                   d. Which user profile aspects support this selection
-                   e. IF prerequisites exist: EXPLICITLY state whether they are CURRENTLY met or not
+                1. ANALYZE EACH BUSINESS OBJECTIVE CAREFULLY To UNDERSTAND when you are allowed to use each objective
+                2. SELECT the best business objective that is allowed to use against the user portrait
+                3. JUSTIFY YOUR CHOICE:
+                   - Explain why the selected objective is allowed to use now
+                   - Show how it addresses user needs
+                   - Bold the final business_goal
 
                 GENERATE 3-5 ANALYSIS_QUERIES:
                 [OBJECTIVE-SPECIFIC QUERIES - generate your own based on context]
