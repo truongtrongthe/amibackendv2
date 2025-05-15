@@ -10,8 +10,8 @@ import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from aitools import emit_analysis_event, save_knowledge
 from ai_tools import fetch_knowledge_with_similarity
+from pccontroller import save_knowledge
 from brain_singleton import get_current_graph_version
 from utilities import logger
 
@@ -109,14 +109,7 @@ class LearningProcessor:
             logger.error(f"Error processing message: {str(e)}")
             import traceback
             logger.error(f"Stack trace: {traceback.format_exc()}")
-            if thread_id:
-                emit_analysis_event(thread_id, {
-                    "type": "analysis",
-                    "content": str(e),
-                    "complete": True,
-                    "status": "error"
-                })
-            return {"status": "error", "message": f"Error: {str(e)}"}
+            
    
     async def _search_knowledge(self, message: str, conversation_context: str = "") -> Dict[str, Any]:
         logger.info(f"Searching for analysis knowledge based on message: {message[:100]}...")
@@ -163,6 +156,7 @@ class LearningProcessor:
 
             # Add LLM-generated queries
             temp_response = await self._active_learning(message, conversation_context, {}, "unknown", {})
+
             if "message" in temp_response:
                 query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
                 if query_section:
@@ -177,6 +171,20 @@ class LearningProcessor:
                         logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries")
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse LLM queries")
+                        temp_response = await self._active_learning(message, conversation_context, {}, "unknown", {})
+                        query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
+                        if query_section:
+                            try:
+                                llm_queries = json.loads(query_section.group(1).strip())
+                                valid_llm_queries = [
+                                    q for q in llm_queries 
+                                    if q not in queries and len(q.strip()) > 5 and 
+                                    not any(vague in q.lower() for vague in ["core topic", "chủ đề chính", "cuộc sống"])
+                                ]
+                                queries.extend(valid_llm_queries)
+                                logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries on retry")
+                            except json.JSONDecodeError:
+                                logger.error("Failed to parse LLM queries after retry")
 
             # Remove duplicates and low-value queries
             queries = list(dict.fromkeys(queries))
@@ -260,25 +268,35 @@ class LearningProcessor:
         prior_topic = prior_data.get("topic", "") if prior_data else ""
         prior_knowledge = prior_data.get("knowledge", "") if prior_data else ""
         
-        # Modified: Expanded confirmation keywords and added follow-up reference detection
+        # Expanded confirmation keywords
         confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
         is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords)
-        # Modified: Relaxed length constraint and added regex to detect references to prior topic
-        is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group)\b', message.lower(), re.IGNORECASE) or message.lower().strip() in prior_topic.lower()
+        # Detect follow-ups or confirmations
+        is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message.lower(), re.IGNORECASE) or message.lower().strip() in prior_topic.lower()
         
+        # Extract core topic for better continuity
+        core_prior_topic = prior_topic
+        if prior_topic:
+            # Extract specific concept (e.g., "phân nhóm khách hàng")
+            match = re.search(r'(phân nhóm khách hàng|customer segmentation|phân loại người dùng)', prior_topic, re.IGNORECASE)
+            if match:
+                core_prior_topic = match.group(1)
+            elif any(term in prior_topic.lower() for term in ["phân nhóm", "segmentation", "nhóm khách hàng"]):
+                core_prior_topic = "phân nhóm khách hàng"
+            logger.info(f"Core prior topic extracted: {core_prior_topic}")
+
         if is_follow_up:
             response_strategy = "FOLLOW_UP"
-            # Modified: Enhanced instructions to deepen prior topic with actionable insights
+            # Enhanced: Deepen prior topic with specific details and actionable follow-ups
             strategy_instructions = (
-                "Recognize the message as a follow-up or confirmation of PRIOR TOPIC, likely referring to a specific group or concept from PRIOR KNOWLEDGE. "
-                "Extract the core topic from PRIOR TOPIC (e.g., 'Nhóm Rối Loạn Cương Dương' from 'Nhóm rối loạn cương dương thì hiểu ntn'). "
-                "Use PRIOR KNOWLEDGE to deepen the discussion, focusing on actionable strategies or specific aspects (e.g., management, support methods). "
+                "Recognize the message as a follow-up or confirmation of PRIOR TOPIC, referring to a specific concept or group from PRIOR KNOWLEDGE (e.g., customer segmentation methods). "
+                "Use PRIOR KNOWLEDGE to deepen the discussion, leveraging specific details (e.g., named groups like 'Nhóm Rối Loạn Cương Dương') and offering actionable insights (e.g., implementation methods, support strategies). "
                 "Structure the response with key aspects (e.g., purpose, methods, outcomes). "
-                "If PRIOR TOPIC is ambiguous, rephrase it (e.g., 'It sounds like you’re asking about the erectile dysfunction group…'). "
-                "Ask a targeted follow-up to further the discussion (e.g., 'Would you like specific support strategies for this group?')."
+                "If PRIOR TOPIC is ambiguous, rephrase it (e.g., 'It sounds like you’re confirming customer segmentation…'). "
+                "Ask a targeted follow-up to advance the discussion (e.g., 'Which group do you want to focus on, like Nhóm Rối Loạn Cương Dương?')."
             )
             knowledge_context = prior_knowledge
-            similarity_score = max(similarity_score, 0.7)  # Boost similarity for follow-ups
+            similarity_score = max(similarity_score, 0.7)
         elif similarity_score < 0.35:
             response_strategy = "LOW_SIMILARITY"
             strategy_instructions = (
@@ -288,27 +306,16 @@ class LearningProcessor:
             )
         else:
             response_strategy = "RELEVANT_KNOWLEDGE"
-            # Modified: Added emphasis on continuity for non-confirmation follow-ups
+            # Enhanced: Prioritize continuity for related topics
             strategy_instructions = (
                 "Present all relevant knowledge from EXISTING KNOWLEDGE in a comprehensive format, structuring the response to cover key aspects (e.g., purpose, methods, outcomes, context). "
-                "If the message likely continues PRIOR TOPIC (e.g., contains similar keywords), prioritize deepening that topic with actionable insights. "
-                "If the topic is ambiguous (e.g., unclear terms like 'Em'), rephrase it (e.g., 'It sounds like you’re asking about…'). "
+                "If the message likely continues PRIOR TOPIC (e.g., contains keywords like 'phân nhóm' or 'khách hàng'), prioritize deepening that topic with specific details and actionable insights. "
+                "If the topic is ambiguous, rephrase it (e.g., 'It sounds like you’re asking about…'). "
                 "Ask a targeted question to confirm the topic or validate the summary (e.g., 'Đây có phải ý bạn muốn hỏi không?'). "
                 f"If similarity is 0.35–0.55, emphasize clarification. "
                 f"If above 0.55, focus on mastery and closure."
             )
         
-        # Modified: Added core topic extraction for better continuity
-        core_prior_topic = prior_topic
-        if prior_topic:
-            # Extract specific group or concept (e.g., "Nhóm Rối Loạn Cương Dương")
-            match = re.search(r'(Nhóm [^\s]+(?: [^\s]+)*)', prior_topic, re.IGNORECASE)
-            if match:
-                core_prior_topic = match.group(1)
-            elif "rối loạn cương dương" in prior_topic.lower():
-                core_prior_topic = "Nhóm Rối Loạn Cương Dương"
-            logger.info(f"Core prior topic extracted: {core_prior_topic}")
-
         prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
 
             **Input**:
@@ -323,16 +330,17 @@ class LearningProcessor:
 
             **Instructions**:
             1. **Topic Detection**: Identify the core topic from CONVERSATION HISTORY and CURRENT MESSAGE. For follow-ups or confirmations, anchor to PRIOR TOPIC and PRIOR KNOWLEDGE. Rephrase ambiguous terms (e.g., 'It sounds like you’re asking about…').
-            2. **Intent Analysis**: Classify intent (questioning, confirming, follow-up, etc.). For follow-ups, expand PRIOR TOPIC with actionable insights based on PRIOR KNOWLEDGE’s suggested aspects.
-            3. **Knowledge Queries**: Generate 3 specific queries: core topic, specific aspect, related concept.
-            4. **Response**: Follow RESPONSE STRATEGY with a curious tone. For follow-ups, deepen discussion with practical strategies and ask a targeted follow-up. Keep responses concise (100–150 words).
+            2. **Intent Analysis**: Classify intent (questioning, confirming, follow-up, etc.). For follow-ups, expand PRIOR TOPIC with actionable insights based on PRIOR KNOWLEDGE’s specific details.
+            3. **Knowledge Queries**: Generate 3 specific queries: core topic, specific aspect, related concept. Ensure queries are JSON-parsable and relevant to PRIOR TOPIC.
+            4. **Response**: Follow RESPONSE STRATEGY with a curious tone. For follow-ups, deepen discussion with practical details and ask a targeted follow-up. Keep responses concise (100–150 words).
             5. **Output**:
                 - Conversational Response
-                - <knowledge_queries>[...]</knowledge_queries>
+                - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
 
             **Constraints**:
             - Use user’s language (Vietnamese if applicable).
             - Ensure topic continuity for follow-ups and confirmations.
+            - Ensure knowledge queries are specific and JSON-parsable.
             """
         try:
             response = await LLM.ainvoke(prompt)
@@ -455,7 +463,11 @@ async def execute_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, 
             return await save_new_knowledge(
                 parameters.get("query", ""),
                 parameters.get("content", ""),
-                parameters.get("graph_version_id", "")
+                parameters.get("graph_version_id", ""),
+                parameters.get("user_id", ""),
+                parameters.get("thread_id", ""),
+                parameters.get("topic", ""),
+                parameters.get("categories", [])
             )
         return {"status": "error", "message": f"Unknown tool: {tool_name}"}
     except Exception as e:
@@ -478,7 +490,7 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
         logger.error(f"Error fetching knowledge: {str(e)}")
         return {"status": "error", "message": f"Failed to fetch knowledge: {str(e)}"}
 
-async def save_new_knowledge(query: str, knowledge_content: str, graph_version_id: str) -> Dict[str, Any]:
+async def save_new_knowledge(query: str, knowledge_content: str, graph_version_id: str, user_id: str, thread_id: str, topic: str, categories: List[str]) -> Dict[str, Any]:
     """Save new knowledge to the knowledge base."""
     logger.info(f"Saving new knowledge for query: {query[:100]}...")
     try:
@@ -487,6 +499,14 @@ async def save_new_knowledge(query: str, knowledge_content: str, graph_version_i
             content=knowledge_content,
             graph_version_id=graph_version_id
         )
+        await save_knowledge(
+            input=query,
+            user_id="learner",
+            bank_name="health",
+            thread_id="learning_thread_1747282472163",
+            topic="phân nhóm khách hàng",
+            categories=["health_segmentation"]
+                        )
         return {
             "status": "success",
             "message": f"Knowledge saved for {query}",
