@@ -144,22 +144,28 @@ class LearningProcessor:
         try:
             queries = []
             primary_query = message.strip()
-            
-            # Handle short or confirmation messages
-            confirmation_keywords = ["có", "yes", "correct", "right", "explore further"]
-            is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords) and len(primary_query) <= 20
-            if is_confirmation and conversation_context:
-                # Use prior user question or AI queries
+            prior_topic = ""
+            prior_knowledge = ""
+
+            # Extract prior topic and knowledge
+            if conversation_context:
                 user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 if user_messages:
-                    last_user_msg = user_messages[-1].strip()
-                    if last_user_msg != primary_query and len(last_user_msg) > 5:
-                        queries.append(last_user_msg)
-                        logger.info(f"Using prior user message as query: {last_user_msg[:50]}")
+                    prior_topic = user_messages[-1].strip() if len(user_messages) > 1 else user_messages[0].strip()
+                    logger.info(f"Extracted prior topic: {prior_topic[:50]}")
                 if ai_messages:
-                    last_ai_msg = ai_messages[-1].strip()
-                    query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', last_ai_msg, re.DOTALL)
+                    prior_knowledge = ai_messages[-1].strip()
+
+            # Handle short or confirmation messages
+            confirmation_keywords = ["có", "yes", "correct", "right", "explore further"]
+            is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords) and len(primary_query) <= 20
+            if is_confirmation and prior_topic:
+                # Reuse prior topic and queries
+                queries.append(prior_topic)
+                logger.info(f"Confirmation detected, reusing prior topic: {prior_topic[:50]}")
+                if prior_knowledge:
+                    query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', prior_knowledge, re.DOTALL)
                     if query_section:
                         try:
                             prior_queries = json.loads(query_section.group(1).strip())
@@ -167,8 +173,15 @@ class LearningProcessor:
                             logger.info(f"Reusing {len(prior_queries)} prior AI queries")
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse prior AI queries")
+                # Enrich confirmation query
+                primary_query = f"{primary_query} about {prior_topic}"
+                queries.append(primary_query)
+                logger.info(f"Enriched confirmation query: {primary_query[:50]}")
             else:
                 queries.append(primary_query)
+                if prior_topic and prior_topic != primary_query:
+                    queries.append(prior_topic)
+                    logger.info(f"Added prior topic to queries: {prior_topic[:50]}")
 
             # Add LLM-generated queries
             temp_response = await self._active_learning(message, conversation_context, {}, "unknown")
@@ -177,20 +190,40 @@ class LearningProcessor:
                 if query_section:
                     try:
                         llm_queries = json.loads(query_section.group(1).strip())
-                        queries.extend([q for q in llm_queries if q not in queries])
-                        logger.info(f"Added {len(llm_queries)} LLM-generated queries")
+                        # Filter vague or off-topic queries
+                        valid_llm_queries = [
+                            q for q in llm_queries 
+                            if q not in queries and len(q.strip()) > 5 and 
+                            not any(vague in q.lower() for vague in ["core topic", "chủ đề chính", "cuộc sống"])
+                        ]
+                        queries.extend(valid_llm_queries)
+                        logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries")
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse LLM queries")
 
+            # Remove duplicates and low-value queries
+            queries = list(dict.fromkeys(queries))
+            queries = [q for q in queries if len(q.strip()) > 5]
             if not queries:
                 logger.warning("No valid queries found")
-                return {"knowledge_context": "", "similarity": 0.0, "query_count": 0, "metadata": {"similarity": 0.0}}
+                return {
+                    "knowledge_context": prior_knowledge if is_confirmation else "",
+                    "similarity": 0.7 if is_confirmation else 0.0,
+                    "query_count": 0,
+                    "metadata": {"similarity": 0.7 if is_confirmation else 0.0}
+                }
 
-            best_knowledge = ""
-            best_similarity = 0.0
+            best_knowledge = prior_knowledge if is_confirmation else ""
+            best_similarity = 0.7 if is_confirmation else 0.0
             query_count = 0
+            vector_count = 4  # Placeholder; fetch actual size if possible
+
+            # Dynamic threshold
+            base_threshold = 0.35 if vector_count <= 10 else 0.4
+            logger.info(f"Using similarity threshold: {base_threshold} for {vector_count} vectors")
 
             for query in queries:
+                # Use raw similarity if above threshold, else weight at 80%
                 knowledge = await fetch_knowledge_with_similarity(query, self.graph_version_id)
                 query_count += 1
                 if not knowledge:
@@ -200,23 +233,38 @@ class LearningProcessor:
                 if sim_match:
                     try:
                         similarity = float(sim_match.group(1))
-                        logger.info(f"Query '{query[:30]}...' yielded similarity: {similarity}")
-                        if similarity > best_similarity:
-                            best_similarity = similarity
+                        weighted_similarity = similarity if similarity >= base_threshold else similarity * 0.8
+                        logger.info(f"Query '{query[:30]}...' yielded similarity: {similarity}, weighted: {weighted_similarity}")
+                        if weighted_similarity > best_similarity:
+                            best_similarity = weighted_similarity
                             best_knowledge = knowledge_content
                     except ValueError:
                         logger.warning(f"Invalid similarity score: {sim_match.group(1)}")
+
+            # Vibe score boost for frequent topics
+            vibe_score = 1.0
+            if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
+                for term in ["mục tiêu", "goals", "active learning"]):
+                vibe_score = 1.1
+                best_similarity *= vibe_score
+                logger.info(f"Applied vibe score {vibe_score} for frequent topic")
 
             logger.info(f"Final similarity: {best_similarity} from {query_count} queries")
             return {
                 "knowledge_context": best_knowledge,
                 "similarity": best_similarity,
                 "query_count": query_count,
-                "metadata": {"similarity": best_similarity}
+                "metadata": {"similarity": best_similarity, "vibe_score": vibe_score}
             }
         except Exception as e:
             logger.error(f"Error fetching knowledge: {str(e)}")
-            return {"knowledge_context": "", "similarity": 0.0, "query_count": 0, "metadata": {"similarity": 0.0}}
+            return {
+                "knowledge_context": prior_knowledge if is_confirmation else "",
+                "similarity": 0.7 if is_confirmation else 0.0,
+                "query_count": 0,
+                "metadata": {"similarity": 0.7 if is_confirmation else 0.0}
+            }
+
     async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown") -> Dict[str, Any]:
         logger.info("Answering user question with active learning approach")
         
