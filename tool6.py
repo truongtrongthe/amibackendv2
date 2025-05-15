@@ -384,6 +384,8 @@ class CoTProcessor:
         conversation_lines = conversation_context.count('\n') if conversation_context else 0
         logger.info(f"Building user portrait with {conversation_lines} lines of conversation context")
         
+        logger.info(f"Business objectives: {business_objectives}")
+        
         prompt = f"""Build a comprehensive user profile by THOROUGHLY ANALYZING the ENTIRE conversation history:
 
                 ===== CRITICAL LANGUAGE INSTRUCTION =====
@@ -426,24 +428,30 @@ class CoTProcessor:
 
                 BUSINESS_GOAL SELECTION (CRITICAL):
                 1. CAREFULLY EXAMINE the KNOWLEDGE and BUSINESS OBJECTIVES sections to identify ALL available business objectives
-                2. For EACH objective found:
-                   a. Analyze its key components (purpose, target metrics, timeframe, requirements)
-                   b. Assess compatibility with user's current needs and profile
-                   c. Evaluate alignment with the identified conversation stage
-                   d. Consider implementation feasibility based on user's skills and resources
-                   e. Note any prerequisites that must be met before pursuing this objective
-                3. SELECT EXACTLY ONE objective that:
-                   a. Best addresses the user's primary problem or need
-                   b. Is appropriate for the current conversation stage
-                   c. Has the highest likelihood of successful implementation
-                   d. Provides clear value to the user based on their classification
-                4. Format the selected objective as a clear, SMART goal statement (Specific, Measurable, Achievable, Relevant, Time-bound)
-                5. In your output, bold the business_goal
-                6. PROVIDE A DETAILED JUSTIFICATION explaining:
-                   a. WHY this objective is the most appropriate choice over alternatives
-                   b. HOW it specifically addresses the user's current situation
-                   c. WHAT key factors made this objective stand out from others
-                   d. WHICH aspects of the user profile most strongly support this selection
+                2. For EACH objective:
+                   a. Analyze its core components (purpose, metrics, timeframe)
+                   b. CHECK IF ANY PREREQUISITES or CONDITIONS are mentioned in the objective definition
+                   c. VALIDATE if these prerequisites are CURRENTLY MET based on the existing user portrait
+                   d. IMMEDIATELY DISQUALIFY any objective whose prerequisites are not currently satisfied
+                
+                3. SELECT EXACTLY ONE objective by INCORPORATING THE USER PORTRAIT you've created:
+                   a. STRICTLY FOLLOW any usage guidelines in the objective definition:
+                      - If an objective states "only perform/use when X", FIRST VERIFY if X is CURRENTLY TRUE in the user portrait
+                      - If X is NOT CURRENTLY TRUE (e.g., required information is missing), you MUST DISQUALIFY this objective ENTIRELY
+                      - EVALUATE all usage conditions AGAINST THE CURRENT STATE of the user portrait
+                      - CROSS-CHECK user classification, needs, stage, and capabilities with ALL guidelines
+                      - NEVER select an objective whose current prerequisites are not met, even if they could be met in the future
+                      - If ALL objectives have unmet prerequisites, select the objective "Continue information gathering" instead
+                      b. Choose an objective that is appropriate for the conversation stage identified in the portrait
+                
+                4. In your output, bold the business_goal
+                
+                5. JUSTIFY your selection by explaining:
+                   a. Why this objective best matches the user's situation
+                   b. How it complies with any usage guidelines
+                   c. Why it was chosen over alternatives
+                   d. Which user profile aspects support this selection
+                   e. IF prerequisites exist: EXPLICITLY state whether they are CURRENTLY met or not
 
                 GENERATE 3-5 ANALYSIS_QUERIES:
                 [OBJECTIVE-SPECIFIC QUERIES - generate your own based on context]
