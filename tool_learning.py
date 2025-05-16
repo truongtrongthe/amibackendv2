@@ -213,12 +213,9 @@ class LearningProcessor:
                 if ai_messages:
                     prior_knowledge = ai_messages[-1].strip()
 
-            confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
-            is_confirmation = any(keyword.lower() in primary_query.lower() for keyword in confirmation_keywords)
-            # Check topic overlap for follow-ups
-            topic_overlap = any(term in primary_query.lower() and term in prior_topic.lower() 
-                            for term in ["phân tích chân dung khách hàng", "phân nhóm khách hàng", "chân dung khách hàng"])
-            is_follow_up = is_confirmation or topic_overlap or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', primary_query.lower(), re.IGNORECASE) or (prior_topic and primary_query.lower().strip() in prior_topic.lower())
+            # Use the _detect_follow_up helper function instead of duplicating code
+            follow_up_result = self._detect_follow_up(primary_query, prior_topic)
+            is_follow_up = follow_up_result["is_follow_up"]
             
             if is_follow_up and prior_topic:
                 queries.append(prior_topic)
@@ -228,7 +225,6 @@ class LearningProcessor:
             else:
                 queries.append(primary_query)
                 similarity = 0.0
-                knowledge_context = ""
                 knowledge_context = ""
 
             temp_response = await self._active_learning(primary_query, conversation_context, {}, user_id, {})
@@ -387,38 +383,97 @@ class LearningProcessor:
         prior_topic = prior_data.get("topic", "") if prior_data else ""
         prior_knowledge = prior_data.get("knowledge", "") if prior_data else ""
         
-        confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
-        is_confirmation = any(keyword.lower() in message_str.lower() for keyword in confirmation_keywords)
-        
-        # Improved follow-up detection that looks for patterns in the conversation history
-        is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message_str.lower(), re.IGNORECASE) or (prior_topic and message_str.lower().strip() in prior_topic.lower())
+        # Use the _detect_follow_up helper function instead of duplicating code
+        follow_up_result = self._detect_follow_up(message_str, prior_topic)
+        is_confirmation = follow_up_result["is_confirmation"]
+        is_follow_up = follow_up_result["is_follow_up"]
+        has_pattern_match = follow_up_result["has_pattern_match"]
+        topic_overlap = follow_up_result["topic_overlap"]
         
         core_prior_topic = prior_topic
         
         # Knowledge handling strategy based on queries and similarity
         knowledge_response_sections = []
-        if queries and query_results:
-            for query, result in zip(queries, query_results):
+        
+        # Check for conversation closing messages - common phrases indicating end of conversation
+        closing_phrases = [
+            "thế thôi", "hẹn gặp lại", "tạm biệt", "chào nhé", "goodbye", "bye", "cảm ơn nhé", 
+            "cám ơn nhé", "đủ rồi", "vậy là đủ", "hôm nay vậy là đủ", "hẹn lần sau"
+        ]
+        
+        is_closing_message = any(phrase in message_str.lower() for phrase in closing_phrases)
+        
+        if is_closing_message:
+            # Override low confidence for closing messages
+            knowledge_context = "CONVERSATION_CLOSING: User is ending the conversation politely."
+            response_strategy = "CLOSING"
+            strategy_instructions = (
+                "Recognize this as a closing message where the user is ending the conversation. "
+                "Respond with a brief, polite farewell message. "
+                "Thank them for the conversation and express willingness to help in the future. "
+                "Keep it concise and friendly, in the same language they used (Vietnamese/English)."
+            )
+            logger.info(f"Detected conversation closing message, overriding low confidence response")
+        elif queries and query_results:
+            # Group results by confidence level
+            high_confidence = []
+            medium_confidence = []
+            low_confidence = []
+            
+            for i, query in enumerate(queries):
+                # Get corresponding result if available
+                result = query_results[i] if i < len(query_results) else None
+                
+                if not result:
+                    low_confidence.append(query)
+                    continue
+                    
                 query_similarity = result.get("score", 0.0)
                 query_content = result.get("raw", "")
                 
+                if not query_content:
+                    low_confidence.append(query)
+                    continue
+                
+                # Extract just the AI portion if this is a combined knowledge entry
+                if query_content.startswith("User:") and "\n\nAI:" in query_content:
+                    ai_part = re.search(r'\n\nAI:(.*)', query_content, re.DOTALL)
+                    if ai_part:
+                        query_content = ai_part.group(1).strip()
+                
                 if query_similarity < 0.35:
-                    knowledge_response_sections.append(
-                        f"I can't find knowledge relevant to '{query}'. Can you elaborate?"
-                    )
+                    low_confidence.append(query)
                 elif 0.35 <= query_similarity <= 0.7:
-                    knowledge_response_sections.append(
-                        f"I found some knowledge relevant to '{query}': {query_content}. But I'm not really confident. Can you justify?"
-                    )
+                    medium_confidence.append((query, query_content, query_similarity))
                 else:  # > 0.7
+                    high_confidence.append((query, query_content, query_similarity))
+            
+            # Format response sections by confidence level
+            if high_confidence:
+                knowledge_response_sections.append("HIGH CONFIDENCE KNOWLEDGE:")
+                for query, content, score in high_confidence:
                     knowledge_response_sections.append(
-                        f"Here is what I know about '{query}': {query_content}"
+                        f"On the topic of '{query}' (confidence: {score:.2f}): {content}"
+                    )
+            
+            if medium_confidence:
+                knowledge_response_sections.append("MEDIUM CONFIDENCE KNOWLEDGE:")
+                for query, content, score in medium_confidence:
+                    knowledge_response_sections.append(
+                        f"Regarding '{query}' (confidence: {score:.2f}): {content}\nCould you please confirm or clarify this information?"
+                    )
+            
+            if low_confidence:
+                knowledge_response_sections.append("LOW CONFIDENCE/NO KNOWLEDGE:")
+                for query in low_confidence:
+                    knowledge_response_sections.append(
+                        f"I don't have sufficient knowledge about '{query}'. Would you like to teach me about this topic?"
                     )
             
             # Combine the knowledge sections if they exist
             if knowledge_response_sections:
                 knowledge_context = "\n\n".join(knowledge_response_sections)
-                logger.info(f"Created multi-query knowledge response with {len(knowledge_response_sections)} sections")
+                logger.info(f"Created structured knowledge response with {len(high_confidence)} high, {len(medium_confidence)} medium, and {len(low_confidence)} low confidence items")
         logger.info(f"Knowledge context: {knowledge_context}")
         if is_follow_up:
             response_strategy = "FOLLOW_UP"
@@ -445,6 +500,11 @@ class LearningProcessor:
             if not knowledge_response_sections:
                 knowledge_context = prior_knowledge
             similarity_score = max(similarity_score, 0.7)
+        elif is_closing_message:
+            # This has already been set up earlier, but we'll ensure response_strategy is set correctly
+            response_strategy = "CLOSING"
+            # Keep the strategy_instructions from above
+            # No need to adjust similarity score
         elif similarity_score < 0.35 and not knowledge_response_sections:
             response_strategy = "LOW_SIMILARITY"
             # Create query-specific response section if no other knowledge is found
@@ -494,51 +554,67 @@ class LearningProcessor:
                 - save_knowledge: Save knowledge with user_id (required), query/content, thread_id, topic, categories
 
                 **Instructions**:
-                1. **Intent Classification** (critical for proper response): 
-                   - Carefully analyze if the user is asking a question (query) or providing/initiating information (teaching)
-                   - Use semantic understanding to detect teaching intent:
-                     * The user introduces a new topic with specific details
-                     * The user describes how to do something or explains concepts
-                     * The message has an instructional or explanatory tone
-                     * The user seems to be sharing knowledge rather than seeking it
-                   - In Vietnamese conversations, consider cultural context in your analysis
-                   - For queries: Use EXISTING KNOWLEDGE as foundation if available
-                   - For teaching intent: Set has_teaching_intent=true and acknowledge user is sharing knowledge
-                   - Use Vietnamese if the user does
+                1. **Intent Classification**: 
+                   - Determine whether the user is asking for information (query intent) or providing information (teaching intent)
+                   - Base your classification on the semantic meaning and communicative purpose of the message
+                   - For teaching intent, look for explanatory content, new information, or instructional tone
+                   - For query intent, look for questions or requests for information
+                   - Set has_teaching_intent=true when you detect teaching intent
+                   - Use EXISTING KNOWLEDGE for queries when available
+                   - Match the user's language choice (Vietnamese/English)
+                   - For closing messages, set intent_type="closing" and respond with a polite farewell
 
-                2. **Priority Topics** (set is_priority_topic=true AND should_save_knowledge=true):
-                   - Customer segmentation ("chân dung khách hàng")
-                   - Health-related topics ("rối loạn cương dương")
+                2. **Priority Topics**:
+                   - Identify topics of special importance to the business domain
+                   - When these topics are discussed, set is_priority_topic=true and include the topic name
+                   - Consider the domain context when determining topic priority
 
                 3. **Knowledge Management**:
-                   - IMPORTANT: You should recommend saving knowledge (should_save_knowledge=true) when:
-                     * The user shows teaching intent through their communication style and content
-                     * Priority topics are mentioned
-                     * The user initiates a conversation about a topic they seem knowledgeable about
-                     * The information shared appears valuable for future conversations
+                   - Recommend saving knowledge (should_save_knowledge=true) when:
+                     * The message contains teaching intent
+                     * The information appears valuable for future reference
+                     * The content is well-structured or information-rich
                 
-                4. **Confidence-Based Responses**:
-                   - Low confidence (<0.35): "I can't find knowledge relevant to [query]. Can you elaborate?"
-                   - Medium confidence (0.35-0.7): "I found some knowledge relevant to [query]: [content]. But I'm not really confident. Can you justify?"
-                   - High confidence (>0.7): "Here is what I know about [query]: [content]"
+                4. **Response Confidence**:
+                   - For HIGH confidence queries (similarity >0.7):
+                     * Demonstrate comprehensive understanding
+                     * Speak confidently and authoritatively about the topic
+                     * Present a thorough, well-structured response using the retrieved knowledge
+                     * Connect concepts and provide additional context where appropriate
+                   
+                   - For MEDIUM confidence queries (similarity 0.35-0.7):
+                     * Present the knowledge you have but express some uncertainty
+                     * Acknowledge limitations in your understanding
+                     * End with a specific question asking for clarification or confirmation
+                     * Use phrases like "Based on what I understand..." or "I believe that..."
+                   
+                   - For LOW confidence queries (similarity <0.35):
+                     * Clearly state that you don't have sufficient knowledge on this topic
+                     * Ask if the user would like to teach you about this topic
+                     * Invite them to add knowledge for future reference
+                     * Frame it as an opportunity: "Would you mind sharing your knowledge about [topic]?"
+                   
+                   - When responding with MULTIPLE confidence levels:
+                     * Structure your response in order of confidence (high → medium → low)
+                     * For high confidence topics, provide detailed explanations
+                     * For medium confidence topics, present what you know and ask for confirmation
+                     * For low confidence topics, acknowledge knowledge gaps and request information
+                     * Maintain a cohesive flow between different confidence sections
+                     * Prioritize responding to the user's most important query first
 
-                5. **Language and Relational Dynamics**:
-                   - Recognize when you're being directly addressed (terms like "Em", "You", "Bạn")
-                   - Match your response style to the user's speech register and level of formality
-                   - In Vietnamese conversations:
-                     * If addressed as "Em", respond using "Em" as self-reference and appropriate counterpart (like "Anh/Chị" for the user)
-                     * Maintain consistent relationship pronouns throughout the conversation
-                   - In English conversations:
-                     * Use personal pronouns that match the conversation's established formality level
-                   - Always recognize the cultural/linguistic context of addressing terms
+                5. **Relational Dynamics**:
+                   - Match the user's communication style and level of formality
+                   - Maintain consistent linguistic patterns throughout the conversation
+                   - Respect cultural and linguistic conventions in how you address the user
+                   - Preserve the established relationship dynamic in your responses
 
                 6. **Output Format**:
-                   - Conversational Response (100-150 words, use user's language)
+                   - Respond directly and concisely in the user's language (no prefix or labels)
                    - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
                    - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
                    - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up"}}</evaluation>
 
-                Remember to maintain topic continuity for follow-ups, include user_id in all tool calls, and ensure proper JSON formatting.
+                Maintain topic continuity, ensure proper JSON formatting, and include user_id in all tool calls.
                 """
         try:
             response = await LLM.ainvoke(prompt)
@@ -546,7 +622,7 @@ class LearningProcessor:
             
             content = response.content.strip()
             tool_calls = []
-            evaluation = {"has_teaching_intent": False, "is_priority_topic": False, "priority_topic_name": "", "should_save_knowledge": False}
+            evaluation = {"has_teaching_intent": False, "is_priority_topic": False, "priority_topic_name": "", "should_save_knowledge": False, "intent_type": "query"}
             
             # Extract tool calls if present
             if "<tool_calls>" in content:
@@ -578,6 +654,15 @@ class LearningProcessor:
                         logger.info("Extracted message from JSON response")
                 except Exception as json_error:
                     logger.warning(f"Failed to parse JSON response: {json_error}")
+            
+            # Ensure closing messages get a response even if empty
+            if response_strategy == "CLOSING" and (not content or content.isspace()):
+                # Default closing message if the LLM didn't provide one
+                if "vietnamese" in message_str.lower() or any(vn_word in message_str.lower() for vn_word in ["tạm biệt", "cảm ơn", "hẹn gặp", "thế thôi"]):
+                    content = "Vâng, cảm ơn bạn đã trao đổi. Hẹn gặp lại bạn lần sau nhé!"
+                else:
+                    content = "Thank you for the conversation. Have a great day and I'm here if you need anything else!"
+                logger.info("Added default closing response for empty LLM response")
             
             return {
                 "status": "success",
@@ -662,7 +747,7 @@ class LearningProcessor:
                         categories=categories,
                         ttl_days=ttl_days  # Add TTL for data expiration
                     ),
-                    timeout=5.0  # 5-second timeout for database operations
+                    timeout=3.0  # 5-second timeout for database operations
                 )
                 logger.info(f"Background save_knowledge {'completed successfully' if success else 'failed'}")
                 return success
@@ -674,6 +759,81 @@ class LearningProcessor:
             import traceback
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return False
+
+    def _detect_follow_up(self, message: str, prior_topic: str = "") -> Dict[str, bool]:
+        """
+        Detect whether a message is a follow-up to a previous topic.
+        
+        Args:
+            message: The current message to check
+            prior_topic: The previous topic or message for context
+            
+        Returns:
+            Dictionary with detection results containing:
+            - is_confirmation: Whether the message confirms something
+            - is_follow_up: Whether the message is a follow-up
+            - has_pattern_match: Whether the message matches follow-up patterns
+            - topic_overlap: Whether there's overlap with the prior topic
+        """
+        # More comprehensive confirmation keywords in both English and Vietnamese
+        confirmation_keywords = [
+            # Vietnamese affirmatives
+            "có", "đúng", "đúng rồi", "chính xác", "phải", "ừ", "ừm", "vâng", "dạ", "ok", "được", "đồng ý",
+            # English affirmatives
+            "yes", "yeah", "correct", "right", "sure", "okay", "ok", "indeed", "exactly", "agree", "true",
+            # Action-oriented confirmations
+            "explore further", "tell me more", "continue", "go on", "proceed", "next", "more", "and then",
+            # Vietnamese action confirmations
+            "tiếp tục", "kể tiếp", "nói thêm", "thêm nữa", "và sau đó", "tiếp theo"
+        ]
+        is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords)
+        
+        # Enhanced follow-up detection with more patterns
+        follow_up_patterns = [
+            # Direct references
+            r'\b(nhóm này|this group|that group|these groups|those groups)\b',
+            # Questions about previously mentioned topics
+            r'\b(vậy thì sao|thế còn|còn về|về điểm này|about this|what about|regarding this|related to this)\b',
+            # Continuation markers
+            r'\b(tiếp theo|tiếp tục|continue with|proceed with|more about|elaborate on)\b',
+            # Implicit references
+            r'\b(trong trường hợp đó|in that case|if so|if that\'s the case)\b',
+            # Direct anaphoric references
+            r'\b(nó|they|them|it|those|these|that|this)\b\s+(is|are|như thế nào|làm sao|means|works)'
+        ]
+        has_pattern_match = any(re.search(pattern, message.lower(), re.IGNORECASE) for pattern in follow_up_patterns)
+        
+        # Check for short responses that often indicate follow-ups
+        is_short_response = len(message.strip().split()) <= 5
+        
+        # Check if message is primarily composed of question words (often follow-ups)
+        question_starters = ["why", "how", "what", "when", "where", "who", "which", "tại sao", "làm sao", "khi nào", "ở đâu", "ai", "cái nào"]
+        starts_with_question = any(message.lower().strip().startswith(q) for q in question_starters)
+        
+        # Semantic topic continuity
+        topic_overlap = False
+        if prior_topic:
+            # Check if significant words from the message appear in prior topic
+            msg_words = set(re.findall(r'\b\w{4,}\b', message.lower()))  # Words with 4+ chars
+            topic_words = set(re.findall(r'\b\w{4,}\b', prior_topic.lower()))
+            common_words = msg_words.intersection(topic_words)
+            topic_overlap = len(common_words) >= 1 or message.lower().strip() in prior_topic.lower()
+        
+        # Combined follow-up detection
+        is_follow_up = (
+            is_confirmation or 
+            has_pattern_match or 
+            (is_short_response and prior_topic) or  # Short responses with context are likely follow-ups
+            (starts_with_question and prior_topic) or  # Questions after context are likely follow-ups
+            topic_overlap
+        )
+        
+        return {
+            "is_confirmation": is_confirmation,
+            "is_follow_up": is_follow_up,
+            "has_pattern_match": has_pattern_match,
+            "topic_overlap": topic_overlap
+        }
 
 async def process_llm_with_tools(
         self,

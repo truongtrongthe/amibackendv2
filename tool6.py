@@ -424,8 +424,7 @@ class CoTProcessor:
                 {f"• Resolve temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
                 BUSINESS_GOAL SELECTION (CRITICAL):
-                1. Analyse each business objective carefully to understand when you are allowed to use each objective.
-                2. Analyse each business objective carefully to understand if objective is needed to perform.
+                1. ANALYZE EACH BUSINESS OBJECTIVE CAREFULLY To UNDERSTAND when you are allowed to use each objective.
                 2. SELECT the best business objective that is allowed to use against the user portrait.
                 3. JUSTIFY YOUR CHOICE:
                    - Explain why the selected objective is allowed to use now
