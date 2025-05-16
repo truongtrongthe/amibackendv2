@@ -1,14 +1,17 @@
 import json
 import asyncio
 import logging
-from typing import Dict, List, Any, Optional, Union, AsyncGenerator
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator, Set
 from datetime import datetime
 from uuid import uuid4
 import re
 import pytz
+import weakref
 
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+import functools
+import concurrent.futures
 
 from pccontroller import save_knowledge, query_knowledge
 from brain_singleton import get_current_graph_version
@@ -31,6 +34,8 @@ LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.01)
 class LearningProcessor:
     def __init__(self):
         self.graph_version_id = get_current_graph_version() or str(uuid4())
+        # Set to keep track of pending background tasks
+        self._background_tasks: Set[asyncio.Task] = set()
 
     async def initialize(self):
         """Initialize the processor asynchronously."""
@@ -41,6 +46,11 @@ class LearningProcessor:
         """Process incoming message with active learning flow."""
         logger.info(f"Processing message from user {user_id}")
         try:
+
+            if not message.strip():
+                logger.error("Empty message")
+                return {"status": "error", "message": "Empty message provided"}
+            
             # Step 1: Get suggested knowledge queries from previous responses
             suggested_queries = []
             if conversation_context:
@@ -59,35 +69,35 @@ class LearningProcessor:
 
             # Step 2: Search for relevant knowledge
             logger.info(f"Searching for knowledge based on message...")
-            analysis_knowledge = await self._search_knowledge(message, conversation_context)
+            analysis_knowledge = await self._search_knowledge(message, conversation_context, user_id, thread_id)
             
-            # Step 3: Enrich with suggested queries
-            if suggested_queries:
+            # Step 3: Enrich with suggested queries if we don't have sufficient results
+            if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
                 logger.info(f"Searching for additional knowledge using {len(suggested_queries)} suggested queries")
                 primary_similarity = analysis_knowledge.get("similarity", 0.0)
                 primary_knowledge = analysis_knowledge.get("knowledge_context", "")
-                best_similarity = primary_similarity
-                best_knowledge = primary_knowledge
+                primary_queries = analysis_knowledge.get("queries", [])
+                primary_query_results = analysis_knowledge.get("query_results", [])
                 
                 for query in suggested_queries:
-                    query_knowledge = await self._search_knowledge(query, conversation_context)
-                    query_similarity = query_knowledge.get("similarity", 0.0)
-                    query_content = query_knowledge.get("knowledge_context", "")
-                    
-                    logger.info(f"Query '{query}' yielded similarity score: {query_similarity}")
-                    if query_similarity > best_similarity and query_content:
-                        best_similarity = query_similarity
-                        best_knowledge = query_content
-                        logger.info(f"Found better knowledge with query '{query}', similarity: {best_similarity}")
-                    if query_similarity >= 0.35 and query_content and query_content not in best_knowledge:
-                        best_knowledge += f"\n\nAdditional information from query '{query}':\n{query_content}"
-                        logger.info(f"Added supplementary knowledge from query '{query}'")
+                    if query not in primary_queries:  # Avoid duplicate queries
+                        query_knowledge = await self._search_knowledge(query, conversation_context, user_id, thread_id)
+                        query_similarity = query_knowledge.get("similarity", 0.0)
+                        query_results = query_knowledge.get("query_results", [])
+                        
+                        logger.info(f"Suggested query '{query}' yielded similarity score: {query_similarity}")
+                        
+                        # Add the new query and its results to our collection
+                        if query_results:
+                            primary_queries.append(query)
+                            primary_query_results.extend(query_results)
+                            logger.info(f"Added results from suggested query '{query}'")
                 
-                if best_similarity > primary_similarity:
-                    analysis_knowledge["knowledge_context"] = best_knowledge
-                    analysis_knowledge["similarity"] = best_similarity
-                    analysis_knowledge["metadata"]["similarity"] = best_similarity
-                    logger.info(f"Updated knowledge from suggested queries. New similarity: {best_similarity}")
+                # Update analysis_knowledge with enriched data
+                if len(primary_query_results) > len(analysis_knowledge.get("query_results", [])):
+                    analysis_knowledge["queries"] = primary_queries
+                    analysis_knowledge["query_results"] = primary_query_results
+                    logger.info(f"Updated knowledge with {len(primary_query_results)} total query results")
             
             # Step 4: Log similarity score
             similarity = analysis_knowledge.get("similarity", 0.0)
@@ -96,6 +106,8 @@ class LearningProcessor:
             # Step 5: Generate response
             logger.info(f"Generating response based on knowledge...")
             prior_data = analysis_knowledge.get("prior_data", {})
+            
+            # Remove hardcoded teaching intent detection and let the LLM handle it
             response = await self._active_learning(message, conversation_context, analysis_knowledge, user_id, prior_data)
             logger.info(f"Response generated with status: {response.get('status', 'unknown')}")
             
@@ -103,40 +115,65 @@ class LearningProcessor:
                 logger.info(f"Active learning mode used: {response['metadata']['response_strategy']}")
             
             # Step 6: Save knowledge for relevant responses
-            if response.get("status") == "success" and response["metadata"]["similarity_score"] >= 0.35:
-                topic = response["metadata"].get("core_prior_topic", "unknown")
-                categories = ["health_segmentation"] if any(term in message.lower() or topic.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
-                message_content = response["message"]
-                conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
-                query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', message_content, re.DOTALL)
-                knowledge_queries = json.loads(query_section.group(1).strip()) if query_section else []
+            if response.get("status") == "success":
+                # Get teaching intent and priority topic info from LLM evaluation
+                has_teaching_intent = response.get("metadata", {}).get("has_teaching_intent", False)
+                is_priority_topic = response.get("metadata", {}).get("is_priority_topic", False)
+                should_save_knowledge = response.get("metadata", {}).get("should_save_knowledge", False)
+                priority_topic_name = response.get("metadata", {}).get("priority_topic_name", "")
+                intent_type = response.get("metadata", {}).get("intent_type", "unknown")
+                
+                # Trust the LLM's intent detection entirely
+                
+                # Force should_save_knowledge to True if it's a priority topic
+                if is_priority_topic:
+                    should_save_knowledge = True
+                
+                logger.info(f"LLM evaluation: intent={intent_type}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}, should_save={should_save_knowledge}")
+                
+                # Only save knowledge when teaching intent is detected
+                if has_teaching_intent:
+                    # Determine logging message based on detected intent
+                    log_reason = "teaching intent"
+                    
+                    logger.info(f"Saving knowledge due to {log_reason}")
+                    
+                    message_content = response["message"]
+                    conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                    query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', message_content, re.DOTALL)
+                    knowledge_queries = json.loads(query_section.group(1).strip()) if query_section else []
 
-                await save_knowledge(
-                    input=message,
-                    user_id=user_id,
-                    bank_name="health" if "health_segmentation" in categories else "default",
-                    thread_id=thread_id,
-                    topic=topic,
-                    categories=categories
-                )
-                await save_knowledge(
-                    input=conversational_response,
-                    user_id=user_id,
-                    bank_name="health" if "health_segmentation" in categories else "default",
-                    thread_id=thread_id,
-                    topic=topic,
-                    categories=categories + ["response"]
-                )
-                for query in knowledge_queries:
-                    await save_knowledge(
-                        input=query,
-                        user_id=user_id,
-                        bank_name="health" if "health_segmentation" in categories else "default",
-                        thread_id=thread_id,
-                        topic=topic,
-                        categories=categories + ["query"]
-                    )
-                logger.info(f"Saved knowledge: user input, response, and {len(knowledge_queries)} queries for topic '{topic}'")
+                    # Set up categories and bank name
+                    categories = ["health_segmentation"] if is_priority_topic else ["general"]
+                    bank_name = "conversation"
+                    
+                    # Add teaching intent category
+                    categories.append("teaching_intent")
+                    
+                    # Add specific topic category if provided by LLM
+                    if priority_topic_name and priority_topic_name not in categories:
+                        categories.append(priority_topic_name.lower().replace(" ", "_"))
+                    
+                    # Combine user input and AI response in a formatted way
+                    combined_knowledge = f"User: {message}\n\nAI: {conversational_response}"
+                    
+                    # Save combined knowledge
+                    try:
+                        logger.info(f"Saving combined knowledge to {bank_name} bank: '{combined_knowledge[:100]}...'")
+                        success = await self._background_save_knowledge(
+                            input_text=combined_knowledge,
+                            user_id=user_id,
+                            bank_name=bank_name,
+                            thread_id=thread_id,
+                            topic=priority_topic_name or "user_teaching",
+                            categories=categories,
+                            ttl_days=365  # 365 days TTL
+                        )
+                        logger.info(f"Save combined knowledge completed: {success}")
+                    except Exception as e:
+                        logger.error(f"Error saving combined knowledge: {str(e)}")
+                    
+                    logger.info(f"Saved combined knowledge for topic '{priority_topic_name or 'user_teaching'}'")
 
             return response
         except Exception as e:
@@ -145,50 +182,56 @@ class LearningProcessor:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return {"status": "error", "message": f"Error: {str(e)}"}
    
-    async def _search_knowledge(self, message: str, conversation_context: str = "") -> Dict[str, Any]:
-        logger.info(f"Searching for analysis knowledge based on message: {message[:100]}...")
+    async def _search_knowledge(self, message: Union[str, List], conversation_context: str = "", user_id: str = "unknown", thread_id: Optional[str] = None) -> Dict[str, Any]:
+        logger.info(f"Searching for analysis knowledge based on message: {str(message)[:100]}...")
         try:
+            if not isinstance(message, str):
+                logger.warning(f"Converting non-string message: {message}")
+                primary_query = str(message[0]) if isinstance(message, list) and message else str(message)
+            else:
+                primary_query = message.strip()
+            if not primary_query:
+                logger.error("Empty primary query")
+                return {
+                    "knowledge_context": "",
+                    "similarity": 0.0,
+                    "query_count": 0,
+                    "prior_data": {"topic": "", "knowledge": ""},
+                    "metadata": {"similarity": 0.0}
+                }
             queries = []
-            primary_query = message.strip()
             prior_topic = ""
             prior_knowledge = ""
-
             if conversation_context:
                 user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 logger.info(f"Found {len(user_messages)} user messages in context")
                 if user_messages:
                     prior_topic = user_messages[-2].strip() if len(user_messages) > 1 else user_messages[0].strip()
+                    
                     logger.info(f"Extracted prior topic: {prior_topic[:50]}")
                 if ai_messages:
                     prior_knowledge = ai_messages[-1].strip()
 
             confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
-            is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords)
-            is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message.lower(), re.IGNORECASE) or message.lower().strip() in prior_topic.lower()
+            is_confirmation = any(keyword.lower() in primary_query.lower() for keyword in confirmation_keywords)
+            # Check topic overlap for follow-ups
+            topic_overlap = any(term in primary_query.lower() and term in prior_topic.lower() 
+                            for term in ["phân tích chân dung khách hàng", "phân nhóm khách hàng", "chân dung khách hàng"])
+            is_follow_up = is_confirmation or topic_overlap or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', primary_query.lower(), re.IGNORECASE) or (prior_topic and primary_query.lower().strip() in prior_topic.lower())
             
             if is_follow_up and prior_topic:
                 queries.append(prior_topic)
                 logger.info(f"Follow-up detected, reusing prior topic: {prior_topic[:50]}")
-                if prior_knowledge:
-                    query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', prior_knowledge, re.DOTALL)
-                    if query_section:
-                        try:
-                            prior_queries = json.loads(query_section.group(1).strip())
-                            queries.extend(prior_queries)
-                            logger.info(f"Reusing {len(prior_queries)} prior AI queries")
-                        except json.JSONDecodeError:
-                            logger.warning("Failed to parse prior AI queries")
-                    primary_query = f"{primary_query} about {prior_topic}"
-                    queries.append(primary_query)
-                    logger.info(f"Enriched follow-up query: {primary_query[:50]}")
+                similarity = 0.7
+                knowledge_context = prior_knowledge
             else:
                 queries.append(primary_query)
-                if prior_topic and prior_topic != primary_query:
-                    queries.append(prior_topic)
-                    logger.info(f"Added prior topic to queries: {prior_topic[:50]}")
+                similarity = 0.0
+                knowledge_context = ""
+                knowledge_context = ""
 
-            temp_response = await self._active_learning(message, conversation_context, {}, "unknown", {})
+            temp_response = await self._active_learning(primary_query, conversation_context, {}, user_id, {})
             if "message" in temp_response:
                 query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
                 if query_section:
@@ -203,7 +246,7 @@ class LearningProcessor:
                         logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries")
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse LLM queries, retrying once")
-                        temp_response = await self._active_learning(message, conversation_context, {}, "unknown", {})
+                        temp_response = await self._active_learning(primary_query, conversation_context, {}, user_id, {})
                         query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
                         if query_section:
                             try:
@@ -217,62 +260,97 @@ class LearningProcessor:
                                 logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries on retry")
                             except json.JSONDecodeError:
                                 logger.error("Failed to parse LLM queries after retry")
-
+            logger.info(f"Queries: {queries}")
             queries = list(dict.fromkeys(queries))
             queries = [q for q in queries if len(q.strip()) > 5]
             if not queries:
                 logger.warning("No valid queries found")
                 return {
-                    "knowledge_context": prior_knowledge if is_follow_up else "",
-                    "similarity": 0.7 if is_follow_up else 0.0,
+                    "knowledge_context": knowledge_context,
+                    "similarity": similarity,
                     "query_count": 0,
                     "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
-                    "metadata": {"similarity": 0.7 if is_follow_up else 0.0}
+                    "metadata": {"similarity": similarity}
                 }
 
-            best_knowledge = prior_knowledge if is_follow_up else ""
-            best_similarity = 0.7 if is_follow_up else 0.0
             query_count = 0
-
-            categories = ["health_segmentation"] if any(term in message.lower() or prior_topic.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
-            bank_name = "health" if "health_segmentation" in categories else "default"
+            bank_name = "conversation"
             
-            for query in queries:
-                results = await query_knowledge(
+            # Batch query_knowledge calls to reduce API retries
+            results_list = await asyncio.gather(
+                *(query_knowledge(
                     query=query,
                     bank_name=bank_name,
                     user_id=user_id,
-                    thread_id=thread_id,
-                    topic=prior_topic or "unknown",
-                    top_k=5,
-                    min_similarity=0.3
-                )
+                    thread_id=None,  # Remove thread_id restriction to find more results
+                    topic=None,      # Remove topic restriction
+                    top_k=10,
+                    min_similarity=0.2  # Lower threshold for better matching
+                ) for query in queries),
+                return_exceptions=True
+            )
+
+            # Store all query results
+            all_query_results = []
+            best_result = None
+            highest_similarity = 0.0
+
+            for query, results in zip(queries, results_list):
                 query_count += 1
-                if not results:
+                if isinstance(results, Exception):
+                    logger.warning(f"Query '{query[:30]}...' failed: {str(results)}")
+                    all_query_results.append(None)  # Add None for failed queries
                     continue
+                if not results:
+                    logger.info(f"Query '{query[:30]}...' returned no results")
+                    all_query_results.append(None)  # Add None for empty results
+                    continue
+                
+                # Log query results for debugging
                 top_result = results[0]
-                similarity = top_result["score"]
+                all_query_results.append(top_result)  # Store the top result for each query
+                query_similarity = top_result["score"]
                 knowledge_content = top_result["raw"]
-                logger.info(f"Query '{query[:30]}...' yielded similarity: {similarity}")
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_knowledge = knowledge_content
-                    logger.info(f"Updated best knowledge with similarity: {best_similarity}")
+                
+                # Extract just the AI portion if this is a combined knowledge entry
+                if knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
+                    ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
+                    if ai_part:
+                        knowledge_content = ai_part.group(1).strip()
+                        logger.info(f"Extracted AI portion from combined knowledge")
+                
+                logger.info(f"Query '{query[:30]}...' yielded similarity: {query_similarity}, content: '{knowledge_content[:50]}...'")
+                
+                # Track the best overall result
+                if query_similarity > highest_similarity:
+                    highest_similarity = query_similarity
+                    best_result = top_result
+                    similarity = query_similarity
+                    knowledge_context = knowledge_content
+                    logger.info(f"Updated best knowledge with similarity: {similarity}")
 
-            vibe_score = 1.0
+            # Apply regular boost for priority topics
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
-                   for term in ["mục tiêu", "goals", "active learning", "phân nhóm"]):
+                   for term in ["mục tiêu", "goals", "active learning", "phân nhóm", "phân tích chân dung", "chân dung khách hàng"]):
                 vibe_score = 1.1
-                best_similarity *= vibe_score
-                logger.info(f"Applied vibe score {vibe_score} for frequent topic")
+                similarity *= vibe_score
+                logger.info(f"Applied vibe score {vibe_score} for priority topic")
+            else:
+                vibe_score = 1.0
 
-            logger.info(f"Final similarity: {best_similarity} from {query_count} queries")
+            # Filter out None results
+            valid_query_results = [result for result in all_query_results if result is not None]
+            
+            logger.info(f"Final similarity: {similarity} from {query_count} queries, found {len(valid_query_results)} valid results")
             return {
-                "knowledge_context": best_knowledge,
-                "similarity": best_similarity,
+                "knowledge_context": knowledge_context,
+                "similarity": similarity,
                 "query_count": query_count,
+                "queries": queries,
+                "original_query": primary_query,  # Add the original query for reference
+                "query_results": valid_query_results,
                 "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
-                "metadata": {"similarity": best_similarity, "vibe_score": vibe_score}
+                "metadata": {"similarity": similarity, "vibe_score": vibe_score}
             }
         except Exception as e:
             logger.error(f"Error fetching knowledge: {str(e)}")
@@ -284,7 +362,7 @@ class LearningProcessor:
                 "metadata": {"similarity": 0.7 if is_follow_up else 0.0}
             }
 
-    async def _active_learning(self, message: str, conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None) -> Dict[str, Any]:
+    async def _active_learning(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None) -> Dict[str, Any]:
         logger.info("Answering user question with active learning approach")
         
         vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -293,100 +371,184 @@ class LearningProcessor:
         time_str = current_time.strftime("%H:%M")
         temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
         
+        message_str = message if isinstance(message, str) else str(message[0]) if isinstance(message, list) and message else ""
+        if not message_str:
+            logger.error("Empty message in active learning")
+            return {"status": "error", "message": "Empty message provided"}
+        
         knowledge_context = analysis_knowledge.get("knowledge_context", "") if analysis_knowledge else ""
         similarity_score = float(analysis_knowledge.get("similarity", 0.0)) if analysis_knowledge else 0.0
         logger.info(f"Using similarity score: {similarity_score}")
+        
+        # Extract query information if available
+        queries = analysis_knowledge.get("queries", []) if analysis_knowledge else []
+        query_results = analysis_knowledge.get("query_results", []) if analysis_knowledge else []
         
         prior_topic = prior_data.get("topic", "") if prior_data else ""
         prior_knowledge = prior_data.get("knowledge", "") if prior_data else ""
         
         confirmation_keywords = ["có", "yes", "correct", "right", "explore further", "đúng rồi", "nhóm này"]
-        is_confirmation = any(keyword.lower() in message.lower() for keyword in confirmation_keywords)
-        is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message.lower(), re.IGNORECASE) or message.lower().strip() in prior_topic.lower()
+        is_confirmation = any(keyword.lower() in message_str.lower() for keyword in confirmation_keywords)
+        
+        # Improved follow-up detection that looks for patterns in the conversation history
+        is_follow_up = is_confirmation or re.search(r'\b(nhóm này|this group|vậy thì sao)\b', message_str.lower(), re.IGNORECASE) or (prior_topic and message_str.lower().strip() in prior_topic.lower())
         
         core_prior_topic = prior_topic
-        if prior_topic:
-            match = re.search(r'(phân nhóm khách hàng|customer segmentation|phân loại người dùng)', prior_topic, re.IGNORECASE)
-            if match:
-                core_prior_topic = match.group(1)
-            elif any(term in prior_topic.lower() for term in ["phân nhóm", "segmentation", "nhóm khách hàng"]):
-                core_prior_topic = "phân nhóm khách hàng"
-            logger.info(f"Core prior topic extracted: {core_prior_topic}")
-
+        
+        # Knowledge handling strategy based on queries and similarity
+        knowledge_response_sections = []
+        if queries and query_results:
+            for query, result in zip(queries, query_results):
+                query_similarity = result.get("score", 0.0)
+                query_content = result.get("raw", "")
+                
+                if query_similarity < 0.35:
+                    knowledge_response_sections.append(
+                        f"I can't find knowledge relevant to '{query}'. Can you elaborate?"
+                    )
+                elif 0.35 <= query_similarity <= 0.7:
+                    knowledge_response_sections.append(
+                        f"I found some knowledge relevant to '{query}': {query_content}. But I'm not really confident. Can you justify?"
+                    )
+                else:  # > 0.7
+                    knowledge_response_sections.append(
+                        f"Here is what I know about '{query}': {query_content}"
+                    )
+            
+            # Combine the knowledge sections if they exist
+            if knowledge_response_sections:
+                knowledge_context = "\n\n".join(knowledge_response_sections)
+                logger.info(f"Created multi-query knowledge response with {len(knowledge_response_sections)} sections")
+        logger.info(f"Knowledge context: {knowledge_context}")
         if is_follow_up:
             response_strategy = "FOLLOW_UP"
-            strategy_instructions = (
-                "Recognize the message as a follow-up or confirmation of PRIOR TOPIC, referring to a specific concept or group from PRIOR KNOWLEDGE (e.g., customer segmentation methods). "
-                "Use PRIOR KNOWLEDGE to deepen the discussion, leveraging specific details (e.g., named groups like 'Nhóm Rối Loạn Cương Dương') and offering actionable insights (e.g., implementation methods, support strategies). "
-                "Structure the response with key aspects (e.g., purpose, methods, outcomes). "
-                "If PRIOR TOPIC is ambiguous, rephrase it (e.g., 'It sounds like you’re confirming customer segmentation…'). "
-                "Ask a targeted follow-up to advance the discussion (e.g., 'Which group do you want to focus on, like Nhóm Rối Loạn Cương Dương?')."
-            )
-            knowledge_context = prior_knowledge
+            
+            # Enhanced strategy for confirmation responses
+            if is_confirmation:
+                strategy_instructions = (
+                    f"Recognize this is a direct confirmation ('{message_str}') to your question in your previous message'. "
+                    "Continue the conversation as if the user said 'yes' to your previous question. "
+                    "Provide a helpful response that builds on the previous question, offering relevant details or asking a follow-up question. "
+                    "Don't ask for clarification when the confirmation is clear - proceed with the conversation flow naturally. "
+                    "If your previous question offered to provide more information, now is the time to provide that information. "
+                    "Keep the response substantive, helpful, and directly related to what the user just confirmed interest in."
+                )
+            else:
+                strategy_instructions = (
+                    "Recognize the message as a follow-up or confirmation of PRIOR TOPIC, referring to a specific concept or group from PRIOR KNOWLEDGE (e.g., customer segmentation methods). "
+                    "Use PRIOR KNOWLEDGE to deepen the discussion, leveraging specific details. "
+                    "Structure the response with key aspects (e.g., purpose, methods, outcomes). "
+                    "If PRIOR TOPIC is ambiguous, rephrase it (e.g., 'It sounds like you're confirming customer segmentation…'). "
+                    "Ask a targeted follow-up to advance the discussion."
+                )
+            # For follow-ups, use prior knowledge if no specific knowledge response sections
+            if not knowledge_response_sections:
+                knowledge_context = prior_knowledge
             similarity_score = max(similarity_score, 0.7)
-        elif similarity_score < 0.35:
+        elif similarity_score < 0.35 and not knowledge_response_sections:
             response_strategy = "LOW_SIMILARITY"
+            # Create query-specific response section if no other knowledge is found
+            if queries:
+                query_text = queries[0] if isinstance(queries, list) and queries else str(queries)
+                knowledge_response_sections = [f"I can't find knowledge relevant to '{query_text}'. Can you elaborate or teach me about this topic?"]
+                knowledge_context = "\n\n".join(knowledge_response_sections)
+                logger.info(f"Created LOW_SIMILARITY response for query: {query_text}")
+            
             strategy_instructions = (
                 "State: 'Tôi không thể tìm thấy thông tin liên quan; vui lòng giải thích thêm.' "
                 "Ask for more details about the topic. "
-                "Propose a specific question (e.g., 'Bạn có thể chia sẻ thêm về ý nghĩa của điều này không?')."
+                "Propose a specific question (e.g., 'Bạn có thể chia sẻ thêm về ý nghĩa của điều này không?'). "
+                "If the message appears to be attempting to teach or explain something, acknowledge this and express "
+                "interest in learning about the topic through a thoughtful follow-up question."
             )
         else:
             response_strategy = "RELEVANT_KNOWLEDGE"
             strategy_instructions = (
-                "Present all relevant knowledge from EXISTING KNOWLEDGE in a comprehensive format, structuring the response to cover key aspects (e.g., purpose, methods, outcomes, context). "
-                "If the message likely continues PRIOR TOPIC (e.g., contains keywords like 'phân nhóm' or 'khách hàng'), prioritize deepening that topic with specific details and actionable insights. "
-                "If the topic is ambiguous, rephrase it (e.g., 'It sounds like you’re asking about…'). "
-                "Ask a targeted question to confirm the topic or validate the summary (e.g., 'Đây có phải ý bạn muốn hỏi không?'). "
-                f"If similarity is 0.35–0.55, emphasize clarification. "
-                f"If above 0.55, focus on mastery and closure."
+                "Present the retrieved knowledge prominently in your response, directly quoting the most relevant parts. "
+                "If there are multiple knowledge sections with different confidence levels, address each appropriately:"
+                "- For low confidence (<0.35): Mention you don't have good information and ask for clarification"
+                "- For medium confidence (0.35-0.7): Present the knowledge but express uncertainty and ask for confirmation"
+                "- For high confidence (>0.7): Present the knowledge confidently"
+                "Begin with a clear statement like 'Theo thông tin tôi có...' or 'Mục tiêu của tôi là...' followed by the knowledge. "
+                "Structure the response to emphasize the core information from EXISTING KNOWLEDGE. "
+                "If the message likely continues PRIOR TOPIC, prioritize deepening that topic with specific details. "
+                "If the topic is ambiguous, connect the dots by stating how the knowledge answers their question."
             )
         
-        prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure. You have access to tools for querying and saving knowledge.
+        prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
 
-            **Input**:
-            - CURRENT MESSAGE: {message}
-            - CONVERSATION HISTORY: {conversation_context}
-            - TIME: {temporal_context}
-            - EXISTING KNOWLEDGE: {knowledge_context}
-            - RESPONSE STRATEGY: {response_strategy}
-            - STRATEGY INSTRUCTIONS: {strategy_instructions}
-            - PRIOR TOPIC: {core_prior_topic}
-            - PRIOR KNOWLEDGE: {prior_knowledge}
-            - USER ID: {user_id}
+                **Input**:
+                - CURRENT MESSAGE: {message_str}
+                - CONVERSATION HISTORY: {conversation_context}
+                - TIME: {temporal_context}
+                - EXISTING KNOWLEDGE: {knowledge_context}
+                - RESPONSE STRATEGY: {response_strategy}
+                - PRIOR TOPIC: {core_prior_topic}
+                - USER ID: {user_id}
 
-            **Tools Available**:
-            - knowledge_query: Query the knowledge base.
-              Parameters: query (str, required), context (str), user_id (str, required), thread_id (str), topic (str), top_k (int, default 5), min_similarity (float, default 0.3)
-            - save_knowledge: Save knowledge to the database.
-              Parameters: query (str), content (str), user_id (str, required), thread_id (str), topic (str), categories (list of str, default ["general"])
+                **Response Approach**:
+                {strategy_instructions}
 
-            **Instructions**:
-            1. **Topic Detection**: Identify the core topic from CONVERSATION HISTORY and CURRENT MESSAGE. For follow-ups or confirmations, anchor to PRIOR TOPIC and PRIOR KNOWLEDGE. Rephrase ambiguous terms (e.g., 'It sounds like you’re asking about…').
-            2. **Intent Analysis**: Classify intent (questioning, confirming, follow-up, etc.). For follow-ups, expand PRIOR TOPIC with actionable insights based on PRIOR KNOWLEDGE’s specific details.
-            3. **Tool Usage**:
-               - Use knowledge_query if additional information is needed (e.g., for LOW_SIMILARITY or complex queries).
-               - Use save_knowledge to store important insights (e.g., after confirmations or high-relevance responses).
-               - Include tool calls in the output if needed.
-            4. **Knowledge Queries**: Generate 3 specific queries: core topic, specific aspect, related concept. Ensure queries are JSON-parsable and relevant to PRIOR TOPIC.
-            5. **Response**: Follow RESPONSE STRATEGY with a curious tone. For follow-ups, deepen discussion with practical details and ask a targeted follow-up. Keep responses concise (100–150 words).
-            6. **Output**:
-                - Conversational Response
-                - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
-                - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if tools are needed, JSON-parsable)
+                **Tools**:
+                - knowledge_query: Query the knowledge base with query (required), user_id (required), context, thread_id, topic, top_k, min_similarity
+                - save_knowledge: Save knowledge with user_id (required), query/content, thread_id, topic, categories
 
-            **Constraints**:
-            - Use user’s language (Vietnamese if applicable).
-            - Ensure topic continuity for follow-ups and confirmations.
-            - Ensure knowledge queries and tool calls are JSON-parsable.
-            - Include user_id in all tool calls.
-            """
+                **Instructions**:
+                1. **Intent Classification** (critical for proper response): 
+                   - Carefully analyze if the user is asking a question (query) or providing/initiating information (teaching)
+                   - Use semantic understanding to detect teaching intent:
+                     * The user introduces a new topic with specific details
+                     * The user describes how to do something or explains concepts
+                     * The message has an instructional or explanatory tone
+                     * The user seems to be sharing knowledge rather than seeking it
+                   - In Vietnamese conversations, consider cultural context in your analysis
+                   - For queries: Use EXISTING KNOWLEDGE as foundation if available
+                   - For teaching intent: Set has_teaching_intent=true and acknowledge user is sharing knowledge
+                   - Use Vietnamese if the user does
+
+                2. **Priority Topics** (set is_priority_topic=true AND should_save_knowledge=true):
+                   - Customer segmentation ("chân dung khách hàng")
+                   - Health-related topics ("rối loạn cương dương")
+
+                3. **Knowledge Management**:
+                   - IMPORTANT: You should recommend saving knowledge (should_save_knowledge=true) when:
+                     * The user shows teaching intent through their communication style and content
+                     * Priority topics are mentioned
+                     * The user initiates a conversation about a topic they seem knowledgeable about
+                     * The information shared appears valuable for future conversations
+                
+                4. **Confidence-Based Responses**:
+                   - Low confidence (<0.35): "I can't find knowledge relevant to [query]. Can you elaborate?"
+                   - Medium confidence (0.35-0.7): "I found some knowledge relevant to [query]: [content]. But I'm not really confident. Can you justify?"
+                   - High confidence (>0.7): "Here is what I know about [query]: [content]"
+
+                5. **Language and Relational Dynamics**:
+                   - Recognize when you're being directly addressed (terms like "Em", "You", "Bạn")
+                   - Match your response style to the user's speech register and level of formality
+                   - In Vietnamese conversations:
+                     * If addressed as "Em", respond using "Em" as self-reference and appropriate counterpart (like "Anh/Chị" for the user)
+                     * Maintain consistent relationship pronouns throughout the conversation
+                   - In English conversations:
+                     * Use personal pronouns that match the conversation's established formality level
+                   - Always recognize the cultural/linguistic context of addressing terms
+
+                6. **Output Format**:
+                   - Conversational Response (100-150 words, use user's language)
+                   - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
+                   - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
+                   - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up"}}</evaluation>
+
+                Remember to maintain topic continuity for follow-ups, include user_id in all tool calls, and ensure proper JSON formatting.
+                """
         try:
             response = await LLM.ainvoke(prompt)
             logger.info(f"LLM response generated with similarity score: {similarity_score}")
             
             content = response.content.strip()
             tool_calls = []
+            evaluation = {"has_teaching_intent": False, "is_priority_topic": False, "priority_topic_name": "", "should_save_knowledge": False}
+            
+            # Extract tool calls if present
             if "<tool_calls>" in content:
                 tool_section = re.search(r'<tool_calls>(.*?)</tool_calls>', content, re.DOTALL)
                 if tool_section:
@@ -396,7 +558,18 @@ class LearningProcessor:
                         logger.info(f"Extracted {len(tool_calls)} tool calls")
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse tool calls")
-
+            
+            # Extract evaluation if present
+            if "<evaluation>" in content:
+                eval_section = re.search(r'<evaluation>(.*?)</evaluation>', content, re.DOTALL)
+                if eval_section:
+                    try:
+                        evaluation = json.loads(eval_section.group(1).strip())
+                        content = re.sub(r'<evaluation>.*?</evaluation>', '', content, flags=re.DOTALL).strip()
+                        logger.info(f"Extracted LLM evaluation: {evaluation}")
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse evaluation")
+            
             if content.startswith('{') and '"message"' in content:
                 try:
                     parsed_json = json.loads(content)
@@ -416,7 +589,11 @@ class LearningProcessor:
                     "similarity_score": similarity_score,
                     "response_strategy": response_strategy,
                     "core_prior_topic": core_prior_topic,
-                    "tool_calls": tool_calls
+                    "tool_calls": tool_calls,
+                    "has_teaching_intent": evaluation.get("has_teaching_intent", False),
+                    "is_priority_topic": evaluation.get("is_priority_topic", False),
+                    "priority_topic_name": evaluation.get("priority_topic_name", ""),
+                    "should_save_knowledge": evaluation.get("should_save_knowledge", False)
                 }
             }
         except Exception as e:
@@ -426,16 +603,102 @@ class LearningProcessor:
                 "message": "Tôi xin lỗi, nhưng tôi gặp lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại."
             }
 
+    def _create_background_task(self, coro):
+        """Create and track a background task."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        # Add callback to remove task from set when done
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def cleanup(self):
+        """Wait for all background tasks to complete."""
+        if not self._background_tasks:
+            return
+            
+        logger.info(f"Waiting for {len(self._background_tasks)} background tasks to complete...")
+        # Create a copy as the set may be modified during iteration
+        pending_tasks = list(self._background_tasks)
+        
+        if not pending_tasks:
+            return
+            
+        done, pending = await asyncio.wait(
+            pending_tasks, 
+            timeout=5.0,  # Increased timeout to 5 seconds for tasks to complete
+            return_when=asyncio.ALL_COMPLETED
+        )
+        
+        if pending:
+            logger.warning(f"{len(pending)} background tasks did not complete in time and will be cancelled")
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        # Try to await cancelled tasks to handle cancellation properly
+                        await asyncio.wait_for(task, timeout=0.5)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+                    
+        # Clean up the set
+        self._background_tasks.clear()
+        logger.info("Background task cleanup completed")
+
+    async def _background_save_knowledge(self, input_text: str, user_id: str, bank_name: str, 
+                                         thread_id: Optional[str] = None, topic: Optional[str] = None, 
+                                         categories: List[str] = ["general"], ttl_days: Optional[int] = 365) -> None:
+        """Execute save_knowledge in a separate background task."""
+        try:
+            logger.info(f"Starting background save_knowledge task for user {user_id}")
+            # Use a shorter timeout for saving knowledge to avoid hanging tasks
+            try:
+                success = await asyncio.wait_for(
+                    save_knowledge(
+                        input=input_text,
+                        user_id=user_id,
+                        bank_name=bank_name,
+                        thread_id=thread_id,
+                        topic=topic,
+                        categories=categories,
+                        ttl_days=ttl_days  # Add TTL for data expiration
+                    ),
+                    timeout=5.0  # 5-second timeout for database operations
+                )
+                logger.info(f"Background save_knowledge {'completed successfully' if success else 'failed'}")
+                return success
+            except asyncio.TimeoutError:
+                logger.warning(f"Background save_knowledge timed out for user {user_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Error in background save_knowledge: {str(e)}")
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            return False
+
 async def process_llm_with_tools(
         self,
         user_message: str,
         conversation_history: List[Dict],
-        state: Dict,
+        state: Union[Dict, str],
         graph_version_id: str,
         thread_id: Optional[str] = None
     ) -> AsyncGenerator[Union[str, Dict], None]:
         """Process user message with tools."""
-        logger.info(f"Processing message for user {state.get('user_id', 'unknown')}")
+        if not user_message:
+            logger.error("Empty user_message")
+            yield {"status": "error", "message": "Empty message provided"}
+            return
+
+        if isinstance(state, str):
+            user_id = state
+            state = {"user_id": state}
+        else:
+            user_id = state.get('user_id', 'unknown')
+        if not user_id:
+            logger.warning("Empty user_id, defaulting to 'unknown'")
+            user_id = "unknown"
+        logger.info(f"Processing message for user {user_id}")
+
         conversation_context = ""
         if conversation_history:
             recent_messages = []
@@ -443,8 +706,8 @@ async def process_llm_with_tools(
             max_messages = 50
             for msg in reversed(conversation_history):
                 try:
-                    role = msg.get("role", "").lower()
-                    content = msg.get("content", "")
+                    role = msg.get("role", "").lower() if isinstance(msg, dict) else ""
+                    content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
                     if role and content:
                         if role in ["assistant", "ai"]:
                             recent_messages.append(f"AI: {content.strip()}")
@@ -479,7 +742,7 @@ async def process_llm_with_tools(
             response = await learning_processor.process_incoming_message(
                 user_message, 
                 conversation_context, 
-                state.get('user_id', 'unknown'),
+                user_id,
                 thread_id
             )
             
@@ -501,6 +764,10 @@ async def process_llm_with_tools(
                     else:
                         logger.warning(f"Invalid tool call format: {tool_call}")
 
+            # Force cleanup of tasks before returning final result
+            if 'learning_processor' in state:
+                await state['learning_processor'].cleanup()
+                
             yield {"status": "success", "message": message_content}
             state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
 
@@ -512,6 +779,11 @@ async def process_llm_with_tools(
             logger.error(f"Traceback: {traceback.format_exc()}")
             error_response = {"status": "error", "message": f"Error: {str(e)}"}
             yield error_response
+        finally:
+            # Make sure we clean up tasks even in case of exception
+            if 'learning_processor' in state:
+                await state['learning_processor'].cleanup()
+                
         yield {"state": state}
 
 async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
@@ -520,7 +792,8 @@ async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict
         try:
             user_id = parameters.get("user_id", "")
             if not user_id:
-                return {"status": "error", "message": "Missing required parameter: user_id"}
+                logger.warning("Missing user_id in tool call, defaulting to 'unknown'")
+                user_id = "unknown"
 
             if tool_name == "knowledge_query":
                 query = parameters.get("query", "")
@@ -530,21 +803,28 @@ async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict
                 thread_id = parameters.get("thread_id", None)
                 topic = parameters.get("topic", None)
                 
-                categories = ["health_segmentation"] if any(term in query.lower() or term in context.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
-                bank_name = "health" if "health_segmentation" in categories else "default"
-
+                # Determine if we should check health bank based on content
+                is_health_topic = any(term in query.lower() or term in context.lower() 
+                    for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", 
+                                "phân tích chân dung khách hàng", "chân dung khách hàng", "customer profile"])
+                
+                bank_name = "conversation"
+                
+                # Try querying the specified bank
                 results = await query_knowledge(
                     query=query,
                     bank_name=bank_name,
                     user_id=user_id,
-                    thread_id=thread_id,
-                    topic=topic,
-                    top_k=parameters.get("top_k", 5),
-                    min_similarity=parameters.get("min_similarity", 0.3)
+                    thread_id=None,  # Remove thread_id restriction to find more results
+                    topic=None,      # Remove topic restriction
+                    top_k=10,
+                    min_similarity=0.2  # Lower threshold for better matching
                 )
                 return {
                     "status": "success",
-                    "message": f"Queried knowledge for '{query}'",
+                    "message": f"Queried knowledge for '{query}' from {bank_name} bank" + 
+                              (", then checked health bank" if bank_name != "health" and is_health_topic else "") +
+                              (", then checked default bank" if bank_name == "health" and not results else ""),
                     "data": results
                 }
 
@@ -560,20 +840,32 @@ async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict
                 categories = parameters.get("categories", ["general"])
                 
                 if not categories or categories == ["general"]:
-                    categories = ["health_segmentation"] if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng"]) else ["general"]
-                bank_name = "health" if "health_segmentation" in categories else "default"
+                    categories = ["health_segmentation"] if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", "phân tích chân dung khách hàng"]) else ["general"]
+                
+                # Add teaching_intent category for explicit knowledge saves
+                if "teaching_intent" not in categories:
+                    categories.append("teaching_intent")
+                    
+                bank_name = "conversation"
+                
+                # Format as a teaching entry for consistency with combined knowledge format
+                if not input_text.startswith("User:"):
+                    input_text = f"AI: {input_text}"
 
-                success = await save_knowledge(
-                    input=input_text,
+                # Run save_knowledge in background task
+                self._create_background_task(self._background_save_knowledge(
+                    input_text=input_text,
                     user_id=user_id,
                     bank_name=bank_name,
                     thread_id=thread_id,
                     topic=topic,
-                    categories=categories
-                )
+                    categories=categories,
+                    ttl_days=365  # 365 days TTL for knowledge
+                ))
+                
                 return {
-                    "status": "success" if success else "error",
-                    "message": f"{'Saved' if success else 'Failed to save'} knowledge for '{input_text[:50]}...'"
+                    "status": "success",
+                    "message": f"Save knowledge task initiated for '{input_text[:50]}...'"
                 }
 
             return {"status": "error", "message": f"Unknown tool: {tool_name}"}

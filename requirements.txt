@@ -32,3 +32,5 @@ networkx
 tqdm
 tenacity
 backoff
+pytest
+pytest-asyncio

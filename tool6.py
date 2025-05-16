@@ -382,9 +382,6 @@ class CoTProcessor:
         
         # Log conversation context length to help with debugging
         conversation_lines = conversation_context.count('\n') if conversation_context else 0
-        logger.info(f"Building user portrait with {conversation_lines} lines of conversation context")
-        
-        logger.info(f"Business objectives: {business_objectives}")
         
         prompt = f"""Build a comprehensive user profile by THOROUGHLY ANALYZING the ENTIRE conversation history:
 
@@ -418,7 +415,7 @@ class CoTProcessor:
                 Identify the current stage (first contact, information gathering, problem identification, etc.) and adapt your approach accordingly. Consider whether the conversation is progressing naturally or needs redirection.
 
                 KEY FOCUS AREAS:
-                • Apply classification techniques from knowledge context
+                • Apply classification techniques from knowledge context strictly. Identify if the user profile is completed.
                 • Identify behavioral patterns and hidden needs beyond stated requirements
                 • Determine information gaps and plan appropriate next steps
                 • Analyze alignment with business objectives
@@ -427,8 +424,9 @@ class CoTProcessor:
                 {f"• Resolve temporal references (like 'Sunday', 'tomorrow', 'next week') to specific dates" if needs_temporal_resolution else ""}
 
                 BUSINESS_GOAL SELECTION (CRITICAL):
-                1. ANALYZE EACH BUSINESS OBJECTIVE CAREFULLY To UNDERSTAND when you are allowed to use each objective
-                2. SELECT the best business objective that is allowed to use against the user portrait
+                1. Analyse each business objective carefully to understand when you are allowed to use each objective.
+                2. Analyse each business objective carefully to understand if objective is needed to perform.
+                2. SELECT the best business objective that is allowed to use against the user portrait.
                 3. JUSTIFY YOUR CHOICE:
                    - Explain why the selected objective is allowed to use now
                    - Show how it addresses user needs
@@ -509,11 +507,7 @@ class CoTProcessor:
                     **llm_response.get("other_aspects", {}),
                     "portrait_paragraph": portrait_paragraph
                 }
-            )
-            
-            # Log the created profile for debugging
-            logger.info(f"Created user profile with portrait: {portrait_paragraph}")
-            
+            )        
             # If we resolved temporal references, log them
             if needs_temporal_resolution and "temporal_references" in user_profile.other_aspects:
                 temporal_refs = user_profile.other_aspects.get("temporal_references", {})
@@ -574,7 +568,6 @@ class CoTProcessor:
                         "query": query,
                         "knowledge": knowledge_content
                     })
-                    logger.info(f"Knowledge found for Analysis: {knowledge_entries}")
             except Exception as e:
                 logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
 

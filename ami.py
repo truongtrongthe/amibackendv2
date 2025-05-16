@@ -1,5 +1,6 @@
 import json
 import time
+import re  # Add re import for regex
 from typing import Annotated, List, Dict
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
@@ -9,7 +10,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from pilot import Pilot
 from mc_tools import MCWithTools  # Standard tools
-from mc_tools_learning import MCWithTools as MCWithLearningTools  # Import learning-based tools
 from utilities import logger
 import asyncio
 
@@ -294,10 +294,15 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
     thread_id = thread_id or f"learning_thread_{int(time.time())}"
     user_id = user_id or "user"
 
-    # Create a learning-based MC instance
-    mc_learning = MCWithLearningTools(user_id=user_id, convo_id=thread_id)
-    await mc_learning.initialize()
-
+    # Validate user_input
+    if not isinstance(user_input, str):
+        logger.error(f"Invalid user_input type: {type(user_input)}, value: {user_input}")
+        user_input = str(user_input) if user_input else ""
+    if not user_input.strip():
+        logger.error("Empty user_input")
+        yield f"data: {json.dumps({'error': 'Empty message provided'})}\n\n"
+        return
+    
     # Convert conversation history to the format expected by tool_learning
     conversation_history = []
     
@@ -325,36 +330,111 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
     # Use our tool_learning.py's process_llm_with_tools function to process the message
     try:
         # Import directly from tool_learning to ensure we're using the updated version
-        from tool_learning import process_llm_with_tools
+        from tool_learning import LearningProcessor
         
-        async for result in process_llm_with_tools(
+        # Create a learning processor instance directly
+        learning_processor = LearningProcessor()
+        await learning_processor.initialize()
+        
+        # Process the message using the learning processor
+        response = await learning_processor.process_incoming_message(
             user_input,
-            conversation_history,
-            state,
-            graph_version_id,
-            thread_id
-        ):
-            # Format the result for streaming
-            if isinstance(result, dict):
-                if "state" in result:
-                    # State update, don't yield this
-                    pass
-                elif "status" in result and "message" in result:
-                    # Response from LLM
-                    yield f"data: {json.dumps({'message': result['message']})}\n\n"
-                elif "type" in result and result["type"] == "analysis":
-                    # Analysis event
-                    yield f"data: {json.dumps(result)}\n\n"
-                else:
-                    # Other events
-                    yield f"data: {json.dumps(result)}\n\n"
-            else:
-                # Plain text response
-                yield f"data: {json.dumps({'message': str(result)})}\n\n"
+            conversation_context="",  # Initialize with empty context
+            user_id=user_id,
+            thread_id=thread_id
+        )
+        
+        # Execute any tool calls found in the response
+        if isinstance(response, dict) and "metadata" in response and "tool_calls" in response["metadata"]:
+            tool_calls = response["metadata"]["tool_calls"]
+            logger.info(f"Found {len(tool_calls)} tool calls to execute")
             
-            # Small delay to prevent overwhelming the client
-            await asyncio.sleep(0.05)
-    
+            # Execute each tool call
+            for tool_call in tool_calls:
+                if isinstance(tool_call, dict) and "name" in tool_call and "parameters" in tool_call:
+                    tool_name = tool_call["name"]
+                    parameters = tool_call["parameters"]
+                    
+                    # Make sure user_id is included in parameters
+                    if "user_id" not in parameters:
+                        parameters["user_id"] = user_id
+                    
+                    # Make sure thread_id is included in parameters if applicable
+                    if "thread_id" not in parameters and tool_name != "knowledge_query":
+                        parameters["thread_id"] = thread_id
+                    
+                    logger.info(f"Executing tool call: {tool_name} with parameters: {parameters}")
+                    
+                    # Execute the tool call
+                    if tool_name == "save_knowledge":
+                        from pccontroller import save_knowledge
+                        try:
+                            # Get required parameters
+                            input_text = parameters.get("query", "")
+                            if not input_text and "content" in parameters:
+                                input_text = parameters.get("content", "")
+                            
+                            # If we still don't have input text, try to use both query and content
+                            if not input_text and "query" in parameters and "content" in parameters:
+                                input_text = f"{parameters['query']} {parameters['content']}".strip()
+                            
+                            if not input_text:
+                                logger.error("Missing required parameter for save_knowledge: query or content")
+                                continue
+                                
+                            # Get optional parameters
+                            user_id = parameters.get("user_id", user_id)
+                            bank_name = parameters.get("bank_name", "default")
+                            thread_id_param = parameters.get("thread_id", thread_id)
+                            topic = parameters.get("topic", None)
+                            categories = parameters.get("categories", ["general"])
+                            
+                            # Check if this is a health-related query and adjust bank_name
+                            if not parameters.get("bank_name"):
+                                if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", "phân tích chân dung khách hàng"]):
+                                    bank_name = "health"
+                                    if "health_segmentation" not in categories:
+                                        categories.append("health_segmentation")
+                            
+                            logger.info(f"Saving knowledge: '{input_text[:50]}...' for user {user_id}")
+                            
+                            # Execute save_knowledge
+                            success = await save_knowledge(
+                                input=input_text,
+                                user_id=user_id,
+                                bank_name=bank_name,
+                                thread_id=thread_id_param,
+                                topic=topic,
+                                categories=categories
+                            )
+                            logger.info(f"Save knowledge result: {success}")
+                            
+                        except Exception as e:
+                            logger.error(f"Error executing save_knowledge: {str(e)}")
+                    
+                    elif tool_name == "knowledge_query":
+                        logger.info("Skipping knowledge_query tool call in response processing")
+                    
+                    else:
+                        logger.warning(f"Unknown tool call: {tool_name}")
+                else:
+                    logger.warning(f"Invalid tool call format: {tool_call}")
+
+        # Yield the response
+        if isinstance(response, dict) and "message" in response:
+            # Strip out knowledge queries section from the message
+            message_content = response["message"]
+            # Split at knowledge_queries tag and take only the first part
+            message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
+            logger.info("Stripped knowledge_queries from message before sending to frontend")
+            
+            yield f"data: {json.dumps({'message': message_content})}\n\n"
+        else:
+            message_content = str(response)
+            # Also strip knowledge queries from the string representation
+            message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
+            yield f"data: {json.dumps({'message': message_content})}\n\n"
+        
     except Exception as e:
         logger.error(f"Error in convo_stream_learning: {str(e)}")
         import traceback
