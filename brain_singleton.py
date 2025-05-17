@@ -50,29 +50,28 @@ def init_brain(dim=1536, namespace="", graph_version_ids=None, pinecone_index_na
     global _brain_instance, _current_config, _brain_graph_version
     
     with _brain_lock:
-    # Update current configuration
-    _current_config["dim"] = dim
-    _current_config["namespace"] = namespace
-    _current_config["graph_version_ids"] = graph_version_ids or []
-    if pinecone_index_name:
-        _current_config["pinecone_index_name"] = pinecone_index_name
-    
-    if _brain_instance is None:
-        _brain_instance = ActiveBrain(
-            dim=dim,
-            namespace=namespace,
-            graph_version_ids=graph_version_ids,
-            pinecone_index_name=pinecone_index_name
-        )
-            
-        # Initialize graph version based on config if provided
-        if graph_version_ids and len(graph_version_ids) > 0 and _brain_graph_version is None:
-            _brain_graph_version = graph_version_ids[0]
-            logger.info(f"Setting initial brain graph version to {_brain_graph_version}")
-            
-    return _brain_instance
+        # Update current configuration
+        _current_config["dim"] = dim
+        _current_config["namespace"] = namespace
+        _current_config["graph_version_ids"] = graph_version_ids or []
+        if pinecone_index_name:
+            _current_config["pinecone_index_name"] = pinecone_index_name
+        
+        if _brain_instance is None:
+            _brain_instance = ActiveBrain(
+                dim=dim,
+                namespace=namespace,
+                graph_version_ids=graph_version_ids,
+                pinecone_index_name=pinecone_index_name
+            )
+                
+            # Initialize graph version based on config if provided
+            if graph_version_ids and len(graph_version_ids) > 0 and _brain_graph_version is None:
+                _brain_graph_version = graph_version_ids[0]
+                logger.info(f"Setting initial brain graph version to {_brain_graph_version}")
+                
+        return _brain_instance
 
-# Initialize this at module level to avoid import errors
 def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
     """
     Synchronous version of get_brain for compatibility with non-async code
@@ -90,27 +89,27 @@ def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
         from active_brain import ActiveBrain
         
         with _brain_lock:
-        # Create brain if it doesn't exist yet
-        if _brain_instance is None:
-            logger.info("Creating new brain instance (sync)")
-            _brain_instance = ActiveBrain(pinecone_index_name="9well")
-            _brain_graph_version = None
-        
-        # Check if we need to reset and load a specific graph version
+            # Create brain if it doesn't exist yet
+            if _brain_instance is None:
+                logger.info("Creating new brain instance (sync)")
+                _brain_instance = ActiveBrain(pinecone_index_name="9well")
+                _brain_graph_version = None
+            
+            # Check if we need to reset and load a specific graph version
             with _version_check_lock:
-        if graph_version_id and _brain_graph_version != graph_version_id:
-            logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
+                if graph_version_id and _brain_graph_version != graph_version_id:
+                    logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
                     
                     if not _reset_in_progress and not _pending_reset:
                         logger.warning("Starting synchronous brain reset due to version mismatch")
                         # We have to perform a synchronous reset since we're in a sync context
                         reset_brain()
                         # Set the graph version so it's correct for subsequent checks
-            _brain_graph_version = graph_version_id
+                        _brain_graph_version = graph_version_id
                     else:
                         logger.warning("Reset in progress, sync brain access will return current version")
             
-        return _brain_instance
+            return _brain_instance
     except Exception as e:
         logger.error(f"Error getting brain (sync): {e}")
         logger.error(traceback.format_exc())
@@ -144,30 +143,30 @@ async def get_brain(graph_version_id: Optional[str] = None) -> Any:
         
         # Use atomic version check with lock
         with _brain_lock:
-        # Create brain if it doesn't exist yet
-        if _brain_instance is None:
-            logger.info("Creating new brain instance")
-            _brain_instance = ActiveBrain(pinecone_index_name="9well")
-            _brain_graph_version = None
-        
-        # Check if we need to reset and load a specific graph version
+            # Create brain if it doesn't exist yet
+            if _brain_instance is None:
+                logger.info("Creating new brain instance")
+                _brain_instance = ActiveBrain(pinecone_index_name="9well")
+                _brain_graph_version = None
+            
+            # Check if we need to reset and load a specific graph version
             with _version_check_lock:
                 current_version = _brain_graph_version  # Cache to avoid race conditions
                 
                 if graph_version_id and current_version != graph_version_id:
                     logger.info(f"Brain version mismatch: current={current_version}, requested={graph_version_id}")
-            
-            # Only schedule a reset if one is not already in progress or pending
-                    if not _reset_in_progress and not _pending_reset:
-                _pending_reset = True
-                        logger.info(f"Scheduling reset for version {graph_version_id}")
                 
-                # Perform reset in background to not block the request
-                asyncio.create_task(reset_brain_and_load_version(graph_version_id))
-            else:
+                    # Only schedule a reset if one is not already in progress or pending
+                    if not _reset_in_progress and not _pending_reset:
+                        _pending_reset = True
+                        logger.info(f"Scheduling reset for version {graph_version_id}")
+                        
+                        # Perform reset in background to not block the request
+                        asyncio.create_task(reset_brain_and_load_version(graph_version_id))
+                    else:
                         logger.info(f"Reset already pending/in progress, will load version {graph_version_id} when complete")
             
-        return _brain_instance
+            return _brain_instance
     except Exception as e:
         logger.error(f"Error getting brain: {e}")
         logger.error(traceback.format_exc())
@@ -184,14 +183,14 @@ async def reset_brain_and_load_version(graph_version_id: str):
     
     # Set flags to prevent concurrent resets
     with _version_check_lock:
-    # Prevent multiple resets from running concurrently
-    if _reset_in_progress:
-        logger.info(f"Reset already in progress, skipping redundant reset for version {graph_version_id}")
-        return
-    
+        # Prevent multiple resets from running concurrently
+        if _reset_in_progress:
+            logger.info(f"Reset already in progress, skipping redundant reset for version {graph_version_id}")
+            return
+        
         _reset_in_progress = True
         _pending_reset = False
-        
+
     try:
         # Check if we've reset recently to avoid thrashing
         current_time = time.time()
@@ -203,57 +202,57 @@ async def reset_brain_and_load_version(graph_version_id: str):
         # Acquire lock to prevent concurrent modification - use both threading and asyncio locks
         with _brain_lock:
             async with _brain_async_lock:
-            logger.info(f"Resetting brain instance (PID: {os.getpid()})")
-            
-            # Log existing state before reset
-            vector_count = 0
-            if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
-                vector_count = _brain_instance.faiss_index.ntotal
-                logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
-            
-            try:
+                logger.info(f"Resetting brain instance (PID: {os.getpid()})")
+                
+                # Log existing state before reset
+                vector_count = 0
+                if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
+                    vector_count = _brain_instance.faiss_index.ntotal
+                    logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
+                
+                try:
                     # Set graph version BEFORE loading vectors
                     with _version_check_lock:
-                _brain_graph_version = graph_version_id
-                logger.info(f"Set graph version to {graph_version_id}")
-                
-                # Load vectors for this graph version
-                if _brain_instance:
-                    logger.info(f"Starting brain vector loading process [time: {time.time()}]")
-                    
-                    # Check if the load_all_vectors_from_graph_version method returns a coroutine
-                    load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id)
-                    
-                    # Await the result if it's a coroutine
-                    if asyncio.iscoroutine(load_result):
-                        await load_result
-                    
-                    # Update last reset time
-                    _last_reset_time = time.time()
-                    
-                    # Verify vectors were loaded
-                    if hasattr(_brain_instance, 'faiss_index'):
-                        new_vector_count = _brain_instance.faiss_index.ntotal
-                        logger.info(f"Brain reset complete. FAISS index now has {new_vector_count} vectors")
+                        _brain_graph_version = graph_version_id
+                        logger.info(f"Set graph version to {graph_version_id}")
                         
-                        # If vectors were lost, log a warning
-                        if vector_count > 0 and new_vector_count == 0:
-                            logger.error(f"CRITICAL: Lost all vectors during reset! Previous: {vector_count}, Current: {new_vector_count}")
-                    
-                    logger.info("Brain instance reset complete")
-                else:
-                    logger.error("Cannot load vectors - brain instance is None")
-                    
-            except Exception as load_error:
-                logger.error(f"Error loading vectors: {load_error}")
-                logger.error(traceback.format_exc())
+                        # Load vectors for this graph version
+                        if _brain_instance:
+                            logger.info(f"Starting brain vector loading process [time: {time.time()}]")
+                            
+                            # Check if the load_all_vectors_from_graph_version method returns a coroutine
+                            load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id)
+                            
+                            # Await the result if it's a coroutine
+                            if asyncio.iscoroutine(load_result):
+                                await load_result
+                            
+                            # Update last reset time
+                            _last_reset_time = time.time()
+                            
+                            # Verify vectors were loaded
+                            if hasattr(_brain_instance, 'faiss_index'):
+                                new_vector_count = _brain_instance.faiss_index.ntotal
+                                logger.info(f"Brain reset complete. FAISS index now has {new_vector_count} vectors")
+                                
+                                # If vectors were lost, log a warning
+                                if vector_count > 0 and new_vector_count == 0:
+                                    logger.error(f"CRITICAL: Lost all vectors during reset! Previous: {vector_count}, Current: {new_vector_count}")
+                            
+                            logger.info("Brain instance reset complete")
+                        else:
+                            logger.error("Cannot load vectors - brain instance is None")
+                            
+                except Exception as load_error:
+                    logger.error(f"Error loading vectors: {load_error}")
+                    logger.error(traceback.format_exc())
     except Exception as e:
         logger.error(f"Error during brain reset: {e}")
         logger.error(traceback.format_exc())
     finally:
         # Clear reset-in-progress flag
         with _version_check_lock:
-        _reset_in_progress = False
+            _reset_in_progress = False
 
 def reset_brain():
     """Synchronous function to reset the brain singleton"""
@@ -300,7 +299,7 @@ def get_current_graph_version() -> Optional[str]:
     
     # Use lock to ensure thread safety during read
     with _version_check_lock:
-    return _brain_graph_version
+        return _brain_graph_version
 
 def set_graph_version(graph_version_id):
     """
@@ -317,15 +316,15 @@ def set_graph_version(graph_version_id):
     # Use locks to ensure thread safety
     with _brain_lock:
         with _version_check_lock:
-    # Check if we're already using this graph version
+            # Check if we're already using this graph version
             if _brain_graph_version == graph_version_id:
-        return False
-    
-    # Update the configuration with the new graph version ID
-    _current_config["graph_version_ids"] = [graph_version_id]
-    
-    # Reset the brain so it will be recreated with the new graph version
-    reset_brain()
+                return False
+            
+            # Update the configuration with the new graph version ID
+            _current_config["graph_version_ids"] = [graph_version_id]
+            
+            # Reset the brain so it will be recreated with the new graph version
+            reset_brain()
             
             # Explicitly set the graph version after reset
             _brain_graph_version = graph_version_id
