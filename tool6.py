@@ -441,6 +441,7 @@ class CoTProcessor:
                 [USER-SPECIFIC QUERIES - generate your own based on context]
                 - Generate a query to analyze the user with their identified classification
                 - Generate a query about solutions for the specific user need/problem identified
+                - Generate a query about the user's behavior patterns
                 - Optionally add one more context-specific query if needed
 
                 RESPOND WITH JSON (following the language instruction at the top of this prompt):
