@@ -199,6 +199,22 @@ async def reset_brain_and_load_version(graph_version_id: str):
             logger.info(f"Reset attempted too soon, waiting {wait_time:.2f} seconds")
             await asyncio.sleep(wait_time)
         
+        # First check if the requested graph version exists before resetting
+        # This prevents clearing vectors when version doesn't exist
+        from active_brain import ActiveBrain  # Import here to avoid circular imports
+        temp_brain = ActiveBrain(pinecone_index_name=_current_config.get("pinecone_index_name", "9well"))
+        version_exists = await temp_brain.check_graph_version_exists(graph_version_id)
+        
+        if not version_exists:
+            logger.error(f"Requested graph version {graph_version_id} does not exist. Aborting reset to preserve existing vectors.")
+            # If current brain has vectors, keep using it instead of resetting
+            if _brain_instance and hasattr(_brain_instance, 'faiss_index') and _brain_instance.faiss_index.ntotal > 0:
+                current_vector_count = _brain_instance.faiss_index.ntotal
+                logger.info(f"Keeping existing brain with {current_vector_count} vectors instead of resetting")
+                return
+            else:
+                logger.warning(f"No valid graph version found and no existing vectors. Will attempt to use default configuration.")
+        
         # Acquire lock to prevent concurrent modification - use both threading and asyncio locks
         with _brain_lock:
             async with _brain_async_lock:
@@ -220,8 +236,9 @@ async def reset_brain_and_load_version(graph_version_id: str):
                         if _brain_instance:
                             logger.info(f"Starting brain vector loading process [time: {time.time()}]")
                             
-                            # Check if the load_all_vectors_from_graph_version method returns a coroutine
-                            load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id)
+                            # Don't force clear vectors if the version doesn't exist
+                            # Use the version_exists flag to determine if we should force clear
+                            load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id, force_clear_on_failure=False)
                             
                             # Await the result if it's a coroutine
                             if asyncio.iscoroutine(load_result):
@@ -707,10 +724,10 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
             if asyncio.iscoroutine(brain.load_all_vectors_from_graph_version):
                 # This shouldn't happen if get_brain() was properly awaited above
                 print("WARNING: brain.load_all_vectors_from_graph_version is a coroutine - this indicates an error")
-                load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version))
+                load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version, force_clear_on_failure=force_delete))
             else:
                 # Normal case - the method returns a coroutine which we then create a task from
-                load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version))
+                load_task = asyncio.create_task(brain.load_all_vectors_from_graph_version(current_version, force_clear_on_failure=force_delete))
                 
             await asyncio.wait_for(load_task, timeout=300)  # 5 minute timeout
         except asyncio.TimeoutError:
@@ -1032,19 +1049,27 @@ async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
     # Thread-safe check for graph version
     with _version_check_lock:
         current_version = _brain_graph_version
-        version_change_needed = graph_version_id and graph_version_id != current_version
+        version_change_requested = graph_version_id and graph_version_id != current_version
     
-    # If a new graph version is requested, update the configuration
-    if version_change_needed:
-        # Set the new graph version which will reset the brain if needed
-        set_graph_version(graph_version_id)
-    
-    # Get the brain instance
-    brain_coroutine = get_brain(graph_version_id)
-    
-    # Properly handle coroutines - check and await if needed
+    # Get the brain instance first
+    brain_coroutine = get_brain()
     import asyncio
     brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    
+    # If a new graph version is requested, verify it exists before setting
+    if version_change_requested and brain:
+        # Check if the requested version exists before trying to use it
+        version_exists = await brain.check_graph_version_exists(graph_version_id)
+        if not version_exists:
+            logger.warning(f"Requested graph version {graph_version_id} does not exist. Using current version {current_version} instead.")
+            # Use the current version instead of attempting to switch
+            graph_version_id = current_version
+        else:
+            # Set the new graph version which will reset the brain if needed
+            set_graph_version(graph_version_id)
+            # Update brain instance after version change
+            brain_coroutine = get_brain(graph_version_id)
+            brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
     
     # Ensure brain is loaded before querying
     with _brain_lock:
@@ -1057,7 +1082,8 @@ async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
         with _version_check_lock:
             current_version = _brain_graph_version
         
-        success = await load_brain_vectors(current_version, force_delete=True)
+        # Don't force delete existing vectors if we're loading a new version
+        success = await load_brain_vectors(current_version, force_delete=False)
         if not success:
             return {
                 "error": "Failed to load brain",

@@ -400,13 +400,14 @@ class ActiveBrain:
             logger.error(traceback.format_exc())
             return []
 
-    async def load_all_vectors_from_graph_version(self, graph_version_id: str):
+    async def load_all_vectors_from_graph_version(self, graph_version_id: str, force_clear_on_failure: bool = False):
         """
         Load ALL vectors from Pinecone for a given graph version ID.
         This is a simplified version that focuses on just loading all vectors.
 
         Args:
             graph_version_id: The ID of the graph version to load vectors from
+            force_clear_on_failure: If True, will clear existing vectors if the version isn't found
         """
         try:
             
@@ -414,28 +415,43 @@ class ActiveBrain:
                 logger.error("Pinecone index not initialized, cannot load vectors")
                 return
             
+            # Check if the version exists first
+            version_exists = await self.check_graph_version_exists(graph_version_id)
+            if not version_exists:
+                logger.error(f"Version {graph_version_id} not found or not published")
+                if not force_clear_on_failure:
+                    # Check if we already have vectors
+                    if hasattr(self, 'faiss_index') and self.faiss_index is not None and self.faiss_index.ntotal > 0:
+                        current_vector_count = self.faiss_index.ntotal
+                        logger.info(f"Preserving existing {current_vector_count} vectors since requested version doesn't exist")
+                        return
+            
             brain_banks = await self.get_version_brain_banks(graph_version_id)
             if not brain_banks:
                 logger.warning(f"No brain banks found for graph version {graph_version_id}")
 
-                # CRITICAL FIX: Clear the existing FAISS index when no valid banks found
-                logger.info("Clearing existing FAISS index since no valid brain banks were found")
-                if hasattr(self, 'faiss_index') and self.faiss_index is not None:
-                    self.faiss_index.reset()
-                    logger.info("FAISS index has been reset")
+                # Only clear if force_clear_on_failure is True or we have no vectors
+                if force_clear_on_failure or not hasattr(self, 'faiss_index') or self.faiss_index is None or self.faiss_index.ntotal == 0:
+                    logger.info("Clearing existing FAISS index since no valid brain banks were found")
+                    if hasattr(self, 'faiss_index') and self.faiss_index is not None:
+                        self.faiss_index.reset()
+                        logger.info("FAISS index has been reset")
 
-                self.vectors = np.empty((0, self.dim), dtype=np.float32)
-                self.vector_ids = []  # CRITICAL FIX: Reset vector_ids to empty list
-                self.metadata = {}
+                    self.vectors = np.empty((0, self.dim), dtype=np.float32)
+                    self.vector_ids = []  # Reset vector_ids to empty list
+                    self.metadata = {}
 
-                try:
-                    import faiss
-                    faiss.write_index(self.faiss_index, "faiss_index.bin")
-                    with open("metadata.pkl", "wb") as f:
-                        pickle.dump(self.metadata, f)
-                    logger.info("Saved empty state to disk")
-                except Exception as save_error:
-                    logger.error(f"Error saving empty state: {save_error}")
+                    try:
+                        import faiss
+                        faiss.write_index(self.faiss_index, "faiss_index.bin")
+                        with open("metadata.pkl", "wb") as f:
+                            pickle.dump(self.metadata, f)
+                        logger.info("Saved empty state to disk")
+                    except Exception as save_error:
+                        logger.error(f"Error saving empty state: {save_error}")
+                else:
+                    current_vector_count = self.faiss_index.ntotal if hasattr(self, 'faiss_index') and self.faiss_index is not None else 0
+                    logger.info(f"Preserving existing {current_vector_count} vectors since no brain banks were found")
 
                 return
 
@@ -1251,3 +1267,41 @@ class ActiveBrain:
         similarity = np.dot(vec1_normalized, vec2_normalized)
         
         return float(max(0.0, min(1.0, similarity))) 
+
+    async def check_graph_version_exists(self, version_id: str) -> bool:
+        """
+        Check if a graph version exists in Supabase.
+        
+        Args:
+            version_id: UUID of the graph version to check
+            
+        Returns:
+            bool: True if the version exists, False otherwise
+        """
+        try:
+            if not version_id:
+                logger.warning("No version ID provided to check")
+                return False
+                
+            logger.info(f"Checking if graph version {version_id} exists")
+            version_response = supabase.table("brain_graph_version")\
+                .select("id", "status")\
+                .eq("id", version_id)\
+                .execute()
+                
+            if not version_response.data:
+                logger.warning(f"Version {version_id} not found in Supabase")
+                return False
+                
+            version_data = version_response.data[0]
+            if version_data["status"] != "published":
+                logger.warning(f"Version {version_id} exists but is not published (status: {version_data['status']})")
+                return False
+                
+            logger.info(f"Version {version_id} exists and is published")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking if graph version exists: {e}")
+            logger.error(traceback.format_exc())
+            return False 
