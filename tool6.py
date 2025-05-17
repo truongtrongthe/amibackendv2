@@ -52,20 +52,24 @@ class UserProfileModel(BaseModel):
 class CoTProcessor:
     def __init__(self):
         self.user_profiles = TTLCache(maxsize=1000, ttl=3600)
-        self.graph_version_id = get_current_graph_version() or str(uuid4())
+        # Don't set a default graph_version_id here, will be set in initialize
+        self.graph_version_id = None
         # Initialize profiling_skills with empty dict, will be loaded asynchronously
         self.profiling_skills = {"knowledge_context": "Loading...", "metadata": {}}
         self.ai_business_objectives = {"knowledge_context": "Loading...", "metadata": {}}
 
-    async def initialize(self):
+    async def initialize(self, graph_version_id=None):
         """Initialize the processor asynchronously"""
+        # Use provided graph_version_id or fallback to current or generate a new one
+        self.graph_version_id = graph_version_id or get_current_graph_version() or str(uuid4())
+        logger.info(f"Initializing CoTProcessor with graph_version_id: {self.graph_version_id}")
         self.profiling_skills = await self._load_profiling_skills()
         self.ai_business_objectives = await self._load_business_objectives_awareness()
         return self
 
     async def _load_profiling_skills(self) -> Dict[str, Any]:
         """Load knowledge base concurrently using fetch_knowledge."""
-        logger.info("Loading knowledge base")
+        logger.info(f"Loading knowledge base with graph_version_id: {self.graph_version_id}")
         queries = [
             "how to classify user",
             "how to build user profile",
@@ -101,7 +105,7 @@ class CoTProcessor:
         
     async def _load_business_objectives_awareness(self) -> Dict[str, Any]:
         """Load knowledge base concurrently using fetch_knowledge."""
-        logger.info("Loading knowledge base")
+        logger.info(f"Loading business objectives knowledge with graph_version_id: {self.graph_version_id}")
         queries = [
             "Các mục mục têu công việc"
         ]
@@ -541,7 +545,7 @@ class CoTProcessor:
 
         # Fetch knowledge for each analysis query
         knowledge_entries = []
-        logger.info(f"Searching for analysis knowledge: {user_profile.analysis_queries}")
+        logger.info(f"Searching for analysis knowledge: {user_profile.analysis_queries} using graph_version_id: {self.graph_version_id}")
         for query in user_profile.analysis_queries:
             try:
                 # Use the query tool to fetch specific knowledge
@@ -994,16 +998,21 @@ async def process_llm_with_tools(
         else:
             logger.warning("No usable messages found in conversation history")
     
+    # Store the graph_version_id in state for future reference
+    state['graph_version_id'] = graph_version_id
+    
     # Get or create a CoTProcessor instance
     if 'cot_processor' not in state:
         cot_processor = CoTProcessor()
-        # Initialize properly
-        await cot_processor.initialize()
+        # Initialize properly with the provided graph_version_id
+        await cot_processor.initialize(graph_version_id)
         state['cot_processor'] = cot_processor
     else:
         cot_processor = state['cot_processor']
-    
-    state['graph_version_id'] = graph_version_id
+        # Update the graph_version_id if it has changed
+        if cot_processor.graph_version_id != graph_version_id:
+            logger.info(f"Updating CoTProcessor graph_version_id from {cot_processor.graph_version_id} to {graph_version_id}")
+            cot_processor.graph_version_id = graph_version_id
     
     try:
         # Process the message - events will be emitted from process_incoming_message
@@ -1040,7 +1049,7 @@ async def execute_tool(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, 
 
 async def knowledge_query_helper(query: str, context: str, graph_version_id: str) -> Dict[str, Any]:
     """Query knowledge base."""
-    logger.info(f"Querying knowledge: {query}")
+    logger.info(f"Querying knowledge: {query} using graph_version_id: {graph_version_id}")
     try:
         knowledge_data = await fetch_knowledge(query, graph_version_id)
         
