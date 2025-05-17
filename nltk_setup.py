@@ -50,6 +50,22 @@ def setup_nltk():
         'punkt_tab.czech',    # Czech punkt tab
     ]
     
+    # Disable SSL verification for downloading NLTK data
+    try:
+        _create_unverified_https_context = ssl._create_unverified_context
+    except AttributeError:
+        pass
+    else:
+        ssl._create_default_https_context = _create_unverified_https_context
+    
+    # Download required NLTK data for unstructured.io
+    nltk.download('punkt')
+    nltk.download('averaged_perceptron_tagger')
+    nltk.download('averaged_perceptron_tagger_eng')
+    nltk.download('punkt_tab')
+    
+    print("NLTK data download completed successfully.")
+    
     # Handle potential SSL certificate issues
     try:
         # 1. Download regular packages

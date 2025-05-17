@@ -34,3 +34,4 @@ tenacity
 backoff
 pytest
 pytest-asyncio
+unstructured

@@ -610,7 +610,7 @@ def stop_ai_process():
             ai_process_running = False
             print("🛑 Stopped persistent AI process")
 
-def generate_ai_response(message_text: str, user_id: str = None, thread_id: str = None, conversation_history: str = "", graph_version_id: str = None):
+def generate_ai_response(message_text: str, user_id: str = None, thread_id: str = None, graph_version_id: str = None, organization_id: str = None):
     """
     Helper function to generate an AI response without needing Chatwoot integration.
     Uses direct processing to avoid startup overhead.
@@ -619,8 +619,8 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
         message_text: The user's message to respond to
         user_id: Optional user ID for the conversation
         thread_id: Optional thread ID for the conversation
-        conversation_history: The conversation history to provide context for the AI
         graph_version_id: Optional graph version ID for knowledge retrieval
+        organization_id: Optional organization ID for usage tracking
         
     Returns:
         A list of message chunks for a more natural conversation flow
@@ -633,17 +633,6 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
     
     # Prepare enhanced message with conversation history
     enhanced_message = message_text
-    if conversation_history:
-        history_lines = conversation_history.strip().split('\n')
-        print(f"\n📚 Adding conversation history: {len(history_lines)} lines")
-        enhanced_message = f"{conversation_history}\n\nCurrent message: {message_text}"
-        
-        # Log how the message has been enhanced
-        print(f"📝 Original message: \"{message_text}\"")
-        print(f"📝 Enhanced message preview (first 200 chars): \"{enhanced_message[:200]}{'...' if len(enhanced_message) > 200 else ''}\"")
-        print(f"📝 Total input length: {len(enhanced_message)} characters")
-    else:
-        print(f"📝 No conversation history provided, using original message: \"{message_text}\"")
     
     try:
         print(f"\n🔄 Starting AI response generation with thread_id: {thread_id}")
@@ -699,6 +688,26 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
             # Split the full response into smaller message chunks
             message_chunks = split_into_messages(full_response, max_sentences=2)
             print(f"✂️ Split response into {len(message_chunks)} message chunks")
+            
+            # Track usage for the organization
+            if organization_id:
+                try:
+                    from usage import OrganizationUsage
+                    
+                    # Initialize usage tracking for this organization
+                    org_usage = OrganizationUsage(organization_id)
+                    
+                    # Track message usage - one count per message chunk
+                    org_usage.add_message(len(message_chunks))
+                    
+                    # Track reasoning usage - use a count of 1 for the reasoning operation
+                    org_usage.add_reasoning(1)
+                    
+                    print(f"✓ Tracked usage for organization {organization_id}: {len(message_chunks)} messages, 1 reasoning")
+                except Exception as e:
+                    print(f"❌ Error tracking usage: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
             
             return message_chunks
             
@@ -887,8 +896,8 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
                     content, 
                     user_id, 
                     thread_id, 
-                    conversation_history,
-                    graph_version_id
+                    graph_version_id,
+                    organization_id
                 )
                 response_time = time.time() - response_time_start
                 print(f"⏱️ AI response generated in {response_time:.2f} seconds")

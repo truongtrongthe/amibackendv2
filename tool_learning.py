@@ -535,17 +535,31 @@ class LearningProcessor:
             # Create query-specific response section if no other knowledge is found
             if queries:
                 query_text = queries[0] if isinstance(queries, list) and queries else str(queries)
-                knowledge_response_sections = [f"I can't find knowledge relevant to '{query_text}'. Can you elaborate or teach me about this topic?"]
+                knowledge_response_sections = [f"I don't have sufficient knowledge about '{query_text}'. Would you like to teach me about this topic?"]
                 knowledge_context = "\n\n".join(knowledge_response_sections)
                 logger.info(f"Created LOW_SIMILARITY response for query: {query_text}")
             
-            strategy_instructions = (
-                "State: 'Tôi không thể tìm thấy thông tin liên quan; vui lòng giải thích thêm.' "
-                "Ask for more details about the topic. "
-                "Propose a specific question (e.g., 'Bạn có thể chia sẻ thêm về ý nghĩa của điều này không?'). "
-                "If the message appears to be attempting to teach or explain something, acknowledge this and express "
-                "interest in learning about the topic through a thoughtful follow-up question."
-            )
+            # Handle short or unclear queries differently
+            is_short_query = len(message_str.strip().split()) <= 2
+            
+            if is_short_query:
+                strategy_instructions = (
+                    "Recognize this as a very short or potentially unclear message. "
+                    "Acknowledge that you need more information to provide a helpful response. "
+                    "Politely ask the user to provide more details or context about what they're asking. "
+                    "Suggest a few possible interpretations of their query if appropriate. "
+                    "Keep your response friendly and helpful, showing eagerness to assist once you have more information. "
+                    "Match the user's language choice (Vietnamese/English). "
+                    "Ensure you provide a response even if the query is very minimal or unclear."
+                )
+            else:
+                strategy_instructions = (
+                    "State: 'Tôi không thể tìm thấy thông tin liên quan; vui lòng giải thích thêm.' "
+                    "Ask for more details about the topic. "
+                    "Propose a specific question (e.g., 'Bạn có thể chia sẻ thêm về ý nghĩa của điều này không?'). "
+                    "If the message appears to be attempting to teach or explain something, acknowledge this and express "
+                    "interest in learning about the topic through a thoughtful follow-up question."
+                )
         else:
             response_strategy = "RELEVANT_KNOWLEDGE"
             strategy_instructions = (
@@ -565,7 +579,28 @@ class LearningProcessor:
                              "here's how", "đây là cách", "the way to", "Important to know", 
                              "you should know", "bạn nên biết", "cần hiểu rằng", "phương pháp", "cách thức"]
         has_teaching_markers = any(keyword.lower() in message_str.lower() for keyword in teaching_keywords)
-        if has_teaching_markers or (len(message_str.split()) > 20 and "?" not in message_str):
+        
+        # Check for Vietnamese greeting forms or names
+        vn_greeting_patterns = ["anh ", "chị ", "bạn ", "cô ", "ông ", "bác ", "em "]
+        common_vn_names = ["hùng", "hương", "minh", "tuấn", "thảo", "an", "hà", "thủy", "trung", "mai", "hoa", "quân", "dũng", "hiền", "nga", "tâm", "thanh", "tú", "hải", "hòa", "yến", "lan", "hạnh", "phương", "dung", "thu", "hiệp", "đức", "linh", "huy", "tùng", "bình", "giang", "tiến"]
+        
+        is_vn_greeting = any(pattern in message_str.lower() for pattern in vn_greeting_patterns)
+        message_words = message_str.lower().split()
+        contains_vn_name = any(name in message_words for name in common_vn_names)
+        
+        # If this is just a name or greeting, treat it as a greeting
+        if (is_vn_greeting or contains_vn_name) and len(message_str.split()) <= 3:
+            response_strategy = "GREETING"
+            strategy_instructions = (
+                "Recognize this as a Vietnamese greeting or someone addressing you by name. "
+                "Respond warmly and appropriately to the greeting. "
+                "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
+                "Keep your response friendly, brief, and conversational. "
+                "Ask how you can assist them today. "
+                "Ensure your tone matches the formality level they used (formal vs casual)."
+            )
+            logger.info(f"Detected Vietnamese greeting or name reference: '{message_str}'")
+        elif has_teaching_markers or (len(message_str.split()) > 20 and "?" not in message_str):
             response_strategy = "TEACHING_INTENT"
             strategy_instructions = (
                 "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
@@ -584,6 +619,13 @@ class LearningProcessor:
             )
         
         prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
+
+                **Identity Awareness**:
+                - Your name is "Ami" - acknowledge when users call you by name
+                - Notice when users refer to you as AI, assistant, bot, or similar terms
+                - Recognize context clues that indicate the user is speaking directly to you
+                - Maintain your identity consistently throughout the conversation
+                - Do not explicitly state "My name is Ami" unless directly asked
 
                 **Input**:
                 - CURRENT MESSAGE: {message_str}
@@ -611,6 +653,8 @@ class LearningProcessor:
                    - Use EXISTING KNOWLEDGE for queries when available
                    - Match the user's language choice (Vietnamese/English)
                    - For closing messages, set intent_type="closing" and respond with a polite farewell
+                   - When the user addresses you as "Ami" or refers to you as an AI, acknowledge this in your response naturally
+                   - Consider references to your identity or role as indicators of direct address
                    
                    - When handling TEACHING INTENT:
                      * Synthesize the input into a comprehensive practical understanding
@@ -666,12 +710,15 @@ class LearningProcessor:
                    - Maintain consistent linguistic patterns throughout the conversation
                    - Respect cultural and linguistic conventions in how you address the user
                    - Preserve the established relationship dynamic in your responses
+                   - If addressed by name "Ami" or as an AI, subtly acknowledge this in your response
+                   - Adapt your response style based on how directly the user is engaging with you
+                   - For personal questions about your identity, provide concise, truthful answers without long explanations
 
                 6. **Output Format**:
                    - Respond directly and concisely in the user's language (no prefix or labels)
                    - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
                    - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
-                   - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up"}}</evaluation>
+                   - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up", "name_addressed": true/false, "ai_referenced": true/false}}</evaluation>
 
                 Maintain topic continuity, ensure proper JSON formatting, and include user_id in all tool calls.
                 """
@@ -681,7 +728,7 @@ class LearningProcessor:
             
             content = response.content.strip()
             tool_calls = []
-            evaluation = {"has_teaching_intent": False, "is_priority_topic": False, "priority_topic_name": "", "should_save_knowledge": False, "intent_type": "query"}
+            evaluation = {"has_teaching_intent": False, "is_priority_topic": False, "priority_topic_name": "", "should_save_knowledge": False, "intent_type": "query", "name_addressed": False, "ai_referenced": False}
             
             # Extract tool calls if present
             if "<tool_calls>" in content:
@@ -722,6 +769,19 @@ class LearningProcessor:
                 else:
                     content = "Thank you for the conversation. Have a great day and I'm here if you need anything else!"
                 logger.info("Added default closing response for empty LLM response")
+            
+            # Ensure unclear or short queries also get a helpful response when content is empty
+            elif (not content or content.isspace()):
+                # Check if message is short (1-2 words) or unclear
+                is_short_message = len(message_str.strip().split()) <= 2
+                
+                # Default response for short/unclear messages
+                if "vietnamese" in message_str.lower() or any(vn_word in message_str.lower() for vn_word in ["anh", "chị", "bạn", "cô", "ông", "xin", "vui lòng"]):
+                    content = f"Xin lỗi, tôi không hiểu rõ câu hỏi '{message_str}'. Bạn có thể chia sẻ thêm thông tin hoặc đặt câu hỏi cụ thể hơn được không?"
+                else:
+                    content = f"I'm sorry, I didn't fully understand your message '{message_str}'. Could you please provide more details or ask a more specific question?"
+                
+                logger.info(f"Added default response for empty LLM response to short/unclear query: '{message_str}'")
             
             return {
                 "status": "success",
