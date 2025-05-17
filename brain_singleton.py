@@ -7,6 +7,7 @@ import fcntl
 import pickle
 import faiss
 import json
+import threading
 from typing import Optional, Union, Any
 from utilities import logger
 import traceback
@@ -16,10 +17,13 @@ _brain_instance = None
 # Flag to track if brain has been loaded with vectors
 _brain_loaded = False
 _brain_graph_version = None
-_brain_lock = asyncio.Lock()
+# Use threading.RLock() instead of asyncio.Lock() for proper thread safety
+_brain_lock = threading.RLock()
+_brain_async_lock = asyncio.Lock()  # Keep for async functions
 _last_reset_time = 0
 _reset_in_progress = False
 _pending_reset = False
+_version_check_lock = threading.RLock()  # New lock for version checks
 
 # Minimum time between resets (seconds) to prevent rapid resets
 MIN_RESET_INTERVAL = 30
@@ -43,8 +47,9 @@ INDEX_LOCK_PATH = "faiss_index.lock"
 
 def init_brain(dim=1536, namespace="", graph_version_ids=None, pinecone_index_name=None):
     """Initialize the global brain instance with the provided parameters."""
-    global _brain_instance, _current_config
+    global _brain_instance, _current_config, _brain_graph_version
     
+    with _brain_lock:
     # Update current configuration
     _current_config["dim"] = dim
     _current_config["namespace"] = namespace
@@ -59,6 +64,12 @@ def init_brain(dim=1536, namespace="", graph_version_ids=None, pinecone_index_na
             graph_version_ids=graph_version_ids,
             pinecone_index_name=pinecone_index_name
         )
+            
+        # Initialize graph version based on config if provided
+        if graph_version_ids and len(graph_version_ids) > 0 and _brain_graph_version is None:
+            _brain_graph_version = graph_version_ids[0]
+            logger.info(f"Setting initial brain graph version to {_brain_graph_version}")
+            
     return _brain_instance
 
 # Initialize this at module level to avoid import errors
@@ -78,6 +89,7 @@ def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
         # Import inside function to avoid circular imports
         from active_brain import ActiveBrain
         
+        with _brain_lock:
         # Create brain if it doesn't exist yet
         if _brain_instance is None:
             logger.info("Creating new brain instance (sync)")
@@ -85,10 +97,18 @@ def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
             _brain_graph_version = None
         
         # Check if we need to reset and load a specific graph version
+            with _version_check_lock:
         if graph_version_id and _brain_graph_version != graph_version_id:
             logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
-            logger.warning("Sync brain access can't properly load a specific version - use async version when possible")
+                    
+                    if not _reset_in_progress and not _pending_reset:
+                        logger.warning("Starting synchronous brain reset due to version mismatch")
+                        # We have to perform a synchronous reset since we're in a sync context
+                        reset_brain()
+                        # Set the graph version so it's correct for subsequent checks
             _brain_graph_version = graph_version_id
+                    else:
+                        logger.warning("Reset in progress, sync brain access will return current version")
             
         return _brain_instance
     except Exception as e:
@@ -116,12 +136,14 @@ async def get_brain(graph_version_id: Optional[str] = None) -> Any:
     Returns:
         ActiveBrain instance
     """
-    global _brain_instance, _brain_graph_version, _pending_reset
+    global _brain_instance, _brain_graph_version, _pending_reset, _reset_in_progress
     
     try:
         # Import inside function to avoid circular imports
         from active_brain import ActiveBrain
         
+        # Use atomic version check with lock
+        with _brain_lock:
         # Create brain if it doesn't exist yet
         if _brain_instance is None:
             logger.info("Creating new brain instance")
@@ -129,17 +151,21 @@ async def get_brain(graph_version_id: Optional[str] = None) -> Any:
             _brain_graph_version = None
         
         # Check if we need to reset and load a specific graph version
-        if graph_version_id and _brain_graph_version != graph_version_id:
-            logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
+            with _version_check_lock:
+                current_version = _brain_graph_version  # Cache to avoid race conditions
+                
+                if graph_version_id and current_version != graph_version_id:
+                    logger.info(f"Brain version mismatch: current={current_version}, requested={graph_version_id}")
             
             # Only schedule a reset if one is not already in progress or pending
-            if not _pending_reset:
+                    if not _reset_in_progress and not _pending_reset:
                 _pending_reset = True
+                        logger.info(f"Scheduling reset for version {graph_version_id}")
                 
                 # Perform reset in background to not block the request
                 asyncio.create_task(reset_brain_and_load_version(graph_version_id))
             else:
-                logger.info(f"Reset already pending, will load version {graph_version_id} when complete")
+                        logger.info(f"Reset already pending/in progress, will load version {graph_version_id} when complete")
             
         return _brain_instance
     except Exception as e:
@@ -154,17 +180,19 @@ async def reset_brain_and_load_version(graph_version_id: str):
     Args:
         graph_version_id: Graph version ID to load
     """
-    global _brain_instance, _brain_graph_version, _brain_lock, _last_reset_time, _reset_in_progress, _pending_reset
+    global _brain_instance, _brain_graph_version, _brain_async_lock, _last_reset_time, _reset_in_progress, _pending_reset
     
+    # Set flags to prevent concurrent resets
+    with _version_check_lock:
     # Prevent multiple resets from running concurrently
     if _reset_in_progress:
         logger.info(f"Reset already in progress, skipping redundant reset for version {graph_version_id}")
         return
     
-    try:
         _reset_in_progress = True
         _pending_reset = False
         
+    try:
         # Check if we've reset recently to avoid thrashing
         current_time = time.time()
         if current_time - _last_reset_time < MIN_RESET_INTERVAL:
@@ -172,8 +200,9 @@ async def reset_brain_and_load_version(graph_version_id: str):
             logger.info(f"Reset attempted too soon, waiting {wait_time:.2f} seconds")
             await asyncio.sleep(wait_time)
         
-        # Acquire lock to prevent concurrent modification
-        async with _brain_lock:
+        # Acquire lock to prevent concurrent modification - use both threading and asyncio locks
+        with _brain_lock:
+            async with _brain_async_lock:
             logger.info(f"Resetting brain instance (PID: {os.getpid()})")
             
             # Log existing state before reset
@@ -183,7 +212,8 @@ async def reset_brain_and_load_version(graph_version_id: str):
                 logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
             
             try:
-                # Set graph version
+                    # Set graph version BEFORE loading vectors
+                    with _version_check_lock:
                 _brain_graph_version = graph_version_id
                 logger.info(f"Set graph version to {graph_version_id}")
                 
@@ -221,13 +251,25 @@ async def reset_brain_and_load_version(graph_version_id: str):
         logger.error(f"Error during brain reset: {e}")
         logger.error(traceback.format_exc())
     finally:
+        # Clear reset-in-progress flag
+        with _version_check_lock:
         _reset_in_progress = False
 
 def reset_brain():
     """Synchronous function to reset the brain singleton"""
-    global _brain_instance, _brain_graph_version, _last_reset_time, _pending_reset
+    global _brain_instance, _brain_graph_version, _last_reset_time, _pending_reset, _reset_in_progress
     
     try:
+        # Use lock to ensure thread safety
+        with _brain_lock:
+            with _version_check_lock:
+                # Set flags to prevent concurrent resets
+                if _reset_in_progress:
+                    logger.info(f"Reset already in progress, skipping redundant sync reset")
+                    return
+                _reset_in_progress = True
+                _pending_reset = False
+            
         logger.info(f"Resetting brain instance (PID: {os.getpid()})")
         
         # Log existing state before reset
@@ -239,8 +281,6 @@ def reset_brain():
         # Create a new brain instance
         from active_brain import ActiveBrain
         _brain_instance = ActiveBrain(pinecone_index_name="9well")
-        _brain_graph_version = None
-        _pending_reset = False
         
         # Update last reset time
         _last_reset_time = time.time()
@@ -249,10 +289,17 @@ def reset_brain():
     except Exception as e:
         logger.error(f"Error resetting brain: {e}")
         logger.error(traceback.format_exc())
+    finally:
+        # Clear reset-in-progress flag
+        with _version_check_lock:
+            _reset_in_progress = False
 
 def get_current_graph_version() -> Optional[str]:
     """Get the current graph version ID"""
     global _brain_graph_version
+    
+    # Use lock to ensure thread safety during read
+    with _version_check_lock:
     return _brain_graph_version
 
 def set_graph_version(graph_version_id):
@@ -265,10 +312,13 @@ def set_graph_version(graph_version_id):
     Returns:
         bool: True if a new brain instance was created, False if the graph version was already set
     """
-    global _brain_instance, _current_config, _brain_loaded
+    global _brain_instance, _current_config, _brain_loaded, _brain_graph_version
     
+    # Use locks to ensure thread safety
+    with _brain_lock:
+        with _version_check_lock:
     # Check if we're already using this graph version
-    if _current_config["graph_version_ids"] and _current_config["graph_version_ids"][0] == graph_version_id:
+            if _brain_graph_version == graph_version_id:
         return False
     
     # Update the configuration with the new graph version ID
@@ -276,115 +326,82 @@ def set_graph_version(graph_version_id):
     
     # Reset the brain so it will be recreated with the new graph version
     reset_brain()
+            
+            # Explicitly set the graph version after reset
+            _brain_graph_version = graph_version_id
+            logger.info(f"Graph version explicitly set to {graph_version_id}")
     
     return True
 
-def get_current_graph_version():
-    """Get the current graph version ID that's being used."""
-    if _current_config["graph_version_ids"] and len(_current_config["graph_version_ids"]) > 0:
-        return _current_config["graph_version_ids"][0]
-    return None
+def is_brain_loaded():
+    """Check if the brain has been loaded with vectors."""
+    global _brain_loaded, _brain_instance
+    
+    # Use lock to ensure thread safety
+    with _brain_lock:
+        # If we have a flag indicating it's loaded, first check that
+        if _brain_loaded:
+            return True
+            
+        # Otherwise, check if we have a brain instance with a loaded index
+        if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
+            # Check if the FAISS index has vectors
+            if _brain_instance.faiss_index.ntotal > 0:
+                _brain_loaded = True
+                return True
+                
+        # Try loading from disk as a last resort
+        if try_load_from_disk():
+            return True
+            
+        return False
 
-def acquire_lock(lock_path, timeout=30):
+async def activate_brain_with_version(graph_version_id):
     """
-    Acquire a file lock with timeout.
+    Activate the brain with a specific graph version ID.
+    This performs a full reset and reload of vectors for the specified graph version.
     
     Args:
-        lock_path: Path to the lock file
-        timeout: Maximum time to wait for lock in seconds
+        graph_version_id: The graph version ID to activate
         
     Returns:
-        file handle, or None if lock acquisition failed
+        dict: A dictionary with activation results including success status and stats
     """
-    start_time = time.time()
-    lock_file = None
+    global _brain_instance, _brain_loaded, _brain_graph_version
     
-    try:
-        # Make sure the lock file's directory exists
-        lock_dir = os.path.dirname(lock_path)
-        if lock_dir and not os.path.exists(lock_dir):
-            try:
-                os.makedirs(lock_dir, exist_ok=True)
-                print(f"Created directory for lock: {lock_dir}")
-            except Exception as mkdir_error:
-                print(f"Error creating lock directory: {mkdir_error}")
+    # Set the graph version ID with thread safety
+    with _version_check_lock:
+        # Reset flags first
+        _reset_in_progress = False
+        _pending_reset = False
         
-        # Create the lock file if it doesn't exist
-        lock_file = open(lock_path, 'w+')
-        
-        # Set non-blocking flag for easier debugging
-        old_flags = fcntl.fcntl(lock_file.fileno(), fcntl.F_GETFL)
-        fcntl.fcntl(lock_file.fileno(), fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
-        
-        attempts = 0
-        while True:
-            attempts += 1
-            try:
-                # Try to acquire the lock (non-blocking)
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                print(f"Successfully acquired lock on {lock_path} after {attempts} attempts")
-                
-                # Write PID to lockfile for debugging
-                lock_file.seek(0)
-                lock_file.write(f"{os.getpid()}")
-                lock_file.flush()
-                
-                return lock_file
-            except IOError as e:
-                # Check if we've exceeded the timeout
-                if time.time() - start_time > timeout:
-                    print(f"Timeout waiting for lock on {lock_path} after {attempts} attempts")
-                    # Try to read the PID of the process holding the lock
-                    try:
-                        with open(lock_path, 'r') as existing_lock:
-                            pid = existing_lock.read().strip()
-                            print(f"Lock appears to be held by process {pid}")
-                    except Exception:
-                        pass
-                    
-                    if lock_file:
-                        lock_file.close()
-                    return None
-                
-                # Wait a bit before trying again
-                print(f"Waiting for lock on {lock_path}... (attempt {attempts})")
-                time.sleep(0.5)
-    except Exception as e:
-        print(f"Error acquiring lock: {e}")
-        import traceback
-        print(traceback.format_exc())
-        if lock_file:
-            lock_file.close()
-        return None
-
-def release_lock(lock_file):
-    """
-    Release a file lock.
+        # Force version to None to ensure reset triggers properly
+        _brain_graph_version = None
     
-    Args:
-        lock_file: File handle to release
-    """
-    if lock_file:
-        try:
-            # Clear the lockfile contents before releasing
-            lock_file.seek(0)
-            lock_file.truncate()
-            lock_file.write("released")
-            lock_file.flush()
-            
-            # Release the lock
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-            lock_file.close()
-            print("Released lock")
-        except Exception as e:
-            print(f"Error releasing lock: {e}")
-            import traceback
-            print(traceback.format_exc())
-            # Try to force close if normal release failed
-            try:
-                lock_file.close()
-            except:
-                pass
+    # Always perform a full reset first
+    reset_brain()
+    
+    # Then load the vectors
+    success = await load_brain_vectors(graph_version_id, force_delete=True)
+    
+    if success:
+        # Get updated brain instance
+        import asyncio
+        brain_coroutine = get_brain(graph_version_id)
+        brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+        
+        # Return stats for verification
+        return {
+            "success": True,
+            "graph_version_id": get_current_graph_version(),
+            "loaded": is_brain_loaded(),
+            "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
+        }
+    else:
+        return {
+            "success": False,
+            "error": "Failed to load brain vectors"
+        }
 
 def try_load_from_disk():
     """
@@ -857,135 +874,106 @@ async def load_brain_vectors(graph_version_id=None, force_delete=True):
         _current_config["_skip_disk_load"] = False
         return False
 
-def is_brain_loaded():
-    """Check if the brain has been loaded with vectors."""
-    global _brain_loaded, _brain_instance
-    
-    # If we have a flag indicating it's loaded, first check that
-    if _brain_loaded:
-        return True
-        
-    # Otherwise, check if we have a brain instance with a loaded index
-    if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
-        # Check if the FAISS index has vectors
-        if _brain_instance.faiss_index.ntotal > 0:
-            _brain_loaded = True
-            return True
-            
-    # Try loading from disk as a last resort
-    if try_load_from_disk():
-        return True
-        
-    return False
-
-async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
+def acquire_lock(lock_path, timeout=30):
     """
-    Return vectors from brain without printing results.
+    Acquire a file lock with timeout.
     
     Args:
-        input_text: Text to search for similar vectors
-        graph_version_id: Optional graph version to use
+        lock_path: Path to the lock file
+        timeout: Maximum time to wait for lock in seconds
         
     Returns:
-        A dictionary with query results, ready for JSON serialization
+        file handle, or None if lock acquisition failed
     """
-    # If a new graph version is requested, update the configuration
-    if graph_version_id and graph_version_id != get_current_graph_version():
-        # Set the new graph version which will reset the brain if needed
-        set_graph_version(graph_version_id)
+    start_time = time.time()
+    lock_file = None
     
-    # Get the brain instance
-    brain_coroutine = get_brain()
-    
-    # Properly handle coroutines - check and await if needed
-    import asyncio
-    brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
-    
-    # Ensure brain is loaded before querying
-    if not is_brain_loaded() or not hasattr(brain, 'faiss_index') or (hasattr(brain, 'faiss_index') and brain.faiss_index.ntotal == 0):
-        # Try to load the brain
-        success = await load_brain_vectors(get_current_graph_version(), force_delete=True)
-        if not success:
-            return {
-                "error": "Failed to load brain",
-                "query": input_text,
-                "graph_version_id": get_current_graph_version()
-            }
-    
-    # Now perform the query
     try:
-        # Check if the method returns a coroutine
-        result_or_coroutine = brain.get_similar_vectors_by_text(input_text, top_k=10)
+        # Make sure the lock file's directory exists
+        lock_dir = os.path.dirname(lock_path)
+        if lock_dir and not os.path.exists(lock_dir):
+            try:
+                os.makedirs(lock_dir, exist_ok=True)
+                print(f"Created directory for lock: {lock_dir}")
+            except Exception as mkdir_error:
+                print(f"Error creating lock directory: {mkdir_error}")
         
-        # Handle coroutine if necessary
-        results = await result_or_coroutine if asyncio.iscoroutine(result_or_coroutine) else result_or_coroutine
+        # Create the lock file if it doesn't exist
+        lock_file = open(lock_path, 'w+')
         
-        # Convert results to a serializable format
-        formatted_results = []
-        for vector_id, vector, metadata, similarity in results:
-            formatted_results.append({
-                "vector_id": vector_id,
-                "similarity": similarity,
-                "metadata": metadata,
-                "vector_preview": vector[:10] if hasattr(vector, '__getitem__') else []
-            })
+        # Set non-blocking flag for easier debugging
+        old_flags = fcntl.fcntl(lock_file.fileno(), fcntl.F_GETFL)
+        fcntl.fcntl(lock_file.fileno(), fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
         
-        response = {
-            "query": input_text,
-            "graph_version_id": get_current_graph_version(),
-            "vector_count": brain.faiss_index.ntotal if hasattr(brain, 'faiss_index') else 0,
-            "results": formatted_results
-        }
-        
-        # Make sure everything is JSON serializable
-        return json_serialize_for_brain(response)
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                # Try to acquire the lock (non-blocking)
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                print(f"Successfully acquired lock on {lock_path} after {attempts} attempts")
+                
+                # Write PID to lockfile for debugging
+                lock_file.seek(0)
+                lock_file.write(f"{os.getpid()}")
+                lock_file.flush()
+                
+                return lock_file
+            except IOError as e:
+                # Check if we've exceeded the timeout
+                if time.time() - start_time > timeout:
+                    print(f"Timeout waiting for lock on {lock_path} after {attempts} attempts")
+                    # Try to read the PID of the process holding the lock
+                    try:
+                        with open(lock_path, 'r') as existing_lock:
+                            pid = existing_lock.read().strip()
+                            print(f"Lock appears to be held by process {pid}")
+                    except Exception:
+                        pass
+                    
+                    if lock_file:
+                        lock_file.close()
+                    return None
+                
+                # Wait a bit before trying again
+                print(f"Waiting for lock on {lock_path}... (attempt {attempts})")
+                time.sleep(0.5)
     except Exception as e:
+        print(f"Error acquiring lock: {e}")
         import traceback
-        print(f"Error in flick_out: {e}")
         print(traceback.format_exc())
-        return {
-            "error": f"Error processing query: {str(e)}",
-            "query": input_text,
-            "graph_version_id": get_current_graph_version()
-        }
+        if lock_file:
+            lock_file.close()
+        return None
 
-async def activate_brain_with_version(graph_version_id):
+def release_lock(lock_file):
     """
-    Activate the brain with a specific graph version ID.
-    This performs a full reset and reload of vectors for the specified graph version.
+    Release a file lock.
     
     Args:
-        graph_version_id: The graph version ID to activate
-        
-    Returns:
-        dict: A dictionary with activation results including success status and stats
+        lock_file: File handle to release
     """
-    global _brain_instance, _brain_loaded
-    
-    # Always perform a full reset first
-    reset_brain()
-    
-    # Then load the vectors
-    success = await load_brain_vectors(graph_version_id, force_delete=True)
-    
-    if success:
-        # Get updated brain instance
-        import asyncio
-        brain_coroutine = get_brain()
-        brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
-        
-        # Return stats for verification
-        return {
-            "success": True,
-            "graph_version_id": get_current_graph_version(),
-            "loaded": is_brain_loaded(),
-            "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
-        }
-    else:
-        return {
-            "success": False,
-            "error": "Failed to load brain vectors"
-        }
+    if lock_file:
+        try:
+            # Clear the lockfile contents before releasing
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write("released")
+            lock_file.flush()
+            
+            # Release the lock
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
+            print("Released lock")
+        except Exception as e:
+            print(f"Error releasing lock: {e}")
+            import traceback
+            print(traceback.format_exc())
+            # Try to force close if normal release failed
+            try:
+                lock_file.close()
+            except:
+                pass
 
 def json_serialize_for_brain(obj):
     """
@@ -1030,3 +1018,97 @@ def json_serialize_for_brain(obj):
         return obj
     except (TypeError, OverflowError):
         return str(obj) 
+
+async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
+    """
+    Return vectors from brain without printing results.
+    
+    Args:
+        input_text: Text to search for similar vectors
+        graph_version_id: Optional graph version to use
+        
+    Returns:
+        A dictionary with query results, ready for JSON serialization
+    """
+    # Thread-safe check for graph version
+    with _version_check_lock:
+        current_version = _brain_graph_version
+        version_change_needed = graph_version_id and graph_version_id != current_version
+    
+    # If a new graph version is requested, update the configuration
+    if version_change_needed:
+        # Set the new graph version which will reset the brain if needed
+        set_graph_version(graph_version_id)
+    
+    # Get the brain instance
+    brain_coroutine = get_brain(graph_version_id)
+    
+    # Properly handle coroutines - check and await if needed
+    import asyncio
+    brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    
+    # Ensure brain is loaded before querying
+    with _brain_lock:
+        brain_loaded = is_brain_loaded()
+        has_index = brain and hasattr(brain, 'faiss_index')
+        vectors_loaded = has_index and brain.faiss_index.ntotal > 0
+    
+    if not brain_loaded or not has_index or not vectors_loaded:
+        # Try to load the brain
+        with _version_check_lock:
+            current_version = _brain_graph_version
+        
+        success = await load_brain_vectors(current_version, force_delete=True)
+        if not success:
+            return {
+                "error": "Failed to load brain",
+                "query": input_text,
+                "graph_version_id": get_current_graph_version()
+            }
+    
+    # Now perform the query
+    try:
+        # Check if the method returns a coroutine
+        result_or_coroutine = brain.get_similar_vectors_by_text(input_text, top_k=10)
+        
+        # Handle coroutine if necessary
+        results = await result_or_coroutine if asyncio.iscoroutine(result_or_coroutine) else result_or_coroutine
+        
+        # Convert results to a serializable format
+        formatted_results = []
+        for vector_id, vector, metadata, similarity in results:
+            formatted_results.append({
+                "vector_id": vector_id,
+                "similarity": similarity,
+                "metadata": metadata,
+                "vector_preview": vector[:10] if hasattr(vector, '__getitem__') else []
+            })
+        
+        with _version_check_lock:
+            current_version = _brain_graph_version
+        
+        with _brain_lock:
+            vector_count = brain.faiss_index.ntotal if hasattr(brain, 'faiss_index') else 0
+        
+        response = {
+            "query": input_text,
+            "graph_version_id": current_version,
+            "vector_count": vector_count,
+            "results": formatted_results
+        }
+        
+        # Make sure everything is JSON serializable
+        return json_serialize_for_brain(response)
+    except Exception as e:
+        import traceback
+        print(f"Error in flick_out: {e}")
+        print(traceback.format_exc())
+        
+        with _version_check_lock:
+            current_version = _brain_graph_version
+            
+        return {
+            "error": f"Error processing query: {str(e)}",
+            "query": input_text,
+            "graph_version_id": current_version
+        } 
