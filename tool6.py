@@ -71,10 +71,12 @@ class CoTProcessor:
             "how to build user profile",
             "what does user profile has",
             "how to analyze user profile",
+            "how to talk to user",
             "Cách phân nhóm người dùng",
             "Cách xây dựng hồ sơ người dùng",
             "Cách phân tích hồ sơ người dùng",
             "Cần có những gì trong hồ sơ người dùng",
+            "Cách xưng hô với người đối diện"
         ]
         
         try:

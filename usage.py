@@ -8,6 +8,12 @@ from utilities import logger  # Assuming this is your logging utility
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")
 
+# Log basic connection info
+if spb_url and spb_key:
+    logger.info(f"Initialized Supabase client: {spb_url}")
+else:
+    logger.error("Missing Supabase URL or key in environment variables")
+
 supabase: Client = create_client(
     spb_url,
     spb_key
@@ -44,7 +50,6 @@ class OrganizationUsage:
         try:
             start_date, end_date = self._get_date_range(period)
             
-            # Query the message_count table for the organization in the date range
             response = supabase.table("organization_usage") \
                 .select("count") \
                 .eq("org_id", self.org_id) \
@@ -64,7 +69,6 @@ class OrganizationUsage:
         try:
             start_date, end_date = self._get_date_range(period)
             
-            # Query the usage table for reasoning count
             response = supabase.table("organization_usage") \
                 .select("count") \
                 .eq("org_id", self.org_id) \
@@ -85,7 +89,6 @@ class OrganizationUsage:
         try:
             start_date, end_date = self._get_date_range(period)
             
-            # Query all usage for the organization in the date range
             response = supabase.table("organization_usage") \
                 .select("type, count") \
                 .eq("org_id", self.org_id) \
@@ -108,6 +111,7 @@ class OrganizationUsage:
     def add_message(self, count: int = 1) -> bool:
         """Add message usage count for the organization"""
         try:
+            logger.info(f"Adding message count for org {self.org_id}: {count}")
             return self._add_usage("message", count)
         except Exception as e:
             logger.error(f"Error adding message count for org {self.org_id}: {e}")
@@ -116,6 +120,7 @@ class OrganizationUsage:
     def add_reasoning(self, count: int = 1) -> bool:
         """Add reasoning usage count for the organization"""
         try:
+            logger.info(f"Adding reasoning count for org {self.org_id}: {count}")
             return self._add_usage("reasoning", count)
         except Exception as e:
             logger.error(f"Error adding reasoning count for org {self.org_id}: {e}")
@@ -124,44 +129,50 @@ class OrganizationUsage:
     def _add_usage(self, usage_type: str, count: int) -> bool:
         """Generic method to add usage of any type"""
         try:
+            if count <= 0:
+                logger.warning(f"Skipping usage with non-positive count: {count}")
+                return True
+                
             # Get the current date in UTC
             current_date = datetime.now(UTC)
             date_str = current_date.strftime("%Y-%m-%d")
-
-            # Query the usage table for the organization
-            response = supabase.table("organization_usage") \
-                .select("*") \
+            
+            # First check if a record already exists for this org, type, and date
+            existing_records = supabase.table("organization_usage") \
+                .select("id, count") \
                 .eq("org_id", self.org_id) \
                 .eq("date", date_str) \
                 .eq("type", usage_type) \
                 .execute()
-
-            # If the count already exists, update it
-            if response.data:
-                existing_count = response.data[0]["count"]  
-                new_count = existing_count + count
-
+                
+            if existing_records.data and len(existing_records.data) > 0:
+                # Update existing record
+                existing_record = existing_records.data[0]
+                record_id = existing_record["id"]
+                new_count = existing_record["count"] + count
+                
                 # Update the count
                 supabase.table("organization_usage") \
                     .update({"count": new_count}) \
-                    .eq("id", response.data[0]["id"]) \
+                    .eq("id", record_id) \
                     .execute()
+                logger.info(f"Updated usage record: type={usage_type}, count={new_count}")
             else:
-                # Create a new count entry
-                supabase.table("organization_usage") \
-                    .insert({
-                        "org_id": self.org_id, 
-                        "count": count, 
-                        "date": date_str,
-                        "type": usage_type
-                    }) \
-                    .execute()
-                    
-            # Add detailed usage record
+                # Insert new record
+                data = {
+                    "org_id": self.org_id,
+                    "type": usage_type,
+                    "count": count,
+                    "date": date_str
+                }
+                supabase.table("organization_usage").insert(data).execute()
+                logger.info(f"Created new usage record: type={usage_type}, count={count}")
+                
+            # Add a detailed usage record
             self._add_usage_detail(usage_type, count)
             return True
         except Exception as e:
-            logger.error(f"Error adding {usage_type} count for org {self.org_id}: {e}")
+            logger.error(f"Error adding {usage_type} usage: {e}")
             return False
     
     def _add_usage_detail(self, usage_type: str, count: int) -> None:
@@ -170,17 +181,18 @@ class OrganizationUsage:
             # Get the current timestamp in UTC
             timestamp = datetime.now(UTC).isoformat()
             
-            # Insert the usage detail record
-            supabase.table("usage_detail") \
-                .insert({
-                    "org_id": self.org_id,
-                    "type": usage_type,
-                    "count": count,
-                    "timestamp": timestamp
-                }) \
-                .execute()
+            # Add detailed record
+            data = {
+                "org_id": self.org_id,
+                "type": usage_type,
+                "count": count,
+                "timestamp": timestamp
+            }
+            
+            supabase.table("usage_detail").insert(data).execute()
+            logger.info(f"Added usage detail record: type={usage_type}, count={count}")
         except Exception as e:
-            logger.error(f"Error adding usage detail for org {self.org_id}: {e}")
+            logger.error(f"Error adding usage detail: {e}")
 
     def get_usage_details(self, 
                          usage_type: Optional[str] = None, 

@@ -698,6 +698,7 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
                     org_usage = OrganizationUsage(organization_id)
                     
                     # Track message usage - one count per message chunk
+                    logger.info(f"Adding message count for org at Chatwoot.py: {organization_id}: {len(message_chunks)}")
                     org_usage.add_message(len(message_chunks))
                     
                     # Track reasoning usage - use a count of 1 for the reasoning operation
