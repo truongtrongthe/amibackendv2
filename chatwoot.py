@@ -412,6 +412,7 @@ def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
     """
     Split text into smaller chunks for more natural conversation flow.
     Handles languages like Vietnamese where sentence boundaries might not have spaces.
+    Also prepare a special image for QR code if found the bank account number in the text
     
     Args:
         text: The text to split
@@ -426,6 +427,9 @@ def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
     paragraphs = re.split(r'\n\s*\n', text)
     
     result = []
+    
+    # Check if text contains specific keywords and add a special URL item
+        
     for paragraph in paragraphs:
         if not paragraph.strip():
             continue
@@ -448,7 +452,10 @@ def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
         for i in range(0, len(sentences), max_sentences):
             chunk = sentences[i:i+max_sentences]
             result.append(' '.join(chunk))
-    
+    if "Techcombank" in text or "6021111999" in text:
+        print("Found bank information, adding QR code URL")
+        result.append("@https://drive.google.com/file/d/1tzbJNfwulNE7KK1hgeW3kCGx8RO0hs-o/view?usp=sharing")
+
     # If we ended up with nothing, use fallback chunking
     if not result:
         print("No sentences detected, using fallback chunking")
@@ -468,6 +475,11 @@ def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
             
             chunks.append(text[current_pos:end_pos].strip())
             current_pos = end_pos
+        
+        # Check for keywords in fallback mode
+        if "Techcombank" in text or "6021111999" in text:
+            print("Found bank information in fallback mode, adding QR code URL")
+            chunks.append("@https://drive.google.com/file/d/1tzbJNfwulNE7KK1hgeW3kCGx8RO0hs-o/view?usp=sharing")
         
         return chunks
         
@@ -687,6 +699,7 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
             
             # Split the full response into smaller message chunks
             message_chunks = split_into_messages(full_response, max_sentences=2)
+
             print(f"✂️ Split response into {len(message_chunks)} message chunks")
             
             # Track usage for the organization
@@ -992,9 +1005,19 @@ def send_message_chunks(message_chunks: List[str], context: Dict[str, Any], conv
     # Send each chunk as a separate message with a small delay
     for i, chunk in enumerate(message_chunks):
         print(f"📤 Sending chunk {i+1}/{len(message_chunks)}: {chunk}")
+
+        success = False
+        response_data = None
         
-        # Send the message via Chatwoot
-        success, response_data = send_message(context['conversation_id'], chunk)
+        # Check if the chunk starts with @ which indicates it's an attachment URL
+        if chunk.startswith('@'):
+            attachment_url = chunk[1:]  # Remove the @ prefix
+            print(f"📎 Detected attachment URL: {attachment_url}")
+            # Send as attachment with empty message
+            success, response_data = send_message(context['conversation_id'], "", attachment_url)
+        else:
+            # Send as regular text message
+            success, response_data = send_message(context['conversation_id'], chunk)
         
         if success:
             # Only store the message ourselves if we have the platform_message_id
