@@ -73,7 +73,8 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
         print("❌ Error: Missing conversation ID")
         return False, None
         
-    if not message or not message.strip():
+    # Allow empty messages if there's an attachment URL
+    if (not message or not message.strip()) and not attachment_url:
         print("❌ Error: Empty message")
         return False, None
         
