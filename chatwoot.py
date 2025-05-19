@@ -95,9 +95,7 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
     data = {
         'content': message,
         'message_type': 'outgoing',
-        'private': False,
-        'content_type': 'text',
-        'content_attributes': {}
+        'private': False
     }
     
     start_time = time.time()
@@ -111,53 +109,77 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
                 if response.status_code != 200:
                     print(f"❌ Failed to download attachment: Status code {response.status_code}")
                     return False, None
-                    
-                # Save the image temporarily with a unique name
-                temp_filename = f'temp_attachment_{int(time.time())}.dat'
-                content_type = response.headers.get('Content-Type', 'application/octet-stream')
-                extension = get_file_extension(content_type)
                 
-                if extension:
-                    temp_filename = f'temp_attachment_{int(time.time())}.{extension}'
-                
-                with open(temp_filename, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"📋 Preparing multipart form data with attachment ({len(response.content)} bytes)")
-                # Prepare multipart form data
-                files = {
-                    'attachments[]': (os.path.basename(temp_filename), open(temp_filename, 'rb'), content_type)
-                }
-                
-                # Add content type based on attachment
-                if content_type.startswith('image/'):
-                    data['content_type'] = 'image'
-                elif content_type.startswith('video/'):
-                    data['content_type'] = 'video'
-                elif content_type.startswith('audio/'):
-                    data['content_type'] = 'audio'
+                # Check file size (<= 40MB)
+                file_size = len(response.content)
+                max_size = 40 * 1024 * 1024  # 40MB
+                if file_size > max_size:
+                    print(f"❌ Attachment too large: {file_size} bytes (max 40MB). Sending as link instead.")
+                    # Fallback: send the URL as a message
+                    data = {
+                        'content': attachment_url,
+                        'message_type': 'outgoing',
+                        'private': False
+                    }
+                    url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=data,
+                        timeout=10
+                    )
                 else:
-                    data['content_type'] = 'file'
-                
-                # Send the request with multipart form data
-                url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
-                print(f"🔄 Sending request to: {url}")
-                
-                response = requests.post(
-                    url,
-                    headers={'api_access_token': CHATWOOT_API_TOKEN},  # Content-Type is set automatically with files
-                    data=data,
-                    files=files,
-                    timeout=15
-                )
-                
-                # Clean up the temporary file
-                try:
-                    os.remove(temp_filename)
-                    print(f"🗑️ Deleted temporary file {temp_filename}")
-                except Exception as e:
-                    print(f"⚠️ Warning: Failed to delete temporary file: {str(e)}")
-                
+                    # Save the image temporarily with a unique name
+                    temp_filename = f'temp_attachment_{int(time.time())}.dat'
+                    content_type = response.headers.get('Content-Type', 'application/octet-stream')
+                    extension = get_file_extension(content_type)
+                    
+                    # Only allow supported image types
+                    supported_types = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp']
+                    if extension and extension.lower() in supported_types:
+                        temp_filename = f'temp_attachment_{int(time.time())}.{extension}'
+                        with open(temp_filename, 'wb') as f:
+                            f.write(response.content)
+                        print(f"📋 Preparing multipart form data with attachment ({file_size} bytes)")
+                        # Prepare multipart form data
+                        files = {
+                            'attachments[]': (os.path.basename(temp_filename), open(temp_filename, 'rb'), content_type)
+                        }
+                        # Send the request with multipart form data
+                        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+                        print(f"🔄 Sending request to: {url}")
+                        response = requests.post(
+                            url,
+                            headers={'api_access_token': CHATWOOT_API_TOKEN},  # Content-Type is set automatically with files
+                            data={
+                                'content': message,
+                                'message_type': 'outgoing',
+                                'private': False
+                            },
+                            files=files,
+                            timeout=15
+                        )
+                        # Clean up the temporary file
+                        try:
+                            os.remove(temp_filename)
+                            print(f"🗑️ Deleted temporary file {temp_filename}")
+                        except Exception as e:
+                            print(f"⚠️ Warning: Failed to delete temporary file: {str(e)}")
+                    else:
+                        print(f"❌ Unsupported file type: {content_type} ({extension}). Sending as link instead.")
+                        # Fallback: send the URL as a message
+                        data = {
+                            'content': attachment_url,
+                            'message_type': 'outgoing',
+                            'private': False
+                        }
+                        url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
+                        response = requests.post(
+                            url,
+                            headers=headers,
+                            json=data,
+                            timeout=10
+                        )
             except requests.RequestException as e:
                 print(f"❌ Error handling attachment: {str(e)}")
                 return False, None
@@ -455,7 +477,7 @@ def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
             result.append(' '.join(chunk))
     if "Techcombank" in text or "6021111999" in text:
         print("Found bank information, adding QR code URL")
-        result.append("@https://drive.google.com/file/d/1tzbJNfwulNE7KK1hgeW3kCGx8RO0hs-o/view?usp=sharing")
+        result.append("@https://drive.google.com/uc?export=download&id=1tzbJNfwulNE7KK1hgeW3kCGx8RO0hs-o")
 
     # If we ended up with nothing, use fallback chunking
     if not result:
@@ -476,11 +498,6 @@ def split_into_messages(text: str, max_sentences: int = 2) -> List[str]:
             
             chunks.append(text[current_pos:end_pos].strip())
             current_pos = end_pos
-        
-        # Check for keywords in fallback mode
-        if "Techcombank" in text or "6021111999" in text:
-            print("Found bank information in fallback mode, adding QR code URL")
-            chunks.append("@https://drive.google.com/file/d/1tzbJNfwulNE7KK1hgeW3kCGx8RO0hs-o/view?usp=sharing")
         
         return chunks
         
