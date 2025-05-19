@@ -26,9 +26,10 @@ class State(TypedDict):
     stream_events: list  # Add stream_events for real-time events
 
 mc = MCWithTools(user_id="thefusionlab")  # Use MCWithTools instead of MC
-graph_builder = StateGraph(State)
+
 
 async def mc_node(state: State, config=None):
+    logger.info("Entering mc_node with state: %s", state)
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     graph_version_id = config.get("configurable", {}).get("graph_version_id", "") if config else ""
@@ -123,12 +124,16 @@ async def mc_node(state: State, config=None):
     logger.debug(f"Mc node took {time.time() - start_time:.2f}s")
     return final_state
 
+
+graph_builder = StateGraph(State)
 graph_builder.add_node("mc", mc_node)
-graph_builder.add_edge(START, "mc")
+graph_builder.set_entry_point("mc")
 graph_builder.add_edge("mc", END)
 
 checkpointer = MemorySaver()
 convo_graph = graph_builder.compile(checkpointer=checkpointer)
+logger.info(f"Graph nodes: {convo_graph.nodes}")
+
 
 async def convo_stream(user_input: str = None, user_id: str = None, thread_id: str = None, 
               graph_version_id: str = "", mode: str = "mc", 
@@ -151,7 +156,8 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
     start_time = time.time()
     thread_id = thread_id or f"mc_thread_{int(time.time())}"
     user_id = user_id or "thefusionlab"
-
+    logger.info(f"convo_stream init - Input: '{user_input}', Convo ID: {thread_id}")
+    
     # Load or init state with intent_history
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
     default_state = {
@@ -190,6 +196,7 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
     # Process the state asynchronously
     async def process_state():
         # Invoke the graph with the state
+        logger.info(f"Invoking graph with state: {state}")
         updated_state = await convo_graph.ainvoke(state, config)
         logger.info(f"After ainvoke, keys in state: {list(updated_state.keys())}")
         await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, updated_state, as_node="mc")
