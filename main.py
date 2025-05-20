@@ -13,7 +13,7 @@ nest_asyncio.apply()  # Apply patch to allow nested event loops
 from training_prep import process_document,refine_document
 from training_prep_new import understand_document,save_document_insights, understand_cluster
 #FAISS importing here
-from brain_singleton import init_brain, set_graph_version, load_brain_vectors, is_brain_loaded, get_current_graph_version, get_brain, flick_out, activate_brain_with_version
+from brain_singleton import init_brain, load_brain_vectors, flick_out, activate_brain_with_version
 
 # Then other imports
 from flask import Flask, Response, request, jsonify
@@ -28,12 +28,8 @@ from typing import List, Optional, Dict, Any  # Added List and Optional imports
 from collections import deque
 import threading
 import queue
-
-
 # Keep track of recent webhook requests to detect duplicates
 recent_requests = deque(maxlen=1000)
-
-
 
 from supabase import create_client, Client
 import os
@@ -41,7 +37,6 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from threading import Lock
 from utilities import logger
 from enrich_profile import ProfileEnricher
-
 
 # Import SocketIO functionality from socketio_manager.py
 from socketio_manager import init_socketio
