@@ -12,95 +12,18 @@ from typing import Optional, Union, Any
 from utilities import logger
 import traceback
 
-# Reader-Writer Lock implementation
-class RWLock:
-    """
-    Reader-Writer lock that allows multiple concurrent readers but exclusive writers.
-    This implementation gives preference to writers to prevent writer starvation.
-    """
-    def __init__(self):
-        self._read_ready = threading.Condition(threading.RLock())
-        self._readers = 0
-        self._writers = 0
-        self._writer_waiting = False
-        self._owner = None  # Track the owner thread for write lock
-    
-    def acquire_read(self):
-        """Acquire a read lock. Multiple threads can hold this type of lock."""
-        with self._read_ready:
-            while self._writers > 0 or self._writer_waiting:
-                self._read_ready.wait()
-            self._readers += 1
-    
-    def release_read(self):
-        """Release a read lock."""
-        with self._read_ready:
-            self._readers -= 1
-            if self._readers == 0:
-                self._read_ready.notify_all()
-    
-    def acquire_write(self):
-        """Acquire a write lock. Only one thread can hold this type of lock."""
-        me = threading.current_thread()
-        with self._read_ready:
-            self._writer_waiting = True
-            while self._readers > 0 or self._writers > 0:
-                # If we already own the write lock, this is a recursive acquisition
-                if self._writers > 0 and self._owner == me:
-                    self._writers += 1
-                    self._writer_waiting = False
-                    return
-                self._read_ready.wait()
-            self._writers += 1
-            self._writer_waiting = False
-            self._owner = me
-    
-    def release_write(self):
-        """Release a write lock."""
-        with self._read_ready:
-            self._writers -= 1
-            if self._writers == 0:
-                self._owner = None
-                self._read_ready.notify_all()
-    
-    def __enter__(self):
-        """Context manager support for write lock."""
-        self.acquire_write()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager support for write lock."""
-        self.release_write()
-    
-    class ReadLockContext:
-        """Context manager for read lock."""
-        def __init__(self, rwlock):
-            self.rwlock = rwlock
-            
-        def __enter__(self):
-            self.rwlock.acquire_read()
-            return self
-            
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.rwlock.release_read()
-    
-    def read_lock(self):
-        """Get a context manager for read lock."""
-        return self.ReadLockContext(self)
-
 # Global brain instance - initially None
 _brain_instance = None
 # Flag to track if brain has been loaded with vectors
 _brain_loaded = False
 _brain_graph_version = None
-
-# Replace single lock with reader-writer lock
-_brain_rwlock = RWLock()
+# Use threading.RLock() instead of asyncio.Lock() for proper thread safety
+_brain_lock = threading.RLock()
 _brain_async_lock = asyncio.Lock()  # Keep for async functions
 _last_reset_time = 0
 _reset_in_progress = False
 _pending_reset = False
-_version_check_lock = threading.RLock()  # Keep this lock for version checks
+_version_check_lock = threading.RLock()  # New lock for version checks
 
 # Minimum time between resets (seconds) to prevent rapid resets
 MIN_RESET_INTERVAL = 30
@@ -126,9 +49,7 @@ def init_brain(dim=1536, namespace="", graph_version_ids=None, pinecone_index_na
     """Initialize the global brain instance with the provided parameters."""
     global _brain_instance, _current_config, _brain_graph_version
     
-    # Use write lock for initialization
-    _brain_rwlock.acquire_write()
-    try:
+    with _brain_lock:
         # Update current configuration
         _current_config["dim"] = dim
         _current_config["namespace"] = namespace
@@ -150,8 +71,6 @@ def init_brain(dim=1536, namespace="", graph_version_ids=None, pinecone_index_na
                 logger.info(f"Setting initial brain graph version to {_brain_graph_version}")
                 
         return _brain_instance
-    finally:
-        _brain_rwlock.release_write()
 
 def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
     """
@@ -169,48 +88,28 @@ def get_brain_sync(graph_version_id: Optional[str] = None) -> Any:
         # Import inside function to avoid circular imports
         from active_brain import ActiveBrain
         
-        # First check if we need to initialize brain - requires write access
-        _brain_rwlock.acquire_read()
-        try:
-            brain_exists = _brain_instance is not None
-        finally:
-            _brain_rwlock.release_read()
+        with _brain_lock:
+            # Create brain if it doesn't exist yet
+            if _brain_instance is None:
+                logger.info("Creating new brain instance (sync)")
+                _brain_instance = ActiveBrain(pinecone_index_name="9well")
+                _brain_graph_version = None
             
-        if not brain_exists:
-            # Need write lock to initialize
-            _brain_rwlock.acquire_write()
-            try:
-                if _brain_instance is None:
-                    logger.info("Creating new brain instance (sync)")
-                    _brain_instance = ActiveBrain(pinecone_index_name="9well")
-                    _brain_graph_version = None
-            finally:
-                _brain_rwlock.release_write()
-            
-        # Check if version change is needed (read access)
-        need_reset = False
-        with _version_check_lock:
-            if graph_version_id and _brain_graph_version != graph_version_id:
-                logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
-                
-                if not _reset_in_progress and not _pending_reset:
-                    need_reset = True
-                else:
-                    logger.warning("Reset in progress, sync brain access will return current version")
-        
-        # Perform reset if needed (write access)
-        if need_reset:
-            logger.warning("Starting synchronous brain reset due to version mismatch")
-            reset_brain()
+            # Check if we need to reset and load a specific graph version
             with _version_check_lock:
-                _brain_graph_version = graph_version_id
+                if graph_version_id and _brain_graph_version != graph_version_id:
+                    logger.info(f"Brain version mismatch: current={_brain_graph_version}, requested={graph_version_id}")
+                    
+                    if not _reset_in_progress and not _pending_reset:
+                        logger.warning("Starting synchronous brain reset due to version mismatch")
+                        # We have to perform a synchronous reset since we're in a sync context
+                        reset_brain()
+                        # Set the graph version so it's correct for subsequent checks
+                        _brain_graph_version = graph_version_id
+                    else:
+                        logger.warning("Reset in progress, sync brain access will return current version")
             
-        # Return brain instance (read access)
-        _brain_rwlock.acquire_read()
-        try:
             return _brain_instance
-        finally:
-            _brain_rwlock.release_read()
     except Exception as e:
         logger.error(f"Error getting brain (sync): {e}")
         logger.error(traceback.format_exc())
@@ -242,47 +141,32 @@ async def get_brain(graph_version_id: Optional[str] = None) -> Any:
         # Import inside function to avoid circular imports
         from active_brain import ActiveBrain
         
-        # First check if the brain exists - requires read access
-        _brain_rwlock.acquire_read()
-        try:
-            brain_exists = _brain_instance is not None
-        finally:
-            _brain_rwlock.release_read()
+        # Use atomic version check with lock
+        with _brain_lock:
+            # Create brain if it doesn't exist yet
+            if _brain_instance is None:
+                logger.info("Creating new brain instance")
+                _brain_instance = ActiveBrain(pinecone_index_name="9well")
+                _brain_graph_version = None
             
-        if not brain_exists:
-            # Need write lock to initialize
-            _brain_rwlock.acquire_write()
-            try:
-                if _brain_instance is None:
-                    logger.info("Creating new brain instance")
-                    _brain_instance = ActiveBrain(pinecone_index_name="9well")
-                    _brain_graph_version = None
-            finally:
-                _brain_rwlock.release_write()
-        
-        # Check if we need to reset and load a specific graph version
-        with _version_check_lock:
-            current_version = _brain_graph_version  # Cache to avoid race conditions
+            # Check if we need to reset and load a specific graph version
+            with _version_check_lock:
+                current_version = _brain_graph_version  # Cache to avoid race conditions
+                
+                if graph_version_id and current_version != graph_version_id:
+                    logger.info(f"Brain version mismatch: current={current_version}, requested={graph_version_id}")
+                
+                    # Only schedule a reset if one is not already in progress or pending
+                    if not _reset_in_progress and not _pending_reset:
+                        _pending_reset = True
+                        logger.info(f"Scheduling reset for version {graph_version_id}")
+                        
+                        # Perform reset in background to not block the request
+                        asyncio.create_task(reset_brain_and_load_version(graph_version_id))
+                    else:
+                        logger.info(f"Reset already pending/in progress, will load version {graph_version_id} when complete")
             
-            if graph_version_id and current_version != graph_version_id:
-                logger.info(f"Brain version mismatch: current={current_version}, requested={graph_version_id}")
-            
-                # Only schedule a reset if one is not already in progress or pending
-                if not _reset_in_progress and not _pending_reset:
-                    _pending_reset = True
-                    logger.info(f"Scheduling reset for version {graph_version_id}")
-                    
-                    # Perform reset in background to not block the request
-                    asyncio.create_task(reset_brain_and_load_version(graph_version_id))
-                else:
-                    logger.info(f"Reset already pending/in progress, will load version {graph_version_id} when complete")
-        
-        # Return the brain instance - requires read access
-        _brain_rwlock.acquire_read()
-        try:
             return _brain_instance
-        finally:
-            _brain_rwlock.release_read()
     except Exception as e:
         logger.error(f"Error getting brain: {e}")
         logger.error(traceback.format_exc())
@@ -315,95 +199,93 @@ async def reset_brain_and_load_version(graph_version_id: str):
             logger.info(f"Reset attempted too soon, waiting {wait_time:.2f} seconds")
             await asyncio.sleep(wait_time)
         
-        # Use write lock for reset operations
-        _brain_rwlock.acquire_write()
-        try:
-            # First check if the requested graph version exists before resetting
-            # This prevents clearing vectors when version doesn't exist
-            temp_brain = ActiveBrain(pinecone_index_name=_current_config.get("pinecone_index_name", "9well"))
-            version_exists = await temp_brain.check_graph_version_exists(graph_version_id)
-            
-            if not version_exists:
-                logger.error(f"Requested graph version {graph_version_id} does not exist. Aborting reset to preserve existing vectors.")
-                # If current brain has vectors, keep using it instead of resetting
-                if _brain_instance and hasattr(_brain_instance, 'faiss_index') and _brain_instance.faiss_index.ntotal > 0:
-                    current_vector_count = _brain_instance.faiss_index.ntotal
-                    logger.info(f"Keeping existing brain with {current_vector_count} vectors instead of resetting")
-                    return
-                else:
-                    logger.warning(f"No valid graph version found and no existing vectors. Will attempt to use default configuration.")
-            
-            # Reset the brain
-            logger.info(f"Resetting brain instance (PID: {os.getpid()})")
-            
-            # Log existing state before reset
-            vector_count = 0
-            if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
-                vector_count = _brain_instance.faiss_index.ntotal
-                logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
-            
-            try:
-                # Set graph version BEFORE loading vectors
-                with _version_check_lock:
-                    _brain_graph_version = graph_version_id
-                    logger.info(f"Set graph version to {graph_version_id}")
-                    
-                    # Load vectors for this graph version
-                    if _brain_instance:
-                        logger.info(f"Starting brain vector loading process [time: {time.time()}]")
+        # First check if the requested graph version exists before resetting
+        # This prevents clearing vectors when version doesn't exist
+        from active_brain import ActiveBrain  # Import here to avoid circular imports
+        temp_brain = ActiveBrain(pinecone_index_name=_current_config.get("pinecone_index_name", "9well"))
+        version_exists = await temp_brain.check_graph_version_exists(graph_version_id)
+        
+        if not version_exists:
+            logger.error(f"Requested graph version {graph_version_id} does not exist. Aborting reset to preserve existing vectors.")
+            # If current brain has vectors, keep using it instead of resetting
+            if _brain_instance and hasattr(_brain_instance, 'faiss_index') and _brain_instance.faiss_index.ntotal > 0:
+                current_vector_count = _brain_instance.faiss_index.ntotal
+                logger.info(f"Keeping existing brain with {current_vector_count} vectors instead of resetting")
+                return
+            else:
+                logger.warning(f"No valid graph version found and no existing vectors. Will attempt to use default configuration.")
+        
+        # Acquire lock to prevent concurrent modification - use both threading and asyncio locks
+        with _brain_lock:
+            async with _brain_async_lock:
+                logger.info(f"Resetting brain instance (PID: {os.getpid()})")
+                
+                # Log existing state before reset
+                vector_count = 0
+                if _brain_instance and hasattr(_brain_instance, 'faiss_index'):
+                    vector_count = _brain_instance.faiss_index.ntotal
+                    logger.info(f"Existing FAISS index has {vector_count} vectors before reset")
+                
+                try:
+                    # Set graph version BEFORE loading vectors
+                    with _version_check_lock:
+                        _brain_graph_version = graph_version_id
+                        logger.info(f"Set graph version to {graph_version_id}")
                         
-                        # Don't force clear vectors if the version doesn't exist
-                        # Use the version_exists flag to determine if we should force clear
-                        load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id, force_clear_on_failure=False)
-                        
-                        # Await the result if it's a coroutine
-                        if asyncio.iscoroutine(load_result):
-                            await load_result
-                        
-                        # Update last reset time
-                        _last_reset_time = time.time()
-                        
-                        # Verify vectors were loaded
-                        if hasattr(_brain_instance, 'faiss_index'):
-                            new_vector_count = _brain_instance.faiss_index.ntotal
-                            logger.info(f"Brain reset complete. FAISS index now has {new_vector_count} vectors")
+                        # Load vectors for this graph version
+                        if _brain_instance:
+                            logger.info(f"Starting brain vector loading process [time: {time.time()}]")
                             
-                            # If vectors were lost, log a warning
-                            if vector_count > 0 and new_vector_count == 0:
-                                logger.error(f"CRITICAL: Lost all vectors during reset! Previous: {vector_count}, Current: {new_vector_count}")
-                        
-                        logger.info("Brain instance reset complete")
-                    else:
-                        logger.error("Cannot load vectors - brain instance is None")
-                        
-            except Exception as load_error:
-                logger.error(f"Error loading vectors: {load_error}")
-                logger.error(traceback.format_exc())
-        finally:
-            _brain_rwlock.release_write()
+                            # Don't force clear vectors if the version doesn't exist
+                            # Use the version_exists flag to determine if we should force clear
+                            load_result = _brain_instance.load_all_vectors_from_graph_version(graph_version_id, force_clear_on_failure=False)
+                            
+                            # Await the result if it's a coroutine
+                            if asyncio.iscoroutine(load_result):
+                                await load_result
+                            
+                            # Update last reset time
+                            _last_reset_time = time.time()
+                            
+                            # Verify vectors were loaded
+                            if hasattr(_brain_instance, 'faiss_index'):
+                                new_vector_count = _brain_instance.faiss_index.ntotal
+                                logger.info(f"Brain reset complete. FAISS index now has {new_vector_count} vectors")
+                                
+                                # If vectors were lost, log a warning
+                                if vector_count > 0 and new_vector_count == 0:
+                                    logger.error(f"CRITICAL: Lost all vectors during reset! Previous: {vector_count}, Current: {new_vector_count}")
+                            
+                            logger.info("Brain instance reset complete")
+                        else:
+                            logger.error("Cannot load vectors - brain instance is None")
+                            
+                except Exception as load_error:
+                    logger.error(f"Error loading vectors: {load_error}")
+                    logger.error(traceback.format_exc())
     except Exception as e:
         logger.error(f"Error during brain reset: {e}")
         logger.error(traceback.format_exc())
     finally:
+        # Clear reset-in-progress flag
         with _version_check_lock:
             _reset_in_progress = False
-            _last_reset_time = time.time()
 
 def reset_brain():
     """Synchronous function to reset the brain singleton"""
     global _brain_instance, _brain_graph_version, _last_reset_time, _pending_reset, _reset_in_progress
     
-    # Use write lock for reset
-    _brain_rwlock.acquire_write()
     try:
-        with _version_check_lock:
-            # Set flags to prevent concurrent resets
-            if _reset_in_progress:
-                logger.info(f"Reset already in progress, skipping redundant sync reset")
-                return
-            _reset_in_progress = True
-            _pending_reset = False
-        
+        # Use lock to ensure thread safety
+        with _brain_lock:
+            with _version_check_lock:
+                # Set flags to prevent concurrent resets
+                if _reset_in_progress:
+                    logger.info(f"Reset already in progress, skipping redundant sync reset")
+                    return
+                _reset_in_progress = True
+                _pending_reset = False
+            
         logger.info(f"Resetting brain instance (PID: {os.getpid()})")
         
         # Log existing state before reset
@@ -427,12 +309,13 @@ def reset_brain():
         # Clear reset-in-progress flag
         with _version_check_lock:
             _reset_in_progress = False
-        _brain_rwlock.release_write()
 
 def get_current_graph_version() -> Optional[str]:
-    """Get the currently loaded graph version ID"""
-    # Use read lock to get the version
-    with _brain_rwlock.read_lock():
+    """Get the current graph version ID"""
+    global _brain_graph_version
+    
+    # Use lock to ensure thread safety during read
+    with _version_check_lock:
         return _brain_graph_version
 
 def set_graph_version(graph_version_id):
@@ -447,9 +330,8 @@ def set_graph_version(graph_version_id):
     """
     global _brain_instance, _current_config, _brain_loaded, _brain_graph_version
     
-    # Use write lock to ensure thread safety
-    _brain_rwlock.acquire_write()
-    try:
+    # Use locks to ensure thread safety
+    with _brain_lock:
         with _version_check_lock:
             # Check if we're already using this graph version
             if _brain_graph_version == graph_version_id:
@@ -464,18 +346,15 @@ def set_graph_version(graph_version_id):
             # Explicitly set the graph version after reset
             _brain_graph_version = graph_version_id
             logger.info(f"Graph version explicitly set to {graph_version_id}")
-        
-        return True
-    finally:
-        _brain_rwlock.release_write()
+    
+    return True
 
 def is_brain_loaded():
     """Check if the brain has been loaded with vectors."""
     global _brain_loaded, _brain_instance
     
-    # Use read lock to ensure thread safety
-    _brain_rwlock.acquire_read()
-    try:
+    # Use lock to ensure thread safety
+    with _brain_lock:
         # If we have a flag indicating it's loaded, first check that
         if _brain_loaded:
             return True
@@ -492,111 +371,52 @@ def is_brain_loaded():
             return True
             
         return False
-    finally:
-        _brain_rwlock.release_read()
 
-async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
+async def activate_brain_with_version(graph_version_id):
     """
-    Return vectors from brain without printing results.
+    Activate the brain with a specific graph version ID.
+    This performs a full reset and reload of vectors for the specified graph version.
     
     Args:
-        input_text: Text to search for similar vectors
-        graph_version_id: Optional graph version to use
+        graph_version_id: The graph version ID to activate
         
     Returns:
-        A dictionary with query results, ready for JSON serialization
+        dict: A dictionary with activation results including success status and stats
     """
-    # Thread-safe check for graph version
+    global _brain_instance, _brain_loaded, _brain_graph_version
+    
+    # Set the graph version ID with thread safety
     with _version_check_lock:
-        current_version = _brain_graph_version
-        version_change_requested = graph_version_id and graph_version_id != current_version
+        # Reset flags first
+        _reset_in_progress = False
+        _pending_reset = False
+        
+        # Force version to None to ensure reset triggers properly
+        _brain_graph_version = None
     
-    # Get the brain instance - only requires read access
-    brain_coroutine = get_brain()
-    import asyncio
-    brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    # Always perform a full reset first
+    reset_brain()
     
-    # If a new graph version is requested, verify it exists before setting
-    if version_change_requested and brain:
-        # Check if the requested version exists before trying to use it
-        version_exists = await brain.check_graph_version_exists(graph_version_id)
-        if not version_exists:
-            logger.warning(f"Requested graph version {graph_version_id} does not exist. Using current version {current_version} instead.")
-            # Use the current version instead of attempting to switch
-            graph_version_id = current_version
-        else:
-            # Set the new graph version which will reset the brain if needed
-            set_graph_version(graph_version_id)
-            # Update brain instance after version change
-            brain_coroutine = get_brain(graph_version_id)
-            brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    # Then load the vectors
+    success = await load_brain_vectors(graph_version_id, force_delete=True)
     
-    # Ensure brain is loaded before querying - only requires read access
-    with _brain_rwlock.read_lock():
-        brain_loaded = _brain_loaded
-        has_index = brain and hasattr(brain, 'faiss_index')
-        vectors_loaded = has_index and brain.faiss_index.ntotal > 0
-    
-    if not brain_loaded or not has_index or not vectors_loaded:
-        # Try to load the brain
-        with _version_check_lock:
-            current_version = _brain_graph_version
+    if success:
+        # Get updated brain instance
+        import asyncio
+        brain_coroutine = get_brain(graph_version_id)
+        brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
         
-        # Don't force delete existing vectors if we're loading a new version
-        success = await load_brain_vectors(current_version, force_delete=False)
-        if not success:
-            return {
-                "error": "Failed to load brain",
-                "query": input_text,
-                "graph_version_id": get_current_graph_version()
-            }
-    
-    # Now perform the query
-    try:
-        # Check if the method returns a coroutine
-        result_or_coroutine = brain.get_similar_vectors_by_text(input_text, top_k=10)
-        
-        # Handle coroutine if necessary
-        results = await result_or_coroutine if asyncio.iscoroutine(result_or_coroutine) else result_or_coroutine
-        
-        # Convert results to a serializable format
-        formatted_results = []
-        for vector_id, vector, metadata, similarity in results:
-            formatted_results.append({
-                "vector_id": vector_id,
-                "similarity": similarity,
-                "metadata": metadata,
-                "vector_preview": vector[:10] if hasattr(vector, '__getitem__') else []
-            })
-        
-        with _version_check_lock:
-            current_version = _brain_graph_version
-        
-        # Get vector count - only requires read access 
-        with _brain_rwlock.read_lock():
-            vector_count = brain.faiss_index.ntotal if hasattr(brain, 'faiss_index') else 0
-        
-        response = {
-            "query": input_text,
-            "graph_version_id": current_version,
-            "vector_count": vector_count,
-            "results": formatted_results
-        }
-        
-        # Make sure everything is JSON serializable
-        return json_serialize_for_brain(response)
-    except Exception as e:
-        import traceback
-        print(f"Error in flick_out: {e}")
-        print(traceback.format_exc())
-        
-        with _version_check_lock:
-            current_version = _brain_graph_version
-            
+        # Return stats for verification
         return {
-            "error": f"Error processing query: {str(e)}",
-            "query": input_text,
-            "graph_version_id": current_version
+            "success": True,
+            "graph_version_id": get_current_graph_version(),
+            "loaded": is_brain_loaded(),
+            "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
+        }
+    else:
+        return {
+            "success": False,
+            "error": "Failed to load brain vectors"
         }
 
 def try_load_from_disk():
@@ -1213,51 +1033,107 @@ def json_serialize_for_brain(obj):
         json.dumps(obj)
         return obj
     except (TypeError, OverflowError):
-        return str(obj)
+        return str(obj) 
 
-async def activate_brain_with_version(graph_version_id):
+async def flick_out(input_text: str = "", graph_version_id: str = "") -> dict:
     """
-    Activate the brain with a specific graph version ID.
-    This performs a full reset and reload of vectors for the specified graph version.
+    Return vectors from brain without printing results.
     
     Args:
-        graph_version_id: The graph version ID to activate
+        input_text: Text to search for similar vectors
+        graph_version_id: Optional graph version to use
         
     Returns:
-        dict: A dictionary with activation results including success status and stats
+        A dictionary with query results, ready for JSON serialization
     """
-    global _brain_instance, _brain_loaded, _brain_graph_version
-    
-    # Set the graph version ID with thread safety
+    # Thread-safe check for graph version
     with _version_check_lock:
-        # Reset flags first
-        _reset_in_progress = False
-        _pending_reset = False
+        current_version = _brain_graph_version
+        version_change_requested = graph_version_id and graph_version_id != current_version
+    
+    # Get the brain instance first
+    brain_coroutine = get_brain()
+    import asyncio
+    brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    
+    # If a new graph version is requested, verify it exists before setting
+    if version_change_requested and brain:
+        # Check if the requested version exists before trying to use it
+        version_exists = await brain.check_graph_version_exists(graph_version_id)
+        if not version_exists:
+            logger.warning(f"Requested graph version {graph_version_id} does not exist. Using current version {current_version} instead.")
+            # Use the current version instead of attempting to switch
+            graph_version_id = current_version
+        else:
+            # Set the new graph version which will reset the brain if needed
+            set_graph_version(graph_version_id)
+            # Update brain instance after version change
+            brain_coroutine = get_brain(graph_version_id)
+            brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    
+    # Ensure brain is loaded before querying
+    with _brain_lock:
+        brain_loaded = is_brain_loaded()
+        has_index = brain and hasattr(brain, 'faiss_index')
+        vectors_loaded = has_index and brain.faiss_index.ntotal > 0
+    
+    if not brain_loaded or not has_index or not vectors_loaded:
+        # Try to load the brain
+        with _version_check_lock:
+            current_version = _brain_graph_version
         
-        # Force version to None to ensure reset triggers properly
-        _brain_graph_version = None
+        # Don't force delete existing vectors if we're loading a new version
+        success = await load_brain_vectors(current_version, force_delete=False)
+        if not success:
+            return {
+                "error": "Failed to load brain",
+                "query": input_text,
+                "graph_version_id": get_current_graph_version()
+            }
     
-    # Always perform a full reset first
-    reset_brain()
-    
-    # Then load the vectors
-    success = await load_brain_vectors(graph_version_id, force_delete=True)
-    
-    if success:
-        # Get updated brain instance
-        import asyncio
-        brain_coroutine = get_brain(graph_version_id)
-        brain = await brain_coroutine if asyncio.iscoroutine(brain_coroutine) else brain_coroutine
+    # Now perform the query
+    try:
+        # Check if the method returns a coroutine
+        result_or_coroutine = brain.get_similar_vectors_by_text(input_text, top_k=10)
         
-        # Return stats for verification
-        return {
-            "success": True,
-            "graph_version_id": get_current_graph_version(),
-            "loaded": is_brain_loaded(),
-            "vector_count": brain.faiss_index.ntotal if (brain and hasattr(brain, 'faiss_index')) else 0
+        # Handle coroutine if necessary
+        results = await result_or_coroutine if asyncio.iscoroutine(result_or_coroutine) else result_or_coroutine
+        
+        # Convert results to a serializable format
+        formatted_results = []
+        for vector_id, vector, metadata, similarity in results:
+            formatted_results.append({
+                "vector_id": vector_id,
+                "similarity": similarity,
+                "metadata": metadata,
+                "vector_preview": vector[:10] if hasattr(vector, '__getitem__') else []
+            })
+        
+        with _version_check_lock:
+            current_version = _brain_graph_version
+        
+        with _brain_lock:
+            vector_count = brain.faiss_index.ntotal if hasattr(brain, 'faiss_index') else 0
+        
+        response = {
+            "query": input_text,
+            "graph_version_id": current_version,
+            "vector_count": vector_count,
+            "results": formatted_results
         }
-    else:
+        
+        # Make sure everything is JSON serializable
+        return json_serialize_for_brain(response)
+    except Exception as e:
+        import traceback
+        print(f"Error in flick_out: {e}")
+        print(traceback.format_exc())
+        
+        with _version_check_lock:
+            current_version = _brain_graph_version
+            
         return {
-            "success": False,
-            "error": "Failed to load brain vectors"
+            "error": f"Error processing query: {str(e)}",
+            "query": input_text,
+            "graph_version_id": current_version
         } 
