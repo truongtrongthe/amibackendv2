@@ -57,6 +57,7 @@ class CoTProcessor:
         # Initialize profiling_skills with empty dict, will be loaded asynchronously
         self.profiling_skills = {"knowledge_context": "Loading...", "metadata": {}}
         self.ai_business_objectives = {"knowledge_context": "Loading...", "metadata": {}}
+        self.communication_skills = {"knowledge_context": "Loading...", "metadata": {}}
 
     async def initialize(self, graph_version_id=None):
         """Initialize the processor asynchronously"""
@@ -65,22 +66,17 @@ class CoTProcessor:
         logger.info(f"Initializing CoTProcessor with graph_version_id: {self.graph_version_id}")
         self.profiling_skills = await self._load_profiling_skills()
         self.ai_business_objectives = await self._load_business_objectives_awareness()
+        self.communication_skills = await self._load_communication_skills()
         return self
 
     async def _load_profiling_skills(self) -> Dict[str, Any]:
         """Load knowledge base concurrently using fetch_knowledge."""
         logger.info(f"Loading knowledge base with graph_version_id: {self.graph_version_id}")
         queries = [
-            "how to classify user",
-            "how to build user profile",
-            "what does user profile has",
-            "how to analyze user profile",
-            "how to communicate with user",
             "Cách phân nhóm người dùng",
             "Cách xây dựng hồ sơ người dùng",
             "Cách phân tích hồ sơ người dùng",
-            "Cần có những gì trong hồ sơ người dùng",
-            "Cách giao tiếp với người dùng"
+            "Cần có những gì trong hồ sơ người dùng"
         ]
         
         try:
@@ -98,9 +94,40 @@ class CoTProcessor:
                         profiling_skills[query] = json.loads(result) if isinstance(result, str) else result
                     except json.JSONDecodeError:
                         profiling_skills[query] = {"content": result}
+
             return self._process_profiling_skills(profiling_skills)
+            
         except Exception as e:
             logger.error(f"Error loading profiling skills: {str(e)}")
+            return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
+        
+    async def _load_communication_skills(self) -> Dict[str, Any]:
+        """Load communication knowledge base concurrently using fetch_knowledge."""
+        logger.info(f"Loading communication skills with graph_version_id: {self.graph_version_id}")
+        queries = [
+            
+            "Cách giao tiếp với người dùng",
+            
+        ]
+        
+        try:
+            results = await asyncio.gather(
+                *[fetch_knowledge(query, self.graph_version_id) for query in queries],
+                return_exceptions=True
+            )
+            communication_skills = {}
+            for query, result in zip(queries, results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error fetching knowledge for query {query}: {str(result)}")
+                    communication_skills[query] = {}
+                else:
+                    try:
+                        communication_skills[query] = json.loads(result) if isinstance(result, str) else result
+                    except json.JSONDecodeError:
+                        communication_skills[query] = {"content": result}
+            return self._process_communication_skills(communication_skills)
+        except Exception as e:
+            logger.error(f"Error loading communication skills: {str(e)}")
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
         
     async def _load_business_objectives_awareness(self) -> Dict[str, Any]:
@@ -172,6 +199,48 @@ class CoTProcessor:
             }
         }
     
+    def _process_communication_skills(self, communication_skills: Dict[str, Any]) -> Dict[str, Any]:
+        """Structure the fetched communication knowledge."""
+        # Extract and combine all knowledge entries
+        knowledge_context = []
+        
+        for query, knowledge in communication_skills.items():
+            if isinstance(knowledge, dict):
+                # If it's already a dict, use it directly
+                if "content" in knowledge:
+                    knowledge_context.append(knowledge["content"])
+            elif isinstance(knowledge, str):
+                # If it's a string, try to parse it
+                try:
+                    parsed = json.loads(knowledge)
+                    if isinstance(parsed, dict) and "content" in parsed:
+                        knowledge_context.append(parsed["content"])
+                except json.JSONDecodeError:
+                    # If not JSON, use the string directly
+                    knowledge_context.append(knowledge)
+
+        # Clean up the knowledge context
+        cleaned_context = []
+        for entry in knowledge_context:
+            # Remove excessive newlines and spaces
+            cleaned = re.sub(r'\n{3,}', '\n\n', entry)
+            cleaned = re.sub(r' +', ' ', cleaned)
+            cleaned = cleaned.strip()
+            if cleaned:
+                cleaned_context.append(cleaned)
+
+        # Combine all knowledge into a single context
+        full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
+        
+        return {
+            "knowledge_context": full_knowledge,
+            "metadata": {
+                "source_queries": list(communication_skills.keys()),
+                "entry_count": len(cleaned_context),
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+    
     def _process_business_objectives_knowledge(self, business_objectives: Dict[str, Any]) -> Dict[str, Any]:
         """Structure the fetched knowledge."""
         # Extract and combine all knowledge entries
@@ -221,10 +290,15 @@ class CoTProcessor:
         """
         logger.info(f"Processing message from user {user_id}")
         try:
-            # Ensure profiling skills are loaded
+            # Ensure profiling skills and communication skills are loaded
             if "knowledge_context" in self.profiling_skills and self.profiling_skills["knowledge_context"] == "Loading...":
                 logger.info("Profiling skills not loaded yet, loading now...")
                 self.profiling_skills = await self._load_profiling_skills()
+            
+            # Ensure communication skills are loaded
+            if "knowledge_context" in self.communication_skills and self.communication_skills["knowledge_context"] == "Loading...":
+                logger.info("Communication skills not loaded yet, loading now...")
+                self.communication_skills = await self._load_communication_skills()
             
             # Emit initial analysis event
             if thread_id:
@@ -891,8 +965,11 @@ class CoTProcessor:
                     else:
                         temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
         
+        # Get communication skills for use in prompt
+        communication_knowledge = self.communication_skills.get("knowledge_context", "")
+        
         # Build prompt for LLM to generate response
-        prompt = f"""Generate a response to the user that STRICTLY FOLLOWS the action plan:
+        prompt = f"""Generate a response to the user that STRICTLY FOLLOWS the action plan and communication guidelines:
 
         CURRENT MESSAGE: {message}
         CONVERSATION: {conversation_context}
@@ -902,6 +979,7 @@ class CoTProcessor:
         ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
         USER CONTEXT: Classification={user_profile.classification}, Business Goal={user_profile.business_goal}
         ADDITIONAL INFO: {additional_knowledge}
+        COMMUNICATION KNOWLEDGE: {communication_knowledge}
 
         STRICT EXECUTION REQUIREMENTS:
         1. ONLY implement the actions listed in the ACTION PLAN - nothing more, nothing less
@@ -909,6 +987,7 @@ class CoTProcessor:
         3. DO NOT mention or suggest Facebook, messengers, or any external contacts unless explicitly in the plan
         4. Follow the exact priority order of the actions as they appear in the plan
         5. Use the same language as the user (Vietnamese/English/etc.) throughout
+        6. Apply appropriate communication techniques from the COMMUNICATION KNOWLEDGE
 
         FORMAT GUIDELINES:
         • Be concise and professional
@@ -916,9 +995,11 @@ class CoTProcessor:
         • Use appropriate pronouns (e.g., in Vietnamese: Anh/Chị/Em) based on detected language
         • Skip formulaic greetings and focus on delivering the actions
         • Adapt to the specific user needs indicated in the analysis
+        • Follow communication patterns appropriate for the user's classification
 
         CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN. Do not suggest connecting with specialists, visiting websites, or using external services unless these are explicitly listed as actions in the plan.
-        """
+        
+        COMMUNICATION STYLE: Apply communication techniques from the COMMUNICATION KNOWLEDGE that match this user's classification and needs."""
 
         try:
             response = await LLM.ainvoke(prompt)
