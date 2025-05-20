@@ -1,6 +1,4 @@
-# SentenceTransformer has to be imported before FAISS
-from training_prep import process_document,refine_document
-from training_prep_new import understand_document,save_document_insights, understand_cluster
+
 
 # Then other imports
 from flask import Flask, Response, request, jsonify, g, copy_current_request_context, current_app, Blueprint
@@ -1326,6 +1324,64 @@ def chatwoot_webhook():
         trace = traceback.format_exc()
         logger.error(f"→ STACK TRACE: {trace}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@api_bp.route('/activate-brain', methods=['POST', 'OPTIONS'])
+def activate_brain():
+    """
+    Activate the brain with a specific graph version ID.
+    This endpoint will load vectors for the specified graph version.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN ACTIVATE BRAIN request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    graph_version_id = data.get("graph_version_id", "")
+    
+    if not graph_version_id:
+        return jsonify({"error": "graph_version_id is required"}), 400
+    
+    try:
+        # Call the centralized activate_brain_with_version function
+        result = run_async_in_thread(activate_brain_with_version, graph_version_id)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END ACTIVATE BRAIN request - total time: {elapsed:.2f}s ===")
+        
+        if result["success"]:
+            return jsonify({
+                "message": "Brain activated successfully", 
+                "graph_version_id": result["graph_version_id"],
+                "loaded": result["loaded"],
+                "elapsed_seconds": elapsed,
+                "worker_id": "",
+                "vector_count": result["vector_count"]
+            }), 200
+        else:
+            return jsonify({"error": result["error"]}), 500
+            
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in activate_brain: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": error_msg}), 500
+
+
+@api_bp.route('/')
+def home():
+    return "Hello, It's me Ami!"
+
+@api_bp.route('/ping', methods=['POST'])
+def ping():
+    return "Pong"
+
+
 
 @api_bp.route('/contact-conversations', methods=['GET', 'OPTIONS'])
 def get_contact_conversations():

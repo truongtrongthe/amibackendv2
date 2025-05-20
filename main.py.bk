@@ -10,13 +10,13 @@ import nest_asyncio
 nest_asyncio.apply()  # Apply patch to allow nested event loops
 
 # SentenceTransformer has to be imported before FAISS
-from training_prep import process_document
-from training_prep_new import understand_document,save_document_insights
+from training_prep import process_document,refine_document
+from training_prep_new import understand_document,save_document_insights, understand_cluster
 #FAISS importing here
-from brain_singleton import init_brain, load_brain_vectors
+from brain_singleton import init_brain, load_brain_vectors, flick_out, activate_brain_with_version
 
 # Then other imports
-from flask import Flask, Response, request, jsonify, stream_with_context
+from flask import Flask, Response, request, jsonify
 import json
 from uuid import UUID, uuid4
 from datetime import datetime
@@ -34,9 +34,9 @@ recent_requests = deque(maxlen=1000)
 from supabase import create_client, Client
 import os
 from flask_socketio import SocketIO, emit, join_room, leave_room
+from threading import Lock
 from utilities import logger
-import traceback
-
+from enrich_profile import ProfileEnricher
 
 # Import SocketIO functionality from socketio_manager.py
 from socketio_manager import init_socketio
@@ -164,157 +164,6 @@ init_brain(
     graph_version_ids=[DEFAULT_GRAPH_VERSION],
     pinecone_index_name=DEFAULT_PINECONE_INDEX
 )
-
-# Add a utility class for processing async requests in threads
-class RequestProcessor:
-    """
-    Utility class to handle async request processing in isolated threads.
-    This provides a cleaner way to manage event loop isolation and thread safety.
-    """
-    
-    @staticmethod
-    def process_in_thread(processor_func, *args, **kwargs):
-        """
-        Process a request in a dedicated thread with complete event loop isolation.
-        
-        Args:
-            processor_func: The async function to run in the isolated thread
-            *args, **kwargs: Arguments to pass to the processor function
-            
-        Returns:
-            Queue: A queue that will receive response items
-        """
-        # Create response queue for communication
-        response_queue = queue.Queue()
-        
-        # Define the thread worker
-        def thread_worker():
-            try:
-                # Create a new event loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                # Create a fully isolated execution environment
-                def isolated_run():
-                    async def async_processor():
-                        try:
-                            # Run the provided processor function
-                            async_gen = processor_func(*args, **kwargs)
-                            
-                            # Process all items from the generator
-                            async for item in async_gen:
-                                response_queue.put(item)
-                                
-                        except Exception as e:
-                            logger.error(f"Error in async processing: {str(e)}")
-                            logger.error(traceback.format_exc())
-                            response_queue.put({"error": f"Processing error: {str(e)}"})
-                        finally:
-                            # Signal end of stream
-                            response_queue.put(None)
-                    
-                    try:
-                        # Run the async processor in this thread's event loop
-                        return loop.run_until_complete(async_processor())
-                    except Exception as e:
-                        logger.error(f"Error in event loop execution: {str(e)}")
-                        logger.error(traceback.format_exc())
-                        response_queue.put({"error": f"Loop error: {str(e)}"})
-                        response_queue.put(None)
-                    finally:
-                        # Clean up the event loop
-                        try:
-                            # Cancel pending tasks
-                            pending = asyncio.all_tasks(loop)
-                            for task in pending:
-                                task.cancel()
-                            
-                            # Wait for tasks to be cancelled
-                            if pending:
-                                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                            
-                            # Close the loop
-                            loop.close()
-                        except Exception as close_err:
-                            logger.error(f"Error closing event loop: {str(close_err)}")
-                
-                # Run the isolated function
-                isolated_run()
-                
-            except Exception as e:
-                logger.error(f"Error in thread execution: {str(e)}")
-                logger.error(traceback.format_exc())
-                response_queue.put({"error": f"Thread error: {str(e)}"})
-                response_queue.put(None)
-        
-        # Start the worker thread
-        threading.Thread(target=thread_worker, daemon=True).start()
-        
-        # Return the queue for the caller to consume
-        return response_queue
-    
-    @staticmethod
-    def stream_response(response_queue, start_time, thread_id=None):
-        """
-        Create a generator function for streaming responses from a queue.
-        
-        Args:
-            response_queue: Queue containing response items
-            start_time: The time when the request started
-            thread_id: Optional thread ID for logging
-            
-        Returns:
-            function: A generator function that yields response items
-        """
-        def generate_response():
-            try:
-                # Yield items as they become available from the worker thread
-                while True:
-                    try:
-                        # Get next item with timeout to allow for checking if client disconnected
-                        item = response_queue.get(timeout=1.0)
-                        if item is None:  # Signal for end of stream
-                            break
-                        
-                        # Pass through the string data directly if it's already formatted
-                        if isinstance(item, str) and item.startswith("data:"):
-                            yield item
-                        else:
-                            # Yield the item as SSE format
-                            yield f"data: {json.dumps(item)}\n\n"
-                        
-                    except queue.Empty:
-                        # No data available yet, check if client is still connected
-                        # Use a safer check that works with eventlet
-                        if request.environ.get('werkzeug.server.shutdown'):
-                            logger.info("Client disconnected, stopping stream")
-                            break
-                        
-                        # Check if the connection is closed (safely)
-                        try:
-                            # See if connection is still alive without causing exceptions
-                            if not request.environ.get('wsgi.input'):
-                                logger.info("Client disconnected (no input), stopping stream")
-                                break
-                        except Exception:
-                            # Any exception here likely means the connection is broken
-                            logger.info("Client disconnected (error checking), stopping stream")
-                            break
-                            
-                        continue  # Continue waiting for data
-                        
-                end_time = datetime.now()
-                elapsed = (end_time - start_time).total_seconds()
-                thread_info = f"for thread {thread_id} " if thread_id else ""
-                logger.info(f"[SESSION_TRACE] === END request {thread_info}- total time: {elapsed:.2f}s ===")
-                
-            except Exception as e:
-                error_msg = f"Error in response generator: {str(e)}"
-                logger.error(error_msg)
-                logger.error(traceback.format_exc())
-                yield f"data: {json.dumps({'error': error_msg})}\n\n"
-        
-        return generate_response
 
 def handle_options():
     """Common OPTIONS handler for all endpoints."""
@@ -495,8 +344,7 @@ def emit_next_action_event(thread_id: str, data: Dict[str, Any]):
 @app.route('/havefun', methods=['POST', 'OPTIONS'])
 def havefun():
     """
-    Handle havefun requests with complete event loop isolation.
-    Each request runs in its own thread with a dedicated event loop using the RequestProcessor.
+    Handle havefun requests using a thread-based approach to avoid Flask/Eventlet event loop conflicts.
     """
     if request.method == 'OPTIONS':
         return handle_options()
@@ -504,100 +352,23 @@ def havefun():
     start_time = datetime.now()
     logger.info(f"[SESSION_TRACE] === BEGIN havefun request at {start_time.isoformat()} ===")
     
-    # Parse request data
     data = request.get_json() or {}
     user_input = data.get("user_input", "")
     user_id = data.get("user_id", "thefusionlab")
     thread_id = data.get("thread_id", "chat_thread")
     graph_version_id = data.get("graph_version_id", "")
-    use_websocket = data.get("use_websocket", False)
-    
-    # Define the processor function that will run in the isolated thread
-    async def process_convo_request():
-        # Import here to avoid circular imports
-        from ami import convo_stream
-        
-        # Set up thread-local lock if needed
-        if thread_id:
-            # Use the thread_locks mechanism defined in this file
-            with thread_locks_lock:
-                if thread_id not in thread_locks:
-                    thread_locks[thread_id] = threading.RLock()
-                thread_lock = thread_locks[thread_id]
-                thread_lock_last_used[thread_id] = time.time()
-            
-            # Try to acquire the lock with timeout
-            acquired = thread_lock.acquire(timeout=60)  # 60-second timeout
-            
-            if not acquired:
-                logger.error(f"Could not acquire lock for thread {thread_id} after 60 seconds")
-                yield {"error": "Server busy. Please try again."}
-                return
-            
-            logger.info(f"Acquired lock for thread {thread_id}")
-        
-        try:
-            # Set up the conversation stream - it's an async generator
-            stream = convo_stream(
-                user_input=user_input,
-                thread_id=thread_id,
-                user_id=user_id,
-                graph_version_id=graph_version_id,
-                use_websocket=use_websocket,
-                thread_id_for_analysis=thread_id
-            )
-            
-            # Process each item
-            async for item in stream:
-                # Yield each item to be processed by the RequestProcessor
-                yield item
-                
-        finally:
-            # Always release the lock when done
-            if thread_id:
-                thread_lock.release()
-                logger.info(f"Released lock for thread {thread_id}")
-    
-    # Process the request in an isolated thread using the utility class
-    response_queue = RequestProcessor.process_in_thread(process_convo_request)
-    
-    # Create a streaming response with our generator
-    response = Response(
-        stream_with_context(RequestProcessor.stream_response(response_queue, start_time, thread_id)()),
-        mimetype='text/event-stream'
-    )
-    response.headers['X-Accel-Buffering'] = 'no'
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
+    use_websocket = data.get("use_websocket", False)  # New flag to enable WebSocket
 
-@app.route('/conversation/learning', methods=['POST', 'OPTIONS'])
-def conversation_learning():
-    """
-    Handle conversation requests using the learning-based conversation system.
-    This endpoint uses tool_learning.py for knowledge similarity checks and active learning.
-    """
-    if request.method == 'OPTIONS':
-        return handle_options()
-    
-    start_time = datetime.now()
-    logger.info(f"[SESSION_TRACE] === BEGIN LEARNING CONVERSATION request at {start_time.isoformat()} ===")
-    
-    data = request.get_json() or {}
-    user_input = data.get("user_input", "")
-    user_id = data.get("user_id", "learner")
-    thread_id = data.get("thread_id", "learning_thread")
-    graph_version_id = data.get("graph_version_id", "")
-    use_websocket = data.get("use_websocket", False)
-    
     # Get or create a lock for this thread_id
+    thread_lock = None
     with thread_locks_lock:
         if thread_id not in thread_locks:
             thread_locks[thread_id] = threading.RLock()
         thread_lock = thread_locks[thread_id]
         thread_lock_last_used[thread_id] = time.time()
     
-    # Update session info if using WebSockets
+    # Update session info if using WebSockets - do this outside the thread lock
+    # to minimize lock contention
     if use_websocket:
         active_session_exists = False
         
@@ -610,74 +381,183 @@ def conversation_learning():
                     ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
                     ws_sessions[sid]['has_pending_request'] = True
     
-    # Define the processor function that will run in the isolated thread
-    async def process_learning_request():
-        # Import directly within the async function to ensure proper event loop isolation
-        from ami import convo_stream_learning
-        
-        # Set up thread-local lock
-        if thread_id:
-            acquired = thread_lock.acquire(timeout=60)  # 60-second timeout
-            
-            if not acquired:
-                logger.error(f"Could not acquire lock for thread {thread_id} after 60 seconds")
-                yield {"error": "Server busy. Please try again."}
-                return
-            
-            logger.info(f"Acquired lock for thread {thread_id}")
-        
-        try:
-            # Prepare stream parameters
-            stream_params = {
-                "user_input": user_input,
-                "user_id": user_id,
-                "thread_id": thread_id,
-                "graph_version_id": graph_version_id,
-                "mode": "learning"
-            }
-            
-            if use_websocket:
-                stream_params["use_websocket"] = True
-                stream_params["thread_id_for_analysis"] = thread_id
-            
-            # Get the stream
-            stream = convo_stream_learning(**stream_params)
-            
-            # Process each item
-            async for item in stream:
-                yield item
-                
-            # Update thread lock last used time
-            with thread_locks_lock:
-                thread_lock_last_used[thread_id] = time.time()
-            
-            # If using WebSockets, update session to indicate request is done
-            if use_websocket:
-                with session_lock:
-                    thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
-                    for sid in thread_sessions:
-                        if 'has_pending_request' in ws_sessions[sid]:
-                            ws_sessions[sid]['has_pending_request'] = False
-                
-        finally:
-            # Always release the lock when done
-            if thread_id:
-                thread_lock.release()
-                logger.info(f"Released lock for thread {thread_id}")
+    # Prepare stream parameters outside the lock
+    stream_params = {
+        "user_input": user_input,
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "graph_version_id": graph_version_id,
+        "mode": "mc"
+    }
     
-    # Process the request in an isolated thread
-    response_queue = RequestProcessor.process_in_thread(process_learning_request)
+    if use_websocket:
+        stream_params["use_websocket"] = True
+        stream_params["thread_id_for_analysis"] = thread_id
+
+    # Function to run the stream processing with proper locking
+    async def process_stream_with_lock():
+        outputs = []
+        # Acquire the thread-specific lock only for the processing part
+        with thread_lock:
+            try:
+                # Import directly here to ensure fresh imports
+                from ami import convo_stream
+                
+                # Define the async process function
+                async def process_stream():
+                    """Process the stream and return all items."""
+                    try:
+                        # Get the stream
+                        stream = convo_stream(**stream_params)
+                        
+                        # Process all the output
+                        async for item in stream:
+                            outputs.append(item)
+                    except Exception as e:
+                        error_msg = f"Error processing stream: {str(e)}"
+                        logger.error(error_msg)
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                    
+                    return True
+                
+                # Run the async function
+                await process_stream()
+                
+                # Update thread lock last used time
+                with thread_locks_lock:
+                    thread_lock_last_used[thread_id] = time.time()
+                
+                # If using WebSockets, update session to indicate request is done
+                if use_websocket:
+                    with session_lock:
+                        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                        for sid in thread_sessions:
+                            if 'has_pending_request' in ws_sessions[sid]:
+                                ws_sessions[sid]['has_pending_request'] = False
+                
+            except Exception as e:
+                error_msg = f"Error in stream processing: {str(e)}"
+                logger.error(error_msg)
+                import traceback
+                logger.error(traceback.format_exc())
+                outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+        
+        return outputs
+    
+    # Create a synchronous response streaming solution that runs the async processing
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Run the async processing with proper locking
+            outputs = run_async_in_thread(process_stream_with_lock)
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+            
+            # Log completion
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            logger.info(f"[SESSION_TRACE] === END havefun request - total time: {elapsed:.2f}s ===")
+            
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
     
     # Create a streaming response with our generator
-    response = Response(
-        stream_with_context(RequestProcessor.stream_response(response_queue, start_time, thread_id)()),
-        mimetype='text/event-stream'
-    )
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
     response.headers['X-Accel-Buffering'] = 'no'
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
+@app.route('/activate-brain', methods=['POST', 'OPTIONS'])
+def activate_brain():
+    """
+    Activate the brain with a specific graph version ID.
+    This endpoint will load vectors for the specified graph version.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN ACTIVATE BRAIN request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    graph_version_id = data.get("graph_version_id", "")
+    
+    if not graph_version_id:
+        return jsonify({"error": "graph_version_id is required"}), 400
+    
+    try:
+        # Call the centralized activate_brain_with_version function
+        result = run_async_in_thread(activate_brain_with_version, graph_version_id)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END ACTIVATE BRAIN request - total time: {elapsed:.2f}s ===")
+        
+        if result["success"]:
+            return jsonify({
+                "message": "Brain activated successfully", 
+                "graph_version_id": result["graph_version_id"],
+                "loaded": result["loaded"],
+                "elapsed_seconds": elapsed,
+                "worker_id": "",
+                "vector_count": result["vector_count"]
+            }), 200
+        else:
+            return jsonify({"error": result["error"]}), 500
+            
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in activate_brain: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": error_msg}), 500
+
+@app.route('/examine', methods=['POST', 'OPTIONS'])
+def examine_a_brain():
+    """
+    Handle examine an active brain requests using a thread-based approach to avoid Flask/Eventlet event loop conflicts.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN EXAMINE request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    
+    if not user_input:
+        return jsonify({"error": "user_input is required"}), 400
+        
+    try:
+        # Use the flick_out function now directly from brain_singleton
+        brain_results = run_async_in_thread(flick_out, user_input)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END EXAMINE request - total time: {elapsed:.2f}s ===")
+        return Response(json.dumps(brain_results), mimetype='application/json'), 200
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in examine_a_brain: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": error_msg}), 500
 
 @app.route('/process-document', methods=['POST', 'OPTIONS'])
 def process_document_endpoint():
@@ -893,6 +773,222 @@ def save_document_insights_endpoint():
             "error": f"Error saving document insights: {str(e)}",
             "error_type": type(e).__name__
         }), 500
+
+@app.route('/')
+def home():
+    return "Hello, It's me Ami!"
+
+@app.route('/ping', methods=['POST'])
+def ping():
+    return "Pong"
+
+@app.route('/understand-cluster', methods=['POST', 'OPTIONS'])
+def understand_cluster_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    # Check for data in JSON format
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Request must be in JSON format"}), 400
+
+    # Validate required fields
+    if 'sentences' not in request.json:
+        return jsonify({"success": False, "error": "Missing 'sentences' field in request body"}), 400
+        
+    sentences = request.json['sentences']
+    
+    # Validate sentences is a list
+    if not isinstance(sentences, list):
+        return jsonify({"success": False, "error": "The 'sentences' field must be a list of strings"}), 400
+        
+    # Validate sentences are not empty
+    if not sentences:
+        return jsonify({"success": False, "error": "The 'sentences' list cannot be empty"}), 400
+        
+    # Validate all sentences are strings
+    if not all(isinstance(s, str) for s in sentences):
+        return jsonify({"success": False, "error": "All items in 'sentences' must be strings"}), 400
+
+    # Log information
+    logger.info(f"Processing {len(sentences)} sentences in understand-cluster endpoint")
+    
+    # Use the thread-based approach to call the async function
+    try:
+        # Run the async understand_cluster function in a separate thread
+        result = run_async_in_thread(understand_cluster, sentences)
+        
+        # Validate result structure
+        if not isinstance(result, dict):
+            logger.error(f"Invalid result type from understand_cluster: {type(result)}")
+            return jsonify({
+                "success": False,
+                "error": "Cluster processing returned invalid data structure",
+                "error_type": "ProcessingError"
+            }), 500
+        
+        # Check for success
+        if result.get("success", False):
+            # Log success statistics
+            insights = result["document_insights"]
+            logger.info(f"Cluster processed successfully: {insights.get('metadata', {}).get('sentence_count', 0)} sentences")
+            
+            # Return the document insights with proper structure
+            return jsonify(result), 200
+        else:
+            error_msg = result.get("error", "Failed to process sentences")
+            error_type = result.get("error_type", "UnknownError")
+            logger.error(f"Cluster processing failed: {error_type}: {error_msg}")
+            return jsonify({
+                "success": False,
+                "error": error_msg,
+                "error_type": error_type
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in understand_cluster: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": f"Error processing sentences: {str(e)}",
+            "error_type": type(e).__name__
+        }), 500
+
+@app.route('/conversation/learning', methods=['POST', 'OPTIONS'])
+def conversation_learning():
+    """
+    Handle conversation requests using the learning-based conversation system.
+    This endpoint uses tool_learning.py for knowledge similarity checks and active learning.
+    """
+    if request.method == 'OPTIONS':
+        return handle_options()
+    
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN LEARNING CONVERSATION request at {start_time.isoformat()} ===")
+    
+    data = request.get_json() or {}
+    user_input = data.get("user_input", "")
+    user_id = data.get("user_id", "learner")
+    thread_id = data.get("thread_id", "learning_thread")
+    graph_version_id = data.get("graph_version_id", "")
+    use_websocket = data.get("use_websocket", False)
+    
+    # Get or create a lock for this thread_id
+    thread_lock = None
+    with thread_locks_lock:
+        if thread_id not in thread_locks:
+            thread_locks[thread_id] = threading.RLock()
+        thread_lock = thread_locks[thread_id]
+        thread_lock_last_used[thread_id] = time.time()
+    
+    # Update session info if using WebSockets
+    if use_websocket:
+        active_session_exists = False
+        
+        with session_lock:
+            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+            active_session_exists = len(thread_sessions) > 0            
+            if active_session_exists:
+                for sid in thread_sessions:
+                    ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                    ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
+                    ws_sessions[sid]['has_pending_request'] = True
+    
+    # Prepare stream parameters
+    stream_params = {
+        "user_input": user_input,
+        "user_id": user_id,
+        "thread_id": thread_id,
+        "graph_version_id": graph_version_id,
+        "mode": "learning"
+    }
+    
+    if use_websocket:
+        stream_params["use_websocket"] = True
+        stream_params["thread_id_for_analysis"] = thread_id
+    
+    # Function to run the stream processing with proper locking
+    async def process_stream_with_lock():
+        outputs = []
+        # Acquire the thread-specific lock only for the processing part
+        with thread_lock:
+            try:
+                # Import directly here to ensure fresh imports
+                from ami import convo_stream_learning
+                
+                # Define the async process function
+                async def process_stream():
+                    """Process the stream and return all items."""
+                    try:
+                        # Get the stream using our learning-based stream function
+                        stream = convo_stream_learning(**stream_params)
+                        
+                        # Process all the output
+                        async for item in stream:
+                            outputs.append(item)
+                    except Exception as e:
+                        error_msg = f"Error processing learning stream: {str(e)}"
+                        logger.error(error_msg)
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+                    
+                    return True
+                
+                # Run the async function
+                await process_stream()
+                
+                # Update thread lock last used time
+                with thread_locks_lock:
+                    thread_lock_last_used[thread_id] = time.time()
+                
+                # If using WebSockets, update session to indicate request is done
+                if use_websocket:
+                    with session_lock:
+                        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                        for sid in thread_sessions:
+                            if 'has_pending_request' in ws_sessions[sid]:
+                                ws_sessions[sid]['has_pending_request'] = False
+                
+            except Exception as e:
+                error_msg = f"Error in learning stream processing: {str(e)}"
+                logger.error(error_msg)
+                import traceback
+                logger.error(traceback.format_exc())
+                outputs.append(f"data: {json.dumps({'error': error_msg})}\n\n")
+        
+        return outputs
+    
+    # Create a synchronous response streaming solution that runs the async processing
+    def generate_response():
+        """Generate streaming response items synchronously."""
+        try:
+            # Run the async processing with proper locking
+            outputs = run_async_in_thread(process_stream_with_lock)
+            
+            # Yield each output
+            for item in outputs:
+                yield item
+            
+            # Log completion
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            logger.info(f"[SESSION_TRACE] === END LEARNING CONVERSATION request - total time: {elapsed:.2f}s ===")
+            
+        except Exception as outer_e:
+            # Handle any errors in the outer function
+            error_msg = f"Error in learning response generator: {str(outer_e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
+    
+    # Create a streaming response with our generator
+    from flask import stream_with_context
+    response = Response(stream_with_context(generate_response()), mimetype='text/event-stream')
+    response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 # Import the init_app function from routes.py
 from routes import init_app
