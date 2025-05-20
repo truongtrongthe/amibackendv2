@@ -29,7 +29,7 @@ mc = MCWithTools(user_id="thefusionlab")  # Use MCWithTools instead of MC
 
 
 async def mc_node(state: State, config=None):
-    logger.info("Entering mc_node with state: %s", state)
+    
     start_time = time.time()
     user_id = config.get("configurable", {}).get("user_id", "thefusionlab") if config else "thefusionlab"
     graph_version_id = config.get("configurable", {}).get("graph_version_id", "") if config else ""
@@ -89,7 +89,6 @@ async def mc_node(state: State, config=None):
         logger.info(f"Final analysis stored in state at end of processing")
     
     logger.info(f"Analysis events received: {analysis_count} (complete: {complete_analysis_count})")
-    logger.info(f"Final state has analysis: {'analysis' in final_state}")
     
     # Handle analysis in final state with proper indentation
     if 'analysis' in final_state:

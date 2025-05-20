@@ -267,7 +267,6 @@ class CoTProcessor:
             
             logger.info(f"Now I am searching knowledge follow the queries ...")
             analysis_knowledge = await self._search_analysis_knowledge(user_profile.classification, user_profile, message)
-            logger.info(f"I found analysis knowledge: {analysis_knowledge}")
             
             # Emit knowledge found event
             if thread_id:
