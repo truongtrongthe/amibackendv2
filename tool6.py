@@ -758,8 +758,19 @@ class CoTProcessor:
                         else:
                             # Serialize the dictionary as a fallback
                             knowledge_content = json.dumps(knowledge)
+                    elif isinstance(knowledge, list) and knowledge:
+                        # If it's a list of results, process the first item
+                        first_item = knowledge[0]
+                        if isinstance(first_item, dict):
+                            if "raw" in first_item:
+                                knowledge_content = first_item["raw"]
+                            elif "content" in first_item:
+                                knowledge_content = first_item["content"]
+                            else:
+                                knowledge_content = json.dumps(first_item)
+                        else:
+                            knowledge_content = str(first_item)
                     else:
-                        # Convert to string as a last resort
                         knowledge_content = str(knowledge)
                     
                     knowledge_entries.append({
@@ -1044,7 +1055,33 @@ class CoTProcessor:
                         if query:
                             knowledge = await query_knowledge_from_graph(query, self.graph_version_id)
                             if knowledge:
-                                knowledge_results.append(f"Query: {query}\nResult: {knowledge}")
+                                # Extract knowledge content based on its type
+                                knowledge_content = ""
+                                if isinstance(knowledge, str):
+                                    knowledge_content = knowledge
+                                elif isinstance(knowledge, dict):
+                                    if "raw" in knowledge:
+                                        knowledge_content = knowledge["raw"]
+                                    elif "content" in knowledge:
+                                        knowledge_content = knowledge["content"]
+                                    else:
+                                        knowledge_content = json.dumps(knowledge)
+                                elif isinstance(knowledge, list) and knowledge:
+                                    # If it's a list of results, process the first item
+                                    first_item = knowledge[0]
+                                    if isinstance(first_item, dict):
+                                        if "raw" in first_item:
+                                            knowledge_content = first_item["raw"]
+                                        elif "content" in first_item:
+                                            knowledge_content = first_item["content"]
+                                        else:
+                                            knowledge_content = json.dumps(first_item)
+                                    else:
+                                        knowledge_content = str(first_item)
+                                else:
+                                    knowledge_content = str(knowledge)
+                                
+                                knowledge_results.append(f"Query: {query}\nResult: {knowledge_content}")
                     except Exception as e:
                         logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
                 
