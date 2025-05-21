@@ -366,13 +366,13 @@ async def chatwoot_webhook(data: dict, request: Request):
         # Handle different event types
         if event == "message_created":
             logger.info(f"→ PROCESSING message_created event for organization: {organization_id or 'None'}")
-            handle_message_created(data, organization_id)
+            await handle_message_created(data, organization_id)
         elif event == "message_updated":
             logger.info(f"→ PROCESSING message_updated event for organization: {organization_id or 'None'}")
-            handle_message_updated(data, organization_id)
+            await handle_message_updated(data, organization_id)
         elif event == "conversation_created":
             logger.info(f"→ PROCESSING conversation_created event for organization: {organization_id or 'None'}")
-            handle_conversation_created(data, organization_id)
+            await handle_conversation_created(data, organization_id)
         else:
             logger.info(f"→ UNHANDLED event type: {event}")
         

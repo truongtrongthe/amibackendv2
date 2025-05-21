@@ -8,7 +8,6 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, AIMessage
 
-from pilot import Pilot
 from mc_tools import MCWithTools  # Standard tools
 from utilities import logger
 import asyncio

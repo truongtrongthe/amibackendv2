@@ -8,14 +8,12 @@ import os
 from dotenv import load_dotenv
 from contact import ContactManager
 from contactconvo import ConversationManager
-from ami import convo_stream
 import time
 import multiprocessing
-import tempfile
-import pickle
 import queue
 import threading
 import logging
+import asyncio
 
 # Add multiprocessing freeze support
 from multiprocessing import freeze_support
@@ -640,7 +638,7 @@ def stop_ai_process():
             ai_process_running = False
             print("🛑 Stopped persistent AI process")
 
-def generate_ai_response(message_text: str, user_id: str = None, thread_id: str = None, graph_version_id: str = None, organization_id: str = None):
+async def generate_ai_response(message_text: str, user_id: str = None, thread_id: str = None, graph_version_id: str = None, organization_id: str = None):
     """
     Helper function to generate an AI response without needing Chatwoot integration.
     Uses direct processing to avoid startup overhead.
@@ -669,43 +667,27 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
         
         try:
             from ami import convo_stream
-            import asyncio
             
-            # Create an event loop for async execution
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            # Function to process the async generator
-            async def process_response():
-                response_chunks = []
-                try:
-                    async for chunk in convo_stream(
-                        user_input=enhanced_message,
-                        user_id=user_id,
-                        thread_id=thread_id,
-                        graph_version_id=graph_version_id,
-                        mode="mc"
-                    ):
-                        # Process the chunk
-                        if chunk.startswith('data: '):
-                            try:
-                                import json
-                                data_json = json.loads(chunk[6:])
-                                if 'message' in data_json:
-                                    message_content = data_json['message']
-                                    response_chunks.append(message_content)
-                                    print(f"Received chunk: {message_content[:50]}...")
-                            except json.JSONDecodeError:
-                                print(f"Error parsing chunk: {chunk}")
-                except Exception as e:
-                    print(f"Error processing chunks: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                return response_chunks
-            
-            # Run the async function and get results
-            response_chunks = loop.run_until_complete(process_response())
-            loop.close()
+            # Process the response directly with async/await
+            response_chunks = []
+            async for chunk in convo_stream(
+                user_input=enhanced_message,
+                user_id=user_id,
+                thread_id=thread_id,
+                graph_version_id=graph_version_id,
+                mode="mc"
+            ):
+                # Process the chunk
+                if chunk.startswith('data: '):
+                    try:
+                        import json
+                        data_json = json.loads(chunk[6:])
+                        if 'message' in data_json:
+                            message_content = data_json['message']
+                            response_chunks.append(message_content)
+                            print(f"Received chunk: {message_content[:50]}...")
+                    except json.JSONDecodeError:
+                        print(f"Error parsing chunk: {chunk}")
             
             # Combine all response chunks into a single text
             full_response = ' '.join(response_chunks)
@@ -758,7 +740,7 @@ def generate_ai_response(message_text: str, user_id: str = None, thread_id: str 
         traceback.print_exc()
         return ["I'm sorry, I encountered an error while processing your request. The team has been notified."]
 
-def handle_message_created(data: Dict[str, Any], organization_id: str = None):
+async def handle_message_created(data: Dict[str, Any], organization_id: str = None):
     """
     Handle message created event within conversation context.
     Processes incoming messages and generates AI responses when appropriate.
@@ -912,7 +894,7 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
                 if AI_RESPONSE_DELAY > 0:
                     delay_seconds = min(AI_RESPONSE_DELAY, 3.0)  # Cap at 3 seconds
                     print(f"⏱️ Waiting {delay_seconds} seconds before responding...")
-                    time.sleep(delay_seconds)
+                    await asyncio.sleep(delay_seconds)
                 
                 # Retrieve conversation history to provide context for the AI
                 conversation_history = get_conversation_history(db_conversation_id, max_messages=5)
@@ -924,7 +906,7 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
                 
                 # Generate and send AI response
                 response_time_start = time.time()
-                message_chunks = generate_ai_response(
+                message_chunks = await generate_ai_response(
                     content, 
                     user_id, 
                     thread_id, 
@@ -935,7 +917,7 @@ def handle_message_created(data: Dict[str, Any], organization_id: str = None):
                 print(f"⏱️ AI response generated in {response_time:.2f} seconds")
                 
                 if message_chunks:
-                    send_message_chunks(message_chunks, context, conversation_data)
+                    await send_message_chunks(message_chunks, context, conversation_data)
                 else:
                     print("❌ No AI response generated")
             
@@ -1006,7 +988,7 @@ def get_graph_version_id(organization_id: str = None) -> str:
     # based on organization settings or defaults
     return DEFAULT_GRAPH_VERSION_ID
 
-def send_message_chunks(message_chunks: List[str], context: Dict[str, Any], conversation_data: Dict[str, Any]):
+async def send_message_chunks(message_chunks: List[str], context: Dict[str, Any], conversation_data: Dict[str, Any]):
     """
     Send message chunks with appropriate delays between them.
     
@@ -1080,11 +1062,11 @@ def send_message_chunks(message_chunks: List[str], context: Dict[str, Any], conv
         # Add delay between messages (except for the last one)
         if i < len(message_chunks) - 1:
             print(f"⏱️ Waiting {chunk_delay:.1f}s before sending next chunk...")
-            time.sleep(chunk_delay)
+            await asyncio.sleep(chunk_delay)  # Use asyncio.sleep instead of time.sleep
     
     print(f"✅ Sent all {len(message_chunks)} message chunks")
 
-def handle_message_updated(data: Dict[str, Any], organization_id: str = None):
+async def handle_message_updated(data: Dict[str, Any], organization_id: str = None):
     """
     Handle message updated event within conversation context
     """
@@ -1179,7 +1161,7 @@ def handle_message_updated(data: Dict[str, Any], organization_id: str = None):
         import traceback
         traceback.print_exc()
 
-def handle_conversation_created(data: Dict[str, Any], organization_id: str = None):
+async def handle_conversation_created(data: Dict[str, Any], organization_id: str = None):
     """
     Handle conversation created event
     """
@@ -1350,7 +1332,8 @@ def verify_webhook_signature(request):
 @app.route('/webhook/chatwoot', methods=['POST'])
 def chatwoot_webhook():
     """
-    Handle Chatwoot webhook events 
+    Handle Chatwoot webhook events - Note this Flask route is only used when
+    not running in FastAPI mode. In FastAPI, the route in fastapi_routes.py is used.
     """
     try:
         # Verify webhook signature (optional but recommended)
@@ -1372,17 +1355,21 @@ def chatwoot_webhook():
         # Detailed logging to debug
         log_raw_data(data, event_type)
         
-        # Handle different event types
+        # Create and run tasks with appropriate async handling
+        # We can't directly await in Flask, so we use asyncio.run for each handler
         if event_type == 'message_created':
-            handle_message_created(data, organization_id)
+            # Run the async function in a new event loop
+            asyncio.run(handle_message_created(data, organization_id))
             return jsonify({"success": True, "message": "Message created event processed"}), 200
             
         elif event_type == 'message_updated':
-            handle_message_updated(data, organization_id)
+            # Run the async function in a new event loop
+            asyncio.run(handle_message_updated(data, organization_id))
             return jsonify({"success": True, "message": "Message updated event processed"}), 200
             
         elif event_type == 'conversation_created':
-            handle_conversation_created(data, organization_id)
+            # Run the async function in a new event loop
+            asyncio.run(handle_conversation_created(data, organization_id))
             return jsonify({"success": True, "message": "Conversation created event processed"}), 200
             
         else:
