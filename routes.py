@@ -24,6 +24,8 @@ recent_requests = deque(maxlen=1000)
 from database import get_all_labels, get_raw_data_by_label, clean_text
 #from docuhandler import process_document,summarize_document
 
+from training_prep import process_document
+from training_prep_new import  understand_document,save_document_insights
 from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
 from aia import create_aia,get_all_aias,get_aia_detail,delete_aia,update_aia
 from brainlog import get_brain_logs, get_brain_log_detail, BrainLog  # Assuming these are in brain_logs.py
@@ -252,6 +254,223 @@ def pilot():
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
+
+
+@app.route('/process-document', methods=['POST', 'OPTIONS'])
+def process_document_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    if 'user_id' not in request.form or 'bank_name' not in request.form or 'reformatted_text' not in request.form:
+        return jsonify({"error": "Missing user_id, bank_name, or reformatted_text"}), 400
+
+    user_id = request.form['user_id']
+    bank_name = request.form['bank_name']
+    reformatted_text = request.form['reformatted_text']
+    knowledge_elements = request.form['knowledge_elements'] # Get knowledge_elements from frontend
+    mode = request.form.get('mode', 'default')  # Optional mode parameter
+
+    # Debug logging
+    logger.info(f"Process document request for bank_name={bank_name}")
+    logger.info(f"Knowledge elements provided to MAIN: {len(knowledge_elements)} characters")
+    if knowledge_elements and len(knowledge_elements) > 0:
+        logger.info(f"First 100 chars of knowledge elements hit at MAIN: {knowledge_elements[:100]}...")
+        logger.info(f"Knowledge elements contain 'KEY POINT': {'KEY POINT' in knowledge_elements}")
+    logger.debug(f"First 100 chars of reformatted_text: {reformatted_text[:100]}...")
+    if not reformatted_text.strip():
+        return jsonify({"error": "Empty reformatted_text provided"}), 400
+
+    # Use the thread-based approach instead of the global event loop
+    try:
+        # Run the async process_document function in a separate thread
+        # We only pass the processed text and knowledge elements - no file to avoid reprocessing
+        success = run_async_in_thread(
+            process_document, 
+            text=reformatted_text, 
+            user_id=user_id, 
+            mode=mode, 
+            bank=bank_name,
+            knowledge_elements=knowledge_elements  # Pass knowledge_elements to process_document
+        )
+        
+        if success:
+            return jsonify({
+                "message": "Document processed successfully"
+            }), 200
+        else:
+            return jsonify({
+                "error": "Failed to process document"
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in process_document: {str(e)}")
+        return jsonify({
+            "error": f"Error processing document: {str(e)}"
+        }), 500
+
+@app.route('/understand-document', methods=['POST', 'OPTIONS'])
+def understand_document_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    if 'file' not in request.files:
+        return jsonify({"success": False, "error": "Missing file"}), 400
+
+    file = request.files['file']
+
+    if not file.filename:
+        return jsonify({"success": False, "error": "No file selected"}), 400
+        
+    # Determine file type from extension
+    file_extension = file.filename.split('.')[-1].lower()
+    if file_extension not in ['docx', 'pdf']:
+        return jsonify({"success": False, "error": f"Unsupported file type: {file_extension}. Only DOCX and PDF files are supported."}), 400
+
+    # Use the thread-based approach instead of the global event loop
+    try:
+        # Read file content into BytesIO
+        file_content = file.read()
+        if not file_content:
+            logger.warning(f"Empty file content for {file.filename}")
+            return jsonify({"success": False, "error": "Empty file content."}), 400
+            
+        # Create BytesIO object from file content
+        from io import BytesIO
+        file_bytes = BytesIO(file_content)
+        
+        # Log file info for debugging
+        logger.info(f"Processing file '{file.filename}' ({len(file_content)} bytes) as {file_extension}")
+        
+        # Run the async understand_document function in a separate thread
+        result = run_async_in_thread(
+            understand_document, 
+            input_source=file_bytes,  # Pass BytesIO object
+            file_type=file_extension  # Pass detected file type
+        )
+        
+        # Validate result structure
+        if not isinstance(result, dict):
+            logger.error(f"Invalid result type from understand_document: {type(result)}")
+            return jsonify({
+                "success": False,
+                "error": "Document processing returned invalid data structure",
+                "error_type": "ProcessingError"
+            }), 500
+        
+        # Check for success
+        if result.get("success", False):
+            # Validate presence of document_insights
+            if "document_insights" not in result:
+                logger.warning("Missing document_insights in successful result")
+                result["document_insights"] = {}
+                
+            # Log success statistics
+            insights = result["document_insights"]
+            logger.info(f"Document processed successfully: {insights.get('metadata', {}).get('sentence_count', 0)} sentences, "
+                        f"{insights.get('metadata', {}).get('cluster_count', 0)} clusters")
+            
+            # Return the document insights with proper structure
+            return jsonify(result), 200
+        else:
+            error_msg = result.get("error", "Failed to process document")
+            error_type = result.get("error_type", "UnknownError")
+            logger.error(f"Document processing failed: {error_type}: {error_msg}")
+            return jsonify({
+                "success": False,
+                "error": error_msg,
+                "error_type": error_type
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in understand_document: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": f"Error processing document: {str(e)}",
+            "error_type": type(e).__name__
+        }), 500
+
+@app.route('/save-document-insights', methods=['POST', 'OPTIONS'])
+def save_document_insights_endpoint():
+    if request.method == 'OPTIONS':
+        return handle_options()
+
+    # Check for data in JSON format or form data
+    if request.is_json:
+        # Process JSON request
+        if 'document_insight' not in request.json:
+            return jsonify({"success": False, "error": "Missing document_insight in request body"}), 400
+            
+        if 'user_id' not in request.json:
+            return jsonify({"success": False, "error": "Missing user_id in request body"}), 400
+            
+        if 'bank_name' not in request.json:
+            return jsonify({"success": False, "error": "Missing bank_name in request body"}), 400
+            
+        document_insight = request.json['document_insight']
+        user_id = request.json['user_id']
+        bank_name = request.json['bank_name']
+        mode = request.json.get('mode', 'default')
+    else:
+        # Process form data
+        if 'document_insight' not in request.form:
+            return jsonify({"success": False, "error": "Missing document_insight in form data"}), 400
+            
+        if 'user_id' not in request.form:
+            return jsonify({"success": False, "error": "Missing user_id in form data"}), 400
+            
+        if 'bank_name' not in request.form:
+            return jsonify({"success": False, "error": "Missing bank_name in form data"}), 400
+            
+        document_insight = request.form['document_insight']
+        user_id = request.form['user_id']
+        bank_name = request.form['bank_name']
+        mode = request.form.get('mode', 'default')
+
+    # Ensure document_insight is a JSON string
+    if isinstance(document_insight, dict):
+        document_insight = json.dumps(document_insight)
+    elif not isinstance(document_insight, str):
+        return jsonify({
+            "success": False, 
+            "error": f"Invalid document_insight format. Expected JSON object or string, got {type(document_insight).__name__}"
+        }), 400
+
+    # Log request details
+    logger.info(f"Saving document insights to bank '{bank_name}' for user '{user_id}'")
+    
+    # Use the thread-based approach to call the async function
+    try:
+        # Run the async save_document_insights function in a separate thread
+        success = run_async_in_thread(
+            save_document_insights, 
+            document_insight=document_insight, 
+            user_id=user_id, 
+            mode=mode, 
+            bank=bank_name
+        )
+
+        if success:
+            logger.info(f"Document insights saved successfully to bank '{bank_name}'")
+            return jsonify({
+                "success": True,
+                "message": "Document insights saved successfully"
+            }), 200
+        else:
+            logger.error(f"Failed to save document insights to bank '{bank_name}'")
+            return jsonify({
+                "success": False, 
+                "error": "Failed to save document insights"
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in save_document_insights endpoint: {type(e).__name__}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False, 
+            "error": f"Error saving document insights: {str(e)}",
+            "error_type": type(e).__name__
+        }), 500
+
 
 
 @api_bp.route('/labels', methods=['GET', 'OPTIONS'])
