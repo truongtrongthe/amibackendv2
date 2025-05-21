@@ -402,7 +402,7 @@ async def generate_sse_stream(request: HaveFunRequest, thread_lock: asyncio.Lock
             process_id = str(uuid4())
             processing_message = {
                 "status": "processing",
-                "message": "Request is being processed and results will be sent via WebSocket",
+                "message": "AI is working on your request...",
                 "thread_id": thread_id,
                 "process_id": process_id
             }
