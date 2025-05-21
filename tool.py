@@ -7,7 +7,7 @@ import hashlib
 from typing import List, Dict, Any, Optional, AsyncGenerator, Union
 from functools import lru_cache
 from pydantic import BaseModel
-import structlog
+
 from langchain_openai import ChatOpenAI
 from cachetools import TTLCache
 import os

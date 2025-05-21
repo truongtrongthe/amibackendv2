@@ -169,7 +169,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,min_similarity=0.3) for query in queries],
                 return_exceptions=True
             )
             business_objectives = {}
@@ -284,7 +284,8 @@ class CoTProcessor:
             processed_content = self._extract_knowledge_content(knowledge)
             if processed_content:
                 knowledge_context.append(processed_content)
-
+        #logger.info(f"Business objectives knowledge context: {knowledge_context}")
+        
         # Clean up the knowledge context
         cleaned_context = []
         for entry in knowledge_context:
@@ -295,8 +296,14 @@ class CoTProcessor:
             if cleaned:
                 cleaned_context.append(cleaned)
 
-        # Combine all knowledge into a single context
+        # Combine all knowledge into a single context - use a single newline for better readability
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
+        
+        # One final cleanup pass
+        full_knowledge = re.sub(r'\n{3,}', '\n\n', full_knowledge)
+        full_knowledge = re.sub(r' +', ' ', full_knowledge)
+        
+        logger.info(f"Business objectives knowledge context cleaned: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -705,6 +712,7 @@ class CoTProcessor:
         # Handle dict data
         elif isinstance(knowledge_data, dict):
             if "raw" in knowledge_data:
+                
                 raw_content = knowledge_data["raw"]
                 if extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
                     user_part = re.search(r'User:(.*?)(?=\n\nAI:)', raw_content, re.DOTALL)
@@ -728,17 +736,50 @@ class CoTProcessor:
                 # Serialize the dictionary as a fallback
                 knowledge_content = json.dumps(knowledge_data)
         
-        # Handle list data (take the first item)
+        # Handle list data (process all items)
         elif isinstance(knowledge_data, list) and knowledge_data:
-            first_item = knowledge_data[0]
-            # Recursively process the first item
-            knowledge_content = self._extract_knowledge_content(first_item, extract_user_part)
+            # Process all items instead of just the first one
+            knowledge_items = []
+            for item in knowledge_data:
+                # Recursively process each item
+                processed_content = self._extract_knowledge_content(item, extract_user_part)
+                if processed_content:
+                    # Normalize whitespace before adding
+                    processed_content = re.sub(r'\n{3,}', '\n\n', processed_content)
+                    processed_content = re.sub(r' +', ' ', processed_content)
+                    processed_content = processed_content.strip()
+                    knowledge_items.append(processed_content)
+            
+            # Join all knowledge items with a cleaner separator
+            knowledge_content = "\n---\n".join(knowledge_items) if knowledge_items else ""
         
         # Handle other types
         else:
             knowledge_content = str(knowledge_data)
             
+        # Filter out content starting with "AI Synthesis:" directly
+        if knowledge_content.startswith("AI Synthesis:"):
+            logger.info(f"Filtered out AI Synthesis content")
+            return ""
+        
+        # Filter out AI Synthesis sections from combined content
+        if "\n---\n" in knowledge_content:
+            sections = knowledge_content.split("\n---\n")
+            filtered_sections = [section for section in sections if not section.strip().startswith("AI Synthesis:")]
+            
+            if len(filtered_sections) < len(sections):
+                logger.info(f"Filtered out {len(sections) - len(filtered_sections)} AI Synthesis sections")
+            
+            knowledge_content = "\n---\n".join(filtered_sections)
+        
+        # Final whitespace normalization
+        knowledge_content = re.sub(r'\n{3,}', '\n\n', knowledge_content)
+        knowledge_content = re.sub(r' +', ' ', knowledge_content)
+        knowledge_content = knowledge_content.strip()
+            
         return knowledge_content
+    
+    
 
     async def _user_story(self, user_profile: UserProfileModel) -> str:
         """Transform user profile into a compact narrative format."""

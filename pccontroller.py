@@ -249,7 +249,7 @@ async def query_knowledge(
         
         # Current time for post-filtering
         current_time = datetime.now().isoformat()
-
+        
         # Filter and format results, including expiration check
         knowledge = [
             {
