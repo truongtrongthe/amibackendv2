@@ -751,7 +751,9 @@ class CoTProcessor:
                     if isinstance(knowledge, str):
                         knowledge_content = knowledge
                     elif isinstance(knowledge, dict):
-                        if "content" in knowledge:
+                        if "raw" in knowledge:
+                            knowledge_content = knowledge["raw"]
+                        elif "content" in knowledge:
                             knowledge_content = knowledge["content"]
                         else:
                             # Serialize the dictionary as a fallback
@@ -1293,10 +1295,13 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
                 result_data = json.loads(knowledge_data)
             except json.JSONDecodeError:
                 # If not valid JSON, use as raw text
-                result_data = {"content": knowledge_data}
+                result_data = {"raw": knowledge_data, "content": knowledge_data}
         else:
             # If it's already a dict or other type, use directly
-            result_data = knowledge_data if isinstance(knowledge_data, dict) else {"content": str(knowledge_data)}
+            if isinstance(knowledge_data, dict):
+                result_data = knowledge_data
+            else:
+                result_data = {"raw": str(knowledge_data), "content": str(knowledge_data)}
         
         return {
             "status": "success",
