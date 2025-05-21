@@ -299,7 +299,7 @@ class CoTProcessor:
             
             # Emit initial analysis event
             if thread_id:
-                emit_analysis_event(thread_id, {
+                await emit_analysis_event(thread_id, {
                     "type": "analysis",
                     "content": "Starting analysis",
                     "complete": False,
@@ -313,7 +313,7 @@ class CoTProcessor:
             if thread_id:
                 profile_data = serialize_model(user_profile)
                 logger.info(f"Emitting profile_complete event with data: {json.dumps(profile_data, indent=2)}")
-                emit_analysis_event(thread_id, {
+                await emit_analysis_event(thread_id, {
                     "type": "analysis",
                     "content": "User profile analysis complete",
                     "complete": False,
@@ -329,7 +329,7 @@ class CoTProcessor:
             
             # Emit knowledge search event
             if thread_id:
-                emit_analysis_event(thread_id, {
+                await emit_analysis_event(thread_id, {
                     "type": "analysis",
                     "content": "Searching for analysis knowledge...",
                     "complete": False,
@@ -341,7 +341,7 @@ class CoTProcessor:
             
             # Emit knowledge found event
             if thread_id:
-                emit_analysis_event(thread_id, {
+                await emit_analysis_event(thread_id, {
                     "type": "analysis",
                     "content": "Analysis knowledge found.Analyzing it and proposing an action plan.",
                     "complete": False,
@@ -356,7 +356,7 @@ class CoTProcessor:
             
             # Emit action plan event
             if thread_id:
-                emit_analysis_event(thread_id, {
+                await emit_analysis_event(thread_id, {
                     "type": "analysis",
                     "content": "Action plan created",
                     "complete": False,
@@ -399,7 +399,7 @@ class CoTProcessor:
             logger.error(f"Error processing message: {str(e)}")
             # Emit error event
             if thread_id:
-                emit_analysis_event(thread_id, {
+                await emit_analysis_event(thread_id, {
                     "type": "analysis",
                     "content": str(e),
                     "complete": True,
@@ -1078,20 +1078,20 @@ async def process_llm_with_tools(
     # Store the graph_version_id in state for future reference
     state['graph_version_id'] = graph_version_id
     
-    # Get or create a CoTProcessor instance
-    if 'cot_processor' not in state:
-        cot_processor = CoTProcessor()
-        # Initialize properly with the provided graph_version_id
-        await cot_processor.initialize(graph_version_id)
-        state['cot_processor'] = cot_processor
-    else:
-        cot_processor = state['cot_processor']
-        # Update the graph_version_id if it has changed
-        if cot_processor.graph_version_id != graph_version_id:
-            logger.info(f"Updating CoTProcessor graph_version_id from {cot_processor.graph_version_id} to {graph_version_id}")
-            cot_processor.graph_version_id = graph_version_id
-    
     try:
+        # Get or create a CoTProcessor instance
+        if 'cot_processor' not in state:
+            cot_processor = CoTProcessor()
+            # Initialize properly with the provided graph_version_id
+            await cot_processor.initialize(graph_version_id)
+            state['cot_processor'] = cot_processor
+        else:
+            cot_processor = state['cot_processor']
+            # Update the graph_version_id if it has changed
+            if cot_processor.graph_version_id != graph_version_id:
+                logger.info(f"Updating CoTProcessor graph_version_id from {cot_processor.graph_version_id} to {graph_version_id}")
+                cot_processor.graph_version_id = graph_version_id
+                
         # Process the message - events will be emitted from process_incoming_message
         response = await cot_processor.process_incoming_message(
             user_message, 
@@ -1104,8 +1104,11 @@ async def process_llm_with_tools(
         state.setdefault("messages", []).append({"role": "assistant", "content": response.get("message", "")})
         state["prompt_str"] = response.get("message", "")
     except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
         logger.error(f"Error in CoT processing: {str(e)}")
-        error_response = {"status": "error", "message": f"Error: {str(e)}"}
+        logger.error(f"Traceback: {error_traceback}")
+        error_response = {"status": "error", "message": f"Error: {str(e)}", "traceback": error_traceback}
         yield error_response
     yield {"state": state}
 

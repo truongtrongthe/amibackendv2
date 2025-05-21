@@ -30,11 +30,47 @@ session_lock = asyncio.Lock()
 undelivered_messages = {}
 message_lock = asyncio.Lock()
 
+# Reference to the main module's session storage - to be set from main.py
+# This avoids circular imports
+main_ws_sessions = None
+
 # Global counter for tracking session operations
 session_modification_counter = 0
 
 # Socket.IO instance
 init_count = 0
+
+# Set reference to main's ws_sessions
+def set_main_sessions(sessions_dict):
+    global main_ws_sessions
+    
+    # Log the stack trace to find out where this is being called from
+    caller_stack = traceback.format_stack()
+    # Get just the last few stack frames for readability
+    relevant_stack = caller_stack[-3:-1]
+    
+    # Only update the reference if the new sessions_dict has content
+    if sessions_dict and len(sessions_dict) > 0:
+        main_ws_sessions = sessions_dict
+        logger.info(f"Main ws_sessions reference set")
+        
+        # For debugging, copy any existing sessions from main to local
+        session_count = len(sessions_dict)
+        thread_ids = [data.get('thread_id') for sid, data in sessions_dict.items()]
+        logger.info(f"Set main sessions with {session_count} sessions for threads: {thread_ids}")
+        
+        # Log all session IDs for debugging
+        session_ids = list(sessions_dict.keys())
+        logger.info(f"Set main sessions with session IDs: {session_ids}")
+        logger.info(f"Set main sessions called from: {''.join(relevant_stack)}")
+    else:
+        # Don't overwrite existing sessions if the new one is empty
+        if main_ws_sessions and len(main_ws_sessions) > 0:
+            logger.warning(f"Ignoring empty sessions_dict - keeping existing {len(main_ws_sessions)} sessions")
+            logger.warning(f"Empty set_main_sessions called from: {''.join(relevant_stack)}")
+        else:
+            logger.warning(f"Set main sessions called but sessions_dict is empty or None, and no existing sessions")
+            logger.warning(f"Empty set_main_sessions called from: {''.join(relevant_stack)}")
 
 async def log_session_state(operation, session_id=None, thread_id=None):
     """Log the current state of the sessions dictionary with a stack trace"""
@@ -136,11 +172,12 @@ def register_handlers():
                 ws_sessions[sid] = {
                     'thread_id': old_thread_id,
                     'user_id': old_user_id,
-                    'status': 'connected',
+                    'status': 'ready',  # Changed from 'connected' to 'ready' to match Flask
                     'connected_at': datetime.now().isoformat(),
                     'remote_addr': remote_addr,
                     'transport': transport_type,
-                    'reconnected': True
+                    'reconnected': True,
+                    'last_activity': datetime.now().isoformat()  # Add last_activity timestamp
                 }
                 
                 # Rejoin the room for the thread
@@ -156,12 +193,17 @@ def register_handlers():
                 # If it's a new connection, create a new pre-registered session
                 ws_sessions[sid] = {
                     'pre_registered': True,
+                    'status': 'ready',  # Changed from 'connected' to 'ready' to match Flask
                     'transport': transport_type,
                     'connected_at': datetime.now().isoformat(),
-                    'remote_addr': remote_addr,
-                    'status': 'connected'
+                    'last_activity': datetime.now().isoformat(),  # Add last_activity timestamp
+                    'remote_addr': remote_addr
                 }
                 logger.info(f"Pre-registered new session {sid} with transport {transport_type}")
+                
+            # Log current sessions for debugging
+            all_sessions = {k: {'thread_id': v.get('thread_id'), 'status': v.get('status')} for k, v in ws_sessions.items()}
+            logger.info(f"Current sessions after connect: {json.dumps(all_sessions)}")
 
     @sio.on('register_session')
     async def handle_register(sid, data):
@@ -182,9 +224,11 @@ def register_handlers():
             }
             
         await sio.enter_room(sid, thread_id)
-        await sio.emit('registered', {
+        # Emit session_registered with the same structure as Flask implementation
+        await sio.emit('session_registered', {
+            'status': 'ready',
             'thread_id': thread_id,
-            'status': 'success'
+            'session_id': sid
         }, room=sid)
         
         logger.info(f"Session {sid} registered to thread {thread_id} for user {user_id}")
@@ -192,10 +236,32 @@ def register_handlers():
         # Send any undelivered messages
         async with message_lock:
             if thread_id in undelivered_messages:
-                for msg in undelivered_messages[thread_id]:
-                    await sio.emit(msg['event'], msg['data'], room=sid)
-                logger.info(f"Sent {len(undelivered_messages[thread_id])} undelivered messages to {sid}")
-                undelivered_messages[thread_id] = []
+                # Process each message type (analysis, knowledge, next_action)
+                if 'analysis' in undelivered_messages[thread_id] and undelivered_messages[thread_id]['analysis']:
+                    for msg in undelivered_messages[thread_id]['analysis']:
+                        await sio.emit('analysis_update', msg, room=sid)
+                        
+                if 'knowledge' in undelivered_messages[thread_id] and undelivered_messages[thread_id]['knowledge']:
+                    for msg in undelivered_messages[thread_id]['knowledge']:
+                        await sio.emit('knowledge', msg, room=sid)
+                        
+                if 'next_action' in undelivered_messages[thread_id] and undelivered_messages[thread_id]['next_action']:
+                    for msg in undelivered_messages[thread_id]['next_action']:
+                        await sio.emit('next_action', msg, room=sid)
+                
+                # Count total messages sent
+                total_messages = 0
+                if 'analysis' in undelivered_messages[thread_id]:
+                    total_messages += len(undelivered_messages[thread_id]['analysis'])
+                if 'knowledge' in undelivered_messages[thread_id]:
+                    total_messages += len(undelivered_messages[thread_id]['knowledge'])
+                if 'next_action' in undelivered_messages[thread_id]:
+                    total_messages += len(undelivered_messages[thread_id]['next_action'])
+                
+                logger.info(f"Sent {total_messages} undelivered messages to {sid}")
+                
+                # Clear the undelivered messages
+                undelivered_messages[thread_id] = {}
 
     @sio.on('disconnect')
     async def handle_disconnect(sid):
@@ -229,18 +295,62 @@ def register_handlers():
             return
             
         async with session_lock:
+            is_registered = False
             if sid in ws_sessions:
+                stored_thread_id = ws_sessions[sid].get('thread_id')
                 ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                is_registered = stored_thread_id == thread_id
+                
+            # If this session is not registered for this thread_id, register it now
+            if not is_registered:
+                logger.info(f"Session {sid} not registered for thread {thread_id}, registering now")
+                ws_sessions[sid]['thread_id'] = thread_id
+                ws_sessions[sid]['status'] = 'ready'
+                ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                
+                # Join the room
+                await sio.enter_room(sid, thread_id)
+                
+                # Send registration confirmation
+                await sio.emit('session_registered', {
+                    'status': 'ready',
+                    'thread_id': thread_id,
+                    'session_id': sid
+                }, room=sid)
+                
+                logger.info(f"Automatically registered session {sid} for thread {thread_id}")
         
         # Send any undelivered messages
         async with message_lock:
-            if thread_id in undelivered_messages and undelivered_messages[thread_id]:
-                for msg in undelivered_messages[thread_id]:
-                    await sio.emit(msg['event'], msg['data'], room=sid)
-                logger.info(f"Sent {len(undelivered_messages[thread_id])} missed messages to {sid} for thread {thread_id}")
-                undelivered_messages[thread_id] = []
-            else:
-                await sio.emit('no_missed_messages', {'thread_id': thread_id}, room=sid)
+            if thread_id in undelivered_messages:
+                has_messages = False
+                total_messages = 0
+                
+                # Process each message type
+                if 'analysis' in undelivered_messages[thread_id] and undelivered_messages[thread_id]['analysis']:
+                    for msg in undelivered_messages[thread_id]['analysis']:
+                        await sio.emit('analysis_update', msg, room=sid)
+                    total_messages += len(undelivered_messages[thread_id]['analysis'])
+                    has_messages = True
+                    
+                if 'knowledge' in undelivered_messages[thread_id] and undelivered_messages[thread_id]['knowledge']:
+                    for msg in undelivered_messages[thread_id]['knowledge']:
+                        await sio.emit('knowledge', msg, room=sid)
+                    total_messages += len(undelivered_messages[thread_id]['knowledge'])
+                    has_messages = True
+                    
+                if 'next_action' in undelivered_messages[thread_id] and undelivered_messages[thread_id]['next_action']:
+                    for msg in undelivered_messages[thread_id]['next_action']:
+                        await sio.emit('next_action', msg, room=sid)
+                    total_messages += len(undelivered_messages[thread_id]['next_action'])
+                    has_messages = True
+                
+                if has_messages:
+                    logger.info(f"Sent {total_messages} missed messages to {sid} for thread {thread_id}")
+                    # Clear the undelivered messages
+                    undelivered_messages[thread_id] = {}
+                else:
+                    await sio.emit('no_missed_messages', {'thread_id': thread_id}, room=sid)
 
 async def emit_analysis_event(thread_id: str, data: Dict[str, Any]) -> bool:
     """
@@ -253,52 +363,99 @@ async def emit_analysis_event(thread_id: str, data: Dict[str, Any]) -> bool:
         logger.error("Cannot emit - sio instance not initialized")
         return False
         
+    # Access sessions using either main_ws_sessions or local ws_sessions
+    sessions_to_use = main_ws_sessions if main_ws_sessions is not None else ws_sessions
+    
+    if not sessions_to_use:
+        logger.error("No session dictionary available - both main_ws_sessions and ws_sessions are empty or None")
+        
+    logger.info(f"[WS_EMISSION] Starting emit_analysis_event for thread {thread_id}, data type: {type(data)}")
+    if isinstance(data, dict):
+        logger.info(f"[WS_EMISSION] Data keys: {list(data.keys())}")
+        if 'type' in data:
+            logger.info(f"[WS_EMISSION] Event type: {data['type']}")
+    
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
     active_session_ids = []
     
+    # Add detailed debugging
+    logger.info(f"emit_analysis_event: Looking for sessions for thread {thread_id}")
+    
     async with session_lock:
-        for session_id, session_data in ws_sessions.items():
-            stored_thread_id = session_data.get('thread_id')
-            
-            if stored_thread_id == thread_id:
-                active_sessions_count += 1
-                active_session_ids.append(session_id)
-                # Update last activity timestamp to mark session as active
-                session_data['last_activity'] = datetime.now().isoformat()
+        # For debugging, always log this
+        total_sessions = len(sessions_to_use)
+        # Log the thread_ids of all sessions for debugging
+        all_thread_ids = [data.get('thread_id') for sid, data in sessions_to_use.items()]
+        
+        logger.info(f"emit_analysis_event: Total {total_sessions} sessions, Thread IDs: {all_thread_ids}")
+        
+        # Check sessions directly
+        if total_sessions > 0:
+            for sid, session_data in sessions_to_use.items():
+                stored_thread_id = session_data.get('thread_id')
+                logger.info(f"Checking session {sid} with thread_id {stored_thread_id} against {thread_id}")
+                if stored_thread_id == thread_id:
+                    active_sessions_count += 1
+                    active_session_ids.append(sid)
+                    # Update last activity timestamp to mark session as active
+                    session_data['last_activity'] = datetime.now().isoformat()
+                    logger.info(f"Found active session {sid} for thread {thread_id}")
+        
+        # Log what we found for debugging
+        if total_sessions > 0:
+            logger.info(f"emit_analysis_event: Found {active_sessions_count} active sessions (out of {total_sessions} total)")
+        else:
+            logger.info(f"emit_analysis_event: No sessions found (total: {total_sessions})")
+    
+    # Try to emit to the room regardless of whether we found active sessions
+    # This handles case where room exists but we didn't find sessions
+    try:
+        logger.info(f"[WS_EMISSION] Emitting analysis_update to room {thread_id}")
+        await sio.emit('analysis_update', data, room=thread_id)
+        logger.info(f"emit_analysis_event: Emitted to room {thread_id}")
+    except Exception as e:
+        logger.error(f"Error emitting to room {thread_id}: {str(e)}")
     
     if active_sessions_count > 0:
-        # First try to emit to the room
-        try:
-            await sio.emit('analysis', data, room=thread_id)
-        except Exception as e:
-            logger.error(f"Error emitting to room {thread_id}: {str(e)}")
+        logger.info(f"emit_analysis_event: Found {active_sessions_count} active sessions for thread {thread_id}: {active_session_ids}")
         
         # Also send directly to each session as a backup
         success = False
         for session_id in active_session_ids:
             try:
-                await sio.emit('analysis', data, room=session_id)
+                logger.info(f"[WS_EMISSION] Emitting analysis_update directly to session {session_id}")
+                await sio.emit('analysis_update', data, room=session_id)
                 success = True
+                logger.info(f"emit_analysis_event: Successfully sent analysis_update to session {session_id}")
             except Exception as e:
                 logger.error(f"Failed direct delivery to session {session_id}: {str(e)}")
         
         # Store message in case not all deliveries were successful
         if not success:
+            logger.info(f"[WS_EMISSION] No successful direct deliveries, storing message for later retrieval")
             async with message_lock:
                 if thread_id not in undelivered_messages:
-                    undelivered_messages[thread_id] = []
-                undelivered_messages[thread_id].append({'event': 'analysis', 'data': data})
+                    undelivered_messages[thread_id] = {}
+                if 'analysis' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['analysis'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['analysis'] = (undelivered_messages[thread_id]['analysis'] + [data])[-50:]
         
+        logger.info(f"[WS_EMISSION] Completed emission to {active_sessions_count} sessions for thread {thread_id}")
         return True
     else:
-        logger.warning(f"No active sessions found for thread {thread_id}, analysis event not delivered")
+        logger.warning(f"No active sessions found for thread {thread_id}, analysis event not delivered directly")
         
         # Store undelivered message for later retrieval
+        logger.info(f"[WS_EMISSION] Storing message for thread {thread_id} for later retrieval")
         async with message_lock:
             if thread_id not in undelivered_messages:
-                undelivered_messages[thread_id] = []
-            undelivered_messages[thread_id].append({'event': 'analysis', 'data': data})
+                undelivered_messages[thread_id] = {}
+            if 'analysis' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['analysis'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['analysis'] = (undelivered_messages[thread_id]['analysis'] + [data])[-50:]
         
         return False
 
@@ -312,13 +469,26 @@ async def emit_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
     if not sio:
         logger.error("Cannot emit - sio instance not initialized")
         return False
+    
+    # Access sessions using either main_ws_sessions or local ws_sessions
+    sessions_to_use = main_ws_sessions if main_ws_sessions is not None else ws_sessions
+    
+    if not sessions_to_use:
+        logger.error("No session dictionary available - both main_ws_sessions and ws_sessions are empty or None")
         
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
     active_session_ids = []
     
     async with session_lock:
-        for session_id, session_data in ws_sessions.items():
+        # For debugging, always log this
+        total_sessions = len(sessions_to_use)
+        # Log the thread_ids of all sessions for debugging
+        all_thread_ids = [data.get('thread_id') for sid, data in sessions_to_use.items()]
+        
+        logger.info(f"emit_knowledge_event: Total {total_sessions} sessions, Thread IDs: {all_thread_ids}")
+        
+        for session_id, session_data in sessions_to_use.items():
             stored_thread_id = session_data.get('thread_id')
             
             # Match sessions with the target thread_id
@@ -327,7 +497,7 @@ async def emit_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
                 active_session_ids.append(session_id)
                 # Update last activity timestamp to mark session as active
                 session_data['last_activity'] = datetime.now().isoformat()
-    
+
     if active_sessions_count > 0:
         logger.info(f"Emitting knowledge event to thread {thread_id} ({active_sessions_count} active sessions)")
         
@@ -350,8 +520,11 @@ async def emit_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
         if not success:
             async with message_lock:
                 if thread_id not in undelivered_messages:
-                    undelivered_messages[thread_id] = []
-                undelivered_messages[thread_id].append({'event': 'knowledge', 'data': data})
+                    undelivered_messages[thread_id] = {}
+                if 'knowledge' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['knowledge'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
         
         return True
     else:
@@ -360,8 +533,11 @@ async def emit_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
         # Store undelivered message for later retrieval
         async with message_lock:
             if thread_id not in undelivered_messages:
-                undelivered_messages[thread_id] = []
-            undelivered_messages[thread_id].append({'event': 'knowledge', 'data': data})
+                undelivered_messages[thread_id] = {}
+            if 'knowledge' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['knowledge'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['knowledge'] = (undelivered_messages[thread_id]['knowledge'] + [data])[-50:]
         
         return False
 
@@ -376,12 +552,25 @@ async def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
         logger.error("Cannot emit - sio instance not initialized")
         return False
         
+    # Access sessions using either main_ws_sessions or local ws_sessions
+    sessions_to_use = main_ws_sessions if main_ws_sessions is not None else ws_sessions
+    
+    if not sessions_to_use:
+        logger.error("No session dictionary available - both main_ws_sessions and ws_sessions are empty or None")
+        
     # Check if there are any active sessions in this thread room
     active_sessions_count = 0
     active_session_ids = []
     
     async with session_lock:
-        for session_id, session_data in ws_sessions.items():
+        # For debugging, always log this
+        total_sessions = len(sessions_to_use)
+        # Log the thread_ids of all sessions for debugging
+        all_thread_ids = [data.get('thread_id') for sid, data in sessions_to_use.items()]
+        
+        logger.info(f"emit_next_action_event: Total {total_sessions} sessions, Thread IDs: {all_thread_ids}")
+        
+        for session_id, session_data in sessions_to_use.items():
             stored_thread_id = session_data.get('thread_id')
             
             # Match sessions with the target thread_id
@@ -390,11 +579,13 @@ async def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
                 active_session_ids.append(session_id)
                 # Update last activity timestamp to mark session as active
                 session_data['last_activity'] = datetime.now().isoformat()
-    
+
     if active_sessions_count > 0:
+        logger.info(f"Emitting next_action event to thread {thread_id} ({active_sessions_count} active sessions)")
+        
         # First try to emit to the room
         try:
-            await sio.emit('next_actions', data, room=thread_id)
+            await sio.emit('next_action', data, room=thread_id)
         except Exception as e:
             logger.error(f"Error emitting next_action event to room {thread_id}: {str(e)}")
         
@@ -402,7 +593,7 @@ async def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
         success = False
         for session_id in active_session_ids:
             try:
-                await sio.emit('next_actions', data, room=session_id)
+                await sio.emit('next_action', data, room=session_id)
                 success = True
             except Exception as e:
                 logger.error(f"Failed direct next_action delivery to session {session_id}: {str(e)}")
@@ -411,16 +602,24 @@ async def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
         if not success:
             async with message_lock:
                 if thread_id not in undelivered_messages:
-                    undelivered_messages[thread_id] = []
-                undelivered_messages[thread_id].append({'event': 'next_actions', 'data': data})
+                    undelivered_messages[thread_id] = {}
+                if 'next_action' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['next_action'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['next_action'] = (undelivered_messages[thread_id]['next_action'] + [data])[-50:]
         
         return True
     else:
+        logger.warning(f"No active sessions found for thread {thread_id}, next_action event not delivered")
+        
         # Store undelivered message for later retrieval
         async with message_lock:
             if thread_id not in undelivered_messages:
-                undelivered_messages[thread_id] = []
-            undelivered_messages[thread_id].append({'event': 'next_actions', 'data': data})
+                undelivered_messages[thread_id] = {}
+            if 'next_action' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['next_action'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['next_action'] = (undelivered_messages[thread_id]['next_action'] + [data])[-50:]
         
         return False
 

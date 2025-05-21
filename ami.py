@@ -13,6 +13,15 @@ from mc_tools import MCWithTools  # Standard tools
 from utilities import logger
 import asyncio
 
+# Import socketio manager for WebSocket support
+try:
+    from socketio_manager_async import emit_analysis_event, emit_knowledge_event, emit_next_action_event
+    socketio_imports_success = True
+    logger.info("Successfully imported socketio_manager_async functions in ami.py")
+except ImportError:
+    socketio_imports_success = False
+    logger.warning("Could not import socketio_manager_async in ami.py - WebSocket events may not be delivered")
+
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]

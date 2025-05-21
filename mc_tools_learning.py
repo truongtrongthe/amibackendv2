@@ -158,12 +158,12 @@ class MCWithTools:
         # Import socketio_manager functions outside the loop if using WebSockets
         if use_websocket and thread_id_for_analysis:
             try:
-                from socketio_manager import emit_analysis_event, emit_knowledge_event, emit_next_action_event
+                from socketio_manager_async import emit_analysis_event, emit_knowledge_event, emit_next_action_event
                 socket_imports_success = True
-                logger.info(f"Successfully imported socketio_manager functions for thread {thread_id_for_analysis}")
+                logger.info(f"Successfully imported socketio_manager_async functions for thread {thread_id_for_analysis}")
             except Exception as socket_import_error:
                 socket_imports_success = False
-                logger.error(f"Failed to import socketio_manager functions: {socket_import_error}")
+                logger.error(f"Failed to import socketio_manager_async functions: {socket_import_error}")
         else:
             socket_imports_success = False
         
@@ -193,18 +193,24 @@ class MCWithTools:
                         
                         if use_websocket and thread_id_for_analysis and socket_imports_success:
                             try:
-                                # Directly emit to WebSocket using socketio_manager
-                                was_delivered = emit_analysis_event(thread_id_for_analysis, result)
-                                if was_delivered:
-                                    logger.info(f"Analysis event #{analysis_events_sent} emitted to WebSocket")
-                                else:
-                                    logger.warning(f"Analysis event #{analysis_events_sent} FAILED to deliver - no active sessions")
-                                    # Still yield the result for other consumers
-                                    yield result
-                            except Exception as socket_error:
-                                logger.error(f"Socket emission error for analysis: {socket_error}")
-                                # Fall back to yielding the event
-                                yield result
+                                # Check if we can get the sessions variable from the current state
+                                from socketio_manager_async import ws_sessions, main_ws_sessions
+                                
+                                # Try to log session state for debugging
+                                logger.info(f"Analysis event - Local session count: {len(ws_sessions) if ws_sessions else 0}, " +
+                                           f"Main session count: {len(main_ws_sessions) if main_ws_sessions else 0}")
+                                
+                                # Make sure the result has the thread_id
+                                if "thread_id" not in result:
+                                    result["thread_id"] = thread_id_for_analysis
+                                
+                                # Emit the event asynchronously
+                                await emit_analysis_event(thread_id_for_analysis, result)
+                                logger.info(f"Emitted analysis event {analysis_events_sent} for thread {thread_id_for_analysis}")
+                            except Exception as e:
+                                logger.error(f"Error emitting analysis event {analysis_events_sent}: {str(e)}")
+                                logger.error(f"Thread ID: {thread_id_for_analysis}, Event type: {event_type}")
+                                # Don't raise exception here - continue processing
                         else:
                             # Not using WebSocket, just yield the event
                             yield result
