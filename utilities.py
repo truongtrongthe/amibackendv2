@@ -16,10 +16,3 @@ logger = logging.getLogger(__name__)
 LLM = ChatOpenAI(model="gpt-4o", streaming=True)
 EMBEDDINGS = OpenAIEmbeddings(model="text-embedding-3-small")
 
-
-def sanitize_vector_id(text):
-    return text.replace(" ", "_").lower()
-
-def clean_llm_response(raw):
-    raw = raw.strip().replace("```json\n", "").replace("\n```", "").replace("json\n", "").strip()
-    return raw

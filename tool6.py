@@ -3,17 +3,15 @@ import asyncio
 import logging
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from datetime import datetime
-from uuid import uuid4
 from cachetools import TTLCache
 import re
 import pytz
 
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-
-from aitools import emit_analysis_event  
+from tools import emit_analysis_event  
 from pccontroller import query_knowledge
-from brain_singleton import get_current_graph_version
+
 from utilities import logger
 
 # Custom JSON encoder to handle datetime objects
@@ -61,7 +59,7 @@ class CoTProcessor:
     async def initialize(self, graph_version_id=None):
         """Initialize the processor asynchronously"""
         # Use provided graph_version_id or fallback to current or generate a new one
-        self.graph_version_id = graph_version_id or get_current_graph_version() or str(uuid4())
+        self.graph_version_id = graph_version_id or "bd5b8bc1-d0cb-4e3e-9cd7-68a8563366fc"
         logger.info(f"Initializing CoTProcessor with graph_version_id: {self.graph_version_id}")
         self.profiling_skills = await self._load_profiling_skills()
         self.ai_business_objectives = await self._load_business_objectives_awareness()
