@@ -414,7 +414,7 @@ async def generate_sse_stream(request: HaveFunRequest, thread_lock: asyncio.Lock
     
     try:
         # Try to acquire the lock with timeout
-        async with asyncio.timeout(60):  # 60-second timeout
+        async with asyncio.timeout(180):  # 180-second timeout (increased from 60 seconds)
             async with thread_lock:
                 logger.info(f"[REQUEST:{request_id}] Acquired lock for thread {thread_id}")
                 
@@ -471,7 +471,7 @@ async def generate_sse_stream(request: HaveFunRequest, thread_lock: asyncio.Lock
                 
                 logger.info(f"[REQUEST:{request_id}] Released lock for thread {thread_id}")
     except asyncio.TimeoutError:
-        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for thread {thread_id} after 60 seconds")
+        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for thread {thread_id} after 180 seconds")
         logger.info(f"[REQUEST:{request_id}] Yielding timeout error for thread {thread_id}")
         yield f"data: {json.dumps({'error': 'Server busy. Please try again.'})}\n\n"
     except Exception as e:
@@ -564,7 +564,7 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
     
     try:
         # Try to acquire the lock with timeout
-        async with asyncio.timeout(60):  # 60-second timeout
+        async with asyncio.timeout(180):  # 180-second timeout (increased from 60 seconds)
             async with thread_lock:
                 logger.info(f"[REQUEST:{request_id}] Acquired lock for thread {thread_id}")
                 
@@ -621,7 +621,7 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
                 
                 logger.info(f"[REQUEST:{request_id}] Released lock for thread {thread_id}")
     except asyncio.TimeoutError:
-        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for thread {thread_id} after 60 seconds")
+        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for thread {thread_id} after 180 seconds")
         logger.info(f"[REQUEST:{request_id}] Yielding timeout error for thread {thread_id}")
         yield f"data: {json.dumps({'error': 'Server busy. Please try again.'})}\n\n"
     except Exception as e:
