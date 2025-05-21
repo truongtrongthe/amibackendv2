@@ -10,7 +10,7 @@ import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from tools import emit_analysis_event  
-from pccontroller import query_knowledge
+from pccontroller import query_knowledge_from_graph
 
 from utilities import logger
 
@@ -78,7 +78,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge(query, self.graph_version_id) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id) for query in queries],
                 return_exceptions=True
             )
             profiling_skills = {}
@@ -102,14 +102,12 @@ class CoTProcessor:
         """Load communication knowledge base concurrently using fetch_knowledge."""
         logger.info(f"Loading communication skills with graph_version_id: {self.graph_version_id}")
         queries = [
-            
-            "Cách giao tiếp với người dùng",
-            
+            "Cách giao tiếp với người dùng"
         ]
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge(query, self.graph_version_id) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id) for query in queries],
                 return_exceptions=True
             )
             communication_skills = {}
@@ -122,7 +120,9 @@ class CoTProcessor:
                         communication_skills[query] = json.loads(result) if isinstance(result, str) else result
                     except json.JSONDecodeError:
                         communication_skills[query] = {"content": result}
-            return self._process_communication_skills(communication_skills)
+            communication_skills = self._process_communication_skills(communication_skills)
+            logger.info(f"Communication skills: {communication_skills}")
+            return communication_skills
         except Exception as e:
             logger.error(f"Error loading communication skills: {str(e)}")
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
@@ -136,7 +136,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge(query, self.graph_version_id) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id) for query in queries],
                 return_exceptions=True
             )
             business_objectives = {}
@@ -619,7 +619,7 @@ class CoTProcessor:
         for query in user_profile.analysis_queries:
             try:
                 # Use the query tool to fetch specific knowledge
-                knowledge = await query_knowledge(query, self.graph_version_id)
+                knowledge = await query_knowledge_from_graph(query, self.graph_version_id)
                 if knowledge:
                     # Handle different types of knowledge data
                     if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
@@ -920,7 +920,7 @@ class CoTProcessor:
                         # Extract just the query string from the query info dictionary
                         query = query_info.get('query', '') if isinstance(query_info, dict) else query_info
                         if query:
-                            knowledge = await query_knowledge(query, self.graph_version_id)
+                            knowledge = await query_knowledge_from_graph(query, self.graph_version_id)
                             if knowledge:
                                 knowledge_results.append(f"Query: {query}\nResult: {knowledge}")
                     except Exception as e:
@@ -1131,7 +1131,7 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     """Query knowledge base."""
     logger.info(f"Querying knowledge: {query} using graph_version_id: {graph_version_id}")
     try:
-        knowledge_data = await query_knowledge(query, graph_version_id)
+        knowledge_data = await query_knowledge_from_graph(query, graph_version_id)
         
         # Handle different return types from fetch_knowledge
         if isinstance(knowledge_data, dict) and "status" in knowledge_data and knowledge_data["status"] == "error":

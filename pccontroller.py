@@ -8,6 +8,18 @@ import json
 from typing import Dict, List, Optional
 from pinecone import Pinecone, ServerlessSpec
 import backoff
+from supabase import create_client, Client
+import traceback
+
+spb_url = os.getenv("SUPABASE_URL")
+spb_key = os.getenv("SUPABASE_KEY")
+
+supabase: Client = create_client(
+    spb_url,
+    spb_key
+)
+
+
 
 # Initialize Pinecone client
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", ""))
@@ -30,6 +42,64 @@ def initialize_index():
         raise
 
 ent_index = initialize_index()
+
+
+async def get_brain_banks(graph_version_id: str) -> List[Dict[str, str]]:
+        """
+        Get the bank names for all brains in a version
+
+        Args:
+            version_id: UUID of the graph version
+
+        Returns:
+            List of dicts containing brain_id and bank_name
+        """
+        try:
+            
+            version_response = supabase.table("brain_graph_version")\
+                .select("brain_ids", "status")\
+                .eq("id", graph_version_id)\
+                .execute()
+
+            if not version_response.data:
+                logger.error(f"Version {graph_version_id} not found")
+                return []
+
+            version_data = version_response.data[0]
+            if version_data["status"] != "published":
+                logger.warning(f"Version {graph_version_id} is not published")
+                return []
+
+            brain_ids = version_data["brain_ids"]
+            if not brain_ids:
+                logger.warning(f"No brain IDs found for version {graph_version_id}")
+                return []
+
+            
+            brain_response = supabase.table("brain")\
+                .select("id", "brain_id", "bank_name")\
+                .in_("id", brain_ids)\
+                .execute()
+
+            if not brain_response.data:
+                logger.warning(f"No brain data found for brain IDs: {brain_ids}")
+                return []
+
+            brain_banks = [
+                {
+                    "id": brain["id"],
+                    "brain_id": brain["brain_id"],
+                    "bank_name": brain["bank_name"]
+                }
+                for brain in brain_response.data
+            ]
+
+            logger.info(f"Retrieved brain structure for version {graph_version_id}, {len(brain_banks)} brains")
+            return brain_banks
+        except Exception as e:
+            logger.error(f"Error getting brain banks: {e}")
+            logger.error(traceback.format_exc())
+            return []
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
 async def save_knowledge(
@@ -205,3 +275,31 @@ async def query_knowledge(
     except Exception as e:
         logger.error(f"Query failed after retries: {e}")
         return []
+
+async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id: Optional[str] = None, thread_id: Optional[str] = None, topic: Optional[str] = None, top_k: int = 10, min_similarity: float = 0.3, ef_search: int = 100) -> List[Dict]:
+    """
+    Query knowledge from Pinecone with optimized vector structure and recall tuning.
+
+    Args:
+        query: The search query.
+        graph_version_id: The graph version ID.
+        user_id: The user ID.
+        thread_id: The thread ID.
+        topic: The topic.
+        top_k: The top K.
+    """
+    
+    brain_banks = await get_brain_banks(graph_version_id)
+    valid_namespaces = [brain["bank_name"] for brain in brain_banks]
+    # Add conversation namespace to the list
+    valid_namespaces.extend(["conversation"])
+    logger.info(f"Valid namespaces for graph version {graph_version_id}: {valid_namespaces}")
+
+    # Get all knowledge from all namespaces
+    all_knowledge = []
+    for namespace in valid_namespaces:
+        knowledge = await query_knowledge(query, namespace, user_id, thread_id, topic, top_k, min_similarity, ef_search)
+        if knowledge:
+            all_knowledge.extend(knowledge)
+
+    return all_knowledge

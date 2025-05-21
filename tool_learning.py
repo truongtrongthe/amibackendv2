@@ -14,7 +14,7 @@ import functools
 import concurrent.futures
 
 from pccontroller import save_knowledge, query_knowledge
-from brain_singleton import get_current_graph_version
+
 from utilities import logger
 
 # Custom JSON encoder for datetime objects
@@ -33,7 +33,7 @@ LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.01)
 
 class LearningProcessor:
     def __init__(self):
-        self.graph_version_id = get_current_graph_version() or str(uuid4())
+        self.graph_version_id = ""
         # Set to keep track of pending background tasks
         self._background_tasks: Set[asyncio.Task] = set()
 
@@ -1119,7 +1119,7 @@ async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict
                 categories = parameters.get("categories", ["general"])
                 
                 if not categories or categories == ["general"]:
-                    categories = ["health_segmentation"] if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", "phân tích chân dung khách hàng"]) else ["general"]
+                    categories = ["human shared"]
                 
                 # Add teaching_intent category for explicit knowledge saves
                 if "teaching_intent" not in categories:

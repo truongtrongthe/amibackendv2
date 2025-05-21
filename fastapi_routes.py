@@ -184,6 +184,28 @@ async def brains(org_id: str):
 async def brains_options():
     return handle_options()
 
+from contact import ContactManager
+cm = ContactManager()
+
+@router.get('/contacts')
+async def get_all_contacts(organization_id: str):
+    """Get all contacts for an organization"""
+    if not organization_id:
+        raise HTTPException(status_code=400, detail="organization_id parameter is required")
+    
+    try:
+        contacts = cm.get_contacts(organization_id)
+        if not contacts:
+            return {"message": "No contacts found", "contacts": []}
+        
+        return {"contacts": contacts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.options('/contacts')
+async def contacts_options():
+    return handle_options()
+
 @router.get('/brain-details')
 async def brain_details(brain_id: str):
     """Get details for a specific brain"""
