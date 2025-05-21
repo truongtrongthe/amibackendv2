@@ -212,41 +212,10 @@ class CoTProcessor:
         knowledge_context = []
         
         for query, knowledge in profiling_skills.items():
-            if isinstance(knowledge, dict):
-                # Check for raw field (from query_knowledge_from_graph results)
-                if "raw" in knowledge:
-                    knowledge_context.append(knowledge["raw"])
-                # Also check for content field (fallback)
-                elif "content" in knowledge:
-                    knowledge_context.append(knowledge["content"])
-                elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
-                    # If it's a list of results, try to get the first item
-                    first_item = knowledge[0]
-                    if isinstance(first_item, dict):
-                        if "raw" in first_item:
-                            knowledge_context.append(first_item["raw"])
-                        elif "content" in first_item:
-                            knowledge_context.append(first_item["content"])
-            elif isinstance(knowledge, str):
-                # If it's a string, try to parse it
-                try:
-                    parsed = json.loads(knowledge)
-                    if isinstance(parsed, dict):
-                        if "raw" in parsed:
-                            knowledge_context.append(parsed["raw"])
-                        elif "content" in parsed:
-                            knowledge_context.append(parsed["content"])
-                except json.JSONDecodeError:
-                    # If not JSON, use the string directly
-                    knowledge_context.append(knowledge)
-            elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
-                # If it's a list of results, try to get the first item
-                first_item = knowledge[0]
-                if isinstance(first_item, dict):
-                    if "raw" in first_item:
-                        knowledge_context.append(first_item["raw"])
-                    elif "content" in first_item:
-                        knowledge_context.append(first_item["content"])
+            # Process knowledge using the common utility function
+            processed_content = self._extract_knowledge_content(knowledge)
+            if processed_content:
+                knowledge_context.append(processed_content)
 
         # Clean up the knowledge context
         cleaned_context = []
@@ -276,41 +245,10 @@ class CoTProcessor:
         knowledge_context = []
         
         for query, knowledge in communication_skills.items():
-            if isinstance(knowledge, dict):
-                # Check for raw field (from query_knowledge_from_graph results)
-                if "raw" in knowledge:
-                    knowledge_context.append(knowledge["raw"])
-                # Also check for content field (fallback)
-                elif "content" in knowledge:
-                    knowledge_context.append(knowledge["content"])
-                elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
-                    # If it's a list of results, try to get the first item
-                    first_item = knowledge[0]
-                    if isinstance(first_item, dict):
-                        if "raw" in first_item:
-                            knowledge_context.append(first_item["raw"])
-                        elif "content" in first_item:
-                            knowledge_context.append(first_item["content"])
-            elif isinstance(knowledge, str):
-                # If it's a string, try to parse it
-                try:
-                    parsed = json.loads(knowledge)
-                    if isinstance(parsed, dict):
-                        if "raw" in parsed:
-                            knowledge_context.append(parsed["raw"])
-                        elif "content" in parsed:
-                            knowledge_context.append(parsed["content"])
-                except json.JSONDecodeError:
-                    # If not JSON, use the string directly
-                    knowledge_context.append(knowledge)
-            elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
-                # If it's a list of results, try to get the first item
-                first_item = knowledge[0]
-                if isinstance(first_item, dict):
-                    if "raw" in first_item:
-                        knowledge_context.append(first_item["raw"])
-                    elif "content" in first_item:
-                        knowledge_context.append(first_item["content"])
+            # Process knowledge using the common utility function
+            processed_content = self._extract_knowledge_content(knowledge)
+            if processed_content:
+                knowledge_context.append(processed_content)
 
         # Clean up the knowledge context
         cleaned_context = []
@@ -342,41 +280,10 @@ class CoTProcessor:
         knowledge_context = []
         
         for query, knowledge in business_objectives.items():
-            if isinstance(knowledge, dict):
-                # Check for raw field (from query_knowledge_from_graph results)
-                if "raw" in knowledge:
-                    knowledge_context.append(knowledge["raw"])
-                # Also check for content field (fallback)
-                elif "content" in knowledge:
-                    knowledge_context.append(knowledge["content"])
-                elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
-                    # If it's a list of results, try to get the first item
-                    first_item = knowledge[0]
-                    if isinstance(first_item, dict):
-                        if "raw" in first_item:
-                            knowledge_context.append(first_item["raw"])
-                        elif "content" in first_item:
-                            knowledge_context.append(first_item["content"])
-            elif isinstance(knowledge, str):
-                # If it's a string, try to parse it
-                try:
-                    parsed = json.loads(knowledge)
-                    if isinstance(parsed, dict):
-                        if "raw" in parsed:
-                            knowledge_context.append(parsed["raw"])
-                        elif "content" in parsed:
-                            knowledge_context.append(parsed["content"])
-                except json.JSONDecodeError:
-                    # If not JSON, use the string directly
-                    knowledge_context.append(knowledge)
-            elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
-                # If it's a list of results, try to get the first item
-                first_item = knowledge[0]
-                if isinstance(first_item, dict):
-                    if "raw" in first_item:
-                        knowledge_context.append(first_item["raw"])
-                    elif "content" in first_item:
-                        knowledge_context.append(first_item["content"])
+            # Process knowledge using the common utility function
+            processed_content = self._extract_knowledge_content(knowledge)
+            if processed_content:
+                knowledge_context.append(processed_content)
 
         # Clean up the knowledge context
         cleaned_context = []
@@ -739,7 +646,7 @@ class CoTProcessor:
         for query in user_profile.analysis_queries:
             try:
                 # Use the query tool to fetch specific knowledge
-                knowledge = await query_knowledge_from_graph(query, self.graph_version_id)
+                knowledge = await query_knowledge_from_graph(query, self.graph_version_id, exclude_categories=["ai_synthesis"])
                 if knowledge:
                     # Handle different types of knowledge data
                     if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
@@ -747,31 +654,7 @@ class CoTProcessor:
                         continue
                     
                     # Process the knowledge content based on its type
-                    knowledge_content = ""
-                    if isinstance(knowledge, str):
-                        knowledge_content = knowledge
-                    elif isinstance(knowledge, dict):
-                        if "raw" in knowledge:
-                            knowledge_content = knowledge["raw"]
-                        elif "content" in knowledge:
-                            knowledge_content = knowledge["content"]
-                        else:
-                            # Serialize the dictionary as a fallback
-                            knowledge_content = json.dumps(knowledge)
-                    elif isinstance(knowledge, list) and knowledge:
-                        # If it's a list of results, process the first item
-                        first_item = knowledge[0]
-                        if isinstance(first_item, dict):
-                            if "raw" in first_item:
-                                knowledge_content = first_item["raw"]
-                            elif "content" in first_item:
-                                knowledge_content = first_item["content"]
-                            else:
-                                knowledge_content = json.dumps(first_item)
-                        else:
-                            knowledge_content = str(first_item)
-                    else:
-                        knowledge_content = str(knowledge)
+                    knowledge_content = self._extract_knowledge_content(knowledge)
                     
                     knowledge_entries.append({
                         "query": query,
@@ -792,6 +675,70 @@ class CoTProcessor:
             "query_count": len(knowledge_entries),
             "rationale": f"Analyzed {len(knowledge_entries)} queries for user profile"
         }
+
+    def _extract_knowledge_content(self, knowledge_data, extract_user_part=True):
+        """Extract knowledge content from various data types, handling combined User/AI content.
+        
+        Args:
+            knowledge_data: The knowledge data (string, dict, list)
+            extract_user_part: Whether to extract the User part (True) or AI part (False)
+            
+        Returns:
+            str: The extracted knowledge content
+        """
+        knowledge_content = ""
+        
+        # Handle string data
+        if isinstance(knowledge_data, str):
+            knowledge_content = knowledge_data
+            if extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
+                user_part = re.search(r'User:(.*?)(?=\n\nAI:)', knowledge_content, re.DOTALL)
+                if user_part:
+                    knowledge_content = user_part.group(1).strip()
+                    logger.info(f"Extracted User portion from string knowledge")
+            elif not extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
+                ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
+                if ai_part:
+                    knowledge_content = ai_part.group(1).strip()
+                    logger.info(f"Extracted AI portion from string knowledge")
+        
+        # Handle dict data
+        elif isinstance(knowledge_data, dict):
+            if "raw" in knowledge_data:
+                raw_content = knowledge_data["raw"]
+                if extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
+                    user_part = re.search(r'User:(.*?)(?=\n\nAI:)', raw_content, re.DOTALL)
+                    if user_part:
+                        knowledge_content = user_part.group(1).strip()
+                        logger.info(f"Extracted User portion from dict knowledge")
+                    else:
+                        knowledge_content = raw_content
+                elif not extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
+                    ai_part = re.search(r'\n\nAI:(.*)', raw_content, re.DOTALL)
+                    if ai_part:
+                        knowledge_content = ai_part.group(1).strip()
+                        logger.info(f"Extracted AI portion from dict knowledge")
+                    else:
+                        knowledge_content = raw_content
+                else:
+                    knowledge_content = raw_content
+            elif "content" in knowledge_data:
+                knowledge_content = knowledge_data["content"]
+            else:
+                # Serialize the dictionary as a fallback
+                knowledge_content = json.dumps(knowledge_data)
+        
+        # Handle list data (take the first item)
+        elif isinstance(knowledge_data, list) and knowledge_data:
+            first_item = knowledge_data[0]
+            # Recursively process the first item
+            knowledge_content = self._extract_knowledge_content(first_item, extract_user_part)
+        
+        # Handle other types
+        else:
+            knowledge_content = str(knowledge_data)
+            
+        return knowledge_content
 
     async def _user_story(self, user_profile: UserProfileModel) -> str:
         """Transform user profile into a compact narrative format."""
@@ -1053,33 +1000,10 @@ class CoTProcessor:
                         # Extract just the query string from the query info dictionary
                         query = query_info.get('query', '') if isinstance(query_info, dict) else query_info
                         if query:
-                            knowledge = await query_knowledge_from_graph(query, self.graph_version_id)
+                            knowledge = await query_knowledge_from_graph(query, self.graph_version_id, exclude_categories=["ai_synthesis"])
                             if knowledge:
                                 # Extract knowledge content based on its type
-                                knowledge_content = ""
-                                if isinstance(knowledge, str):
-                                    knowledge_content = knowledge
-                                elif isinstance(knowledge, dict):
-                                    if "raw" in knowledge:
-                                        knowledge_content = knowledge["raw"]
-                                    elif "content" in knowledge:
-                                        knowledge_content = knowledge["content"]
-                                    else:
-                                        knowledge_content = json.dumps(knowledge)
-                                elif isinstance(knowledge, list) and knowledge:
-                                    # If it's a list of results, process the first item
-                                    first_item = knowledge[0]
-                                    if isinstance(first_item, dict):
-                                        if "raw" in first_item:
-                                            knowledge_content = first_item["raw"]
-                                        elif "content" in first_item:
-                                            knowledge_content = first_item["content"]
-                                        else:
-                                            knowledge_content = json.dumps(first_item)
-                                    else:
-                                        knowledge_content = str(first_item)
-                                else:
-                                    knowledge_content = str(knowledge)
+                                knowledge_content = self._extract_knowledge_content(knowledge)
                                 
                                 knowledge_results.append(f"Query: {query}\nResult: {knowledge_content}")
                     except Exception as e:
@@ -1290,22 +1214,31 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
     """Query knowledge base."""
     logger.info(f"Querying knowledge: {query} using graph_version_id: {graph_version_id}")
     try:
-        knowledge_data = await query_knowledge_from_graph(query, graph_version_id)
+        # Create temporary processor to use its _extract_knowledge_content method
+        processor = CoTProcessor()
+        
+        knowledge_data = await query_knowledge_from_graph(query, graph_version_id, exclude_categories=["ai_synthesis"])
         
         # Handle different return types from fetch_knowledge
         if isinstance(knowledge_data, dict) and "status" in knowledge_data and knowledge_data["status"] == "error":
             # If fetch_knowledge returned an error dictionary
             return knowledge_data
         
-        # Handle string or other return types
-        result_data = {}
-        if isinstance(knowledge_data, str):
-            # Check if the knowledge_data contains vector representations
-            if knowledge_data and ("[" in knowledge_data and "]" in knowledge_data):
-                # Look for specific patterns indicating vector data
-                if any(pattern in knowledge_data for pattern in ["-0.", "0.", "1.", "2.", "..."]):
+        # Process knowledge data for both primary types
+        if isinstance(knowledge_data, list) and knowledge_data:
+            # Extract first item's content using the utility function
+            first_item = knowledge_data[0]
+            processed_content = processor._extract_knowledge_content(first_item)
+            result_data = {"raw": processed_content, "content": processed_content}
+        else:
+            # Process direct knowledge content
+            processed_content = processor._extract_knowledge_content(knowledge_data)
+            
+            # Filter out vector data if present
+            if processed_content and ("[" in processed_content and "]" in processed_content):
+                if any(pattern in processed_content for pattern in ["-0.", "0.", "1.", "2.", "..."]):
                     # Filter out the vector data sections
-                    lines = knowledge_data.split("\n")
+                    lines = processed_content.split("\n")
                     filtered_lines = []
                     skip_until_next_entry = False
                     
@@ -1324,21 +1257,14 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
                             filtered_lines.append(line)
                     
                     # Replace knowledge data with filtered version
-                    knowledge_data = "\n".join(filtered_lines)
+                    processed_content = "\n".join(filtered_lines)
                     logger.info("Filtered out vector data from knowledge response")
             
+            # Try to parse as JSON, but use raw text if it fails
             try:
-                # Try to parse as JSON if it's a string that contains JSON
-                result_data = json.loads(knowledge_data)
-            except json.JSONDecodeError:
-                # If not valid JSON, use as raw text
-                result_data = {"raw": knowledge_data, "content": knowledge_data}
-        else:
-            # If it's already a dict or other type, use directly
-            if isinstance(knowledge_data, dict):
-                result_data = knowledge_data
-            else:
-                result_data = {"raw": str(knowledge_data), "content": str(knowledge_data)}
+                result_data = json.loads(processed_content)
+            except (json.JSONDecodeError, TypeError):
+                result_data = {"raw": processed_content, "content": processed_content}
         
         return {
             "status": "success",

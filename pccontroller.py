@@ -276,7 +276,7 @@ async def query_knowledge(
         logger.error(f"Query failed after retries: {e}")
         return []
 
-async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id: Optional[str] = None, thread_id: Optional[str] = None, topic: Optional[str] = None, top_k: int = 10, min_similarity: float = 0.3, ef_search: int = 100) -> List[Dict]:
+async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id: Optional[str] = None, thread_id: Optional[str] = None, topic: Optional[str] = None, top_k: int = 10, min_similarity: float = 0.3, ef_search: int = 100, exclude_categories: Optional[List[str]] = None) -> List[Dict]:
     """
     Query knowledge from Pinecone with optimized vector structure and recall tuning.
 
@@ -287,6 +287,9 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         thread_id: The thread ID.
         topic: The topic.
         top_k: The top K.
+        min_similarity: Minimum similarity threshold.
+        ef_search: Search exploration factor.
+        exclude_categories: List of categories to exclude from results.
     """
     
     #brain_banks = await get_brain_banks(graph_version_id)
@@ -301,5 +304,16 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         knowledge = await query_knowledge(query, namespace, user_id, thread_id, topic, top_k, min_similarity, ef_search)
         if knowledge:
             all_knowledge.extend(knowledge)
+
+    # Post-process to filter out excluded categories
+    if exclude_categories:
+        filtered_knowledge = []
+        for entry in all_knowledge:
+            # Check if this entry has any of the excluded categories
+            entry_categories = entry.get("categories", [])
+            if not any(cat in entry_categories for cat in exclude_categories):
+                filtered_knowledge.append(entry)
+        logger.info(f"Filtered out {len(all_knowledge) - len(filtered_knowledge)} entries with excluded categories: {exclude_categories}")
+        all_knowledge = filtered_knowledge
 
     return all_knowledge
