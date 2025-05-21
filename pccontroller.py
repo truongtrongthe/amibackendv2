@@ -289,11 +289,11 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         top_k: The top K.
     """
     
-    brain_banks = await get_brain_banks(graph_version_id)
-    valid_namespaces = [brain["bank_name"] for brain in brain_banks]
+    #brain_banks = await get_brain_banks(graph_version_id)
+    #valid_namespaces = [brain["bank_name"] for brain in brain_banks]
     # Add conversation namespace to the list
-    valid_namespaces.extend(["conversation"])
-    logger.info(f"Valid namespaces for graph version {graph_version_id}: {valid_namespaces}")
+    valid_namespaces = ["conversation"]
+    #logger.info(f"Valid namespaces for graph version {graph_version_id}: {valid_namespaces}")
 
     # Get all knowledge from all namespaces
     all_knowledge = []

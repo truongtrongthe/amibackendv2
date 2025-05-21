@@ -87,12 +87,29 @@ class CoTProcessor:
                     logger.error(f"Error fetching knowledge for query {query}: {str(result)}")
                     profiling_skills[query] = {}
                 else:
+                    # Log raw result structure for debugging
+                    if isinstance(result, list) and result:
+                        logger.info(f"Query '{query}' returned list result with {len(result)} items")
+                        logger.info(f"First result keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'not a dict'}")
+                    elif isinstance(result, dict):
+                        logger.info(f"Query '{query}' returned dict result with keys: {list(result.keys())}")
+                    else:
+                        logger.info(f"Query '{query}' returned result of type: {type(result)}")
+                    
                     try:
                         profiling_skills[query] = json.loads(result) if isinstance(result, str) else result
                     except json.JSONDecodeError:
                         profiling_skills[query] = {"content": result}
 
-            return self._process_profiling_skills(profiling_skills)
+            # Process the results
+            processed = self._process_profiling_skills(profiling_skills)
+            
+            # Add additional logging
+            logger.info(f"Profiling knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
+            if processed.get('knowledge_context', '') == "No knowledge available.":
+                logger.warning("No profiling knowledge entries were extracted from the query results")
+                
+            return processed
             
         except Exception as e:
             logger.error(f"Error loading profiling skills: {str(e)}")
@@ -116,13 +133,29 @@ class CoTProcessor:
                     logger.error(f"Error fetching knowledge for query {query}: {str(result)}")
                     communication_skills[query] = {}
                 else:
+                    # Log raw result structure for debugging
+                    if isinstance(result, list) and result:
+                        logger.info(f"Query '{query}' returned list result with {len(result)} items")
+                        logger.info(f"First result keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'not a dict'}")
+                    elif isinstance(result, dict):
+                        logger.info(f"Query '{query}' returned dict result with keys: {list(result.keys())}")
+                    else:
+                        logger.info(f"Query '{query}' returned result of type: {type(result)}")
+                    
                     try:
                         communication_skills[query] = json.loads(result) if isinstance(result, str) else result
                     except json.JSONDecodeError:
                         communication_skills[query] = {"content": result}
-            communication_skills = self._process_communication_skills(communication_skills)
-            logger.info(f"Communication skills: {communication_skills}")
-            return communication_skills
+            
+            # Process the results
+            processed = self._process_communication_skills(communication_skills)
+            
+            # Add additional logging
+            logger.info(f"Communication knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
+            if processed.get('knowledge_context', '') == "No knowledge available.":
+                logger.warning("No communication knowledge entries were extracted from the query results")
+            
+            return processed
         except Exception as e:
             logger.error(f"Error loading communication skills: {str(e)}")
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
@@ -145,11 +178,30 @@ class CoTProcessor:
                     logger.error(f"Error fetching knowledge for query {query}: {str(result)}")
                     business_objectives[query] = {}
                 else:
+                    # Log raw result structure for debugging
+                    if isinstance(result, list) and result:
+                        logger.info(f"Query '{query}' returned list result with {len(result)} items")
+                        logger.info(f"First result keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'not a dict'}")
+                    elif isinstance(result, dict):
+                        logger.info(f"Query '{query}' returned dict result with keys: {list(result.keys())}")
+                    else:
+                        logger.info(f"Query '{query}' returned result of type: {type(result)}")
+                    
                     try:
                         business_objectives[query] = json.loads(result) if isinstance(result, str) else result
                     except json.JSONDecodeError:
                         business_objectives[query] = {"content": result}
-            return self._process_business_objectives_knowledge(business_objectives)
+                        
+            # Process the results
+            processed = self._process_business_objectives_knowledge(business_objectives)
+            
+            # Add additional logging
+            logger.info(f"Business objectives knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
+            if processed.get('knowledge_context', '') == "No knowledge available.":
+                logger.warning("No business objectives knowledge entries were extracted from the query results")
+                
+            return processed
+            
         except Exception as e:
             logger.error(f"Error loading profiling skills: {str(e)}")
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
@@ -161,18 +213,40 @@ class CoTProcessor:
         
         for query, knowledge in profiling_skills.items():
             if isinstance(knowledge, dict):
-                # If it's already a dict, use it directly
-                if "content" in knowledge:
+                # Check for raw field (from query_knowledge_from_graph results)
+                if "raw" in knowledge:
+                    knowledge_context.append(knowledge["raw"])
+                # Also check for content field (fallback)
+                elif "content" in knowledge:
                     knowledge_context.append(knowledge["content"])
+                elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
+                    # If it's a list of results, try to get the first item
+                    first_item = knowledge[0]
+                    if isinstance(first_item, dict):
+                        if "raw" in first_item:
+                            knowledge_context.append(first_item["raw"])
+                        elif "content" in first_item:
+                            knowledge_context.append(first_item["content"])
             elif isinstance(knowledge, str):
                 # If it's a string, try to parse it
                 try:
                     parsed = json.loads(knowledge)
-                    if isinstance(parsed, dict) and "content" in parsed:
-                        knowledge_context.append(parsed["content"])
+                    if isinstance(parsed, dict):
+                        if "raw" in parsed:
+                            knowledge_context.append(parsed["raw"])
+                        elif "content" in parsed:
+                            knowledge_context.append(parsed["content"])
                 except json.JSONDecodeError:
                     # If not JSON, use the string directly
                     knowledge_context.append(knowledge)
+            elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
+                # If it's a list of results, try to get the first item
+                first_item = knowledge[0]
+                if isinstance(first_item, dict):
+                    if "raw" in first_item:
+                        knowledge_context.append(first_item["raw"])
+                    elif "content" in first_item:
+                        knowledge_context.append(first_item["content"])
 
         # Clean up the knowledge context
         cleaned_context = []
@@ -203,18 +277,40 @@ class CoTProcessor:
         
         for query, knowledge in communication_skills.items():
             if isinstance(knowledge, dict):
-                # If it's already a dict, use it directly
-                if "content" in knowledge:
+                # Check for raw field (from query_knowledge_from_graph results)
+                if "raw" in knowledge:
+                    knowledge_context.append(knowledge["raw"])
+                # Also check for content field (fallback)
+                elif "content" in knowledge:
                     knowledge_context.append(knowledge["content"])
+                elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
+                    # If it's a list of results, try to get the first item
+                    first_item = knowledge[0]
+                    if isinstance(first_item, dict):
+                        if "raw" in first_item:
+                            knowledge_context.append(first_item["raw"])
+                        elif "content" in first_item:
+                            knowledge_context.append(first_item["content"])
             elif isinstance(knowledge, str):
                 # If it's a string, try to parse it
                 try:
                     parsed = json.loads(knowledge)
-                    if isinstance(parsed, dict) and "content" in parsed:
-                        knowledge_context.append(parsed["content"])
+                    if isinstance(parsed, dict):
+                        if "raw" in parsed:
+                            knowledge_context.append(parsed["raw"])
+                        elif "content" in parsed:
+                            knowledge_context.append(parsed["content"])
                 except json.JSONDecodeError:
                     # If not JSON, use the string directly
                     knowledge_context.append(knowledge)
+            elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
+                # If it's a list of results, try to get the first item
+                first_item = knowledge[0]
+                if isinstance(first_item, dict):
+                    if "raw" in first_item:
+                        knowledge_context.append(first_item["raw"])
+                    elif "content" in first_item:
+                        knowledge_context.append(first_item["content"])
 
         # Clean up the knowledge context
         cleaned_context = []
@@ -228,6 +324,8 @@ class CoTProcessor:
 
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
+        
+        logger.info(f"Processed {len(cleaned_context)} communication knowledge entries")
         
         return {
             "knowledge_context": full_knowledge,
@@ -245,18 +343,40 @@ class CoTProcessor:
         
         for query, knowledge in business_objectives.items():
             if isinstance(knowledge, dict):
-                # If it's already a dict, use it directly
-                if "content" in knowledge:
+                # Check for raw field (from query_knowledge_from_graph results)
+                if "raw" in knowledge:
+                    knowledge_context.append(knowledge["raw"])
+                # Also check for content field (fallback)
+                elif "content" in knowledge:
                     knowledge_context.append(knowledge["content"])
+                elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
+                    # If it's a list of results, try to get the first item
+                    first_item = knowledge[0]
+                    if isinstance(first_item, dict):
+                        if "raw" in first_item:
+                            knowledge_context.append(first_item["raw"])
+                        elif "content" in first_item:
+                            knowledge_context.append(first_item["content"])
             elif isinstance(knowledge, str):
                 # If it's a string, try to parse it
                 try:
                     parsed = json.loads(knowledge)
-                    if isinstance(parsed, dict) and "content" in parsed:
-                        knowledge_context.append(parsed["content"])
+                    if isinstance(parsed, dict):
+                        if "raw" in parsed:
+                            knowledge_context.append(parsed["raw"])
+                        elif "content" in parsed:
+                            knowledge_context.append(parsed["content"])
                 except json.JSONDecodeError:
                     # If not JSON, use the string directly
                     knowledge_context.append(knowledge)
+            elif isinstance(knowledge, (list, tuple)) and len(knowledge) > 0:
+                # If it's a list of results, try to get the first item
+                first_item = knowledge[0]
+                if isinstance(first_item, dict):
+                    if "raw" in first_item:
+                        knowledge_context.append(first_item["raw"])
+                    elif "content" in first_item:
+                        knowledge_context.append(first_item["content"])
 
         # Clean up the knowledge context
         cleaned_context = []
