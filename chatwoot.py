@@ -59,7 +59,10 @@ process_lock = threading.Lock()
 # Track last message time and pending messages by conversation
 last_message_times = {}
 pending_messages = defaultdict(list)
-CONSECUTIVE_MESSAGE_WINDOW = 10.0  # seconds to wait for more messages
+CONSECUTIVE_MESSAGE_WINDOW = 60.0  # seconds to wait for more messages
+
+# Keep track of active tasks for each conversation
+active_tasks = {}
 
 def send_message(conversation_id: int, message: str, attachment_url: str = None) -> tuple:
     """
@@ -803,8 +806,7 @@ async def handle_message_created(data: Dict[str, Any], organization_id: str = No
             print(f"\n📨 Incoming Message FROM {context['contact_name']}:")
         else:
             print(f"\n📤 Outgoing Message TO {context['contact_name']}:")
-        print(f"Content: {content}")
-        print(f"Conversation ID: {context['conversation_id']}")
+        
         if context.get('last_activity_at'):
             print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
@@ -885,34 +887,24 @@ async def handle_message_created(data: Dict[str, Any], organization_id: str = No
                 print(f"⏭️ Skipping AI response for message with ignore prefix: {AI_IGNORE_PREFIX}")
                 return
 
-            # Add to pending messages and check if we should process now or wait
-            current_time = time.time()
-            last_time = last_message_times.get(conv_id_str, 0)
-            time_since_last = current_time - last_time
-            
-            # Update the last message time
-            last_message_times[conv_id_str] = current_time
-            
             # Add to pending messages
             pending_messages[conv_id_str].append({
                 'content': content,
-                'time': current_time,
+                'time': time.time(),
                 'context': context,
                 'conversation_data': conversation_data,
                 'contact_data': contact_data,
                 'organization_id': organization_id
             })
             
-            # If this is a consecutive message (within window), schedule processing for later
-            if time_since_last < CONSECUTIVE_MESSAGE_WINDOW:
-                print(f"⏱️ Consecutive message detected! ({time_since_last:.1f}s gap) Delaying response...")
-                
-                # Schedule the processing task
-                asyncio.create_task(process_pending_messages_after_delay(conv_id_str))
-                return
-            
-            # If we reach here, process messages immediately
-            await process_pending_messages(conv_id_str)
+            # If no active task for this conversation, create one
+            if conv_id_str not in active_tasks or active_tasks[conv_id_str].done():
+                print(f"⏱️ Scheduling message processing task for conversation {conv_id_str}")
+                active_tasks[conv_id_str] = asyncio.create_task(
+                    process_messages_with_batching(conv_id_str)
+                )
+            else:
+                print(f"⏱️ Task already scheduled for conversation {conv_id_str}, adding message to queue")
             
         elif is_incoming and not ENABLE_AI_RESPONSES:
             print("ℹ️ AI responses are disabled. Set ENABLE_AI_RESPONSES=true to enable.")
@@ -924,93 +916,85 @@ async def handle_message_created(data: Dict[str, Any], organization_id: str = No
         import traceback
         traceback.print_exc()
 
-# Add these new functions after handle_message_created
-async def process_pending_messages_after_delay(conv_id_str: str):
-    """Wait for the consecutive message window before processing pending messages."""
+# Replace process_pending_messages_after_delay function with this new function
+async def process_messages_with_batching(conv_id_str: str):
+    """Process messages in batches of 2 with a delay between batches."""
     try:
-        await asyncio.sleep(CONSECUTIVE_MESSAGE_WINDOW)
+        # Initial delay to allow more messages to accumulate
+        await asyncio.sleep(CONSECUTIVE_MESSAGE_WINDOW / 2)  # 30 seconds
         
-        # Check if any new messages came in during our wait
-        current_time = time.time()
-        last_time = last_message_times.get(conv_id_str, 0)
-        
-        # If no new messages came during our wait, process the queue
-        if current_time - last_time >= CONSECUTIVE_MESSAGE_WINDOW:
-            await process_pending_messages(conv_id_str)
-        # Otherwise another delay task is already scheduled
+        while pending_messages[conv_id_str]:
+            # Get up to 2 messages from the queue
+            batch = []
+            while len(batch) < 2 and pending_messages[conv_id_str]:
+                batch.append(pending_messages[conv_id_str].pop(0))
+            
+            if not batch:
+                break
+                
+            print(f"Processing batch of {len(batch)} messages for conversation {conv_id_str}")
+            
+            # Combine messages in the batch
+            combined_content = "\n".join([m['content'] for m in batch])
+            print(f"Combined {len(batch)} messages into one request: \n{combined_content}")
+            
+            # Use the most recent message's metadata
+            latest = batch[-1]
+            context = latest['context']
+            conversation_data = latest['conversation_data']
+            contact_data = latest['contact_data']
+            organization_id = latest['organization_id']
+            
+            # Create thread_id and user_id for AI response
+            db_conversation_id = conversation_data['id']
+            thread_id = f"chatwoot_{db_conversation_id}"
+            user_id = f"chatwoot_{contact_data['id']}"
+            
+            print(f"\n🤖 Generating AI response for message batch: '{combined_content}'")
+            
+            # Add a delay to make the response seem more natural
+            if AI_RESPONSE_DELAY > 0:
+                delay_seconds = min(AI_RESPONSE_DELAY * 1.5, 3.0)
+                print(f"⏱️ Waiting {delay_seconds} seconds before responding...")
+                await asyncio.sleep(delay_seconds)
+            
+            # Retrieve conversation history
+            conversation_history = get_conversation_history(db_conversation_id, max_messages=5)
+            
+            # Try to find a graph version ID
+            graph_version_id = get_graph_version_id(organization_id) or DEFAULT_GRAPH_VERSION_ID
+            print(f"Using graph_version_id: {graph_version_id if graph_version_id else 'None'}")
+            
+            # Generate and send AI response
+            response_time_start = time.time()
+            message_chunks = await generate_ai_response(
+                combined_content, 
+                user_id, 
+                thread_id, 
+                graph_version_id,
+                organization_id
+            )
+            response_time = time.time() - response_time_start
+            print(f"⏱️ AI response generated in {response_time:.2f} seconds")
+            
+            if message_chunks:
+                await send_message_chunks(message_chunks, context, conversation_data)
+            else:
+                print("❌ No AI response generated")
+                
+            # Wait before processing the next batch (if any)
+            if pending_messages[conv_id_str]:
+                print(f"⏱️ Waiting before processing next batch...")
+                await asyncio.sleep(CONSECUTIVE_MESSAGE_WINDOW / 3)  # 20 seconds
+                
     except Exception as e:
-        print(f"Error in delayed message processing: {e}")
+        print(f"Error in batch message processing: {e}")
         import traceback
         traceback.print_exc()
-
-async def process_pending_messages(conv_id_str: str):
-    """Process all pending messages for a conversation."""
-    try:
-        if not pending_messages[conv_id_str]:
-            return
-            
-        messages = pending_messages[conv_id_str]
-        print(f"Processing {len(messages)} pending messages for conversation {conv_id_str}")
-        
-        # Combine all messages if multiple
-        if len(messages) > 1:
-            combined_content = "\n".join([m['content'] for m in messages])
-            print(f"Combined {len(messages)} consecutive messages into one request: \n{combined_content}")
-        else:
-            combined_content = messages[0]['content']
-        
-        # Use the most recent message's metadata
-        latest = messages[-1]
-        context = latest['context']
-        conversation_data = latest['conversation_data']
-        contact_data = latest['contact_data']
-        organization_id = latest['organization_id']
-        
-        # Clear the pending messages
-        pending_messages[conv_id_str] = []
-        
-        # Create thread_id and user_id for AI response
-        db_conversation_id = conversation_data['id']
-        thread_id = f"chatwoot_{db_conversation_id}"
-        user_id = f"chatwoot_{contact_data['id']}"
-        
-        print(f"\n🤖 Generating AI response for message(s): '{combined_content}'")
-        
-        # Add a delay to make the response seem more natural
-        if AI_RESPONSE_DELAY > 0:
-            # Add a slightly longer delay for combined messages
-            delay_seconds = min(AI_RESPONSE_DELAY * 1.5, 3.0) if len(messages) > 1 else AI_RESPONSE_DELAY
-            print(f"⏱️ Waiting {delay_seconds} seconds before responding...")
-            await asyncio.sleep(delay_seconds)
-        
-        # Retrieve conversation history to provide context for the AI
-        conversation_history = get_conversation_history(db_conversation_id, max_messages=5)
-        
-        # Try to find a graph version ID to use for knowledge retrieval
-        graph_version_id = get_graph_version_id(organization_id) or DEFAULT_GRAPH_VERSION_ID
-        print(f"Using graph_version_id: {graph_version_id if graph_version_id else 'None'}")
-        
-        # Generate and send AI response
-        response_time_start = time.time()
-        message_chunks = await generate_ai_response(
-            combined_content, 
-            user_id, 
-            thread_id, 
-            graph_version_id,
-            organization_id
-        )
-        response_time = time.time() - response_time_start
-        print(f"⏱️ AI response generated in {response_time:.2f} seconds")
-        
-        if message_chunks:
-            await send_message_chunks(message_chunks, context, conversation_data)
-        else:
-            print("❌ No AI response generated")
-            
-    except Exception as e:
-        print(f"Error processing pending messages: {e}")
-        import traceback
-        traceback.print_exc()
+    finally:
+        # Clean up task reference when done
+        if conv_id_str in active_tasks:
+            del active_tasks[conv_id_str]
 
 def get_conversation_history(conversation_id: int, max_messages: int = 5) -> str:
     """
@@ -1166,7 +1150,7 @@ async def handle_message_updated(data: Dict[str, Any], organization_id: str = No
         # Log update
         print(f"📝 Message updated:")
         print(f"Message ID: {message_id}")
-        print(f"Content: {content}")
+
         
         # Find the conversation by platform message ID if available
         conversation_id = None

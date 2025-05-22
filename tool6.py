@@ -119,7 +119,7 @@ class CoTProcessor:
         """Load communication knowledge base concurrently using fetch_knowledge."""
         logger.info(f"Loading communication skills with graph_version_id: {self.graph_version_id}")
         queries = [
-            "Cách giao tiếp với người dùng"
+            "Cách giao tiếp và nói năng với khác"
         ]
         
         try:
@@ -132,16 +132,7 @@ class CoTProcessor:
                 if isinstance(result, Exception):
                     logger.error(f"Error fetching knowledge for query {query}: {str(result)}")
                     communication_skills[query] = {}
-                else:
-                    # Log raw result structure for debugging
-                    if isinstance(result, list) and result:
-                        logger.info(f"Query '{query}' returned list result with {len(result)} items")
-                        logger.info(f"First result keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'not a dict'}")
-                    elif isinstance(result, dict):
-                        logger.info(f"Query '{query}' returned dict result with keys: {list(result.keys())}")
-                    else:
-                        logger.info(f"Query '{query}' returned result of type: {type(result)}")
-                    
+                else:     
                     try:
                         communication_skills[query] = json.loads(result) if isinstance(result, str) else result
                     except json.JSONDecodeError:
@@ -263,7 +254,7 @@ class CoTProcessor:
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
         
-        logger.info(f"Processed {len(cleaned_context)} communication knowledge entries")
+        logger.info(f"Communication knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -810,9 +801,9 @@ class CoTProcessor:
     async def _decide_action_plan_with_llm(self, user_profile: UserProfileModel, analysis_knowledge: Dict[str, Any]) -> Dict[str, Any]:
         """Create action plan using LLM based on user profile and analysis knowledge."""
         
+
         # Get the user story
         user_story = await self._user_story(user_profile)
-        logger.info(f"USER STORY: {user_story}")
         
         # Extract temporal references if available
         temporal_info = ""
@@ -845,6 +836,7 @@ class CoTProcessor:
         date_str = current_time.strftime("%A, %B %d, %Y")
         time_str = current_time.strftime("%H:%M")
         
+        logger.info(f"ANALYSIS KNOWLEDGE: {analysis_knowledge.get('knowledge_context', '')}")
         # Create a temporal context string
         temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
         
@@ -1089,6 +1081,11 @@ class CoTProcessor:
         # Get communication skills for use in prompt
         communication_knowledge = self.communication_skills.get("knowledge_context", "")
         
+        logger.info(f"Communication knowledge: {communication_knowledge}")
+        logger.info(f"Addtional info: {additional_knowledge}")
+        logger.info(f"ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}")
+        logger.info(f"Conversation context: {conversation_context}")
+
         # Build prompt for LLM to generate response
         prompt = f"""Generate a response to the user that STRICTLY FOLLOWS the action plan and communication guidelines:
 
