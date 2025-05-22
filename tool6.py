@@ -457,7 +457,7 @@ class CoTProcessor:
         full_knowledge = re.sub(r'\n{3,}', '\n\n', full_knowledge)
         full_knowledge = re.sub(r' +', ' ', full_knowledge)
         
-        logger.info(f"Business objectives knowledge context cleaned: {full_knowledge}")
+        #logger.info(f"Business objectives knowledge context cleaned: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -1281,7 +1281,7 @@ class CoTProcessor:
         • Adapt to the specific user needs indicated in the analysis
         • Follow communication patterns appropriate for the user's classification
 
-        CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN. Do not suggest connecting with specialists, visiting websites, or using external services unless these are explicitly listed as actions in the plan."""
+        CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN."""
         logger.info(f"Prompt Before Taking Action: {prompt}")
         try:
             response = await LLM.ainvoke(prompt)
