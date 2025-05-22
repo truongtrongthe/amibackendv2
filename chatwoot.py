@@ -14,6 +14,8 @@ import queue
 import threading
 import logging
 import asyncio
+from functools import partial
+import concurrent.futures
 
 # Add multiprocessing freeze support
 from multiprocessing import freeze_support
@@ -536,6 +538,10 @@ def ai_process_function(request_queue, response_queue):
         
         print("✅ AI process initialized and ready to handle requests")
         
+        # Add a heartbeat mechanism to detect process health
+        last_heartbeat = time.time()
+        HEARTBEAT_INTERVAL = 60  # 60 seconds
+        
         # Process requests until shutdown
         while True:
             try:
@@ -547,29 +553,81 @@ def ai_process_function(request_queue, response_queue):
                     print("🛑 Received shutdown signal, closing AI process")
                     break
                 
+                # Check for heartbeat request
+                if request == "HEARTBEAT":
+                    response_queue.put("ALIVE")
+                    last_heartbeat = time.time()
+                    continue
+                
+                # Update heartbeat
+                last_heartbeat = time.time()
+                
                 # Process the request
                 message, user_id, thread_id, graph_version_id = request
                 print(f"📩 Processing request: message='{message[:50]}...', user={user_id}, thread={thread_id}")
                 
                 start_time = time.time()
                 
-                # Process the request
+                # Process the request with a timeout
+                MAX_PROCESSING_TIME = 30  # 30 seconds maximum processing time
                 response_chunks = []
-                for chunk in convo_stream(
-                    user_input=message,
-                    user_id=user_id,
-                    thread_id=thread_id,
-                    graph_version_id=graph_version_id,
-                    mode="mc"
-                ):
-                    # Process the chunk
-                    if chunk.startswith('data: '):
+                
+                try:
+                    # Use a separate thread with timeout for processing
+                    import threading
+                    import queue as py_queue
+                    
+                    result_queue = py_queue.Queue()
+                    
+                    def process_with_timeout():
                         try:
-                            data_json = json.loads(chunk[6:])
-                            if 'message' in data_json:
-                                response_chunks.append(data_json['message'])
+                            chunks = []
+                            for chunk in convo_stream(
+                                user_input=message,
+                                user_id=user_id,
+                                thread_id=thread_id,
+                                graph_version_id=graph_version_id,
+                                mode="mc"
+                            ):
+                                # Process the chunk
+                                if chunk.startswith('data: '):
+                                    try:
+                                        data_json = json.loads(chunk[6:])
+                                        if 'message' in data_json:
+                                            chunks.append(data_json['message'])
+                                    except Exception as e:
+                                        print(f"Error processing chunk: {str(e)}")
+                            result_queue.put(chunks)
                         except Exception as e:
-                            print(f"Error processing chunk: {str(e)}")
+                            result_queue.put(f"Error: {str(e)}")
+                    
+                    # Start processing thread
+                    thread = threading.Thread(target=process_with_timeout)
+                    thread.daemon = True
+                    thread.start()
+                    
+                    # Wait for result with timeout
+                    thread.join(MAX_PROCESSING_TIME)
+                    
+                    if thread.is_alive():
+                        # Thread is still running after timeout
+                        print(f"⚠️ AI processing timeout after {MAX_PROCESSING_TIME} seconds")
+                        response_queue.put("Error: AI processing timeout")
+                        continue
+                    
+                    # Get result
+                    result = result_queue.get(block=False)
+                    if isinstance(result, list):
+                        response_chunks = result
+                    else:
+                        print(f"Error in AI processing: {result}")
+                        response_queue.put(result)
+                        continue
+                    
+                except Exception as e:
+                    print(f"Error during AI processing: {str(e)}")
+                    response_queue.put(f"Error: {str(e)}")
+                    continue
                 
                 # Combine into a single response
                 full_response = ' '.join(response_chunks)
@@ -581,6 +639,11 @@ def ai_process_function(request_queue, response_queue):
                 response_queue.put(full_response)
                 
             except queue.Empty:
+                # Check if we've been silent for too long
+                if time.time() - last_heartbeat > HEARTBEAT_INTERVAL * 2:
+                    print("⚠️ AI process appears to be stalled - no activity for too long")
+                    break
+                    
                 print("⏰ AI process timeout - no requests received in 5 minutes")
                 break
             except Exception as e:
@@ -677,26 +740,24 @@ async def generate_ai_response(message_text: str, user_id: str = None, thread_id
         try:
             from ami import convo_stream
             
-            # Process the response directly with async/await
+            # Process the response directly with async/await and implement timeout handling
+            loop = asyncio.get_event_loop()
             response_chunks = []
-            async for chunk in convo_stream(
-                user_input=enhanced_message,
-                user_id=user_id,
-                thread_id=thread_id,
-                graph_version_id=graph_version_id,
-                mode="mc"
-            ):
-                # Process the chunk
-                if chunk.startswith('data: '):
-                    try:
-                        import json
-                        data_json = json.loads(chunk[6:])
-                        if 'message' in data_json:
-                            message_content = data_json['message']
-                            response_chunks.append(message_content)
-                            print(f"Received chunk: {message_content[:50]}...")
-                    except json.JSONDecodeError:
-                        print(f"Error parsing chunk: {chunk}")
+            
+            # Use ThreadPoolExecutor for potentially blocking operations
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                try:
+                    # Run in executor with a timeout
+                    result = await loop.run_in_executor(
+                        executor,
+                        partial(process_ai_response, enhanced_message, user_id, thread_id, graph_version_id)
+                    )
+                    response_chunks = result
+                except Exception as e:
+                    print(f"Error processing AI response: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    return ["I'm sorry, I encountered an error while processing your request. The team has been notified."]
             
             # Combine all response chunks into a single text
             full_response = ' '.join(response_chunks)
@@ -749,177 +810,45 @@ async def generate_ai_response(message_text: str, user_id: str = None, thread_id
         traceback.print_exc()
         return ["I'm sorry, I encountered an error while processing your request. The team has been notified."]
 
-async def handle_message_created(data: Dict[str, Any], organization_id: str = None):
-    """
-    Handle message created event within conversation context.
-    Processes incoming messages and generates AI responses when appropriate.
+# Add a new helper function for AI response processing
+def process_ai_response(message, user_id, thread_id, graph_version_id):
+    """Helper function to process AI response in a separate thread"""
+    from ami import convo_stream
+    import json
     
-    Args:
-        data: The webhook event data
-        organization_id: Optional organization ID for multi-tenant setups
-    """
-    start_time = time.time()
-    try:
-        # Extract message ID for duplicate detection
-        message_id = data.get('id')
-        
-        # Skip if we've already processed this message
-        if message_id and message_id in processed_messages:
-            print(f"⏭️ Skipping duplicate message with ID: {message_id}")
-            return
-            
-        # Add to processed messages
-        if message_id:
-            processed_messages.append(message_id)
-        
-        # Get conversation context
-        context = handle_conversation_event(data)
-        if not context or not context.get('conversation_id'):
-            print("❌ Invalid conversation context, skipping message")
-            return
-            
-        # Handle contact data
-        contact_data = handle_contact_creation(data, organization_id)
-        if not contact_data:
-            print("❌ Could not create or retrieve contact, skipping message")
-            return
-        
-        # Handle conversation data
-        conversation_data = handle_conversation_management(data, contact_data['id'])
-        if not conversation_data:
-            print("❌ Could not create or retrieve conversation, skipping message")
-            return
-        
-        # Get message details
-        content = data.get('content', '')
-        message_type = data.get('message_type')
-        is_incoming = message_type == 'incoming'
-        status = 'received' if is_incoming else 'sent'
-        
-        # Skip empty messages
-        if not content or not content.strip():
-            print("⏭️ Skipping empty message")
-            return
-        
-        # Log initial message with clearer direction indication
-        if is_incoming:
-            print(f"\n📨 Incoming Message FROM {context['contact_name']}:")
-        else:
-            print(f"\n📤 Outgoing Message TO {context['contact_name']}:")
-        
-        if context.get('last_activity_at'):
-            print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        
-        # Add message to conversation - but only if it's incoming OR not from our own system
-        # (outgoing messages from our AI system are already stored when we send them)
-        sender = data.get('sender')
-        sender_id = sender.get('id') if sender else None
-        sender_type = sender.get('type') if sender else None
-        
-        # For outgoing messages, determine if this might be our own message by checking
-        # if we've recently sent a similar message with this content
-        is_likely_our_message = False
-        if not is_incoming:
+    response_chunks = []
+    # This will be run in a thread, so we need synchronous code
+    for chunk in convo_stream(
+        user_input=message,
+        user_id=user_id,
+        thread_id=thread_id,
+        graph_version_id=graph_version_id,
+        mode="mc"
+    ):
+        # Process the chunk
+        if chunk.startswith('data: '):
             try:
-                conversation = conversation_manager.get_conversation(conversation_data['id'])
-                if conversation and "messages" in conversation.get("conversation_data", {}):
-                    messages = conversation["conversation_data"]["messages"]
-                    
-                    # Look for a recent message with same content (within last 30 seconds)
-                    current_time = datetime.now(timezone.utc)
-                    for msg in reversed(messages):  # Start from most recent
-                        # Skip non-matching messages
-                        if msg.get('content') != content or msg.get('direction') != 'outgoing':
-                            continue
-                            
-                        # Check timestamp if available
-                        if msg.get('timestamp'):
-                            try:
-                                msg_time = datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00'))
-                                # If message is within last 30 seconds, it's likely a duplicate
-                                time_diff = (current_time - msg_time).total_seconds()
-                                if time_diff < 30:
-                                    is_likely_our_message = True
-                                    logger.info(f"Detected outgoing message that is likely our own (based on content match)")
-                                    break
-                            except (ValueError, TypeError):
-                                # If timestamp parsing fails, continue checking
-                                pass
-            except Exception as e:
-                logger.warning(f"Error while checking if message is our own: {str(e)}")
-        
-        # Only store incoming messages or outgoing messages that are not likely our own
-        if is_incoming or (not is_likely_our_message and sender_type != 'bot'):
-            message = {
-                'sender_type': 'agent' if message_type == 'outgoing' else 'contact',
-                'content': content,
-                'platform': 'chatwoot',
-                'platform_message_id': message_id,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'direction': 'incoming' if is_incoming else 'outgoing',
-                'status': status
-            }
-            
-            if is_incoming:
-                message.update({
-                    'source': context.get('channel', 'facebook'),
-                    'raw_data': {
-                        'facebook_id': context.get('facebook_id'),
-                        'contact_name': context.get('contact_name')
-                    }
-                })
-                
-            logger.info(f"Adding message to conversation {conversation_data['id']}")
-            conversation_manager.add_message(conversation_data['id'], message)
-        else:
-            logger.info(f"Skipping storage of our own outgoing message (already stored when sent)")
-        
-        # If this is an incoming message from a customer, check if we should generate an AI response
-        if is_incoming and ENABLE_AI_RESPONSES:
-            # Skip if conversation is in blocklist
-            conv_id_str = str(context['conversation_id'])
-            if conv_id_str in AI_RESPONSE_BLOCKLIST:
-                print(f"⏭️ Skipping AI response for blocklisted conversation ID: {conv_id_str}")
-                return
-                
-            # Skip if message starts with ignore prefix
-            if AI_IGNORE_PREFIX and content.strip().startswith(AI_IGNORE_PREFIX):
-                print(f"⏭️ Skipping AI response for message with ignore prefix: {AI_IGNORE_PREFIX}")
-                return
-
-            # Add to pending messages
-            pending_messages[conv_id_str].append({
-                'content': content,
-                'time': time.time(),
-                'context': context,
-                'conversation_data': conversation_data,
-                'contact_data': contact_data,
-                'organization_id': organization_id
-            })
-            
-            # If no active task for this conversation, create one
-            if conv_id_str not in active_tasks or active_tasks[conv_id_str].done():
-                print(f"⏱️ Scheduling message processing task for conversation {conv_id_str}")
-                active_tasks[conv_id_str] = asyncio.create_task(
-                    process_messages_with_batching(conv_id_str)
-                )
-            else:
-                print(f"⏱️ Task already scheduled for conversation {conv_id_str}, adding message to queue")
-            
-        elif is_incoming and not ENABLE_AI_RESPONSES:
-            print("ℹ️ AI responses are disabled. Set ENABLE_AI_RESPONSES=true to enable.")
-            
-        print(f"✅ Message processing completed in {time.time() - start_time:.2f} seconds")
+                data_json = json.loads(chunk[6:])
+                if 'message' in data_json:
+                    message_content = data_json['message']
+                    response_chunks.append(message_content)
+                    print(f"Received chunk: {message_content[:50]}...")
+            except json.JSONDecodeError:
+                print(f"Error parsing chunk: {chunk}")
     
-    except Exception as e:
-        print(f"❌ Error in handle_message_created: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    return response_chunks
 
-# Replace process_pending_messages_after_delay function with this new function
+# Modify process_messages_with_batching function to include timeouts and better error handling
 async def process_messages_with_batching(conv_id_str: str):
     """Process messages in batches of 2 with a delay between batches."""
     try:
+        # Add a maximum queue size limit to prevent memory issues
+        MAX_QUEUE_SIZE = 10  # Maximum pending messages to keep
+        if len(pending_messages[conv_id_str]) > MAX_QUEUE_SIZE:
+            print(f"⚠️ Queue size limit reached ({len(pending_messages[conv_id_str])} messages). Trimming to {MAX_QUEUE_SIZE}.")
+            # Keep only the most recent messages
+            pending_messages[conv_id_str] = pending_messages[conv_id_str][-MAX_QUEUE_SIZE:]
+            
         # Initial delay to allow more messages to accumulate
         await asyncio.sleep(CONSECUTIVE_MESSAGE_WINDOW / 2)  # 30 seconds
         
@@ -965,23 +894,40 @@ async def process_messages_with_batching(conv_id_str: str):
             graph_version_id = get_graph_version_id(organization_id) or DEFAULT_GRAPH_VERSION_ID
             print(f"Using graph_version_id: {graph_version_id if graph_version_id else 'None'}")
             
-            # Generate and send AI response
+            # Generate and send AI response with timeout
             response_time_start = time.time()
-            message_chunks = await generate_ai_response(
-                combined_content, 
-                user_id, 
-                thread_id, 
-                graph_version_id,
-                organization_id
-            )
-            response_time = time.time() - response_time_start
-            print(f"⏱️ AI response generated in {response_time:.2f} seconds")
-            
-            if message_chunks:
-                await send_message_chunks(message_chunks, context, conversation_data)
-            else:
-                print("❌ No AI response generated")
+            try:
+                # Set a timeout for AI response generation
+                message_chunks = await asyncio.wait_for(
+                    generate_ai_response(
+                        combined_content, 
+                        user_id, 
+                        thread_id, 
+                        graph_version_id,
+                        organization_id
+                    ),
+                    timeout=30.0  # 30 second timeout for AI response
+                )
+                response_time = time.time() - response_time_start
+                print(f"⏱️ AI response generated in {response_time:.2f} seconds")
                 
+                if message_chunks:
+                    # Set a timeout for message sending
+                    await asyncio.wait_for(
+                        send_message_chunks(message_chunks, context, conversation_data),
+                        timeout=60.0  # 60 second timeout for sending all chunks
+                    )
+                else:
+                    print("❌ No AI response generated")
+            except asyncio.TimeoutError:
+                print(f"⚠️ Timeout exceeded while processing messages for conversation {conv_id_str}")
+                # Send a fallback message to avoid leaving the user hanging
+                fallback_message = ["I'm sorry, I'm taking too long to process your request. Please try again in a moment."]
+                try:
+                    await send_message_chunks(fallback_message, context, conversation_data)
+                except Exception as e:
+                    print(f"Failed to send fallback message: {str(e)}")
+            
             # Wait before processing the next batch (if any)
             if pending_messages[conv_id_str]:
                 print(f"⏱️ Waiting before processing next batch...")
@@ -1149,8 +1095,7 @@ async def handle_message_updated(data: Dict[str, Any], organization_id: str = No
         
         # Log update
         print(f"📝 Message updated:")
-        print(f"Message ID: {message_id}")
-
+        
         
         # Find the conversation by platform message ID if available
         conversation_id = None
@@ -1203,7 +1148,7 @@ async def handle_message_updated(data: Dict[str, Any], organization_id: str = No
                         # Add the new message with updated content instead
                         # of trying to update the entire conversation
                         conversation_manager.add_message(conversation_id, updated_message)
-                        print(f"✅ Added updated message to conversation {conversation_id}")
+                        
                     else:
                         print(f"⚠️ Message with ID {message_id} not found in conversation {conversation_id}")
                 else:
@@ -1388,6 +1333,173 @@ def verify_webhook_signature(request):
         
     return True
 
+async def handle_message_created(data: Dict[str, Any], organization_id: str = None):
+    """
+    Handle message created event within conversation context.
+    Processes incoming messages and generates AI responses when appropriate.
+    
+    Args:
+        data: The webhook event data
+        organization_id: Optional organization ID for multi-tenant setups
+    """
+    start_time = time.time()
+    try:
+        # Extract message ID for duplicate detection
+        message_id = data.get('id')
+        
+        # Skip if we've already processed this message
+        if message_id and message_id in processed_messages:
+            print(f"⏭️ Skipping duplicate message with ID: {message_id}")
+            return
+            
+        # Add to processed messages
+        if message_id:
+            processed_messages.append(message_id)
+        
+        # Get conversation context
+        context = handle_conversation_event(data)
+        if not context or not context.get('conversation_id'):
+            print("❌ Invalid conversation context, skipping message")
+            return
+            
+        # Handle contact data
+        contact_data = handle_contact_creation(data, organization_id)
+        if not contact_data:
+            print("❌ Could not create or retrieve contact, skipping message")
+            return
+        
+        # Handle conversation data
+        conversation_data = handle_conversation_management(data, contact_data['id'])
+        if not conversation_data:
+            print("❌ Could not create or retrieve conversation, skipping message")
+            return
+        
+        # Get message details
+        content = data.get('content', '')
+        message_type = data.get('message_type')
+        is_incoming = message_type == 'incoming'
+        status = 'received' if is_incoming else 'sent'
+        
+        # Skip empty messages
+        if not content or not content.strip():
+            print("⏭️ Skipping empty message")
+            return
+        
+        # Log initial message with clearer direction indication
+        if is_incoming:
+            print(f"\n📨 Incoming Message FROM {context['contact_name']}:")
+        else:
+            print(f"\n📤 Outgoing Message TO {context['contact_name']}:")
+        
+        if context.get('last_activity_at'):
+            print(f"Time: {context['last_activity_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        
+        # Add message to conversation - but only if it's incoming OR not from our own system
+        # (outgoing messages from our AI system are already stored when we send them)
+        sender = data.get('sender')
+        sender_id = sender.get('id') if sender else None
+        sender_type = sender.get('type') if sender else None
+        
+        # For outgoing messages, determine if this might be our own message by checking
+        # if we've recently sent a similar message with this content
+        is_likely_our_message = False
+        if not is_incoming:
+            try:
+                conversation = conversation_manager.get_conversation(conversation_data['id'])
+                if conversation and "messages" in conversation.get("conversation_data", {}):
+                    messages = conversation["conversation_data"]["messages"]
+                    
+                    # Look for a recent message with same content (within last 30 seconds)
+                    current_time = datetime.now(timezone.utc)
+                    for msg in reversed(messages):  # Start from most recent
+                        # Skip non-matching messages
+                        if msg.get('content') != content or msg.get('direction') != 'outgoing':
+                            continue
+                            
+                        # Check timestamp if available
+                        if msg.get('timestamp'):
+                            try:
+                                msg_time = datetime.fromisoformat(msg['timestamp'].replace('Z', '+00:00'))
+                                # If message is within last 30 seconds, it's likely a duplicate
+                                time_diff = (current_time - msg_time).total_seconds()
+                                if time_diff < 30:
+                                    is_likely_our_message = True
+                                    logger.info(f"Detected outgoing message that is likely our own (based on content match)")
+                                    break
+                            except (ValueError, TypeError):
+                                # If timestamp parsing fails, continue checking
+                                pass
+            except Exception as e:
+                logger.warning(f"Error while checking if message is our own: {str(e)}")
+        
+        # Only store incoming messages or outgoing messages that are not likely our own
+        if is_incoming or (not is_likely_our_message and sender_type != 'bot'):
+            message = {
+                'sender_type': 'agent' if message_type == 'outgoing' else 'contact',
+                'content': content,
+                'platform': 'chatwoot',
+                'platform_message_id': message_id,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'direction': 'incoming' if is_incoming else 'outgoing',
+                'status': status
+            }
+            
+            if is_incoming:
+                message.update({
+                    'source': context.get('channel', 'facebook'),
+                    'raw_data': {
+                        'facebook_id': context.get('facebook_id'),
+                        'contact_name': context.get('contact_name')
+                    }
+                })
+                
+            logger.info(f"Adding message to conversation {conversation_data['id']}")
+            conversation_manager.add_message(conversation_data['id'], message)
+        else:
+            logger.info(f"Skipping storage of our own outgoing message (already stored when sent)")
+        
+        # If this is an incoming message from a customer, check if we should generate an AI response
+        if is_incoming and ENABLE_AI_RESPONSES:
+            # Skip if conversation is in blocklist
+            conv_id_str = str(context['conversation_id'])
+            if conv_id_str in AI_RESPONSE_BLOCKLIST:
+                print(f"⏭️ Skipping AI response for blocklisted conversation ID: {conv_id_str}")
+                return
+                
+            # Skip if message starts with ignore prefix
+            if AI_IGNORE_PREFIX and content.strip().startswith(AI_IGNORE_PREFIX):
+                print(f"⏭️ Skipping AI response for message with ignore prefix: {AI_IGNORE_PREFIX}")
+                return
+
+            # Add to pending messages
+            pending_messages[conv_id_str].append({
+                'content': content,
+                'time': time.time(),
+                'context': context,
+                'conversation_data': conversation_data,
+                'contact_data': contact_data,
+                'organization_id': organization_id
+            })
+            
+            # If no active task for this conversation, create one
+            if conv_id_str not in active_tasks or active_tasks[conv_id_str].done():
+                print(f"⏱️ Scheduling message processing task for conversation {conv_id_str}")
+                active_tasks[conv_id_str] = asyncio.create_task(
+                    process_messages_with_batching(conv_id_str)
+                )
+            else:
+                print(f"⏱️ Task already scheduled for conversation {conv_id_str}, adding message to queue")
+            
+        elif is_incoming and not ENABLE_AI_RESPONSES:
+            print("ℹ️ AI responses are disabled. Set ENABLE_AI_RESPONSES=true to enable.")
+            
+        print(f"✅ Message processing completed in {time.time() - start_time:.2f} seconds")
+    
+    except Exception as e:
+        print(f"❌ Error in handle_message_created: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 @router.post('/webhook/chatwoot')
 async def chatwoot_webhook(
     request: Request,
@@ -1485,3 +1597,42 @@ async def verify_webhook_signature_fastapi(request: Request, body: bytes) -> boo
         return False
         
     return True
+
+# Add a heartbeat function to monitor AI process health
+def check_ai_process_health():
+    """Check if the AI process is healthy and restart if necessary"""
+    global ai_process, request_queue, response_queue, ai_process_running, process_lock
+    
+    with process_lock:
+        if ai_process_running:
+            try:
+                # Send heartbeat request
+                request_queue.put("HEARTBEAT", timeout=5)
+                
+                # Wait for response with timeout
+                try:
+                    response = response_queue.get(timeout=10)
+                    if response == "ALIVE":
+                        print("✅ AI process heartbeat check successful")
+                        return True
+                    else:
+                        print(f"⚠️ AI process heartbeat returned unexpected response: {response}")
+                except queue.Empty:
+                    print("⚠️ AI process heartbeat timeout - no response received")
+                
+                # If we get here, process might be unhealthy - try to restart
+                print("🔄 Restarting AI process due to failed heartbeat")
+                stop_ai_process()
+                time.sleep(1)
+                start_ai_process()
+                return False
+                
+            except Exception as e:
+                print(f"⚠️ Error checking AI process health: {str(e)}")
+                # Try to restart the process
+                print("🔄 Restarting AI process due to error")
+                stop_ai_process()
+                time.sleep(1)
+                start_ai_process()
+                return False
+        return False

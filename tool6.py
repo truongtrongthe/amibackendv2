@@ -1158,12 +1158,21 @@ async def process_llm_with_tools(
         message_count = 0
         max_messages = 50  # Increased from 30 to 50 messages
         
+        # Variables to track last message for deduplication
+        last_role = None
+        last_content = None
+        
         for msg in reversed(conversation_history[:-1]):  # Skip the current message
             try:
                 role = msg.get("role", "").lower() 
                 content = msg.get("content", "")
                 
                 if role and content:
+                    # Skip duplicate consecutive messages from the same role
+                    if role == last_role and content == last_content:
+                        logger.info(f"Skipping duplicate message from {role}")
+                        continue
+                            
                     # Format based on role with clear separation between messages
                     if role in ["assistant", "ai"]:
                         recent_messages.append(f"AI: {content.strip()}")
@@ -1172,6 +1181,11 @@ async def process_llm_with_tools(
                         recent_messages.append(f"User: {content.strip()}")
                         message_count += 1
                     # All other roles are now explicitly skipped
+                    
+                    # Update last message tracking for deduplication
+                    last_role = role
+                    last_content = content
+                    
                 if message_count >= max_messages:
                     # We've reached our limit, but add a note about truncation
                     if len(conversation_history) > max_messages + 1:  # +1 accounts for current message
