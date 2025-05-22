@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-# Apply eventlet monkey patch before any other imports
-import eventlet
-eventlet.monkey_patch()
-
 # Add at the top with other imports
 import nest_asyncio
 nest_asyncio.apply()  # Apply patch to allow nested event loops
