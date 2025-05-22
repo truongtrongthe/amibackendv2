@@ -43,7 +43,7 @@ CHATWOOT_ACCOUNT_ID = os.getenv('CHATWOOT_ACCOUNT_ID')
 ENABLE_AI_RESPONSES = os.getenv('ENABLE_AI_RESPONSES', 'false').lower() == 'true'
 AI_RESPONSE_BLOCKLIST = os.getenv('AI_RESPONSE_BLOCKLIST', '').split(',')  # Comma-separated list of conversation IDs to exclude
 AI_IGNORE_PREFIX = os.getenv('AI_IGNORE_PREFIX', '!').strip()  # Messages starting with this prefix won't trigger AI
-AI_RESPONSE_DELAY = float(os.getenv('AI_RESPONSE_DELAY', '1.0'))  # Delay in seconds before sending response
+AI_RESPONSE_DELAY = float(os.getenv('AI_RESPONSE_DELAY', '3.0'))  # Delay in seconds before sending response
 DEFAULT_GRAPH_VERSION_ID = os.getenv('DEFAULT_GRAPH_VERSION_ID', '')  # Default graph version ID for knowledge retrieval
 
 # Keep track of recent webhook requests to detect duplicates
@@ -61,7 +61,7 @@ process_lock = threading.Lock()
 # Track last message time and pending messages by conversation
 last_message_times = {}
 pending_messages = defaultdict(list)
-CONSECUTIVE_MESSAGE_WINDOW = 60.0  # seconds to wait for more messages
+CONSECUTIVE_MESSAGE_WINDOW = 100.0  # seconds to wait for more messages
 
 # Keep track of active tasks for each conversation
 active_tasks = {}
@@ -569,7 +569,7 @@ def ai_process_function(request_queue, response_queue):
                 start_time = time.time()
                 
                 # Process the request with a timeout
-                MAX_PROCESSING_TIME = 30  # 30 seconds maximum processing time
+                MAX_PROCESSING_TIME = 300  # 120 seconds maximum processing time (increased from 30s)
                 response_chunks = []
                 
                 try:
@@ -815,26 +815,34 @@ def process_ai_response(message, user_id, thread_id, graph_version_id):
     """Helper function to process AI response in a separate thread"""
     from ami import convo_stream
     import json
+    import asyncio
     
     response_chunks = []
-    # This will be run in a thread, so we need synchronous code
-    for chunk in convo_stream(
-        user_input=message,
-        user_id=user_id,
-        thread_id=thread_id,
-        graph_version_id=graph_version_id,
-        mode="mc"
-    ):
-        # Process the chunk
-        if chunk.startswith('data: '):
-            try:
-                data_json = json.loads(chunk[6:])
-                if 'message' in data_json:
-                    message_content = data_json['message']
-                    response_chunks.append(message_content)
-                    print(f"Received chunk: {message_content[:50]}...")
-            except json.JSONDecodeError:
-                print(f"Error parsing chunk: {chunk}")
+    # This will be run in a thread, so we need to run the async generator in a new event loop
+    async def process_stream():
+        async for chunk in convo_stream(
+            user_input=message,
+            user_id=user_id,
+            thread_id=thread_id,
+            graph_version_id=graph_version_id,
+            mode="mc"
+        ):
+            # Process the chunk
+            if chunk.startswith('data: '):
+                try:
+                    data_json = json.loads(chunk[6:])
+                    if 'message' in data_json:
+                        message_content = data_json['message']
+                        response_chunks.append(message_content)
+                        print(f"Received chunk: {message_content[:50]}...")
+                except json.JSONDecodeError:
+                    print(f"Error parsing chunk: {chunk}")
+    
+    # Create a new event loop and run the coroutine
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(process_stream())
+    loop.close()
     
     return response_chunks
 
@@ -850,7 +858,9 @@ async def process_messages_with_batching(conv_id_str: str):
             pending_messages[conv_id_str] = pending_messages[conv_id_str][-MAX_QUEUE_SIZE:]
             
         # Initial delay to allow more messages to accumulate
-        await asyncio.sleep(CONSECUTIVE_MESSAGE_WINDOW / 2)  # 30 seconds
+        wait_seconds = CONSECUTIVE_MESSAGE_WINDOW
+        print(f"⏱️ Waiting {wait_seconds} seconds to allow more messages to accumulate...")
+        await asyncio.sleep(wait_seconds)  # Full CONSECUTIVE_MESSAGE_WINDOW seconds
         
         while pending_messages[conv_id_str]:
             # Get up to 2 messages from the queue
@@ -883,7 +893,7 @@ async def process_messages_with_batching(conv_id_str: str):
             
             # Add a delay to make the response seem more natural
             if AI_RESPONSE_DELAY > 0:
-                delay_seconds = min(AI_RESPONSE_DELAY * 1.5, 3.0)
+                delay_seconds = AI_RESPONSE_DELAY
                 print(f"⏱️ Waiting {delay_seconds} seconds before responding...")
                 await asyncio.sleep(delay_seconds)
             
@@ -906,7 +916,7 @@ async def process_messages_with_batching(conv_id_str: str):
                         graph_version_id,
                         organization_id
                     ),
-                    timeout=30.0  # 30 second timeout for AI response
+                    timeout=300.0  # 120 second timeout for AI response (increased from 30s)
                 )
                 response_time = time.time() - response_time_start
                 print(f"⏱️ AI response generated in {response_time:.2f} seconds")
@@ -1003,8 +1013,8 @@ async def send_message_chunks(message_chunks: List[str], context: Dict[str, Any]
         conversation_data: Conversation data for persistence
     """
     # Configure delay between messages
-    chunk_delay = AI_RESPONSE_DELAY / 2 if AI_RESPONSE_DELAY > 0 else 0.5
-    chunk_delay = min(chunk_delay, 1.5)  # Cap at 1.5 seconds
+    chunk_delay = AI_RESPONSE_DELAY / 2 if AI_RESPONSE_DELAY > 0 else 1.0
+    chunk_delay = min(max(chunk_delay, 1.0), 3.0)  # Ensure between 1-3 seconds
     print(f"📤 Sending {len(message_chunks)} message chunks with {chunk_delay:.1f}s delay between them")
     
     # Send each chunk as a separate message with a small delay
@@ -1514,7 +1524,7 @@ async def chatwoot_webhook(
         body = await request.body()
         
         # Verify webhook signature (optional but recommended)
-        if not verify_webhook_signature_fastapi(request, body):
+        if not await verify_webhook_signature_fastapi(request, body):
             logger.error("❌ Webhook signature verification failed")
             raise HTTPException(status_code=401, detail="Invalid signature")
             
@@ -1529,7 +1539,7 @@ async def chatwoot_webhook(
         logger.info(f"\n📩 Chatwoot Webhook - Event Type: {event_type} (Organization ID: {org_id or 'None'})")
         
         # Detailed logging to debug
-        log_raw_data(data, event_type)
+        #log_raw_data(data, event_type)
         
         # Process events with appropriate async handling
         if event_type == 'message_created':
