@@ -1,6 +1,4 @@
-# Add at the top with other imports
-import nest_asyncio
-nest_asyncio.apply()  # Apply patch to allow nested event loops
+#FASTAPI app
 
 import asyncio
 import json

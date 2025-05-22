@@ -9,7 +9,6 @@ supabase
 langgraph
 unidecode
 pdfplumber
-eventlet 
 docx
 python-docx
 sentence_transformers
@@ -20,3 +19,4 @@ tenacity
 backoff
 fastapi
 uvicorn
+nest_asyncio
