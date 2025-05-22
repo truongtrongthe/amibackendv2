@@ -55,17 +55,180 @@ class CoTProcessor:
         self.profiling_skills = {"knowledge_context": "Loading...", "metadata": {}}
         self.ai_business_objectives = {"knowledge_context": "Loading...", "metadata": {}}
         self.communication_skills = {"knowledge_context": "Loading...", "metadata": {}}
+        self.comprehensive_profiling_skills = {"knowledge_context": "Loading...", "metadata": {}}
+        self.comprehensive_communication_skills = {"knowledge_context": "Loading...", "metadata": {}}
+        self.comprehensive_business_objectives = {"knowledge_context": "Loading...", "metadata": {}}
 
     async def initialize(self, graph_version_id=None):
         """Initialize the processor asynchronously"""
         # Use provided graph_version_id or fallback to current or generate a new one
         self.graph_version_id = graph_version_id or "bd5b8bc1-d0cb-4e3e-9cd7-68a8563366fc"
         logger.info(f"Initializing CoTProcessor with graph_version_id: {self.graph_version_id}")
+        
+        # First load the basic knowledge bases
         self.profiling_skills = await self._load_profiling_skills()
         self.ai_business_objectives = await self._load_business_objectives_awareness()
         self.communication_skills = await self._load_communication_skills()
+        
+        # Then compile the comprehensive versions
+        compilation_result = await self._compile_self_awareness()
+        logger.info(f"Self-awareness compilation completed: {compilation_result.get('status', 'unknown')}")
+        logger.info(f"Profiling knowledge as Instinct: {self.comprehensive_profiling_skills.get('knowledge_context', '')}")
+        logger.info(f"Communication knowledge as Instinct: {self.comprehensive_communication_skills.get('knowledge_context', '')}")
+        logger.info(f"Business objectives knowledge as Instinct: {self.comprehensive_business_objectives.get('knowledge_context', '')}")
+        
         return self
 
+    async def _compile_self_awareness(self) -> Dict[str, Any]:
+        """Compile self awareness knowledge base.
+        This function compiles comprehensive knowledge bases by synthesizing information from
+        profiling_skills, communication_skills, and ai_business_objectives using LLM.
+        """
+        logger.info("Compiling self awareness knowledge bases")
+        
+        # Extract knowledge contexts from the source variables
+        profiling_context = self.profiling_skills.get("knowledge_context", "")
+        communication_context = self.communication_skills.get("knowledge_context", "")
+        business_context = self.ai_business_objectives.get("knowledge_context", "")
+        
+        # Create prompts for each comprehensive knowledge base with language preservation instructions
+        profiling_prompt = f"""
+        TASK: Create a comprehensive, well-structured knowledge base about user profiling techniques.
+        
+        SOURCE KNOWLEDGE:
+        {profiling_context}
+        
+        CRITICAL INSTRUCTIONS:
+        1. PRESERVE THE ORIGINAL LANGUAGE - maintain the same language as the source (Vietnamese/English)
+        2. DO NOT translate Vietnamese terms or phrases into English or vice versa
+        3. KEEP ALL ORIGINAL EXAMPLES exactly as they appear in the source
+        4. Maintain cultural context and specific terminology from the original
+        5. Synthesize the source knowledge into a comprehensive, cohesive knowledge base
+        6. Organize the information logically with clear sections and categories
+        7. Remove redundant information while preserving all unique content
+        8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
+        
+        FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
+        """
+        
+        communication_prompt = f"""
+        TASK: Create a comprehensive, well-structured knowledge base about effective communication techniques.
+        
+        SOURCE KNOWLEDGE:
+        {communication_context}
+        
+        CRITICAL INSTRUCTIONS:
+        1. PRESERVE THE ORIGINAL LANGUAGE - maintain the same language as the source (Vietnamese/English)
+        2. DO NOT translate Vietnamese terms or phrases into English or vice versa
+        3. KEEP ALL ORIGINAL EXAMPLES exactly as they appear in the source
+        4. Maintain cultural context and specific terminology from the original
+        5. Synthesize the source knowledge into a comprehensive, cohesive knowledge base
+        6. Organize the information logically with clear sections and categories
+        7. Remove redundant information while preserving all unique content
+        8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
+        9. Preserve colloquial phrases like "kiểu như là í" if they appear in the original
+        
+        FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
+        """
+        
+        business_prompt = f"""
+        TASK: Create a comprehensive, well-structured knowledge base about business objectives.
+        
+        SOURCE KNOWLEDGE:
+        {business_context}
+        
+        CRITICAL INSTRUCTIONS:
+        1. PRESERVE THE ORIGINAL LANGUAGE - maintain the same language as the source (Vietnamese/English)
+        2. DO NOT translate Vietnamese terms or phrases into English or vice versa
+        3. KEEP ALL ORIGINAL EXAMPLES exactly as they appear in the source
+        4. Maintain cultural context and specific terminology from the original
+        5. Synthesize the source knowledge into a comprehensive, cohesive knowledge base
+        6. Organize the information logically with clear sections and categories
+        7. Remove redundant information while preserving all unique content
+        8. Preserve all references to specific services, courses, or products
+        
+        FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
+        """
+        
+        try:
+            # Process all three knowledge bases in parallel
+            responses = await asyncio.gather(
+                LLM.ainvoke(profiling_prompt),
+                LLM.ainvoke(communication_prompt),
+                LLM.ainvoke(business_prompt),
+                return_exceptions=True
+            )
+            
+            # Process the responses and update the comprehensive variables
+            timestamp = datetime.now().isoformat()
+            
+            # Process profiling response
+            if isinstance(responses[0], Exception):
+                logger.error(f"Error compiling comprehensive profiling skills: {str(responses[0])}")
+                profiling_result = {"knowledge_context": "Compilation failed.", "metadata": {"error": str(responses[0]), "timestamp": timestamp}}
+            else:
+                profiling_content = responses[0].content.strip()
+                profiling_result = {
+                    "knowledge_context": profiling_content,
+                    "metadata": {
+                        "source": "synthesized from profiling_skills",
+                        "timestamp": timestamp,
+                        "char_count": len(profiling_content),
+                        "language_preserved": True
+                    }
+                }
+            self.comprehensive_profiling_skills = profiling_result
+            
+            # Process communication response
+            if isinstance(responses[1], Exception):
+                logger.error(f"Error compiling comprehensive communication skills: {str(responses[1])}")
+                communication_result = {"knowledge_context": "Compilation failed.", "metadata": {"error": str(responses[1]), "timestamp": timestamp}}
+            else:
+                communication_content = responses[1].content.strip()
+                communication_result = {
+                    "knowledge_context": communication_content,
+                    "metadata": {
+                        "source": "synthesized from communication_skills",
+                        "timestamp": timestamp,
+                        "char_count": len(communication_content),
+                        "language_preserved": True
+                    }
+                }
+            self.comprehensive_communication_skills = communication_result
+            
+            # Process business objectives response
+            if isinstance(responses[2], Exception):
+                logger.error(f"Error compiling comprehensive business objectives: {str(responses[2])}")
+                business_result = {"knowledge_context": "Compilation failed.", "metadata": {"error": str(responses[2]), "timestamp": timestamp}}
+            else:
+                business_content = responses[2].content.strip()
+                business_result = {
+                    "knowledge_context": business_content,
+                    "metadata": {
+                        "source": "synthesized from ai_business_objectives",
+                        "timestamp": timestamp,
+                        "char_count": len(business_content),
+                        "language_preserved": True
+                    }
+                }
+            self.comprehensive_business_objectives = business_result
+            
+            logger.info(f"Successfully compiled all three comprehensive knowledge bases with language preservation")
+            
+            # Return summary of the compilation
+            return {
+                "status": "success",
+                "profiling_chars": len(profiling_result.get("knowledge_context", "")),
+                "communication_chars": len(communication_result.get("knowledge_context", "")),
+                "business_chars": len(business_result.get("knowledge_context", "")),
+                "language_preserved": True,
+                "timestamp": timestamp
+            }
+        
+        except Exception as e:
+            logger.error(f"Error in _compile_self_awareness: {str(e)}")
+            return {"status": "error", "message": str(e), "timestamp": datetime.now().isoformat()}
+        
     async def _load_profiling_skills(self) -> Dict[str, Any]:
         """Load knowledge base concurrently using fetch_knowledge."""
         logger.info(f"Loading knowledge base with graph_version_id: {self.graph_version_id}")
@@ -254,7 +417,7 @@ class CoTProcessor:
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
         
-        logger.info(f"Communication knowledge: {full_knowledge}")
+        #logger.info(f"Communication knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -446,7 +609,7 @@ class CoTProcessor:
         
         # Get the knowledge context
         knowledge_context = self.profiling_skills.get("knowledge_context", "")
-        business_objectives = self.ai_business_objectives.get("knowledge_context", "")
+        business_objectives = self.comprehensive_business_objectives.get("knowledge_context", "")
         
         # Add temporal context for resolving relative time references
         vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -770,8 +933,6 @@ class CoTProcessor:
             
         return knowledge_content
     
-    
-
     async def _user_story(self, user_profile: UserProfileModel) -> str:
         """Transform user profile into a compact narrative format."""
         # Extract key elements
@@ -836,7 +997,7 @@ class CoTProcessor:
         date_str = current_time.strftime("%A, %B %d, %Y")
         time_str = current_time.strftime("%H:%M")
         
-        logger.info(f"ANALYSIS KNOWLEDGE: {analysis_knowledge.get('knowledge_context', '')}")
+        #logger.info(f"ANALYSIS KNOWLEDGE: {analysis_knowledge.get('knowledge_context', '')}")
         # Create a temporal context string
         temporal_context = f"Current date and time: {date_str} at {time_str} (Asia/Ho_Chi_Minh timezone)."
         
@@ -1079,12 +1240,12 @@ class CoTProcessor:
                         temporal_info += f"When user mentioned '{mention}', they meant: {resolved_date}\n"
         
         # Get communication skills for use in prompt
-        communication_knowledge = self.communication_skills.get("knowledge_context", "")
+        communication_knowledge = self.comprehensive_communication_skills.get("knowledge_context", "")
         
-        logger.info(f"Communication knowledge: {communication_knowledge}")
-        logger.info(f"Addtional info: {additional_knowledge}")
-        logger.info(f"ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}")
-        logger.info(f"Conversation context: {conversation_context}")
+        #logger.info(f"Communication knowledge: {communication_knowledge}")
+        #logger.info(f"Addtional info: {additional_knowledge}")
+        #logger.info(f"ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}")
+        #logger.info(f"Conversation context: {conversation_context}")
 
         # Build prompt for LLM to generate response
         prompt = f"""Generate a response to the user that STRICTLY FOLLOWS the action plan and communication guidelines:
@@ -1104,21 +1265,24 @@ class CoTProcessor:
         2. DO NOT introduce any external services, specialists, websites, or social media not mentioned in the plan
         3. DO NOT mention or suggest Facebook, messengers, or any external contacts unless explicitly in the plan
         4. Follow the exact priority order of the actions as they appear in the plan
-        5. Use the same language as the user (Vietnamese/English/etc.) throughout
-        6. Apply appropriate communication techniques from the COMMUNICATION KNOWLEDGE
+        5. Use the same language as the user (Vietnamese/English) throughout
+
+        COMMUNICATION STYLE SPECIFICS:
+        • Use the EXACT COMMUNICATION STYLE from COMMUNICATION KNOWLEDGE that matches this user's classification ({user_profile.classification})
+        • Maintain the original language patterns and expressions (e.g., "kiểu như là í" in Vietnamese)
+        • Use the correct pronouns as specified in the knowledge base (e.g., "em"/"anh" for Vietnamese users)
+        • Avoid repetition by using varied expressions as instructed in the communication guidelines
+        • Adapt your tone to build trust with this specific user classification
 
         FORMAT GUIDELINES:
         • Be concise and professional
         • Match the user's language and cultural context
-        • Use appropriate pronouns (e.g., in Vietnamese: Anh/Chị/Em) based on detected language
         • Skip formulaic greetings and focus on delivering the actions
         • Adapt to the specific user needs indicated in the analysis
         • Follow communication patterns appropriate for the user's classification
 
-        CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN. Do not suggest connecting with specialists, visiting websites, or using external services unless these are explicitly listed as actions in the plan.
-        
-        COMMUNICATION STYLE: Apply communication techniques from the COMMUNICATION KNOWLEDGE that match this user's classification and needs."""
-
+        CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN. Do not suggest connecting with specialists, visiting websites, or using external services unless these are explicitly listed as actions in the plan."""
+        logger.info(f"Prompt Before Taking Action: {prompt}")
         try:
             response = await LLM.ainvoke(prompt)
             return {
