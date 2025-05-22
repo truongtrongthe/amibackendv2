@@ -19,4 +19,4 @@ tenacity
 backoff
 fastapi
 uvicorn
-nest_asyncio
+socketio

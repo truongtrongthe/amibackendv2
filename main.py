@@ -625,7 +625,10 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[REQUEST:{request_id}] === END learning SSE request for thread {thread_id} - total time: {elapsed:.2f}s ===")
 
-
+# Make sure we explicitly define the OPTIONS endpoint for chatwoot webhook
+@app.options('/webhook/chatwoot')
+async def chatwoot_webhook_options():
+    return handle_options()
 
 # Run the application
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify
+from fastapi import APIRouter, Request, Response, Depends, Header, Query, HTTPException
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from collections import deque
 import requests
@@ -25,7 +25,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-app = Flask(__name__)
+# Create an APIRouter instead of Flask app
+router = APIRouter()
 
 # Initialize managers
 contact_manager = ContactManager()
@@ -1329,55 +1330,100 @@ def verify_webhook_signature(request):
         
     return True
 
-@app.route('/webhook/chatwoot', methods=['POST'])
-def chatwoot_webhook():
+@router.post('/webhook/chatwoot')
+async def chatwoot_webhook(
+    request: Request,
+    organization_id: Optional[str] = Query(None),
+    x_organization_id: Optional[str] = Header(None, alias="X-Organization-Id")
+):
     """
-    Handle Chatwoot webhook events - Note this Flask route is only used when
-    not running in FastAPI mode. In FastAPI, the route in fastapi_routes.py is used.
+    Handle Chatwoot webhook events using FastAPI
     """
     try:
+        # Get the body content
+        body = await request.body()
+        
         # Verify webhook signature (optional but recommended)
-        if not verify_webhook_signature(request):
-            print("❌ Webhook signature verification failed")
-            return jsonify({"success": False, "error": "Invalid signature"}), 401
+        if not verify_webhook_signature_fastapi(request, body):
+            logger.error("❌ Webhook signature verification failed")
+            raise HTTPException(status_code=401, detail="Invalid signature")
             
-        data = request.json or {}
+        # Parse the JSON data
+        data = await request.json()
         event_type = data.get('event')
         
-        # Get organization_id from query parameters or headers
-        organization_id = request.args.get('organization_id')
-        if not organization_id:
-            organization_id = request.headers.get('X-Organization-Id')
+        # Use organization_id from query param or header
+        org_id = organization_id or x_organization_id
             
         # Log the webhook event
-        print(f"\n📩 Chatwoot Webhook - Event Type: {event_type} (Organization ID: {organization_id or 'None'})")
+        logger.info(f"\n📩 Chatwoot Webhook - Event Type: {event_type} (Organization ID: {org_id or 'None'})")
         
         # Detailed logging to debug
         log_raw_data(data, event_type)
         
-        # Create and run tasks with appropriate async handling
-        # We can't directly await in Flask, so we use asyncio.run for each handler
+        # Process events with appropriate async handling
         if event_type == 'message_created':
-            # Run the async function in a new event loop
-            asyncio.run(handle_message_created(data, organization_id))
-            return jsonify({"success": True, "message": "Message created event processed"}), 200
+            await handle_message_created(data, org_id)
+            return {"success": True, "message": "Message created event processed"}
             
         elif event_type == 'message_updated':
-            # Run the async function in a new event loop
-            asyncio.run(handle_message_updated(data, organization_id))
-            return jsonify({"success": True, "message": "Message updated event processed"}), 200
+            await handle_message_updated(data, org_id)
+            return {"success": True, "message": "Message updated event processed"}
             
         elif event_type == 'conversation_created':
-            # Run the async function in a new event loop
-            asyncio.run(handle_conversation_created(data, organization_id))
-            return jsonify({"success": True, "message": "Conversation created event processed"}), 200
+            await handle_conversation_created(data, org_id)
+            return {"success": True, "message": "Conversation created event processed"}
             
         else:
-            print(f"Unhandled event type: {event_type}")
-            return jsonify({"success": True, "message": f"Event type {event_type} not processed"}), 200
+            logger.info(f"Unhandled event type: {event_type}")
+            return {"success": True, "message": f"Event type {event_type} not processed"}
             
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"Error processing Chatwoot webhook: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"Error processing Chatwoot webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# New function for FastAPI signature verification
+async def verify_webhook_signature_fastapi(request: Request, body: bytes) -> bool:
+    """
+    Verify the webhook signature from Chatwoot for FastAPI.
+    
+    Args:
+        request: The FastAPI request object
+        body: Raw request body
+        
+    Returns:
+        bool: True if signature is valid or checking is disabled, False otherwise
+    """
+    # Get the secret from environment
+    webhook_secret = os.getenv('WEBHOOK_SECRET')
+    
+    # If no secret is set, we can't verify (but we'll allow for development)
+    if not webhook_secret:
+        logger.warning("⚠️ Warning: No WEBHOOK_SECRET set, skipping signature verification")
+        return True
+        
+    # Get the signature from headers
+    signature = request.headers.get('X-Hub-Signature-256')
+    if not signature:
+        logger.error("❌ No signature found in webhook request")
+        return False
+        
+    # Compute the expected signature
+    import hmac
+    import hashlib
+    
+    # Compute HMAC
+    expected_signature = 'sha256=' + hmac.new(
+        webhook_secret.encode('utf-8'),
+        body,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Secure comparison
+    if not hmac.compare_digest(signature, expected_signature):
+        logger.error("❌ Invalid webhook signature")
+        return False
+        
+    return True

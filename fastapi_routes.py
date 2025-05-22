@@ -24,7 +24,8 @@ recent_requests = deque(maxlen=1000)
 
 from braindb import get_brains, get_brain_details, update_brain, create_brain, get_organization, create_organization, update_organization
 from contactconvo import ConversationManager
-from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created
+# Import the router from chatwoot instead of individual functions
+from chatwoot import router as chatwoot_router
 from braingraph import (
     create_brain_graph, get_brain_graph,
     get_brain_graph_versions,
@@ -285,115 +286,8 @@ async def verify_webhook(
         logger.info(f"❌ Webhook verification failed. Token: {hub_verify_token}, org_id: {org_id}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
-@router.post('/webhook/chatwoot')
-async def chatwoot_webhook(data: dict, request: Request):
-    """Handle Chatwoot webhook events"""
-    logger.info(f"→ RECEIVED WEBHOOK - Path: {request.url.path}, Query Params: {request.query_params}")
-    logger.info(f"→ HEADERS: {dict(request.headers)}")
-    
-    try:
-        # Log parsed JSON data
-        logger.info(f"→ PARSED JSON: {json.dumps(data)[:1000]}...")  # Log first 1000 chars
-        event = data.get('event')
-        logger.info(f"→ EVENT TYPE: {event}")
-        
-        # Get organization_id from query parameters or headers
-        organization_id = request.query_params.get('organization_id')
-        logger.info(f"→ QUERY PARAM organization_id: {organization_id}")
-        
-        if not organization_id:
-            organization_id = request.headers.get('x-organization-id')
-            logger.info(f"→ HEADER X-Organization-Id: {organization_id}")
-        
-        # Extract inbox information
-        inbox = data.get('inbox', {})
-        inbox_id = str(inbox.get('id', ''))
-        facebook_page_id = inbox.get('channel', {}).get('facebook_page_id', 'N/A')
-        
-        logger.info(f"→ INBOX DETAILS - ID: {inbox_id}, Facebook Page ID: {facebook_page_id}")
-        
-        # Create a unique ID for this webhook to detect duplicates
-        request_id = f"{event}_{data.get('id', '')}_{inbox_id}_{datetime.now().timestamp()}"
-        
-        # Check for duplicates
-        if request_id in recent_requests:
-            logger.info(f"→ DUPLICATE detected! Ignoring: {request_id}")
-            return {"status": "success", "message": "Duplicate request ignored"}
-        
-        recent_requests.append(request_id)
-        logger.info(f"→ Added to recent_requests: {request_id}")
-        
-        # Log basic information
-        logger.info(
-            f"→ WEBHOOK SUMMARY - Event: {event}, Inbox: {inbox_id}, "
-            f"Page: {facebook_page_id}, Organization: {organization_id or 'Not provided'}"
-        )
-        
-        # Validate against inbox mapping if available
-        if INBOX_MAPPING and inbox_id:
-            logger.info(f"→ CHECKING inbox mapping for inbox_id: {inbox_id}")
-            inbox_config = INBOX_MAPPING.get(inbox_id)
-            if inbox_config:
-                logger.info(f"→ FOUND inbox config: {inbox_config}")
-                expected_organization_id = inbox_config['organization_id']
-                expected_facebook_page_id = inbox_config['facebook_page_id']
-                
-                # If organization_id was not provided, use the one from mapping
-                if not organization_id:
-                    organization_id = expected_organization_id
-                    logger.info(f"→ USING organization_id {organization_id} from inbox mapping")
-                
-                # If provided, validate that it matches what's expected
-                elif organization_id != expected_organization_id:
-                    logger.warning(
-                        f"→ ORGANIZATION MISMATCH: provided={organization_id}, "
-                        f"expected={expected_organization_id} for inbox {inbox_id}"
-                    )
-                    raise HTTPException(
-                        status_code=400, 
-                        detail="Organization ID does not match inbox configuration"
-                    )
-                
-                # Validate Facebook page ID if available
-                if facebook_page_id != 'N/A' and facebook_page_id != expected_facebook_page_id:
-                    logger.warning(
-                        f"→ FACEBOOK PAGE MISMATCH: actual={facebook_page_id}, "
-                        f"expected={expected_facebook_page_id} for inbox {inbox_id}"
-                    )
-            else:
-                logger.warning(f"→ NO MAPPING found for inbox_id: {inbox_id}")
-        
-        # Handle different event types
-        if event == "message_created":
-            logger.info(f"→ PROCESSING message_created event for organization: {organization_id or 'None'}")
-            await handle_message_created(data, organization_id)
-        elif event == "message_updated":
-            logger.info(f"→ PROCESSING message_updated event for organization: {organization_id or 'None'}")
-            await handle_message_updated(data, organization_id)
-        elif event == "conversation_created":
-            logger.info(f"→ PROCESSING conversation_created event for organization: {organization_id or 'None'}")
-            await handle_conversation_created(data, organization_id)
-        else:
-            logger.info(f"→ UNHANDLED event type: {event}")
-        
-        logger.info("→ WEBHOOK PROCESSING SUCCESSFUL - Returning 200 OK")
-        return {
-            "status": "success", 
-            "message": f"Processed {event} event", 
-            "organization_id": organization_id,
-            "inbox_id": inbox_id
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"→ CRITICAL ERROR processing webhook: {str(e)}")
-        logger.error(f"→ STACK TRACE: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.options('/webhook/chatwoot')
-async def chatwoot_webhook_options():
-    return handle_options()
+# Include the chatwoot router
+router.include_router(chatwoot_router)
 
 @router.post('/create-brain-graph')
 async def create_brain_graph_endpoint(request_data: BrainGraphRequest):
