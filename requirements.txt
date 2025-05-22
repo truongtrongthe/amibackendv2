@@ -20,3 +20,6 @@ backoff
 fastapi
 uvicorn
 socketio
+cachetools
+pytz
+nltk
