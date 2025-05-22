@@ -1281,7 +1281,7 @@ class CoTProcessor:
         • Adapt to the specific user needs indicated in the analysis
         • Follow communication patterns appropriate for the user's classification
 
-        CRITICAL: Your response must ONLY contain actions explicitly specified in the ACTION PLAN."""
+        CRITICAL: Your response must implement the actions from the ACTION PLAN while applying the communication style specified above. Prioritize both action accuracy AND communication style."""
         logger.info(f"Prompt Before Taking Action: {prompt}")
         try:
             response = await LLM.ainvoke(prompt)
