@@ -1,21 +1,14 @@
 import json
 import asyncio
-import logging
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator, Set
 from datetime import datetime
 from uuid import uuid4
 import re
 import pytz
-import weakref
-
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-import functools
-import concurrent.futures
-
 from pccontroller import save_knowledge, query_knowledge
-
-from utilities import logger
+from utilities import logger,EMBEDDINGS
 
 # Custom JSON encoder for datetime objects
 class DateTimeEncoder(json.JSONEncoder):
@@ -110,6 +103,7 @@ class LearningProcessor:
             # Remove hardcoded teaching intent detection and let the LLM handle it
             response = await self._active_learning(message, conversation_context, analysis_knowledge, user_id, prior_data)
             logger.info(f"Response generated with status: {response.get('status', 'unknown')}")
+            logger.info(f"LLM response raw: {response}")
             
             if "metadata" in response and "response_strategy" in response["metadata"]:
                 logger.info(f"Active learning mode used: {response['metadata']['response_strategy']}")
@@ -123,7 +117,60 @@ class LearningProcessor:
                 priority_topic_name = response.get("metadata", {}).get("priority_topic_name", "")
                 intent_type = response.get("metadata", {}).get("intent_type", "unknown")
                 
-                # Trust the LLM's intent detection entirely
+                # Override response_strategy if LLM detected teaching_intent
+                if has_teaching_intent and response.get("metadata", {}).get("response_strategy") != "TEACHING_INTENT":
+                    original_strategy = response.get("metadata", {}).get("response_strategy", "unknown")
+                    logger.info(f"LLM detected teaching_intent=True, regenerating response with TEACHING_INTENT format (was {original_strategy})")
+                    
+                    # Log original response for debugging
+                    logger.info(f"ORIGINAL response before regeneration: {response.get('message', '')[:200]}...")
+                    
+                    # Generate a new response with teaching intent instructions
+                    message_content = response.get("message", "")
+                    teaching_prompt = f"""IMPORTANT: The user is TEACHING you something. Your job is to synthesize this knowledge.
+                    
+                    Original message from user: {message}
+                    
+                    Your original response: {message_content}
+                    
+                    Instructions:
+                    1. Acknowledge their teaching with appreciation
+                    2. Synthesize the knowledge into a clear, structured format
+                    3. Create a SUMMARY section (2-3 sentences) prefixed with "SUMMARY: "
+                    4. Ask 1-2 open-ended follow-up questions to deepen understanding
+                    
+                    CRITICAL: RESPOND IN THE SAME LANGUAGE AS THE USER'S MESSAGE.
+                    - If the user wrote in Vietnamese, respond in Vietnamese
+                    - If the user wrote in English, respond in English
+                    - Match the language exactly - do not mix languages
+                    
+                    DO NOT say this is a teaching message or make meta-references to teaching.
+                    DO include a "SUMMARY: " section with 2-3 concise sentences capturing the core point.
+                    
+                    Your revised synthesized response:
+                    """
+                    
+                    try:
+                        teaching_response = await LLM.ainvoke(teaching_prompt)
+                        teaching_content = teaching_response.content.strip()
+                        
+                        # Check if there's a SUMMARY section, add one if missing
+                        if "SUMMARY:" not in teaching_content:
+                            topic_extract = message[:50] + ("..." if len(message) > 50 else "")
+                            teaching_content += f"\n\nSUMMARY: {topic_extract} là một chiến lược quan trọng khi tương tác với khách hàng, giúp cải thiện trải nghiệm của họ."
+                        
+                        # Update the response
+                        response["message"] = teaching_content
+                        response["metadata"]["response_strategy"] = "TEACHING_INTENT"
+                        logger.info("Successfully regenerated response with TEACHING_INTENT format including SUMMARY section")
+                        logger.info(f"NEW response after regeneration: {teaching_content[:200]}...")
+                    except Exception as e:
+                        logger.error(f"Failed to regenerate teaching response: {str(e)}")
+                        # Add a summary to the existing response if regeneration fails
+                        if "SUMMARY:" not in response["message"]:
+                            topic_extract = message[:50] + ("..." if len(message) > 50 else "")
+                            response["message"] += f"\n\nSUMMARY: {topic_extract} là một chiến lược quan trọng khi tương tác với khách hàng."
+                            logger.info("Added fallback SUMMARY section to existing response")
                 
                 # Force should_save_knowledge to True if it's a priority topic
                 if is_priority_topic:
@@ -184,11 +231,26 @@ class LearningProcessor:
                     # This helps with future retrievals by isolating the clean synthesized knowledge
                     if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
                         try:
+                            # Extract summary if present using regex
+                            summary = ""
+                            summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', conversational_response, re.IGNORECASE)
+                            if summary_match:
+                                summary = summary_match.group(1).strip()
+                            logger.info(f"Topic Summary Gen by LLM: {summary}")
+                            # Create categories list
                             synthesis_categories = list(categories)
                             synthesis_categories.append("ai_synthesis")
+                            
                             logger.info(f"Saving additional AI synthesis for improved future retrieval")
+                            
+                            # Format content with summary if available
+                            synthesis_content = f"AI Synthesis: {conversational_response}"
+                            if summary:
+                                logger.info(f"Found and including summary: {summary}")
+                                synthesis_content = f"SUMMARY: {summary}\n\nAI Synthesis: {conversational_response}"
+                            logger.info(f"Synthesis content to save: {synthesis_content}")
                             synthesis_success = await self._background_save_knowledge(
-                                input_text=f"AI Synthesis: {conversational_response}",
+                                input_text=synthesis_content,
                                 user_id=user_id,
                                 bank_name=bank_name,
                                 thread_id=thread_id,
@@ -197,6 +259,22 @@ class LearningProcessor:
                                 ttl_days=365  # 365 days TTL
                             )
                             logger.info(f"Save AI synthesis completed: {synthesis_success}")
+                            
+                            # Save standalone summary if available
+                            if summary:
+                                summary_categories = list(categories)
+                                summary_categories.append("summary")
+                                logger.info(f"Saving standalone summary for quick retrieval")
+                                summary_success = await self._background_save_knowledge(
+                                    input_text=f"SUMMARY: {summary}",
+                                    user_id=user_id,
+                                    bank_name=bank_name,
+                                    thread_id=thread_id,
+                                    topic=priority_topic_name or "user_teaching",
+                                    categories=summary_categories,
+                                    ttl_days=365  # 365 days TTL
+                                )
+                                logger.info(f"Save summary completed: {summary_success}")
                         except Exception as e:
                             logger.error(f"Error saving AI synthesis: {str(e)}")
 
@@ -227,26 +305,69 @@ class LearningProcessor:
             queries = []
             prior_topic = ""
             prior_knowledge = ""
+            prior_messages = []
             if conversation_context:
                 user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
                 logger.info(f"Found {len(user_messages)} user messages in context")
                 if user_messages:
-                    prior_topic = user_messages[-2].strip() if len(user_messages) > 1 else user_messages[0].strip()
-                    
+                    prior_messages = user_messages[:-1]  # All but the current message
+                    prior_topic = user_messages[-2].strip() if len(user_messages) > 1 else ""
                     logger.info(f"Extracted prior topic: {prior_topic[:50]}")
                 if ai_messages:
                     prior_knowledge = ai_messages[-1].strip()
 
-            # Use the _detect_follow_up helper function instead of duplicating code
-            follow_up_result = self._detect_follow_up(primary_query, prior_topic)
-            is_follow_up = follow_up_result["is_follow_up"]
+            # Use the new conversation flow detection instead of pattern matching
+            flow_result = await self._detect_conversation_flow(
+                message=primary_query,
+                prior_messages=prior_messages,
+                conversation_context=conversation_context
+            )
+            
+            flow_type = flow_result.get("flow_type", "NEW_TOPIC")
+            flow_confidence = flow_result.get("confidence", 0.5)
+            
+            is_follow_up = flow_type in ["FOLLOW_UP", "CONFIRMATION"]
+            is_practice_request = flow_type == "PRACTICE_REQUEST"
+            
+            logger.info(f"Conversation flow: {flow_type} (confidence: {flow_confidence})")
             
             if is_follow_up and prior_topic:
                 queries.append(prior_topic)
                 logger.info(f"Follow-up detected, reusing prior topic: {prior_topic[:50]}")
                 similarity = 0.7
                 knowledge_context = prior_knowledge
+            elif is_practice_request and prior_knowledge:
+                # For practice requests, prioritize last AI message as knowledge
+                queries.append(primary_query)
+                queries.append(prior_topic if prior_topic else primary_query)
+                logger.info(f"Practice request detected, using previous AI knowledge as foundation")
+                # Higher confidence for practice scenarios (we're quite certain about our prior knowledge)
+                similarity = 0.85
+                knowledge_context = prior_knowledge
+                
+                # For practice requests, log specific phrases detected
+                practice_indicators = []
+                if "thử" in primary_query.lower() and ("xem" in primary_query.lower() or "nào" in primary_query.lower()):
+                    practice_indicators.append("thử...xem/nào")
+                if "áp dụng" in primary_query.lower():
+                    practice_indicators.append("áp dụng")
+                if practice_indicators:
+                    logger.info(f"Practice request indicators: {', '.join(practice_indicators)}")
+                
+                # Return early with high confidence for clear practice requests
+                if flow_confidence > 0.8:
+                    logger.info(f"High confidence practice request - prioritizing previous knowledge")
+                    return {
+                        "knowledge_context": knowledge_context,
+                        "similarity": similarity,
+                        "query_count": 1,
+                        "queries": queries,
+                        "original_query": primary_query,
+                        "query_results": [{"raw": knowledge_context, "score": similarity, "metadata": {"practice_request": True}}],
+                        "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
+                        "metadata": {"similarity": similarity, "vibe_score": 1.1, "flow_type": flow_type}
+                    }
             else:
                 queries.append(primary_query)
                 similarity = 0.0
@@ -313,9 +434,10 @@ class LearningProcessor:
 
             # Store all query results
             all_query_results = []
-            best_result = None
-            highest_similarity = 0.0
-
+            best_results = []  # Change from single best_result to list of best_results
+            highest_similarities = []  # Store top 3 similarity scores
+            knowledge_contexts = []  # Store top 3 knowledge contexts
+            
             for query, results in zip(queries, results_list):
                 query_count += 1
                 if isinstance(results, Exception):
@@ -327,34 +449,55 @@ class LearningProcessor:
                     all_query_results.append(None)  # Add None for empty results
                     continue
                 
-                # Log query results for debugging
-                top_result = results[0]
-                all_query_results.append(top_result)  # Store the top result for each query
-                query_similarity = top_result["score"]
-                knowledge_content = top_result["raw"]
-                
-                # Extract just the AI portion if this is a combined knowledge entry
-                if knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                    ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
-                    if ai_part:
-                        knowledge_content = ai_part.group(1).strip()
-                        logger.info(f"Extracted AI portion from combined knowledge")
-                
-                logger.info(f"Query '{query[:30]}...' yielded similarity: {query_similarity}, content: '{knowledge_content[:50]}...'")
-                
-                # Track the best overall result
-                if query_similarity > highest_similarity:
-                    highest_similarity = query_similarity
-                    best_result = top_result
-                    similarity = query_similarity
-                    knowledge_context = knowledge_content
-                    logger.info(f"Updated best knowledge with similarity: {similarity}")
+                # Xử lý tất cả các kết quả từ một query, không chỉ kết quả đầu tiên
+                for result_item in results:
+                    knowledge_content = result_item["raw"]
+                    
+                    # Extract just the AI portion if this is a combined knowledge entry
+                    if knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
+                        ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
+                        if ai_part:
+                            knowledge_content = ai_part.group(1).strip()
+                            logger.info(f"Extracted AI portion from combined knowledge")
+                    
+                    # Evaluate context relevance between query and retrieved knowledge
+                    context_relevance = await self._evaluate_context_relevance(primary_query, knowledge_content)
+                    
+                    # Calculate adjusted similarity score with context relevance factor
+                    query_similarity = result_item["score"]
+                    adjusted_similarity = query_similarity * (0.5 + 0.5 * context_relevance)  # Range between 50%-150% of original score
+                    
+                    # Add context relevance information to result metadata
+                    result_item["context_relevance"] = context_relevance
+                    result_item["adjusted_similarity"] = adjusted_similarity
+                    result_item["query"] = query
+                    
+                    all_query_results.append(result_item)  # Store all results 
+                    
+                    logger.info(f"Result for query '{query[:30]}...' yielded similarity: {query_similarity}, adjusted: {adjusted_similarity}, context relevance: {context_relevance}, content: '{knowledge_content[:50]}...'")
+                    
+                    # Track the top 3 results using adjusted similarity
+                    if not highest_similarities or adjusted_similarity > min(highest_similarities) or len(highest_similarities) < 3:
+                        # Add the new result to our collections
+                        if len(highest_similarities) < 3:
+                            highest_similarities.append(adjusted_similarity)
+                            best_results.append(result_item)
+                            knowledge_contexts.append(knowledge_content)
+                        else:
+                            # Find the minimum similarity in our top 3
+                            min_index = highest_similarities.index(min(highest_similarities))
+                            # Replace it with the new result
+                            highest_similarities[min_index] = adjusted_similarity
+                            best_results[min_index] = result_item
+                            knowledge_contexts[min_index] = knowledge_content
+                        
+                        logger.info(f"Updated top 3 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
 
             # Apply regular boost for priority topics
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
                    for term in ["mục tiêu", "goals", "active learning", "phân nhóm", "phân tích chân dung", "chân dung khách hàng"]):
                 vibe_score = 1.1
-                similarity *= vibe_score
+                highest_similarities = [sim * vibe_score for sim in highest_similarities]
                 logger.info(f"Applied vibe score {vibe_score} for priority topic")
             else:
                 vibe_score = 1.0
@@ -362,14 +505,25 @@ class LearningProcessor:
             # Filter out None results
             valid_query_results = [result for result in all_query_results if result is not None]
             
-            logger.info(f"Final similarity: {similarity} from {query_count} queries, found {len(valid_query_results)} valid results")
+            # Use the highest similarity from our top results
+            similarity = max(highest_similarities) if highest_similarities else 0.0
+            
+            # Combine knowledge contexts for the top results
+            combined_knowledge_context = ""
+            if knowledge_contexts:
+                # Sort by similarity to present most relevant first
+                sorted_contexts = [x for _, x in sorted(zip(highest_similarities, knowledge_contexts), key=lambda pair: pair[0], reverse=True)]
+                combined_knowledge_context = "\n\n---\n\n".join(sorted_contexts[:3])
+            
+            logger.info(f"Final similarity: {similarity} from {query_count} queries, found {len(valid_query_results)} valid results, using top {len(knowledge_contexts)} for response")
             return {
-                "knowledge_context": knowledge_context,
+                "knowledge_context": combined_knowledge_context or knowledge_context,
                 "similarity": similarity,
                 "query_count": query_count,
                 "queries": queries,
                 "original_query": primary_query,  # Add the original query for reference
                 "query_results": valid_query_results,
+                "top_results": best_results,  # Add top results
                 "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
                 "metadata": {"similarity": similarity, "vibe_score": vibe_score}
             }
@@ -408,25 +562,68 @@ class LearningProcessor:
         prior_topic = prior_data.get("topic", "") if prior_data else ""
         prior_knowledge = prior_data.get("knowledge", "") if prior_data else ""
         
-        # Use the _detect_follow_up helper function instead of duplicating code
-        follow_up_result = self._detect_follow_up(message_str, prior_topic)
-        is_confirmation = follow_up_result["is_confirmation"]
-        is_follow_up = follow_up_result["is_follow_up"]
-        has_pattern_match = follow_up_result["has_pattern_match"]
-        topic_overlap = follow_up_result["topic_overlap"]
+        # Extract prior messages from conversation context
+        prior_messages = []
+        if conversation_context:
+            user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
+            if user_messages and len(user_messages) > 1:
+                prior_messages = user_messages[:-1]  # All except current message
+        
+        # Use the new conversation flow detection instead of the old pattern matching
+        flow_result = await self._detect_conversation_flow(
+            message=message_str,
+            prior_messages=prior_messages,
+            conversation_context=conversation_context
+        )
+        
+        flow_type = flow_result.get("flow_type", "NEW_TOPIC")
+        flow_confidence = flow_result.get("confidence", 0.5)
+        
+        is_confirmation = flow_type == "CONFIRMATION"
+        is_follow_up = flow_type in ["FOLLOW_UP", "CONFIRMATION"]
+        is_practice_request = flow_type == "PRACTICE_REQUEST"
+        is_closing = flow_type == "CLOSING"
+        
+        logger.info(f"Active learning conversation flow: {flow_type} (confidence: {flow_confidence})")
         
         core_prior_topic = prior_topic
         
         # Knowledge handling strategy based on queries and similarity
         knowledge_response_sections = []
         
-        # Check for conversation closing messages - common phrases indicating end of conversation
+        # Enhanced closing message detection with conversation flow
         closing_phrases = [
             "thế thôi", "hẹn gặp lại", "tạm biệt", "chào nhé", "goodbye", "bye", "cảm ơn nhé", 
             "cám ơn nhé", "đủ rồi", "vậy là đủ", "hôm nay vậy là đủ", "hẹn lần sau"
         ]
         
-        is_closing_message = any(phrase in message_str.lower() for phrase in closing_phrases)
+        # Use both pattern matching and LLM detection for closing
+        is_closing_message = is_closing or any(phrase in message_str.lower() for phrase in closing_phrases)
+        
+        # Check context relevance of best knowledge if available
+        best_context_relevance = 0.0
+        has_low_relevance_knowledge = False
+        
+        if analysis_knowledge and "query_results" in analysis_knowledge:
+            query_results = analysis_knowledge.get("query_results", [])
+            if query_results and isinstance(query_results[0], dict) and "context_relevance" in query_results[0]:
+                best_context_relevance = query_results[0].get("context_relevance", 0.0)
+                has_low_relevance_knowledge = best_context_relevance < 0.3
+                logger.info(f"Best knowledge context relevance: {best_context_relevance}")
+        
+        # Check for teaching intent in the message
+        teaching_keywords = ["let me explain", "I'll teach you", "Tôi sẽ giải thích", "Tôi dạy bạn", 
+                            "here's how", "đây là cách", "the way to", "Important to know", 
+                            "you should know", "bạn nên biết", "cần hiểu rằng", "phương pháp", "cách thức"]
+        has_teaching_markers = any(keyword.lower() in message_str.lower() for keyword in teaching_keywords)
+        
+        # Check for Vietnamese greeting forms or names
+        vn_greeting_patterns = ["anh ", "chị ", "bạn ", "cô ", "ông ", "bác ", "em "]
+        common_vn_names = ["hùng", "hương", "minh", "tuấn", "thảo", "an", "hà", "thủy", "trung", "mai", "hoa", "quân", "dũng", "hiền", "nga", "tâm", "thanh", "tú", "hải", "hòa", "yến", "lan", "hạnh", "phương", "dung", "thu", "hiệp", "đức", "linh", "huy", "tùng", "bình", "giang", "tiến"]
+        
+        is_vn_greeting = any(pattern in message_str.lower() for pattern in vn_greeting_patterns)
+        message_words = message_str.lower().split()
+        contains_vn_name = any(name in message_words for name in common_vn_names)
         
         if is_closing_message:
             # Override low confidence for closing messages
@@ -439,6 +636,58 @@ class LearningProcessor:
                 "Keep it concise and friendly, in the same language they used (Vietnamese/English)."
             )
             logger.info(f"Detected conversation closing message, overriding low confidence response")
+        elif is_practice_request and prior_knowledge:
+            # Special handling for practice requests
+            response_strategy = "PRACTICE_REQUEST"
+            strategy_instructions = (
+                "The user wants you to DEMONSTRATE or APPLY previously shared knowledge. "
+                "Create a practical example that follows these steps: "
+                
+                "1. Acknowledge their request positively and with enthusiasm. "
+                "2. Reference the prior knowledge in your response directly. "
+                "3. Apply the knowledge in a realistic scenario or example. "
+                "4. Follow any specific methods or steps previously discussed. "
+                "5. Explain your reasoning as you demonstrate. "
+                "6. Ask if your demonstration meets their expectations. "
+                
+                "IMPORTANT: The user is asking you to SHOW your understanding, not asking for new information. "
+                "Even if the request is vague like 'Em thử áp dụng các kiến thức em có anh xem nào', "
+                "understand that they want you to DEMONSTRATE the knowledge you gained from previous messages. "
+                "Be confident and enthusiastic - this is a chance to show what you've learned."
+                
+                "CRITICAL: If the knowledge includes communication techniques, relationship building, or language patterns, "
+                "ACTIVELY USE these techniques in your response format, not just talk about them. For example: "
+                "- If knowledge mentions using 'em' to refer to yourself, use that pronoun in your response "
+                "- If it suggests addressing users as 'anh/chị', use that form of address "
+                "- If it recommends specific phrases or compliments, incorporate them naturally "
+                "- If it suggests question techniques, use those exact techniques at the end of your response"
+            )
+            # For practice requests, consider all retrieved knowledge
+            knowledge_context = prior_knowledge
+            # Increase similarity score for practice requests to ensure we use prior knowledge
+            similarity_score = max(similarity_score, 0.8)
+            logger.info(f"Detected practice request, boosting similarity score to {similarity_score} and using response strategy: PRACTICE_REQUEST")
+        elif has_low_relevance_knowledge and similarity_score > 0.3:
+            # Handle case where we have knowledge but it's not very relevant to the current query
+            response_strategy = "LOW_RELEVANCE_KNOWLEDGE"
+            strategy_instructions = (
+                "You have knowledge with low relevance to the current query. "
+                "PRIORITIZE the user's current message over the retrieved knowledge. "
+                "ONLY reference the knowledge if it genuinely helps answer the query. "
+                "If the knowledge is off-topic, IGNORE it completely and focus on the user's message. "
+                "Be clear and direct in addressing what the user is actually asking about. "
+                "Generate a response primarily based on the user's current message and intent."
+                
+                "However, if the knowledge contains ANY communication techniques or relationship-building approaches, "
+                "incorporate those techniques into HOW you construct your response, even if the topic is different."
+            )
+            
+            # Add context information to knowledge_context to alert the LLM
+            knowledge_context = f"LOW RELEVANCE KNOWLEDGE WARNING: The retrieved knowledge has low relevance " \
+                f"(score: {best_context_relevance:.2f}) to the current query. Prioritize the user's message.\n\n" \
+                f"{knowledge_context}"
+            
+            logger.info(f"Using LOW_RELEVANCE_KNOWLEDGE strategy due to relevance score: {best_context_relevance:.2f}")
         elif queries and query_results:
             # Group results by confidence level
             high_confidence = []
@@ -500,6 +749,8 @@ class LearningProcessor:
                 knowledge_context = "\n\n".join(knowledge_response_sections)
                 logger.info(f"Created structured knowledge response with {len(high_confidence)} high, {len(medium_confidence)} medium, and {len(low_confidence)} low confidence items")
         logger.info(f"Knowledge context: {knowledge_context}")
+        
+        # Initial response strategy determination
         if is_follow_up:
             response_strategy = "FOLLOW_UP"
             
@@ -530,6 +781,18 @@ class LearningProcessor:
             response_strategy = "CLOSING"
             # Keep the strategy_instructions from above
             # No need to adjust similarity score
+        # If this is just a name or greeting, treat it as a greeting
+        elif (is_vn_greeting or contains_vn_name) and len(message_str.split()) <= 3:
+            response_strategy = "GREETING"
+            strategy_instructions = (
+                "Recognize this as a Vietnamese greeting or someone addressing you by name. "
+                "Respond warmly and appropriately to the greeting. "
+                "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
+                "Keep your response friendly, brief, and conversational. "
+                "Ask how you can assist them today. "
+                "Ensure your tone matches the formality level they used (formal vs casual)."
+            )
+            logger.info(f"Detected Vietnamese greeting or name reference: '{message_str}'")
         elif similarity_score < 0.35 and not knowledge_response_sections:
             response_strategy = "LOW_SIMILARITY"
             # Create query-specific response section if no other knowledge is found
@@ -560,6 +823,37 @@ class LearningProcessor:
                     "If the message appears to be attempting to teach or explain something, acknowledge this and express "
                     "interest in learning about the topic through a thoughtful follow-up question."
                 )
+        # If this appears to be a teaching intent message (longer messages without questions, or containing teaching markers)
+        elif has_teaching_markers or (len(message_str.split()) > 20 and "?" not in message_str):
+            response_strategy = "TEACHING_INTENT"
+            strategy_instructions = (
+                "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
+                "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
+                
+                "1. Begin by acknowledging their teaching with appreciation. "
+                "2. ACTIVELY SCAN the entire conversation history for supporting information related to current topic. "
+                "3. Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding. "
+                "4. Structure the knowledge for future application (how to use this information). "
+                "5. Rephrase any ambiguous terms or concepts for clarity. "
+                "6. Organize information with clear steps, examples, or use cases when applicable. "
+                "7. Include contextual understanding (when/where/how to apply this knowledge). "
+                "8. Highlight key principles rather than just recording facts. "
+                "9. Verify your understanding by restating core concepts in different terms. "
+                "10. Expand abbreviations and domain-specific terminology. "
+                "11. CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY"
+                "12. The summary should capture the core teaching point in simple language"
+                "13. Ensure the response demonstrates how to apply this knowledge in future scenarios"
+                "14. END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration"
+                
+                "CRITICAL LANGUAGE INSTRUCTION: ALWAYS respond in EXACTLY the SAME LANGUAGE as the user's message. "
+                "- If the user wrote in Vietnamese, respond entirely in Vietnamese "
+                "- If the user wrote in English, respond entirely in English "
+                "- Do not mix languages in your response "
+                "- Keep the SUMMARY section in the same language as the rest of your response"
+                
+                "This synthesis approach helps create high-quality, reusable knowledge for future users."
+            )
+            logger.info(f"Detected teaching intent message, using TEACHING_INTENT strategy")
         else:
             response_strategy = "RELEVANT_KNOWLEDGE"
             strategy_instructions = (
@@ -572,52 +866,17 @@ class LearningProcessor:
                 "Structure the response to emphasize the core information from EXISTING KNOWLEDGE. "
                 "If the message likely continues PRIOR TOPIC, prioritize deepening that topic with specific details. "
                 "If the topic is ambiguous, connect the dots by stating how the knowledge answers their question."
-            )
-        
-        # Check if this appears to be a teaching intent message
-        teaching_keywords = ["let me explain", "I'll teach you", "Tôi sẽ giải thích", "Tôi dạy bạn", 
-                             "here's how", "đây là cách", "the way to", "Important to know", 
-                             "you should know", "bạn nên biết", "cần hiểu rằng", "phương pháp", "cách thức"]
-        has_teaching_markers = any(keyword.lower() in message_str.lower() for keyword in teaching_keywords)
-        
-        # Check for Vietnamese greeting forms or names
-        vn_greeting_patterns = ["anh ", "chị ", "bạn ", "cô ", "ông ", "bác ", "em "]
-        common_vn_names = ["hùng", "hương", "minh", "tuấn", "thảo", "an", "hà", "thủy", "trung", "mai", "hoa", "quân", "dũng", "hiền", "nga", "tâm", "thanh", "tú", "hải", "hòa", "yến", "lan", "hạnh", "phương", "dung", "thu", "hiệp", "đức", "linh", "huy", "tùng", "bình", "giang", "tiến"]
-        
-        is_vn_greeting = any(pattern in message_str.lower() for pattern in vn_greeting_patterns)
-        message_words = message_str.lower().split()
-        contains_vn_name = any(name in message_words for name in common_vn_names)
-        
-        # If this is just a name or greeting, treat it as a greeting
-        if (is_vn_greeting or contains_vn_name) and len(message_str.split()) <= 3:
-            response_strategy = "GREETING"
-            strategy_instructions = (
-                "Recognize this as a Vietnamese greeting or someone addressing you by name. "
-                "Respond warmly and appropriately to the greeting. "
-                "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
-                "Keep your response friendly, brief, and conversational. "
-                "Ask how you can assist them today. "
-                "Ensure your tone matches the formality level they used (formal vs casual)."
-            )
-            logger.info(f"Detected Vietnamese greeting or name reference: '{message_str}'")
-        elif has_teaching_markers or (len(message_str.split()) > 20 and "?" not in message_str):
-            response_strategy = "TEACHING_INTENT"
-            strategy_instructions = (
-                "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
-                "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
+                "DO NOT include a SUMMARY section - this is only for teaching intent responses."
                 
-                "1. Begin by acknowledging their teaching with appreciation. "
-                "2. Synthesize their input into a structured, comprehensive understanding. "
-                "3. Organize the information with clear steps, examples, or practical applications. "
-                "4. Rephrase any ambiguous terms or concepts for clarity. "
-                "5. Highlight the key principles and practical takeaways. "
-                "6. Ensure your response demonstrates how this knowledge could be applied. "
-                "7. If appropriate, verify your understanding by restating core concepts. "
-                "8. Ask a thoughtful follow-up question that demonstrates engagement. "
-                
-                "This synthesis approach helps create high-quality, reusable knowledge for future users."
+                "MOST IMPORTANTLY: If the knowledge contains ANY communication techniques, relationship-building strategies, "
+                "or specific linguistic patterns, ACTIVELY APPLY these in how you structure your response. For example:"
+                "- If the knowledge mentions using 'em/tôi' or specific pronouns, use those exact pronouns yourself"
+                "- If it suggests addressing the user in specific ways ('anh/chị/bạn'), use that exact form of address"
+                "- If it recommends compliments or specific phrases, incorporate them naturally in your response"
+                "- If it mentions conversation flow techniques, apply them in how you structure this very response"
+                "This way, you're not just explaining the knowledge but DEMONSTRATING it in action."
             )
-        
+
         prompt = f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
 
                 **Identity Awareness**:
@@ -657,7 +916,8 @@ class LearningProcessor:
                    - Consider references to your identity or role as indicators of direct address
                    
                    - When handling TEACHING INTENT:
-                     * Synthesize the input into a comprehensive practical understanding
+                     * ACTIVELY SCAN the entire conversation history for supporting information related to current topic
+                     * Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding
                      * Structure the knowledge for future application (how to use this information)
                      * Rephrase any ambiguous terms, sentences, or paragraphs for clarity
                      * Organize information with clear steps, examples, or use cases when applicable
@@ -665,7 +925,36 @@ class LearningProcessor:
                      * Highlight key principles rather than just recording facts
                      * Verify your understanding by restating core concepts in different terms
                      * Expand abbreviations and domain-specific terminology
+                     * CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY
+                     * The summary should capture the core teaching point in simple language
                      * Ensure the response demonstrates how to apply this knowledge in future scenarios
+                     * END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration
+
+                   - When handling LOW_RELEVANCE_KNOWLEDGE:
+                     * PRIORITIZE the user's current message over any retrieved knowledge
+                     * If retrieved knowledge contradicts or misleads from the user's intent, IGNORE it
+                     * Focus on generating a direct, helpful response to the user's current question
+                     * Evaluate if there's ANY genuinely useful information in the knowledge before using it
+                     * Be explicit when the retrieved knowledge is not addressing the actual query
+                     * Generate a response primarily based on the query itself and your general capabilities
+                     * DO NOT include a SUMMARY section in your response
+                     
+                   - When handling PRACTICE_REQUEST:
+                     * Create a practical demonstration applying previously taught knowledge
+                     * Follow specific steps or methods from the prior knowledge exactly
+                     * Use realistic examples that show the knowledge in action
+                     * Explain your thought process as you demonstrate
+                     * Reference specific parts of prior knowledge to show understanding
+                     * Ask for feedback on your demonstration
+                     * DO NOT include a SUMMARY section in your response
+                     * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY APPLY those techniques in your response format and style
+                     
+                   - When handling RELEVANT_KNOWLEDGE:
+                     * Present information clearly based on confidence level (high/medium/low)
+                     * Structure your response logically with the most relevant information first
+                     * For medium confidence, express some uncertainty and ask for confirmation
+                     * DO NOT include a SUMMARY section in your response - summaries are ONLY for teaching intent
+                     * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY DEMONSTRATE those techniques in your response
 
                 2. **Priority Topics**:
                    - Identify topics of special importance to the business domain
@@ -716,6 +1005,8 @@ class LearningProcessor:
 
                 6. **Output Format**:
                    - Respond directly and concisely in the user's language (no prefix or labels)
+                   - ALWAYS MATCH THE USER'S LANGUAGE - if they use Vietnamese, respond in Vietnamese
+                   - Keep all parts of your response (including SUMMARY sections) in the same language as the user's message
                    - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
                    - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
                    - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up", "name_addressed": true/false, "ai_referenced": true/false}}</evaluation>
@@ -749,6 +1040,74 @@ class LearningProcessor:
                         evaluation = json.loads(eval_section.group(1).strip())
                         content = re.sub(r'<evaluation>.*?</evaluation>', '', content, flags=re.DOTALL).strip()
                         logger.info(f"Extracted LLM evaluation: {evaluation}")
+                        
+                        # Override response_strategy based on LLM evaluation
+                        if evaluation.get("has_teaching_intent", False) == True:
+                            original_strategy = response_strategy
+                            response_strategy = "TEACHING_INTENT"
+                            logger.info(f"LLM detected teaching intent, changing response_strategy from {original_strategy} to TEACHING_INTENT")
+                            
+                            # Update strategy_instructions for teaching intent
+                            strategy_instructions = (
+                                "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
+                                "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
+                                
+                                "1. Begin by acknowledging their teaching with appreciation. "
+                                "2. ACTIVELY SCAN the entire conversation history for supporting information related to current topic. "
+                                "3. Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding. "
+                                "4. Structure the knowledge for future application (how to use this information). "
+                                "5. Rephrase any ambiguous terms or concepts for clarity. "
+                                "6. Organize information with clear steps, examples, or use cases when applicable. "
+                                "7. Include contextual understanding (when/where/how to apply this knowledge). "
+                                "8. Highlight key principles rather than just recording facts. "
+                                "9. Verify your understanding by restating core concepts in different terms. "
+                                "10. Expand abbreviations and domain-specific terminology. "
+                                "11. CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY"
+                                "12. The summary should capture the core teaching point in simple language"
+                                "13. Ensure the response demonstrates how to apply this knowledge in future scenarios"
+                                "14. END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration"
+                                
+                                "This synthesis approach helps create high-quality, reusable knowledge for future users."
+                            )
+                            
+                            # Generate a new response with teaching intent instructions if needed
+                            if original_strategy != "TEACHING_INTENT":
+                                logger.info("Regenerating response with TEACHING_INTENT instructions")
+                                teaching_prompt = f"""IMPORTANT: The user is TEACHING you something. Your job is to synthesize this knowledge.
+                                
+                                Original message: {message_str}
+                                
+                                Instructions:
+                                1. Acknowledge their teaching with appreciation
+                                2. Synthesize the knowledge into a clear, structured format
+                                3. Create a SUMMARY section (2-3 sentences) prefixed with "SUMMARY: "
+                                4. Ask 1-2 open-ended follow-up questions to deepen understanding
+                                
+                                CRITICAL: RESPOND IN THE SAME LANGUAGE AS THE USER'S MESSAGE.
+                                - If the user wrote in Vietnamese, respond in Vietnamese
+                                - If the user wrote in English, respond in English
+                                - Match the language exactly - do not mix languages
+                                
+                                DO NOT say this is a teaching message or make meta-references to teaching.
+                                DO include a "SUMMARY: " section with 2-3 concise sentences capturing the core point.
+                                
+                                Your synthesized response:
+                                """
+                                try:
+                                    teaching_response = await LLM.ainvoke(teaching_prompt)
+                                    teaching_content = teaching_response.content.strip()
+                                    
+                                    # Check if there's a SUMMARY section, add one if missing
+                                    if "SUMMARY:" not in teaching_content:
+                                        # Add default summary at the end if missing
+                                        teaching_content += f"\n\nSUMMARY: This knowledge involves {message_str[:30]}... and requires further development."
+                                    
+                                    # Replace the original content
+                                    content = teaching_content
+                                    logger.info("Successfully regenerated response with TEACHING_INTENT format")
+                                except Exception as e:
+                                    logger.error(f"Failed to regenerate teaching response: {str(e)}")
+                                    # Keep original content if regeneration fails
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse evaluation")
             
@@ -953,6 +1312,198 @@ class LearningProcessor:
             "has_pattern_match": has_pattern_match,
             "topic_overlap": topic_overlap
         }
+
+    async def _evaluate_context_relevance(self, user_input: str, retrieved_knowledge: str) -> float:
+        """
+        Evaluate the relevance between user input and retrieved knowledge.
+        Returns a score between 0.0 and 1.0 indicating relevance.
+        """
+        try:
+            # Method 1: Use embeddings similarity
+            user_embedding = await EMBEDDINGS.aembed_query(user_input)
+            knowledge_embedding = await EMBEDDINGS.aembed_query(retrieved_knowledge)
+            
+            # Calculate cosine similarity
+            dot_product = sum(a * b for a, b in zip(user_embedding, knowledge_embedding))
+            user_norm = sum(a * a for a in user_embedding) ** 0.5
+            knowledge_norm = sum(b * b for b in knowledge_embedding) ** 0.5
+            
+            if user_norm * knowledge_norm == 0:
+                similarity = 0
+            else:
+                similarity = dot_product / (user_norm * knowledge_norm)
+            
+            # Method 2: Let LLM evaluate relevance if similarity is in ambiguous range
+            if 0.3 <= similarity <= 0.7:
+                # Only use LLM evaluation for ambiguous cases to save API calls
+                prompt = f"""
+                Evaluate the relevance between USER INPUT and KNOWLEDGE on a scale of 0-10.
+                
+                USER INPUT:
+                {user_input}
+                
+                KNOWLEDGE:
+                {retrieved_knowledge}
+                
+                Consider:
+                - Topic alignment (not just keywords)
+                - Whether the knowledge addresses the input's intent
+                - Practical usefulness of the knowledge for the input
+                
+                Return ONLY a number between 0-10.
+                """
+                
+                try:
+                    llm_response = await LLM.ainvoke(prompt)
+                    llm_score_text = llm_response.content.strip()
+                    
+                    # Extract just the number from potential additional text
+                    import re
+                    score_match = re.search(r'(\d+(\.\d+)?)', llm_score_text)
+                    if score_match:
+                        llm_score = float(score_match.group(1))
+                        # Normalize to 0-1 range
+                        llm_score = min(10, max(0, llm_score)) / 10
+                        
+                        # Combine with more weight on embedding similarity (50/50 instead of 30/70)
+                        combined_score = 0.5 * similarity + 0.5 * llm_score
+                        logger.info(f"Context relevance: embedding={similarity:.2f}, LLM={llm_score:.2f}, combined={combined_score:.2f}")
+                        return combined_score
+                except Exception as e:
+                    logger.warning(f"LLM relevance evaluation failed: {str(e)}. Falling back to embedding similarity.")
+            
+            logger.info(f"Context relevance from embedding similarity: {similarity:.2f}")
+            return similarity
+            
+        except Exception as e:
+            logger.error(f"Error in context relevance evaluation: {str(e)}")
+            # Default to medium relevance on error to avoid blocking the flow
+            return 0.5
+
+    async def _detect_conversation_flow(self, message: str, prior_messages: List[str], conversation_context: str) -> Dict[str, Any]:
+        """
+        Use LLM to analyze conversation flow and detect the relationship between messages.
+        
+        Args:
+            message: Current message to analyze
+            prior_messages: Previous messages for context (most recent first)
+            conversation_context: Full conversation history
+            
+        Returns:
+            Dictionary with flow type, confidence, and other analysis details
+        """
+        # Skip LLM call if no context is available
+        if not prior_messages:
+            return {
+                "flow_type": "NEW_TOPIC", 
+                "confidence": 0.9,
+                "reasoning": "No prior messages"
+            }
+
+        # First do a quick check for practice request patterns in Vietnamese
+        practice_patterns = [
+            r'(?:thử|áp dụng).*(?:xem|nào)',  # "thử...xem", "áp dụng...xem nào"
+            r'(?:làm thử|thử làm)',           # "làm thử", "thử làm" 
+            r'ví dụ.*(?:đi|nào)',             # "ví dụ...đi", "ví dụ...nào"
+            r'minh họa',                      # "minh họa"
+            r'thực hành'                      # "thực hành"
+        ]
+        
+        # Direct pattern matching for clear practice requests in Vietnamese
+        if any(re.search(pattern, message.lower()) for pattern in practice_patterns):
+            logger.info(f"Direct pattern match for PRACTICE_REQUEST: '{message}'")
+            return {
+                "flow_type": "PRACTICE_REQUEST",
+                "confidence": 0.95,
+                "reasoning": "Direct Vietnamese practice request pattern detected"
+            }
+            
+        # Get the most recent prior message for context
+        prior_message = prior_messages[0] if prior_messages else ""
+        
+        # Prepare a context sample that's not too long (last 800 chars max)
+        context_sample = conversation_context
+        if len(context_sample) > 800:
+            context_sample = "..." + context_sample[-800:]
+        
+        # Enhanced prompt for better flow detection, especially for Vietnamese
+        prompt = f"""
+        Analyze this conversation flow. Your task is to determine the relationship between the CURRENT MESSAGE and previous messages.
+        
+        Classify the CURRENT MESSAGE into exactly ONE of these categories:
+        
+        1. FOLLOW_UP: Continuing or asking for more details about a previous topic
+        2. CONFIRMATION: Agreement, acknowledgment, or confirmation of previous information
+        3. PRACTICE_REQUEST: Asking to demonstrate, apply, or try knowledge previously shared
+        4. CLOSING: Indicating the conversation is ending
+        5. NEW_TOPIC: Starting a completely new conversation topic
+        
+        CRITICAL VIETNAMESE PATTERNS:
+        - If "thử...xem" appears in any form, this is almost certainly a PRACTICE_REQUEST
+        - If "áp dụng" appears with "xem" or "nào", this is a PRACTICE_REQUEST
+        - "làm thử", "thử làm" indicate PRACTICE_REQUEST
+        - "ví dụ", "minh họa" indicate PRACTICE_REQUEST (asking for example)
+        - Short responses like "vâng", "đúng rồi", "được" usually mean CONFIRMATION
+        - "tạm biệt", "hẹn gặp lại" indicate CLOSING
+        
+        PAY SPECIAL ATTENTION: The phrase "Em thử áp dụng..." or similar patterns STRONGLY indicate a PRACTICE_REQUEST where the user wants to demonstrate their knowledge.
+        
+        CONVERSATION CONTEXT:
+        {context_sample}
+        
+        PREVIOUS MESSAGE:
+        {prior_message}
+        
+        CURRENT MESSAGE:
+        {message}
+        
+        Return ONLY a JSON object:
+        {{"flow_type": "FOLLOW_UP|CONFIRMATION|PRACTICE_REQUEST|CLOSING|NEW_TOPIC", "confidence": [0-1.0], "reasoning": "brief explanation"}}
+        """
+        
+        try:
+            response = await LLM.ainvoke(prompt)
+            content = response.content.strip()
+            
+            # Extract JSON from potential additional text
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                content = json_match.group(0)
+                
+            result = json.loads(content)
+            
+            # Log the result
+            logger.info(f"Conversation flow detected: {result['flow_type']} (confidence: {result['confidence']})")
+            return result
+            
+        except Exception as e:
+            logger.warning(f"Error detecting conversation flow: {str(e)}")
+            
+            # Enhanced fallback detection for practice requests in Vietnamese
+            lower_message = message.lower()
+            if any(term in lower_message for term in ["thử", "áp dụng", "ví dụ", "minh họa", "thực hành"]):
+                return {
+                    "flow_type": "PRACTICE_REQUEST",
+                    "confidence": 0.8,
+                    "reasoning": "Fallback practice request detection"
+                }
+            
+            # Simple fallback based on message length
+            is_short_message = len(message.split()) < 5
+            
+            if is_short_message:
+                return {
+                    "flow_type": "FOLLOW_UP",
+                    "confidence": 0.6,
+                    "reasoning": "Short message fallback classification"
+                }
+            else:
+                return {
+                    "flow_type": "NEW_TOPIC",
+                    "confidence": 0.5,
+                    "reasoning": "Fallback classification due to error"
+                }
 
 async def process_llm_with_tools(
         self,

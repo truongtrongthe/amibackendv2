@@ -61,7 +61,7 @@ process_lock = threading.Lock()
 # Track last message time and pending messages by conversation
 last_message_times = {}
 pending_messages = defaultdict(list)
-CONSECUTIVE_MESSAGE_WINDOW = 100.0  # seconds to wait for more messages
+CONSECUTIVE_MESSAGE_WINDOW = 60.0  # seconds to wait for more messages
 
 # Keep track of active tasks for each conversation
 active_tasks = {}

@@ -271,6 +271,7 @@ async def query_knowledge(
         # Sort and limit
         knowledge = sorted(knowledge, key=lambda x: x["score"], reverse=True)[:top_k]
         logger.info(f"Queried {len(knowledge)} knowledge entries for '{query[:50]}...', top score={knowledge[0]['score'] if knowledge else 0}")
+        
         return knowledge
     except Exception as e:
         logger.error(f"Query failed after retries: {e}")
