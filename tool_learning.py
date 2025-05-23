@@ -7,7 +7,7 @@ import re
 import pytz
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-from pccontroller import save_knowledge, query_knowledge
+from pccontroller import save_knowledge, query_knowledge, query_knowledge_from_graph
 from utilities import logger,EMBEDDINGS
 
 # Custom JSON encoder for datetime objects
@@ -420,14 +420,15 @@ class LearningProcessor:
             
             # Batch query_knowledge calls to reduce API retries
             results_list = await asyncio.gather(
-                *(query_knowledge(
+                *(query_knowledge_from_graph(
                     query=query,
-                    bank_name=bank_name,
+                    graph_version_id=self.graph_version_id,
                     user_id=user_id,
                     thread_id=None,  # Remove thread_id restriction to find more results
                     topic=None,      # Remove topic restriction
                     top_k=10,
-                    min_similarity=0.2  # Lower threshold for better matching
+                    min_similarity=0.2,  # Lower threshold for better matching
+                    exclude_categories=["ai_synthesis"]  # Exclude AI synthesis content
                 ) for query in queries),
                 return_exceptions=True
             )
@@ -453,19 +454,19 @@ class LearningProcessor:
                 for result_item in results:
                     knowledge_content = result_item["raw"]
                     
-                    # Extract just the AI portion if this is a combined knowledge entry
+                    # Extract just the User portion if this is a combined knowledge entry
                     if knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                        ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
-                        if ai_part:
-                            knowledge_content = ai_part.group(1).strip()
-                            logger.info(f"Extracted AI portion from combined knowledge")
+                        user_part = re.search(r'User:(.*?)(?=\n\nAI:)', knowledge_content, re.DOTALL)
+                        if user_part:
+                            knowledge_content = user_part.group(1).strip()
+                            logger.info(f"Extracted User portion from combined knowledge")
                     
                     # Evaluate context relevance between query and retrieved knowledge
                     context_relevance = await self._evaluate_context_relevance(primary_query, knowledge_content)
                     
                     # Calculate adjusted similarity score with context relevance factor
                     query_similarity = result_item["score"]
-                    adjusted_similarity = query_similarity * (0.5 + 0.5 * context_relevance)  # Range between 50%-150% of original score
+                    adjusted_similarity = query_similarity * (1.0 + 0.5 * context_relevance)  # Range between 100%-150% of original score
                     
                     # Add context relevance information to result metadata
                     result_item["context_relevance"] = context_relevance
@@ -476,22 +477,22 @@ class LearningProcessor:
                     
                     logger.info(f"Result for query '{query[:30]}...' yielded similarity: {query_similarity}, adjusted: {adjusted_similarity}, context relevance: {context_relevance}, content: '{knowledge_content[:50]}...'")
                     
-                    # Track the top 3 results using adjusted similarity
-                    if not highest_similarities or adjusted_similarity > min(highest_similarities) or len(highest_similarities) < 3:
+                    # Track the top 5 results using adjusted similarity instead of top 3
+                    if not highest_similarities or adjusted_similarity > min(highest_similarities) or len(highest_similarities) < 5:
                         # Add the new result to our collections
-                        if len(highest_similarities) < 3:
+                        if len(highest_similarities) < 5:
                             highest_similarities.append(adjusted_similarity)
                             best_results.append(result_item)
                             knowledge_contexts.append(knowledge_content)
                         else:
-                            # Find the minimum similarity in our top 3
+                            # Find the minimum similarity in our top 5
                             min_index = highest_similarities.index(min(highest_similarities))
                             # Replace it with the new result
                             highest_similarities[min_index] = adjusted_similarity
                             best_results[min_index] = result_item
                             knowledge_contexts[min_index] = knowledge_content
                         
-                        logger.info(f"Updated top 3 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
+                        logger.info(f"Updated top 5 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
 
             # Apply regular boost for priority topics
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
@@ -509,15 +510,49 @@ class LearningProcessor:
             similarity = max(highest_similarities) if highest_similarities else 0.0
             
             # Combine knowledge contexts for the top results
-            combined_knowledge_context = ""
             if knowledge_contexts:
+                # Đơn giản hóa cách xây dựng combined_knowledge_context
+                # Lấy top 5 vectors có liên quan nhất (hoặc ít hơn nếu không đủ)
                 # Sort by similarity to present most relevant first
-                sorted_contexts = [x for _, x in sorted(zip(highest_similarities, knowledge_contexts), key=lambda pair: pair[0], reverse=True)]
-                combined_knowledge_context = "\n\n---\n\n".join(sorted_contexts[:3])
+                sorted_results = sorted(zip(best_results, highest_similarities, knowledge_contexts), 
+                                      key=lambda pair: pair[1], reverse=True)
+                
+                # Đơn giản hóa hoàn toàn quá trình xử lý kết quả
+                # Không cần cơ chế chống trùng lặp phức tạp
+                
+                # Format response sections
+                knowledge_response_sections = []
+                knowledge_response_sections.append("KNOWLEDGE RESULTS:")
+                
+                # Log số lượng kết quả
+                result_count = min(len(sorted_results), 5)  # Tối đa 5 kết quả
+                logger.info(f"Adding {result_count} knowledge items to response")
+                
+                # Thêm từng kết quả với số thứ tự
+                for i, (result, similarity, content) in enumerate(sorted_results[:result_count], 1):
+                    query = result.get("query", "unknown query")
+                    score = result.get("score", 0.0)
+                    
+                    # Loại bỏ tiếp đầu ngữ "AI:" hoặc "AI Synthesis:" nếu có
+                    if content.startswith("AI: "):
+                        content = content[4:]
+                    elif content.startswith("AI Synthesis: "):
+                        content = content[14:]
+                    
+                    # Thêm kết quả có số thứ tự
+                    knowledge_response_sections.append(
+                        f"[{i}] Query: '{query}' (score: {score:.2f})\n{content}"
+                    )
+                
+                # Tạo combined_knowledge_context từ tất cả sections
+                combined_knowledge_context = "\n\n".join(knowledge_response_sections)
+                
+                # Log để kiểm tra số lượng sections
+                logger.info(f"Created knowledge response with {len(knowledge_response_sections) - 1} items")
             
             logger.info(f"Final similarity: {similarity} from {query_count} queries, found {len(valid_query_results)} valid results, using top {len(knowledge_contexts)} for response")
             return {
-                "knowledge_context": combined_knowledge_context or knowledge_context,
+                "knowledge_context": combined_knowledge_context,
                 "similarity": similarity,
                 "query_count": query_count,
                 "queries": queries,
@@ -689,65 +724,78 @@ class LearningProcessor:
             
             logger.info(f"Using LOW_RELEVANCE_KNOWLEDGE strategy due to relevance score: {best_context_relevance:.2f}")
         elif queries and query_results:
-            # Group results by confidence level
-            high_confidence = []
-            medium_confidence = []
-            low_confidence = []
-            
-            for i, query in enumerate(queries):
-                # Get corresponding result if available
-                result = query_results[i] if i < len(query_results) else None
+            # Simplified response strategy that preserves multi-vector output
+            # Just use the knowledge_context that was already built in _search_knowledge
+            if knowledge_context:
+                logger.info(f"Using pre-built knowledge context with multiple results")
+                # Don't modify knowledge_context - preserve it with all items
+                # Debug log to confirm we're not filtering knowledge
+                logger.info(f"Knowledge context length: {len(knowledge_context)}")
+                # Use existing knowledge_context without re-filtering
+            else:
+                # Fallback if knowledge_context is empty but we have results
+                high_confidence = []
+                medium_confidence = []
+                low_confidence = []
                 
-                if not result:
-                    low_confidence.append(query)
-                    continue
+                # Phần fallback khi knowledge_context trống
+                for i, query in enumerate(queries):
+                    # Get corresponding result if available
+                    result = query_results[i] if i < len(query_results) else None
                     
-                query_similarity = result.get("score", 0.0)
-                query_content = result.get("raw", "")
+                    if not result:
+                        low_confidence.append(query)
+                        continue
+                        
+                    query_similarity = result.get("score", 0.0)
+                    query_content = result.get("raw", "")
+                    
+                    if not query_content:
+                        low_confidence.append(query)
+                        continue
+                    
+                    # Extract just the AI portion if this is a combined knowledge entry
+                    if query_content.startswith("User:") and "\n\nAI:" in query_content:
+                        ai_part = re.search(r'\n\nAI:(.*)', query_content, re.DOTALL)
+                        if ai_part:
+                            query_content = ai_part.group(1).strip()
+                    
+                    if query_similarity < 0.35:
+                        low_confidence.append(query)
+                    elif 0.35 <= query_similarity <= 0.7:
+                        medium_confidence.append((query, query_content, query_similarity))
+                    else:  # > 0.7
+                        high_confidence.append((query, query_content, query_similarity))
                 
-                if not query_content:
-                    low_confidence.append(query)
-                    continue
+                # Format response sections by confidence level
+                knowledge_response_sections = []
                 
-                # Extract just the AI portion if this is a combined knowledge entry
-                if query_content.startswith("User:") and "\n\nAI:" in query_content:
-                    ai_part = re.search(r'\n\nAI:(.*)', query_content, re.DOTALL)
-                    if ai_part:
-                        query_content = ai_part.group(1).strip()
+                if high_confidence:
+                    knowledge_response_sections.append("HIGH CONFIDENCE KNOWLEDGE:")
+                    for i, (query, content, score) in enumerate(high_confidence, 1):
+                        knowledge_response_sections.append(
+                            f"[{i}] On the topic of '{query}' (confidence: {score:.2f}): {content}"
+                        )
                 
-                if query_similarity < 0.35:
-                    low_confidence.append(query)
-                elif 0.35 <= query_similarity <= 0.7:
-                    medium_confidence.append((query, query_content, query_similarity))
-                else:  # > 0.7
-                    high_confidence.append((query, query_content, query_similarity))
-            
-            # Format response sections by confidence level
-            if high_confidence:
-                knowledge_response_sections.append("HIGH CONFIDENCE KNOWLEDGE:")
-                for query, content, score in high_confidence:
-                    knowledge_response_sections.append(
-                        f"On the topic of '{query}' (confidence: {score:.2f}): {content}"
-                    )
-            
-            if medium_confidence:
-                knowledge_response_sections.append("MEDIUM CONFIDENCE KNOWLEDGE:")
-                for query, content, score in medium_confidence:
-                    knowledge_response_sections.append(
-                        f"Regarding '{query}' (confidence: {score:.2f}): {content}\nCould you please confirm or clarify this information?"
-                    )
-            
-            if low_confidence:
-                knowledge_response_sections.append("LOW CONFIDENCE/NO KNOWLEDGE:")
-                for query in low_confidence:
-                    knowledge_response_sections.append(
-                        f"I don't have sufficient knowledge about '{query}'. Would you like to teach me about this topic?"
-                    )
-            
-            # Combine the knowledge sections if they exist
-            if knowledge_response_sections:
-                knowledge_context = "\n\n".join(knowledge_response_sections)
-                logger.info(f"Created structured knowledge response with {len(high_confidence)} high, {len(medium_confidence)} medium, and {len(low_confidence)} low confidence items")
+                if medium_confidence:
+                    knowledge_response_sections.append("MEDIUM CONFIDENCE KNOWLEDGE:")
+                    for i, (query, content, score) in enumerate(medium_confidence, 1):
+                        knowledge_response_sections.append(
+                            f"[{i}] About '{query}' (confidence: {score:.2f}): {content}"
+                        )
+                
+                if low_confidence:
+                    knowledge_response_sections.append("LOW CONFIDENCE/NO KNOWLEDGE:")
+                    for i, query in enumerate(low_confidence, 1):
+                        knowledge_response_sections.append(
+                            f"[{i}] I don't have sufficient knowledge about '{query}'. Would you like to teach me about this topic?"
+                        )
+                
+                # Combine the knowledge sections if they exist
+                if knowledge_response_sections:
+                    knowledge_context = "\n\n".join(knowledge_response_sections)
+                    logger.info(f"Created fallback knowledge response with {len(high_confidence)} high, {len(medium_confidence)} medium, and {len(low_confidence)} low confidence items")
+
         logger.info(f"Knowledge context: {knowledge_context}")
         
         # Initial response strategy determination
@@ -857,17 +905,15 @@ class LearningProcessor:
         else:
             response_strategy = "RELEVANT_KNOWLEDGE"
             strategy_instructions = (
-                "Present the retrieved knowledge prominently in your response, directly quoting the most relevant parts. "
-                "If there are multiple knowledge sections with different confidence levels, address each appropriately:"
-                "- For low confidence (<0.35): Mention you don't have good information and ask for clarification"
-                "- For medium confidence (0.35-0.7): Present the knowledge but express uncertainty and ask for confirmation"
-                "- For high confidence (>0.7): Present the knowledge confidently"
-                "Begin with a clear statement like 'Theo thông tin tôi có...' or 'Mục tiêu của tôi là...' followed by the knowledge. "
-                "Structure the response to emphasize the core information from EXISTING KNOWLEDGE. "
-                "If the message likely continues PRIOR TOPIC, prioritize deepening that topic with specific details. "
-                "If the topic is ambiguous, connect the dots by stating how the knowledge answers their question."
-                "DO NOT include a SUMMARY section - this is only for teaching intent responses."
-                
+                "I've found MULTIPLE knowledge entries relevant to your query. Let me provide a comprehensive response.\n\n"
+                "For each knowledge item found:\n"
+                "1. Review and synthesize the information from ALL available knowledge items\n"
+                "2. When answering, incorporate insights from ALL relevant knowledge items found\n"
+                "3. Show how different knowledge entries complement or confirm each other\n"
+                "4. If there are any contradictions between knowledge items, highlight them\n"
+                "5. Present information in order of relevance, addressing the most relevant points first\n\n"
+                "DO NOT ignore any of the provided knowledge items - incorporate insights from ALL of them in your response.\n"
+                "DO NOT summarize the knowledge as 'I found X items' - just seamlessly incorporate all relevant information.\n\n"
                 "MOST IMPORTANTLY: If the knowledge contains ANY communication techniques, relationship-building strategies, "
                 "or specific linguistic patterns, ACTIVELY APPLY these in how you structure your response. For example:"
                 "- If the knowledge mentions using 'em/tôi' or specific pronouns, use those exact pronouns yourself"
@@ -910,6 +956,8 @@ class LearningProcessor:
                    - For query intent, look for questions or requests for information
                    - Set has_teaching_intent=true when you detect teaching intent
                    - Use EXISTING KNOWLEDGE for queries when available
+                   - When KNOWLEDGE RESULTS contains multiple entries, incorporate ALL relevant information from ALL entries
+                   - DO NOT ignore or skip any knowledge entries - review and use ALL of them in your response
                    - Match the user's language choice (Vietnamese/English)
                    - For closing messages, set intent_type="closing" and respond with a polite farewell
                    - When the user addresses you as "Ami" or refers to you as an AI, acknowledge this in your response naturally
@@ -950,9 +998,9 @@ class LearningProcessor:
                      * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY APPLY those techniques in your response format and style
                      
                    - When handling RELEVANT_KNOWLEDGE:
-                     * Present information clearly based on confidence level (high/medium/low)
+                     * Review and use ALL knowledge items provided - don't skip any
+                     * Present information clearly based on relevance
                      * Structure your response logically with the most relevant information first
-                     * For medium confidence, express some uncertainty and ask for confirmation
                      * DO NOT include a SUMMARY section in your response - summaries are ONLY for teaching intent
                      * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY DEMONSTRATE those techniques in your response
 
