@@ -1049,11 +1049,19 @@ class CoTProcessor:
         PART 2: IDENTIFY KNOWLEDGE GAPS
         After creating the action plan, identify 3-5 specific knowledge queries we should run to get additional information needed to execute the plan effectively.
         
+        CRITICAL LANGUAGE REQUIREMENT FOR KNOWLEDGE QUERIES:
+        - ALL knowledge queries MUST be written in the EXACT SAME LANGUAGE as the user's message
+        - If user wrote in Vietnamese → ALL queries must be in Vietnamese
+        - If user wrote in English → ALL queries must be in English
+        - DO NOT translate or mix languages in the queries
+        - Use natural expressions and terminology from the user's language for the queries
+        
         When identifying knowledge gaps:
         1. Review each action in your plan
         2. For each action, identify what additional knowledge would help finding how to execute.
         3. Create specific queries to gather this knowledge by adding "How to" or "What is" to the action
-        4. Ensure queries are in the same language as the user's message
+        4. ENSURE ALL QUERIES ARE IN THE SAME LANGUAGE AS THE USER'S MESSAGE
+        5. Use culturally appropriate query formulations for the user's language
 
         IMPORTANT: You MUST respond with a valid JSON object only. Do not include any other text or explanation.
         The JSON must follow this exact structure:
