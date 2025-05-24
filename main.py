@@ -297,6 +297,9 @@ class QueryKnowledgeRequest(BaseModel):
     vector_id: str
     bank_name: str = "conversation"
 
+class ConversationGradingRequest(BaseModel):
+    graph_version_id: str = ""
+
 # Main havefun endpoint
 @app.post('/havefun')
 async def havefun(request: HaveFunRequest, background_tasks: BackgroundTasks):
@@ -516,6 +519,116 @@ async def conversation_learning(request: ConversationLearningRequest, background
 
 @app.options('/conversation/learning')
 async def conversation_learning_options():
+    return handle_options()
+
+# COT Processor Grading endpoint
+@app.post('/conversation/grading')
+async def conversation_grading(request: ConversationGradingRequest):
+    """
+    Validate COTProcessor knowledge loading and return comprehensive knowledge bases.
+    Returns the three main knowledge components: Profiling, Communication, and Business Objectives.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN conversation/grading request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] graph_version_id={request.graph_version_id}")
+    
+    try:
+        # Import the grading module
+        from grading import COTProcessorGrader
+        
+        # Initialize and run grading
+        grader = COTProcessorGrader()
+        
+        # Initialize COTProcessor with the provided graph_version_id
+        graph_version_id = request.graph_version_id if request.graph_version_id else None
+        logger.info(f"[REQUEST:{request_id}] Initializing COTProcessor with graph_version_id: {graph_version_id}")
+        
+        success = await grader.initialize_cot_processor(graph_version_id)
+        
+        if not success:
+            logger.error(f"[REQUEST:{request_id}] Failed to initialize COTProcessor")
+            return {
+                "status": "error",
+                "error": "Failed to initialize COTProcessor",
+                "request_id": request_id,
+                "elapsed_time": (datetime.now() - start_time).total_seconds()
+            }
+        
+        logger.info(f"[REQUEST:{request_id}] COTProcessor initialized successfully")
+        
+        # Get the three comprehensive knowledge bases
+        profiling_skills = grader.get_comprehensive_profiling_skills()
+        communication_skills = grader.get_comprehensive_communication_skills()
+        business_objectives = grader.get_comprehensive_business_objectives()
+        
+        # Validate that all knowledge bases were loaded successfully
+        validation_results = grader.validate_knowledge_loading()
+        
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        # Prepare the response
+        response_data = {
+            "status": "success",
+            "request_id": request_id,
+            "elapsed_time": elapsed,
+            "graph_version_id": grader.cot_processor.graph_version_id if grader.cot_processor else None,
+            "validation": {
+                "overall_status": validation_results.get("overall_status", "unknown"),
+                "basic_knowledge_valid": len([v for v in validation_results.get("basic_knowledge", {}).values() if v.get("is_valid", False)]),
+                "comprehensive_knowledge_valid": len([v for v in validation_results.get("comprehensive_knowledge", {}).values() if v.get("is_valid", False)])
+            },
+            "knowledge_bases": {
+                "profiling_instinct": {
+                    "knowledge_context": profiling_skills.get("knowledge_context", ""),
+                    "metadata": profiling_skills.get("metadata", {}),
+                    "content_length": len(profiling_skills.get("knowledge_context", "")),
+                    "is_valid": "error" not in profiling_skills
+                },
+                "communication_instinct": {
+                    "knowledge_context": communication_skills.get("knowledge_context", ""),
+                    "metadata": communication_skills.get("metadata", {}),
+                    "content_length": len(communication_skills.get("knowledge_context", "")),
+                    "is_valid": "error" not in communication_skills
+                },
+                "business_objectives_instinct": {
+                    "knowledge_context": business_objectives.get("knowledge_context", ""),
+                    "metadata": business_objectives.get("metadata", {}),
+                    "content_length": len(business_objectives.get("knowledge_context", "")),
+                    "is_valid": "error" not in business_objectives
+                }
+            }
+        }
+        
+        logger.info(f"[REQUEST:{request_id}] Successfully generated grading response:")
+        logger.info(f"[REQUEST:{request_id}] - Profiling Instinct: {response_data['knowledge_bases']['profiling_instinct']['content_length']} chars")
+        logger.info(f"[REQUEST:{request_id}] - Communication Instinct: {response_data['knowledge_bases']['communication_instinct']['content_length']} chars")
+        logger.info(f"[REQUEST:{request_id}] - Business Objectives Instinct: {response_data['knowledge_bases']['business_objectives_instinct']['content_length']} chars")
+        logger.info(f"[REQUEST:{request_id}] - Overall validation status: {response_data['validation']['overall_status']}")
+        
+        return response_data
+        
+    except Exception as e:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.error(f"[REQUEST:{request_id}] Error in conversation/grading endpoint: {str(e)}")
+        import traceback
+        logger.error(f"[REQUEST:{request_id}] Traceback: {traceback.format_exc()}")
+        
+        return {
+            "status": "error",
+            "error": str(e),
+            "request_id": request_id,
+            "elapsed_time": elapsed
+        }
+    finally:
+        logger.info(f"[REQUEST:{request_id}] === END conversation/grading request - total time: {(datetime.now() - start_time).total_seconds():.2f}s ===")
+
+@app.options('/conversation/grading')
+async def conversation_grading_options():
     return handle_options()
 
 # Query Knowledge endpoint
