@@ -201,7 +201,60 @@ class LearningProcessor:
                     if priority_topic_name and priority_topic_name not in categories:
                         categories.append(priority_topic_name.lower().replace(" ", "_"))
                     
-                    # Combine user input and AI response in a formatted way
+                    # Create synthesis_content early so it's available for combined_knowledge
+                    synthesis_content = conversational_response
+                    
+                    # Extract summary if present using regex
+                    summary = ""
+                    summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', conversational_response, re.IGNORECASE)
+                    if summary_match:
+                        summary = summary_match.group(1).strip()
+                        logger.info(f"Topic Summary Gen by LLM: {summary}")
+                    
+                    # Check for structured format sections
+                    user_response = ""
+                    knowledge_synthesis = ""
+                    knowledge_summary = ""
+                    
+                    # Extract structured sections from message_content
+                    user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
+                    synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
+                    summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
+                    
+                    # Try to extract from full response if available in metadata
+                    if not user_response_match and "full_structured_response" in response.get("metadata", {}):
+                        full_response = response["metadata"]["full_structured_response"]
+                        user_response_match = re.search(r'<user_response>(.*?)</user_response>', full_response, re.DOTALL)
+                        synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', full_response, re.DOTALL)
+                        summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', full_response, re.DOTALL)
+                        logger.info("Extracted structured sections from full_structured_response metadata")
+                    
+                    if user_response_match:
+                        user_response = user_response_match.group(1).strip()
+                        logger.info(f"Found structured user response section")
+                    
+                    if synthesis_match:
+                        knowledge_synthesis = synthesis_match.group(1).strip()
+                        logger.info(f"Found structured knowledge synthesis section")
+                        # Use the structured synthesis content if available
+                        synthesis_content = knowledge_synthesis
+                    
+                    if summary_match:
+                        knowledge_summary = summary_match.group(1).strip()
+                        logger.info(f"Found structured knowledge summary section: {knowledge_summary}")
+                        summary = knowledge_summary  # Use the explicit summary if available
+                    
+                    # Format synthesis_content with summary if available
+                    if summary and not synthesis_match:
+                        # Only add summary prefix if we don't have structured synthesis
+                        synthesis_content = f"SUMMARY: {summary}\n\nAI Synthesis: {conversational_response}"
+                    elif not synthesis_match:
+                        # Default format when no structured synthesis is found
+                        synthesis_content = f"AI Synthesis: {conversational_response}"
+                    
+                    logger.info(f"Final synthesis_content: {synthesis_content[:100]}...")
+                    
+                    # Combine user input and AI synthesis content in a formatted way
                     combined_knowledge = f"User: {message}\n\nAI: {synthesis_content}"
 
                     logger.info(f"Combined knowledge: {combined_knowledge}")
@@ -263,80 +316,30 @@ class LearningProcessor:
                     # This helps with future retrievals by isolating the clean synthesized knowledge
                     if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
                         try:
-                            # Extract summary if present using regex
-                            summary = ""
-                            summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', conversational_response, re.IGNORECASE)
-                            if summary_match:
-                                summary = summary_match.group(1).strip()
-                            logger.info(f"Topic Summary Gen by LLM: {summary}")
                             # Create categories list
                             synthesis_categories = list(categories)
                             synthesis_categories.append("ai_synthesis")
                             
                             logger.info(f"Saving additional AI synthesis for improved future retrieval")
                             
-                            # Format content with summary if available
-                            synthesis_content = f"AI Synthesis: {conversational_response}"
-                            if summary:
-                                logger.info(f"Found and including summary: {summary}")
-                                synthesis_content = f"SUMMARY: {summary}\n\nAI Synthesis: {conversational_response}"
-                            logger.info(f"Synthesis content to save: {synthesis_content}")
-
-                            # Check for new structured format with separate sections
-                            user_response = ""
-                            knowledge_synthesis = ""
-                            knowledge_summary = ""
-                            
-                            # Extract user response (this is what was sent to the user)
-                            user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
-                            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
-                            summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
-                            
-                            # Try to extract from full response if available in metadata
-                            if not user_response_match and "full_structured_response" in response.get("metadata", {}):
-                                full_response = response["metadata"]["full_structured_response"]
-                                user_response_match = re.search(r'<user_response>(.*?)</user_response>', full_response, re.DOTALL)
-                                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', full_response, re.DOTALL)
-                                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', full_response, re.DOTALL)
-                                logger.info("Extracted structured sections from full_structured_response metadata")
-                            
-                            if user_response_match:
-                                user_response = user_response_match.group(1).strip()
-                                logger.info(f"Found structured user response section")
-                            
-                            if synthesis_match:
-                                knowledge_synthesis = synthesis_match.group(1).strip()
-                                logger.info(f"Found structured knowledge synthesis section")
-                            
-                            if summary_match:
-                                knowledge_summary = summary_match.group(1).strip()
-                                logger.info(f"Found structured knowledge summary section: {knowledge_summary}")
-                                summary = knowledge_summary  # Use the explicit summary if available
-                            
-                            # If we found structured sections, use them for storage
+                            # Use the synthesis_content that was already created earlier
+                            # Determine storage format and title
                             if knowledge_synthesis and knowledge_summary:
                                 logger.info(f"Using structured sections for knowledge storage")
-                                # Format for storage with clear separation - matching the expected format in tool6.py
-                                synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
-                                
-                                # Store the summary as the title for metadata access
+                                # Format for storage with clear separation
+                                final_synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
                                 summary_title = knowledge_summary
-                                
-                                # Update categories for the synthesis content
                                 synthesis_categories = list(categories)
-                                # Remove ai_synthesis from main content so it's findable in searches
                             else:
-                                # Fallback to old format if structured sections weren't found
-                                logger.info(f"Using legacy format for knowledge storage")
-                                synthesis_content = f"User: {message}\n\nAI: {conversational_response}"
+                                # Use the synthesis_content that was already built
+                                logger.info(f"Using synthesis_content for knowledge storage")
+                                final_synthesis_content = f"User: {message}\n\nAI: {synthesis_content}"
                                 summary_title = summary or ""
-                                
-                                # Remove ai_synthesis from legacy format too
                                 synthesis_categories = list(categories)
                             
-                            logger.info(f"Final synthesis content to save: {synthesis_content[:100]}...")
+                            logger.info(f"Final synthesis content to save: {final_synthesis_content[:100]}...")
                             synthesis_result = await self._background_save_knowledge(
-                                input_text=synthesis_content,
+                                input_text=final_synthesis_content,
                                 title=summary_title,
                                 user_id=user_id,
                                 bank_name=bank_name,
@@ -630,6 +633,12 @@ class LearningProcessor:
             # Use the highest similarity from our top results
             similarity = max(highest_similarities) if highest_similarities else 0.0
             
+            # Debug logging for similarity calculation
+            if highest_similarities:
+                logger.info(f"DEBUG: highest_similarities list: {highest_similarities}")
+                logger.info(f"DEBUG: max(highest_similarities): {max(highest_similarities)}")
+                logger.info(f"DEBUG: Using similarity: {similarity}")
+            
             # Combine knowledge contexts for the top results
             combined_knowledge_context = ""
             if knowledge_contexts:
@@ -651,7 +660,7 @@ class LearningProcessor:
                 logger.info(f"Adding {result_count} knowledge items to response")
                 
                 # Thêm từng kết quả với số thứ tự
-                for i, (result, similarity, content) in enumerate(sorted_results[:result_count], 1):
+                for i, (result, item_similarity, content) in enumerate(sorted_results[:result_count], 1):
                     query = result.get("query", "unknown query")
                     score = result.get("score", 0.0)
                     
