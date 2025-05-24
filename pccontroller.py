@@ -105,6 +105,7 @@ async def get_brain_banks(graph_version_id: str) -> List[Dict[str, str]]:
 async def save_knowledge(
     input: str,
     user_id: str,
+    title: str="",
     bank_name: str = "",
     thread_id: Optional[str] = None,
     topic: Optional[str] = None,
@@ -162,6 +163,7 @@ async def save_knowledge(
         # Optimized metadata
         metadata = {
             "created_at": datetime.now().isoformat(),
+            "title": title,
             "raw": input[:2000],  # Truncate to save space
             "confidence": float(confidence),
             "source": "conversation",

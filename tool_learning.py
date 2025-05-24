@@ -191,7 +191,7 @@ class LearningProcessor:
                     knowledge_queries = json.loads(query_section.group(1).strip()) if query_section else []
 
                     # Set up categories and bank name
-                    categories = ["health_segmentation"] if is_priority_topic else ["general"]
+                    categories = ["general"]
                     bank_name = "conversation"
                     
                     # Add teaching intent category
@@ -203,29 +203,46 @@ class LearningProcessor:
                     
                     # Combine user input and AI response in a formatted way
                     combined_knowledge = f"User: {message}\n\nAI: {conversational_response}"
+
+                    logger.info(f"Combined knowledge: {combined_knowledge}")
                     
                     # Add synthesized flag if this was from TEACHING_INTENT strategy
                     if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
                         categories.append("synthesized_knowledge")
                         logger.info(f"Adding synthesized_knowledge category for enhanced teaching content")
                     
-                    # Save combined knowledge
-                    try:
-                        logger.info(f"Saving combined knowledge to {bank_name} bank: '{combined_knowledge[:100]}...'")
-                        success = await self._background_save_knowledge(
-                            input_text=combined_knowledge,
-                            user_id=user_id,
-                            bank_name=bank_name,
-                            thread_id=thread_id,
-                            topic=priority_topic_name or "user_teaching",
-                            categories=categories,
-                            ttl_days=365  # 365 days TTL
-                        )
-                        logger.info(f"Save combined knowledge completed: {success}")
-                    except Exception as e:
-                        logger.error(f"Error saving combined knowledge: {str(e)}")
+                    # Check if we have structured format available
+                    has_structured_format = False
+                    if response.get("metadata", {}).get("full_structured_response", ""):
+                        full_response = response["metadata"]["full_structured_response"]
+                        if ("<user_response>" in full_response and 
+                            "<knowledge_synthesis>" in full_response and 
+                            "<knowledge_summary>" in full_response):
+                            has_structured_format = True
+                            logger.info("Detected structured format in response, will use that instead of combined knowledge")
                     
-                    logger.info(f"Saved combined knowledge for topic '{priority_topic_name or 'user_teaching'}'")
+                    # Save combined knowledge only if we don't have structured format
+                    if not has_structured_format:
+                        # Save combined knowledge
+                        try:
+                            logger.info(f"Saving combined knowledge to {bank_name} bank: '{combined_knowledge[:100]}...'")
+                            success = await self._background_save_knowledge(
+                                input_text=combined_knowledge,
+                                title="", # Add empty title parameter 
+                                user_id=user_id,
+                                bank_name=bank_name,
+                                thread_id=thread_id,
+                                topic=priority_topic_name or "user_teaching",
+                                categories=categories,
+                                ttl_days=365  # 365 days TTL
+                            )
+                            logger.info(f"Save combined knowledge completed: {success}")
+                        except Exception as e:
+                            logger.error(f"Error saving combined knowledge: {str(e)}")
+                        
+                        logger.info(f"Saved combined knowledge for topic '{priority_topic_name or 'user_teaching'}'")
+                    else:
+                        logger.info(f"Skipping combined knowledge save since structured format is available")
 
                     # If we have synthesized content, save an additional entry with just the AI response
                     # This helps with future retrievals by isolating the clean synthesized knowledge
@@ -249,8 +266,63 @@ class LearningProcessor:
                                 logger.info(f"Found and including summary: {summary}")
                                 synthesis_content = f"SUMMARY: {summary}\n\nAI Synthesis: {conversational_response}"
                             logger.info(f"Synthesis content to save: {synthesis_content}")
+
+                            # Check for new structured format with separate sections
+                            user_response = ""
+                            knowledge_synthesis = ""
+                            knowledge_summary = ""
+                            
+                            # Extract user response (this is what was sent to the user)
+                            user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
+                            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
+                            summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
+                            
+                            # Try to extract from full response if available in metadata
+                            if not user_response_match and "full_structured_response" in response.get("metadata", {}):
+                                full_response = response["metadata"]["full_structured_response"]
+                                user_response_match = re.search(r'<user_response>(.*?)</user_response>', full_response, re.DOTALL)
+                                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', full_response, re.DOTALL)
+                                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', full_response, re.DOTALL)
+                                logger.info("Extracted structured sections from full_structured_response metadata")
+                            
+                            if user_response_match:
+                                user_response = user_response_match.group(1).strip()
+                                logger.info(f"Found structured user response section")
+                            
+                            if synthesis_match:
+                                knowledge_synthesis = synthesis_match.group(1).strip()
+                                logger.info(f"Found structured knowledge synthesis section")
+                            
+                            if summary_match:
+                                knowledge_summary = summary_match.group(1).strip()
+                                logger.info(f"Found structured knowledge summary section: {knowledge_summary}")
+                                summary = knowledge_summary  # Use the explicit summary if available
+                            
+                            # If we found structured sections, use them for storage
+                            if knowledge_synthesis and knowledge_summary:
+                                logger.info(f"Using structured sections for knowledge storage")
+                                # Format for storage with clear separation - matching the expected format in tool6.py
+                                synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
+                                
+                                # Store the summary as the title for metadata access
+                                summary_title = knowledge_summary
+                                
+                                # Update categories for the synthesis content
+                                synthesis_categories = list(categories)
+                                # Remove ai_synthesis from main content so it's findable in searches
+                            else:
+                                # Fallback to old format if structured sections weren't found
+                                logger.info(f"Using legacy format for knowledge storage")
+                                synthesis_content = f"User: {message}\n\nAI: {conversational_response}"
+                                summary_title = summary or ""
+                                
+                                # Remove ai_synthesis from legacy format too
+                                synthesis_categories = list(categories)
+                            
+                            logger.info(f"Final synthesis content to save: {synthesis_content[:100]}...")
                             synthesis_success = await self._background_save_knowledge(
                                 input_text=synthesis_content,
+                                title=summary_title,
                                 user_id=user_id,
                                 bank_name=bank_name,
                                 thread_id=thread_id,
@@ -261,12 +333,15 @@ class LearningProcessor:
                             logger.info(f"Save AI synthesis completed: {synthesis_success}")
                             
                             # Save standalone summary if available
-                            if summary:
+                            if knowledge_summary:
+                                # Define categories for summary - but DON'T add "summary" to avoid filtering
                                 summary_categories = list(categories)
-                                summary_categories.append("summary")
+                                summary_categories.append("knowledge_summary")  # Use a different category name
+                                summary_categories.append("ai_synthesis")  # Add ai_synthesis to summary instead
                                 logger.info(f"Saving standalone summary for quick retrieval")
                                 summary_success = await self._background_save_knowledge(
-                                    input_text=f"SUMMARY: {summary}",
+                                    input_text=f"AI: {knowledge_synthesis}",
+                                    title=knowledge_summary,
                                     user_id=user_id,
                                     bank_name=bank_name,
                                     thread_id=thread_id,
@@ -275,6 +350,24 @@ class LearningProcessor:
                                     ttl_days=365  # 365 days TTL
                                 )
                                 logger.info(f"Save summary completed: {summary_success}")
+                            elif summary and len(summary) > 10:  # Only save non-empty summaries
+                                summary_categories = list(categories)
+                                summary_categories.append("knowledge_summary")  # Use a different category name
+                                summary_categories.append("ai_synthesis")  # Add ai_synthesis to summary instead
+                                logger.info(f"Saving standalone summary (legacy format) for quick retrieval")
+                                summary_success = await self._background_save_knowledge(
+                                    input_text=f"AI: {conversational_response}",
+                                    title=summary,
+                                    user_id=user_id,
+                                    bank_name=bank_name,
+                                    thread_id=thread_id,
+                                    topic=priority_topic_name or "user_teaching",
+                                    categories=summary_categories,
+                                    ttl_days=365  # 365 days TTL
+                                )
+                                logger.info(f"Save legacy summary completed: {summary_success}")
+                            else:
+                                logger.info("No valid summary available, skipping standalone summary save")
                         except Exception as e:
                             logger.error(f"Error saving AI synthesis: {str(e)}")
 
@@ -510,6 +603,7 @@ class LearningProcessor:
             similarity = max(highest_similarities) if highest_similarities else 0.0
             
             # Combine knowledge contexts for the top results
+            combined_knowledge_context = ""
             if knowledge_contexts:
                 # Đơn giản hóa cách xây dựng combined_knowledge_context
                 # Lấy top 5 vectors có liên quan nhất (hoặc ít hơn nếu không đủ)
@@ -549,6 +643,10 @@ class LearningProcessor:
                 
                 # Log để kiểm tra số lượng sections
                 logger.info(f"Created knowledge response with {len(knowledge_response_sections) - 1} items")
+            else:
+                # If no knowledge contexts, set an empty string
+                combined_knowledge_context = ""
+                logger.info("No knowledge items found, using empty knowledge context")
             
             logger.info(f"Final similarity: {similarity} from {query_count} queries, found {len(valid_query_results)} valid results, using top {len(knowledge_contexts)} for response")
             return {
@@ -878,28 +976,36 @@ class LearningProcessor:
                 "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
                 "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
                 
-                "1. Begin by acknowledging their teaching with appreciation. "
-                "2. ACTIVELY SCAN the entire conversation history for supporting information related to current topic. "
-                "3. Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding. "
-                "4. Structure the knowledge for future application (how to use this information). "
-                "5. Rephrase any ambiguous terms or concepts for clarity. "
-                "6. Organize information with clear steps, examples, or use cases when applicable. "
-                "7. Include contextual understanding (when/where/how to apply this knowledge). "
-                "8. Highlight key principles rather than just recording facts. "
-                "9. Verify your understanding by restating core concepts in different terms. "
-                "10. Expand abbreviations and domain-specific terminology. "
-                "11. CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY"
-                "12. The summary should capture the core teaching point in simple language"
-                "13. Ensure the response demonstrates how to apply this knowledge in future scenarios"
-                "14. END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration"
+                "Generate THREE separate outputs in your response:\n\n"
                 
-                "CRITICAL LANGUAGE INSTRUCTION: ALWAYS respond in EXACTLY the SAME LANGUAGE as the user's message. "
+                "1. <user_response>\n"
+                "   This is what the user will see - include:\n"
+                "   - Acknowledgment of their teaching with appreciation\n"
+                "   - Demonstration of your understanding\n"
+                "   - End with 1-2 open-ended questions to deepen the conversation\n"
+                "   - Make this conversational and engaging\n"
+                "</user_response>\n\n"
+                
+                "2. <knowledge_synthesis>\n"
+                "   This is for knowledge storage - include ONLY:\n"
+                "   - Factual information extracted from the user's message\n"
+                "   - Structured, clear explanation of the concepts\n"
+                "   - NO greeting phrases, acknowledgments, or questions\n"
+                "   - NO conversational elements - pure knowledge only\n"
+                "   - Organized in logical sections if appropriate\n"
+                "</knowledge_synthesis>\n\n"
+                
+                "3. <knowledge_summary>\n"
+                "   A concise 2-3 sentence summary capturing the core teaching point\n"
+                "   This should be factual and descriptive, not conversational\n"
+                "</knowledge_summary>\n\n"
+                
+                "CRITICAL LANGUAGE INSTRUCTION: ALWAYS respond in EXACTLY the SAME LANGUAGE as the user's message for ALL sections. "
                 "- If the user wrote in Vietnamese, respond entirely in Vietnamese "
                 "- If the user wrote in English, respond entirely in English "
                 "- Do not mix languages in your response "
-                "- Keep the SUMMARY section in the same language as the rest of your response"
                 
-                "This synthesis approach helps create high-quality, reusable knowledge for future users."
+                "This structured approach helps create high-quality, reusable knowledge while maintaining good user experience."
             )
             logger.info(f"Detected teaching intent message, using TEACHING_INTENT strategy")
         else:
@@ -1069,6 +1175,27 @@ class LearningProcessor:
             tool_calls = []
             evaluation = {"has_teaching_intent": False, "is_priority_topic": False, "priority_topic_name": "", "should_save_knowledge": False, "intent_type": "query", "name_addressed": False, "ai_referenced": False}
             
+            # First, check if we have structured sections
+            user_response = ""
+            knowledge_synthesis = ""
+            knowledge_summary = ""
+            
+            # Extract structured sections
+            user_response_match = re.search(r'<user_response>(.*?)</user_response>', content, re.DOTALL)
+            if user_response_match:
+                user_response = user_response_match.group(1).strip()
+                logger.info(f"Found user_response section in initial response")
+            
+            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', content, re.DOTALL)
+            if synthesis_match:
+                knowledge_synthesis = synthesis_match.group(1).strip()
+                logger.info(f"Found knowledge_synthesis section in initial response")
+            
+            summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', content, re.DOTALL)
+            if summary_match:
+                knowledge_summary = summary_match.group(1).strip()
+                logger.info(f"Found knowledge_summary section in initial response")
+            
             # Extract tool calls if present
             if "<tool_calls>" in content:
                 tool_section = re.search(r'<tool_calls>(.*?)</tool_calls>', content, re.DOTALL)
@@ -1100,22 +1227,36 @@ class LearningProcessor:
                                 "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
                                 "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
                                 
-                                "1. Begin by acknowledging their teaching with appreciation. "
-                                "2. ACTIVELY SCAN the entire conversation history for supporting information related to current topic. "
-                                "3. Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding. "
-                                "4. Structure the knowledge for future application (how to use this information). "
-                                "5. Rephrase any ambiguous terms or concepts for clarity. "
-                                "6. Organize information with clear steps, examples, or use cases when applicable. "
-                                "7. Include contextual understanding (when/where/how to apply this knowledge). "
-                                "8. Highlight key principles rather than just recording facts. "
-                                "9. Verify your understanding by restating core concepts in different terms. "
-                                "10. Expand abbreviations and domain-specific terminology. "
-                                "11. CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY"
-                                "12. The summary should capture the core teaching point in simple language"
-                                "13. Ensure the response demonstrates how to apply this knowledge in future scenarios"
-                                "14. END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration"
+                                "Generate THREE separate outputs in your response:\n\n"
                                 
-                                "This synthesis approach helps create high-quality, reusable knowledge for future users."
+                                "1. <user_response>\n"
+                                "   This is what the user will see - include:\n"
+                                "   - Acknowledgment of their teaching with appreciation\n"
+                                "   - Demonstration of your understanding\n"
+                                "   - End with 1-2 open-ended questions to deepen the conversation\n"
+                                "   - Make this conversational and engaging\n"
+                                "</user_response>\n\n"
+                                
+                                "2. <knowledge_synthesis>\n"
+                                "   This is for knowledge storage - include ONLY:\n"
+                                "   - Factual information extracted from the user's message\n"
+                                "   - Structured, clear explanation of the concepts\n"
+                                "   - NO greeting phrases, acknowledgments, or questions\n"
+                                "   - NO conversational elements - pure knowledge only\n"
+                                "   - Organized in logical sections if appropriate\n"
+                                "</knowledge_synthesis>\n\n"
+                                
+                                "3. <knowledge_summary>\n"
+                                "   A concise 2-3 sentence summary capturing the core teaching point\n"
+                                "   This should be factual and descriptive, not conversational\n"
+                                "</knowledge_summary>\n\n"
+                                
+                                "CRITICAL LANGUAGE INSTRUCTION: ALWAYS respond in EXACTLY the SAME LANGUAGE as the user's message. "
+                                "- If the user wrote in Vietnamese, respond entirely in Vietnamese "
+                                "- If the user wrote in English, respond entirely in English "
+                                "- Do not mix languages in your response "
+                                
+                                "This structured approach helps create high-quality, reusable knowledge while maintaining good user experience."
                             )
                             
                             # Generate a new response with teaching intent instructions if needed
@@ -1126,38 +1267,91 @@ class LearningProcessor:
                                 Original message: {message_str}
                                 
                                 Instructions:
-                                1. Acknowledge their teaching with appreciation
-                                2. Synthesize the knowledge into a clear, structured format
-                                3. Create a SUMMARY section (2-3 sentences) prefixed with "SUMMARY: "
-                                4. Ask 1-2 open-ended follow-up questions to deepen understanding
+                                Generate THREE separate outputs in your response:
+                                
+                                1. <user_response>
+                                   This is what the user will see - include:
+                                   - Acknowledgment of their teaching with appreciation
+                                   - Demonstration of your understanding
+                                   - End with 1-2 open-ended questions to deepen the conversation
+                                   - Make this conversational and engaging
+                                </user_response>
+                                
+                                2. <knowledge_synthesis>
+                                   This is for knowledge storage - include ONLY:
+                                   - Factual information extracted from the user's message
+                                   - Structured, clear explanation of the concepts
+                                   - NO greeting phrases, acknowledgments, or questions
+                                   - NO conversational elements - pure knowledge only
+                                   - Organized in logical sections if appropriate
+                                </knowledge_synthesis>
+                                
+                                3. <knowledge_summary>
+                                   A concise 2-3 sentence summary capturing the core teaching point
+                                   This should be factual and descriptive, not conversational
+                                </knowledge_summary>
                                 
                                 CRITICAL: RESPOND IN THE SAME LANGUAGE AS THE USER'S MESSAGE.
-                                - If the user wrote in Vietnamese, respond in Vietnamese
-                                - If the user wrote in English, respond in English
+                                - If the user wrote in Vietnamese, respond entirely in Vietnamese
+                                - If the user wrote in English, respond entirely in English
                                 - Match the language exactly - do not mix languages
                                 
-                                DO NOT say this is a teaching message or make meta-references to teaching.
-                                DO include a "SUMMARY: " section with 2-3 concise sentences capturing the core point.
-                                
-                                Your synthesized response:
+                                Your structured response:
                                 """
                                 try:
                                     teaching_response = await LLM.ainvoke(teaching_prompt)
                                     teaching_content = teaching_response.content.strip()
                                     
-                                    # Check if there's a SUMMARY section, add one if missing
-                                    if "SUMMARY:" not in teaching_content:
-                                        # Add default summary at the end if missing
-                                        teaching_content += f"\n\nSUMMARY: This knowledge involves {message_str[:30]}... and requires further development."
-                                    
-                                    # Replace the original content
-                                    content = teaching_content
-                                    logger.info("Successfully regenerated response with TEACHING_INTENT format")
+                                    # Extract user response section for what the user sees
+                                    user_response_match = re.search(r'<user_response>(.*?)</user_response>', teaching_content, re.DOTALL)
+                                    if user_response_match:
+                                        user_response = user_response_match.group(1).strip()
+                                        # Update the response with just the user-facing content
+                                        content = teaching_content  # Keep full content for knowledge processing
+                                        
+                                        # Create a new dict for response instead of modifying the AIMessage
+                                        response = {
+                                            "status": "success",
+                                            "message": teaching_content,  # Store full structured content for knowledge saving
+                                            "metadata": {
+                                                "response_strategy": "TEACHING_INTENT",
+                                                "has_teaching_intent": True
+                                            }
+                                        }
+                                        
+                                        # For the user-facing response, extract just the user part
+                                        message_content = user_response
+                                        logger.info("Successfully regenerated response with structured TEACHING_INTENT format")
+                                        logger.info(f"Extracted user-facing content: {message_content[:100]}...")
+                                    else:
+                                        # Check if there's a SUMMARY section, add one if missing
+                                        if "SUMMARY:" not in teaching_content:
+                                            # Add default summary at the end if missing
+                                            teaching_content += f"\n\nSUMMARY: This knowledge involves {message_str[:30]}... and requires further development."
+                                        
+                                        # Replace the original content
+                                        content = teaching_content
+                                        response["message"] = teaching_content
+                                        logger.info("Successfully regenerated response with TEACHING_INTENT format")
                                 except Exception as e:
                                     logger.error(f"Failed to regenerate teaching response: {str(e)}")
                                     # Keep original content if regeneration fails
                     except json.JSONDecodeError:
                         logger.warning("Failed to parse evaluation")
+            
+            # Extract just the user-facing response from structured sections if present
+            user_facing_content = content
+            if response_strategy == "TEACHING_INTENT":
+                # Extract user response (this is what should be sent to the user)
+                user_response_match = re.search(r'<user_response>(.*?)</user_response>', content, re.DOTALL)
+                if user_response_match:
+                    user_facing_content = user_response_match.group(1).strip()
+                    logger.info(f"Extracted user-facing content from structured response")
+                else:
+                    # Remove knowledge_synthesis and knowledge_summary sections if they exist
+                    user_facing_content = re.sub(r'<knowledge_synthesis>.*?</knowledge_synthesis>', '', content, flags=re.DOTALL).strip()
+                    user_facing_content = re.sub(r'<knowledge_summary>.*?</knowledge_summary>', '', user_facing_content, flags=re.DOTALL).strip()
+                    logger.info(f"Cleaned non-user sections from response")
             
             if content.startswith('{') and '"message"' in content:
                 try:
@@ -1169,30 +1363,30 @@ class LearningProcessor:
                     logger.warning(f"Failed to parse JSON response: {json_error}")
             
             # Ensure closing messages get a response even if empty
-            if response_strategy == "CLOSING" and (not content or content.isspace()):
+            if response_strategy == "CLOSING" and (not user_facing_content or user_facing_content.isspace()):
                 # Default closing message if the LLM didn't provide one
                 if "vietnamese" in message_str.lower() or any(vn_word in message_str.lower() for vn_word in ["tạm biệt", "cảm ơn", "hẹn gặp", "thế thôi"]):
-                    content = "Vâng, cảm ơn bạn đã trao đổi. Hẹn gặp lại bạn lần sau nhé!"
+                    user_facing_content = "Vâng, cảm ơn bạn đã trao đổi. Hẹn gặp lại bạn lần sau nhé!"
                 else:
-                    content = "Thank you for the conversation. Have a great day and I'm here if you need anything else!"
+                    user_facing_content = "Thank you for the conversation. Have a great day and I'm here if you need anything else!"
                 logger.info("Added default closing response for empty LLM response")
             
             # Ensure unclear or short queries also get a helpful response when content is empty
-            elif (not content or content.isspace()):
+            elif (not user_facing_content or user_facing_content.isspace()):
                 # Check if message is short (1-2 words) or unclear
                 is_short_message = len(message_str.strip().split()) <= 2
                 
                 # Default response for short/unclear messages
                 if "vietnamese" in message_str.lower() or any(vn_word in message_str.lower() for vn_word in ["anh", "chị", "bạn", "cô", "ông", "xin", "vui lòng"]):
-                    content = f"Xin lỗi, tôi không hiểu rõ câu hỏi '{message_str}'. Bạn có thể chia sẻ thêm thông tin hoặc đặt câu hỏi cụ thể hơn được không?"
+                    user_facing_content = f"Xin lỗi, tôi không hiểu rõ câu hỏi '{message_str}'. Bạn có thể chia sẻ thêm thông tin hoặc đặt câu hỏi cụ thể hơn được không?"
                 else:
-                    content = f"I'm sorry, I didn't fully understand your message '{message_str}'. Could you please provide more details or ask a more specific question?"
+                    user_facing_content = f"I'm sorry, I didn't fully understand your message '{message_str}'. Could you please provide more details or ask a more specific question?"
                 
                 logger.info(f"Added default response for empty LLM response to short/unclear query: '{message_str}'")
             
             return {
                 "status": "success",
-                "message": content,
+                "message": user_facing_content,
                 "metadata": {
                     "timestamp": datetime.now().isoformat(),
                     "user_id": user_id,
@@ -1204,7 +1398,8 @@ class LearningProcessor:
                     "has_teaching_intent": evaluation.get("has_teaching_intent", False),
                     "is_priority_topic": evaluation.get("is_priority_topic", False),
                     "priority_topic_name": evaluation.get("priority_topic_name", ""),
-                    "should_save_knowledge": evaluation.get("should_save_knowledge", False)
+                    "should_save_knowledge": evaluation.get("should_save_knowledge", False),
+                    "full_structured_response": content  # Store the full structured response for knowledge saving
                 }
             }
         except Exception as e:
@@ -1255,7 +1450,7 @@ class LearningProcessor:
         self._background_tasks.clear()
         logger.info("Background task cleanup completed")
 
-    async def _background_save_knowledge(self, input_text: str, user_id: str, bank_name: str, 
+    async def _background_save_knowledge(self, input_text: str, title: str, user_id: str, bank_name: str, 
                                          thread_id: Optional[str] = None, topic: Optional[str] = None, 
                                          categories: List[str] = ["general"], ttl_days: Optional[int] = 365) -> None:
         """Execute save_knowledge in a separate background task."""
@@ -1266,6 +1461,7 @@ class LearningProcessor:
                 success = await asyncio.wait_for(
                     save_knowledge(
                         input=input_text,
+                        title=title,
                         user_id=user_id,
                         bank_name=bank_name,
                         thread_id=thread_id,
