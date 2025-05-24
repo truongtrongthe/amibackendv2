@@ -202,7 +202,7 @@ class LearningProcessor:
                         categories.append(priority_topic_name.lower().replace(" ", "_"))
                     
                     # Combine user input and AI response in a formatted way
-                    combined_knowledge = f"User: {message}\n\nAI: {conversational_response}"
+                    combined_knowledge = f"User: {message}\n\nAI: {synthesis_content}"
 
                     logger.info(f"Combined knowledge: {combined_knowledge}")
                     
@@ -226,7 +226,7 @@ class LearningProcessor:
                         # Save combined knowledge
                         try:
                             logger.info(f"Saving combined knowledge to {bank_name} bank: '{combined_knowledge[:100]}...'")
-                            success = await self._background_save_knowledge(
+                            save_result = await self._background_save_knowledge(
                                 input_text=combined_knowledge,
                                 title="", # Add empty title parameter 
                                 user_id=user_id,
@@ -236,9 +236,24 @@ class LearningProcessor:
                                 categories=categories,
                                 ttl_days=365  # 365 days TTL
                             )
-                            logger.info(f"Save combined knowledge completed: {success}")
+                            logger.info(f"Save combined knowledge completed: {save_result}")
+                            logger.info(f"Save result type: {type(save_result)}, content: {save_result}")
+                            
+                            # Store vector ID for frontend response
+                            if isinstance(save_result, dict):
+                                logger.info(f"Save result is dict, success: {save_result.get('success')}")
+                                if save_result.get("success"):
+                                    vector_id = save_result.get("vector_id")
+                                    response["metadata"]["combined_knowledge_vector_id"] = vector_id
+                                    logger.info(f"✅ Captured combined knowledge vector ID: {vector_id}")
+                                else:
+                                    logger.warning(f"Save operation failed: {save_result.get('error')}")
+                            else:
+                                logger.warning(f"Save result is not dict, got: {type(save_result)}")
                         except Exception as e:
                             logger.error(f"Error saving combined knowledge: {str(e)}")
+                            import traceback
+                            logger.error(f"Full traceback: {traceback.format_exc()}")
                         
                         logger.info(f"Saved combined knowledge for topic '{priority_topic_name or 'user_teaching'}'")
                     else:
@@ -320,7 +335,7 @@ class LearningProcessor:
                                 synthesis_categories = list(categories)
                             
                             logger.info(f"Final synthesis content to save: {synthesis_content[:100]}...")
-                            synthesis_success = await self._background_save_knowledge(
+                            synthesis_result = await self._background_save_knowledge(
                                 input_text=synthesis_content,
                                 title=summary_title,
                                 user_id=user_id,
@@ -330,7 +345,20 @@ class LearningProcessor:
                                 categories=synthesis_categories,
                                 ttl_days=365  # 365 days TTL
                             )
-                            logger.info(f"Save AI synthesis completed: {synthesis_success}")
+                            logger.info(f"Save AI synthesis completed: {synthesis_result}")
+                            logger.info(f"Synthesis result type: {type(synthesis_result)}, content: {synthesis_result}")
+                            
+                            # Store synthesis vector ID
+                            if isinstance(synthesis_result, dict):
+                                logger.info(f"Synthesis result is dict, success: {synthesis_result.get('success')}")
+                                if synthesis_result.get("success"):
+                                    vector_id = synthesis_result.get("vector_id")
+                                    response["metadata"]["synthesis_vector_id"] = vector_id
+                                    logger.info(f"✅ Captured synthesis vector ID: {vector_id}")
+                                else:
+                                    logger.warning(f"Synthesis save failed: {synthesis_result.get('error')}")
+                            else:
+                                logger.warning(f"Synthesis result is not dict, got: {type(synthesis_result)}")
                             
                             # Save standalone summary if available
                             if knowledge_summary:
@@ -1452,13 +1480,13 @@ class LearningProcessor:
 
     async def _background_save_knowledge(self, input_text: str, title: str, user_id: str, bank_name: str, 
                                          thread_id: Optional[str] = None, topic: Optional[str] = None, 
-                                         categories: List[str] = ["general"], ttl_days: Optional[int] = 365) -> None:
+                                         categories: List[str] = ["general"], ttl_days: Optional[int] = 365) -> Dict:
         """Execute save_knowledge in a separate background task."""
         try:
             logger.info(f"Starting background save_knowledge task for user {user_id}")
             # Use a shorter timeout for saving knowledge to avoid hanging tasks
             try:
-                success = await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     save_knowledge(
                         input=input_text,
                         title=title,
@@ -1469,18 +1497,18 @@ class LearningProcessor:
                         categories=categories,
                         ttl_days=ttl_days  # Add TTL for data expiration
                     ),
-                    timeout=3.0  # 5-second timeout for database operations
+                    timeout=6.0  # Increased to 10-second timeout for database operations
                 )
-                logger.info(f"Background save_knowledge {'completed successfully' if success else 'failed'}")
-                return success
+                logger.info(f"Background save_knowledge completed: {result}")
+                return result if isinstance(result, dict) else {"success": bool(result)}
             except asyncio.TimeoutError:
                 logger.warning(f"Background save_knowledge timed out for user {user_id}")
-                return False
+                return {"success": False, "error": "Save operation timed out"}
         except Exception as e:
             logger.error(f"Error in background save_knowledge: {str(e)}")
             import traceback
             logger.error(f"Stack trace: {traceback.format_exc()}")
-            return False
+            return {"success": False, "error": str(e)}
 
     def _detect_follow_up(self, message: str, prior_topic: str = "") -> Dict[str, bool]:
         """

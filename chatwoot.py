@@ -269,7 +269,6 @@ def log_raw_data(data: Dict[str, Any], event_type: str):
     print(json.dumps(data, indent=2, default=str))
     print("===============================\n")
 
-
 def handle_conversation_event(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Base handler for conversation-related events.

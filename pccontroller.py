@@ -112,7 +112,7 @@ async def save_knowledge(
     categories: Optional[List[str]] = None,
     ttl_days: Optional[int] = None,
     batch_size: int = 100
-) -> bool:
+) -> Dict:
     """
     Save knowledge to Pinecone vector database with optimized vector structure.
 
@@ -157,8 +157,15 @@ async def save_knowledge(
             }
         )
         if existing.get("matches", []) and existing["matches"][0]["score"] > 0.95:
-            logger.info(f"Skipping near-duplicate: '{input[:50]}...' exists as {existing['matches'][0]['id']}")
-            return True
+            existing_id = existing["matches"][0]["id"]
+            logger.info(f"Skipping near-duplicate: '{input[:50]}...' exists as {existing_id}")
+            return {
+                "success": True,
+                "vector_id": existing_id,
+                "namespace": ns,
+                "created_at": existing["matches"][0]["metadata"]["created_at"],
+                "duplicate_detected": True
+            }
 
         # Optimized metadata
         metadata = {
@@ -186,10 +193,19 @@ async def save_knowledge(
             namespace=ns,
             batch_size=batch_size
         )
-        return True
+        # Return vector ID for future processing
+        return {
+            "success": True,
+            "vector_id": convo_id,
+            "namespace": ns,
+            "created_at": metadata["created_at"]
+        }
     except Exception as e:
         logger.error(f"Upsert failed after retries: {e}")
-        return False
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
 async def query_knowledge(
@@ -320,3 +336,79 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         all_knowledge = filtered_knowledge
 
     return all_knowledge
+
+@backoff.on_exception(backoff.expo, Exception, max_tries=5)
+async def fetch_vector(vector_id: str, bank_name: str = "conversation") -> Dict:
+    """
+    Fetch a specific vector by its ID from Pinecone.
+
+    Args:
+        vector_id: The unique vector ID to fetch.
+        bank_name: Namespace where the vector is stored (default: "conversation").
+
+    Returns:
+        Dict containing the vector data or error information.
+    """
+    try:
+        ns = bank_name or "conversation"
+        target_index = ent_index
+
+        logger.info(f"Fetching vector {vector_id} from index={ent_index_name}, namespace={ns}")
+
+        # Fetch the specific vector
+        result = await asyncio.to_thread(
+            target_index.fetch,
+            ids=[vector_id],
+            namespace=ns
+        )
+        
+        # Handle Pinecone FetchResponse object correctly
+        vectors = result.vectors if hasattr(result, 'vectors') else {}
+        if vector_id not in vectors:
+            logger.warning(f"Vector {vector_id} not found in namespace {ns}")
+            return {
+                "success": False,
+                "error": f"Vector {vector_id} not found",
+                "vector_id": vector_id,
+                "namespace": ns
+            }
+
+        vector_data = vectors[vector_id]
+        metadata = vector_data.metadata if hasattr(vector_data, 'metadata') else {}
+        
+        # Check if vector has expired
+        current_time = datetime.now().isoformat()
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        if metadata_dict.get("expires_at") and metadata_dict.get("expires_at", "") <= current_time:
+            logger.warning(f"Vector {vector_id} has expired at {metadata_dict.get('expires_at')}")
+            return {
+                "success": False,
+                "error": f"Vector {vector_id} has expired",
+                "vector_id": vector_id,
+                "expired_at": metadata_dict.get("expires_at")
+            }
+
+        logger.info(f"Successfully fetched vector {vector_id}")
+        return {
+            "success": True,
+            "vector_id": vector_id,
+            "namespace": ns,
+            "raw": metadata_dict.get("raw", ""),
+            "title": metadata_dict.get("title", ""),
+            "created_at": metadata_dict.get("created_at", ""),
+            "expires_at": metadata_dict.get("expires_at"),
+            "confidence": metadata_dict.get("confidence", 0.0),
+            "source": metadata_dict.get("source", ""),
+            "user_id": metadata_dict.get("user_id", ""),
+            "thread_id": metadata_dict.get("thread_id", ""),
+            "topic": metadata_dict.get("topic", "unknown"),
+            "categories": metadata_dict.get("categories", ["general"]),
+            "metadata": metadata_dict
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch vector {vector_id}: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "vector_id": vector_id
+        }

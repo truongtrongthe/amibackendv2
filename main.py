@@ -293,6 +293,10 @@ class SaveDocumentInsightsRequest(BaseModel):
     insights: str
     mode: str = "default"
 
+class QueryKnowledgeRequest(BaseModel):
+    vector_id: str
+    bank_name: str = "conversation"
+
 # Main havefun endpoint
 @app.post('/havefun')
 async def havefun(request: HaveFunRequest, background_tasks: BackgroundTasks):
@@ -512,6 +516,69 @@ async def conversation_learning(request: ConversationLearningRequest, background
 
 @app.options('/conversation/learning')
 async def conversation_learning_options():
+    return handle_options()
+
+# Query Knowledge endpoint
+@app.post('/query-knowledge')
+async def query_knowledge_endpoint(request: QueryKnowledgeRequest):
+    """
+    Fetch a specific vector by its ID from Pinecone knowledge base.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN query-knowledge request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Fetching vector_id={request.vector_id}, bank_name={request.bank_name}")
+    
+    try:
+        # Import the fetch_vector function
+        from pccontroller import fetch_vector
+        
+        # Fetch the vector
+        result = await fetch_vector(
+            vector_id=request.vector_id,
+            bank_name=request.bank_name
+        )
+        
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        if result.get("success"):
+            logger.info(f"[REQUEST:{request_id}] Successfully fetched vector {request.vector_id} - time: {elapsed:.2f}s")
+            return {
+                "status": "success",
+                "data": result,
+                "request_id": request_id,
+                "elapsed_time": elapsed
+            }
+        else:
+            logger.warning(f"[REQUEST:{request_id}] Failed to fetch vector {request.vector_id}: {result.get('error')} - time: {elapsed:.2f}s")
+            return {
+                "status": "error",
+                "error": result.get("error", "Unknown error"),
+                "vector_id": request.vector_id,
+                "request_id": request_id,
+                "elapsed_time": elapsed
+            }
+            
+    except Exception as e:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.error(f"[REQUEST:{request_id}] Error in query-knowledge endpoint: {str(e)} - time: {elapsed:.2f}s")
+        import traceback
+        logger.error(f"[REQUEST:{request_id}] Traceback: {traceback.format_exc()}")
+        
+        return {
+            "status": "error",
+            "error": str(e),
+            "vector_id": request.vector_id,
+            "request_id": request_id,
+            "elapsed_time": elapsed
+        }
+
+@app.options('/query-knowledge')
+async def query_knowledge_options():
     return handle_options()
 
 # Generate SSE stream for learning requests

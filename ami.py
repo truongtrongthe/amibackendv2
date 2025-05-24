@@ -413,7 +413,7 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                             logger.info(f"Saving knowledge: '{input_text[:50]}...' for user {user_id}")
                             
                             # Execute save_knowledge
-                            success = await save_knowledge(
+                            result = await save_knowledge(
                                 input=input_text,
                                 user_id=user_id,
                                 bank_name=bank_name,
@@ -421,7 +421,11 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                                 topic=topic,
                                 categories=categories
                             )
-                            logger.info(f"Save knowledge result: {success}")
+                            logger.info(f"Save knowledge result: {result}")
+                            
+                            # Log vector ID if available
+                            if isinstance(result, dict) and result.get("success") and result.get("vector_id"):
+                                logger.info(f"Knowledge saved with vector ID: {result.get('vector_id')}")
                             
                         except Exception as e:
                             logger.error(f"Error executing save_knowledge: {str(e)}")
@@ -442,7 +446,30 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
             message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
             logger.info("Stripped knowledge_queries from message before sending to frontend")
             
-            yield f"data: {json.dumps({'message': message_content})}\n\n"
+            # Prepare response with vector IDs if available
+            response_data = {"message": message_content}
+            
+            # Extract vector IDs from metadata if present
+            if "metadata" in response:
+                metadata = response["metadata"]
+                
+                # Add vector IDs to response if they exist
+                if "combined_knowledge_vector_id" in metadata:
+                    response_data["combined_knowledge_vector_id"] = metadata["combined_knowledge_vector_id"]
+                    logger.info(f"Including combined_knowledge_vector_id in response: {metadata['combined_knowledge_vector_id']}")
+                
+                if "synthesis_vector_id" in metadata:
+                    response_data["synthesis_vector_id"] = metadata["synthesis_vector_id"]
+                    logger.info(f"Including synthesis_vector_id in response: {metadata['synthesis_vector_id']}")
+                
+                # Also include other useful metadata
+                if "has_teaching_intent" in metadata:
+                    response_data["has_teaching_intent"] = metadata["has_teaching_intent"]
+                    
+                if "response_strategy" in metadata:
+                    response_data["response_strategy"] = metadata["response_strategy"]
+            
+            yield f"data: {json.dumps(response_data)}\n\n"
         else:
             message_content = str(response)
             # Also strip knowledge queries from the string representation
