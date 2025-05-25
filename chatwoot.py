@@ -850,7 +850,7 @@ async def process_messages_with_batching(conv_id_str: str):
     """Process messages in batches of 2 with a delay between batches."""
     try:
         # Add a maximum queue size limit to prevent memory issues
-        MAX_QUEUE_SIZE = 10  # Maximum pending messages to keep
+        MAX_QUEUE_SIZE = 20  # Maximum pending messages to keep
         if len(pending_messages[conv_id_str]) > MAX_QUEUE_SIZE:
             print(f"⚠️ Queue size limit reached ({len(pending_messages[conv_id_str])} messages). Trimming to {MAX_QUEUE_SIZE}.")
             # Keep only the most recent messages
@@ -862,9 +862,9 @@ async def process_messages_with_batching(conv_id_str: str):
         await asyncio.sleep(wait_seconds)  # Full CONSECUTIVE_MESSAGE_WINDOW seconds
         
         while pending_messages[conv_id_str]:
-            # Get up to 2 messages from the queue
+            # Get up to 10 messages from the queue
             batch = []
-            while len(batch) < 2 and pending_messages[conv_id_str]:
+            while len(batch) < 10 and pending_messages[conv_id_str]:
                 batch.append(pending_messages[conv_id_str].pop(0))
             
             if not batch:
@@ -872,8 +872,14 @@ async def process_messages_with_batching(conv_id_str: str):
                 
             print(f"Processing batch of {len(batch)} messages for conversation {conv_id_str}")
             
-            # Combine messages in the batch
-            combined_content = "\n".join([m['content'] for m in batch])
+            # Combine messages in the batch with "User:" prefix for each message
+            formatted_messages = []
+            for m in batch:
+                # Add "User:" prefix to each incoming message for AI context
+                formatted_message = f"User: {m['content']}"
+                formatted_messages.append(formatted_message)
+            
+            combined_content = "\n".join(formatted_messages)
             print(f"Combined {len(batch)} messages into one request: \n{combined_content}")
             
             # Use the most recent message's metadata
@@ -897,8 +903,12 @@ async def process_messages_with_batching(conv_id_str: str):
                 await asyncio.sleep(delay_seconds)
             
             # Retrieve conversation history
-            conversation_history = get_conversation_history(db_conversation_id, max_messages=5)
-            
+            conversation_history = get_conversation_history(db_conversation_id, max_messages=100)
+            print(f"Conversation history: {conversation_history}")
+
+            # Add conversation history to the combined content
+            combined_content = f"{conversation_history}\n{combined_content}"
+
             # Try to find a graph version ID
             graph_version_id = get_graph_version_id(organization_id) or DEFAULT_GRAPH_VERSION_ID
             print(f"Using graph_version_id: {graph_version_id if graph_version_id else 'None'}")
@@ -951,7 +961,7 @@ async def process_messages_with_batching(conv_id_str: str):
         if conv_id_str in active_tasks:
             del active_tasks[conv_id_str]
 
-def get_conversation_history(conversation_id: int, max_messages: int = 5) -> str:
+def get_conversation_history(conversation_id: int, max_messages: int = 10) -> str:
     """
     Retrieve and format recent conversation history for AI context.
     
@@ -963,6 +973,8 @@ def get_conversation_history(conversation_id: int, max_messages: int = 5) -> str
         Formatted conversation history string
     """
     conversation_history = ""
+
+    print(f"Getting conversation history for conversation_id: {conversation_id} with max_messages: {max_messages}")
     
     try:
         conversation = conversation_manager.get_conversation(conversation_id)
@@ -1480,7 +1492,7 @@ async def handle_message_created(data: Dict[str, Any], organization_id: str = No
                 print(f"⏭️ Skipping AI response for message with ignore prefix: {AI_IGNORE_PREFIX}")
                 return
 
-            # Add to pending messages
+            # Add to pending messages (without prefix - we'll add it during AI processing)
             pending_messages[conv_id_str].append({
                 'content': content,
                 'time': time.time(),
