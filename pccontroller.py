@@ -18,9 +18,6 @@ supabase: Client = create_client(
     spb_url,
     spb_key
 )
-
-
-
 # Initialize Pinecone client
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", ""))
 ent_index_name = os.getenv("ENT", "ent-index")

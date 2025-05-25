@@ -72,10 +72,10 @@ class CoTProcessor:
         
         # Then compile the comprehensive versions
         compilation_result = await self._compile_self_awareness()
-        logger.info(f"Self-awareness compilation completed: {compilation_result.get('status', 'unknown')}")
-        logger.info(f"Profiling knowledge as Instinct: {self.comprehensive_profiling_skills.get('knowledge_context', '')}")
-        logger.info(f"Communication knowledge as Instinct: {self.comprehensive_communication_skills.get('knowledge_context', '')}")
-        logger.info(f"Business objectives knowledge as Instinct: {self.comprehensive_business_objectives.get('knowledge_context', '')}")
+        #logger.info(f"Self-awareness compilation completed: {compilation_result.get('status', 'unknown')}")
+        #logger.info(f"Profiling knowledge as Instinct: {self.comprehensive_profiling_skills.get('knowledge_context', '')}")
+        #logger.info(f"Communication knowledge as Instinct: {self.comprehensive_communication_skills.get('knowledge_context', '')}")
+        #logger.info(f"Business objectives knowledge as Instinct: {self.comprehensive_business_objectives.get('knowledge_context', '')}")
         
         return self
 
@@ -126,7 +126,7 @@ class CoTProcessor:
         6. Organize the information logically with clear sections and categories
         7. Remove redundant information while preserving all unique content
         8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
-        9. Preserve colloquial phrases like "kiểu như là í" if they appear in the original
+        9. Preserve colloquial phrases if they appear in the original
         
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
@@ -241,7 +241,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
                 return_exceptions=True
             )
             profiling_skills = {}
@@ -287,7 +287,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
                 return_exceptions=True
             )
             communication_skills = {}
@@ -304,8 +304,6 @@ class CoTProcessor:
             # Process the results
             processed = self._process_communication_skills(communication_skills)
             
-            # Add additional logging
-            logger.info(f"Communication knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
             if processed.get('knowledge_context', '') == "No knowledge available.":
                 logger.warning("No communication knowledge entries were extracted from the query results")
             
@@ -323,7 +321,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id,min_similarity=0.3) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
                 return_exceptions=True
             )
             business_objectives = {}
@@ -360,6 +358,113 @@ class CoTProcessor:
             logger.error(f"Error loading profiling skills: {str(e)}")
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
 
+    def _extract_knowledge_content(self, knowledge_data, extract_user_part=True):
+        """Extract knowledge content from various data types, handling combined User/AI content.
+        
+        Args:
+            knowledge_data: The knowledge data (string, dict, list)
+            extract_user_part: Whether to extract the User part (True) or AI part (False)
+            
+        Returns:
+            str: The extracted knowledge content
+        """
+        knowledge_content = ""
+        
+        # Handle string data
+        if isinstance(knowledge_data, str):
+            knowledge_content = knowledge_data
+            if extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
+                user_part = re.search(r'User:(.*?)(?=\n\nAI:)', knowledge_content, re.DOTALL)
+                if user_part:
+                    knowledge_content = user_part.group(1).strip()
+                    logger.info(f"Extracted User portion from string knowledge")
+            elif not extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
+                ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
+                if ai_part:
+                    knowledge_content = ai_part.group(1).strip()
+                    logger.info(f"Extracted AI portion from string knowledge")
+        
+        # Handle dict data
+        elif isinstance(knowledge_data, dict):
+            if "raw" in knowledge_data:
+                
+                raw_content = knowledge_data["raw"]
+                if extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
+                    user_part = re.search(r'User:(.*?)(?=\n\nAI:)', raw_content, re.DOTALL)
+                    if user_part:
+                        knowledge_content = user_part.group(1).strip()
+                        logger.info(f"Extracted User portion from dict knowledge")
+                    else:
+                        knowledge_content = raw_content
+                elif not extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
+                    ai_part = re.search(r'\n\nAI:(.*)', raw_content, re.DOTALL)
+                    if ai_part:
+                        knowledge_content = ai_part.group(1).strip()
+                        logger.info(f"Extracted AI portion from dict knowledge")
+                    else:
+                        knowledge_content = raw_content
+                else:
+                    knowledge_content = raw_content
+            elif "content" in knowledge_data:
+                knowledge_content = knowledge_data["content"]
+            else:
+                # Serialize the dictionary as a fallback
+                knowledge_content = json.dumps(knowledge_data)
+        
+        # Handle list data (process all items)
+        elif isinstance(knowledge_data, list) and knowledge_data:
+            # Process all items instead of just the first one
+            knowledge_items = []
+            for item in knowledge_data:
+                # Recursively process each item
+                processed_content = self._extract_knowledge_content(item, extract_user_part)
+                if processed_content:
+                    # Normalize whitespace before adding
+                    processed_content = re.sub(r'\n{3,}', '\n\n', processed_content)
+                    processed_content = re.sub(r' +', ' ', processed_content)
+                    processed_content = processed_content.strip()
+                    knowledge_items.append(processed_content)
+            
+            # Join all knowledge items with a cleaner separator
+            knowledge_content = "\n---\n".join(knowledge_items) if knowledge_items else ""
+        
+        # Handle other types
+        else:
+            knowledge_content = str(knowledge_data)
+            
+        # Filter out content starting with "AI Synthesis:" directly
+        if knowledge_content.startswith("AI Synthesis:"):
+            logger.info(f"Filtered out AI Synthesis content")
+            return ""
+        
+        # Filter out AI Synthesis sections from combined content
+        if "\n---\n" in knowledge_content:
+            sections = knowledge_content.split("\n---\n")
+            filtered_sections = [section for section in sections if not section.strip().startswith("AI Synthesis:")]
+            
+            if len(filtered_sections) < len(sections):
+                logger.info(f"Filtered out {len(sections) - len(filtered_sections)} AI Synthesis sections")
+            
+            knowledge_content = "\n---\n".join(filtered_sections)
+        
+        # Final whitespace normalization
+        knowledge_content = re.sub(r'\n{3,}', '\n\n', knowledge_content)
+        knowledge_content = re.sub(r' +', ' ', knowledge_content)
+        knowledge_content = knowledge_content.strip()
+            
+        return knowledge_content
+    def _clean_knowledge_content(self, knowledge_content: str) -> str:
+        """Clean the knowledge content."""
+        # Input validation
+        if not knowledge_content or not isinstance(knowledge_content, str):
+            return ""
+        
+        # Remove excessive newlines and spaces
+        knowledge_content = re.sub(r'\n{3,}', '\n\n', knowledge_content)
+        knowledge_content = re.sub(r' +', ' ', knowledge_content)
+        knowledge_content = knowledge_content.strip()
+        return knowledge_content
+    
     def _process_profiling_skills(self, profiling_skills: Dict[str, Any]) -> Dict[str, Any]:
         """Structure the fetched knowledge."""
         # Extract and combine all knowledge entries
@@ -371,18 +476,17 @@ class CoTProcessor:
             if processed_content:
                 knowledge_context.append(processed_content)
 
-        # Clean up the knowledge context
+        # Clean up the knowledge context using the helper function
         cleaned_context = []
         for entry in knowledge_context:
-            # Remove excessive newlines and spaces
-            cleaned = re.sub(r'\n{3,}', '\n\n', entry)
-            cleaned = re.sub(r' +', ' ', cleaned)
-            cleaned = cleaned.strip()
+            cleaned = self._clean_knowledge_content(entry)
             if cleaned:
                 cleaned_context.append(cleaned)
 
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
+
+        logger.info(f"Raw Profiling knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -404,20 +508,17 @@ class CoTProcessor:
             if processed_content:
                 knowledge_context.append(processed_content)
 
-        # Clean up the knowledge context
+        # Clean up the knowledge context using the helper function
         cleaned_context = []
         for entry in knowledge_context:
-            # Remove excessive newlines and spaces
-            cleaned = re.sub(r'\n{3,}', '\n\n', entry)
-            cleaned = re.sub(r' +', ' ', cleaned)
-            cleaned = cleaned.strip()
+            cleaned = self._clean_knowledge_content(entry)
             if cleaned:
                 cleaned_context.append(cleaned)
 
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
         
-        #logger.info(f"Communication knowledge: {full_knowledge}")
+        logger.info(f"Raw Communication knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -440,24 +541,20 @@ class CoTProcessor:
                 knowledge_context.append(processed_content)
         #logger.info(f"Business objectives knowledge context: {knowledge_context}")
         
-        # Clean up the knowledge context
+        # Clean up the knowledge context using the helper function
         cleaned_context = []
         for entry in knowledge_context:
-            # Remove excessive newlines and spaces
-            cleaned = re.sub(r'\n{3,}', '\n\n', entry)
-            cleaned = re.sub(r' +', ' ', cleaned)
-            cleaned = cleaned.strip()
+            cleaned = self._clean_knowledge_content(entry)
             if cleaned:
                 cleaned_context.append(cleaned)
 
         # Combine all knowledge into a single context - use a single newline for better readability
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
         
-        # One final cleanup pass
-        full_knowledge = re.sub(r'\n{3,}', '\n\n', full_knowledge)
-        full_knowledge = re.sub(r' +', ' ', full_knowledge)
+        # One final cleanup pass using the helper function
+        full_knowledge = self._clean_knowledge_content(full_knowledge)
         
-        #logger.info(f"Business objectives knowledge context cleaned: {full_knowledge}")
+        logger.info(f"Raw Business objectives knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -837,101 +934,7 @@ class CoTProcessor:
             "rationale": f"Analyzed {len(knowledge_entries)} queries for user profile"
         }
 
-    def _extract_knowledge_content(self, knowledge_data, extract_user_part=True):
-        """Extract knowledge content from various data types, handling combined User/AI content.
-        
-        Args:
-            knowledge_data: The knowledge data (string, dict, list)
-            extract_user_part: Whether to extract the User part (True) or AI part (False)
-            
-        Returns:
-            str: The extracted knowledge content
-        """
-        knowledge_content = ""
-        
-        # Handle string data
-        if isinstance(knowledge_data, str):
-            knowledge_content = knowledge_data
-            if extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                user_part = re.search(r'User:(.*?)(?=\n\nAI:)', knowledge_content, re.DOTALL)
-                if user_part:
-                    knowledge_content = user_part.group(1).strip()
-                    logger.info(f"Extracted User portion from string knowledge")
-            elif not extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
-                if ai_part:
-                    knowledge_content = ai_part.group(1).strip()
-                    logger.info(f"Extracted AI portion from string knowledge")
-        
-        # Handle dict data
-        elif isinstance(knowledge_data, dict):
-            if "raw" in knowledge_data:
-                
-                raw_content = knowledge_data["raw"]
-                if extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
-                    user_part = re.search(r'User:(.*?)(?=\n\nAI:)', raw_content, re.DOTALL)
-                    if user_part:
-                        knowledge_content = user_part.group(1).strip()
-                        logger.info(f"Extracted User portion from dict knowledge")
-                    else:
-                        knowledge_content = raw_content
-                elif not extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
-                    ai_part = re.search(r'\n\nAI:(.*)', raw_content, re.DOTALL)
-                    if ai_part:
-                        knowledge_content = ai_part.group(1).strip()
-                        logger.info(f"Extracted AI portion from dict knowledge")
-                    else:
-                        knowledge_content = raw_content
-                else:
-                    knowledge_content = raw_content
-            elif "content" in knowledge_data:
-                knowledge_content = knowledge_data["content"]
-            else:
-                # Serialize the dictionary as a fallback
-                knowledge_content = json.dumps(knowledge_data)
-        
-        # Handle list data (process all items)
-        elif isinstance(knowledge_data, list) and knowledge_data:
-            # Process all items instead of just the first one
-            knowledge_items = []
-            for item in knowledge_data:
-                # Recursively process each item
-                processed_content = self._extract_knowledge_content(item, extract_user_part)
-                if processed_content:
-                    # Normalize whitespace before adding
-                    processed_content = re.sub(r'\n{3,}', '\n\n', processed_content)
-                    processed_content = re.sub(r' +', ' ', processed_content)
-                    processed_content = processed_content.strip()
-                    knowledge_items.append(processed_content)
-            
-            # Join all knowledge items with a cleaner separator
-            knowledge_content = "\n---\n".join(knowledge_items) if knowledge_items else ""
-        
-        # Handle other types
-        else:
-            knowledge_content = str(knowledge_data)
-            
-        # Filter out content starting with "AI Synthesis:" directly
-        if knowledge_content.startswith("AI Synthesis:"):
-            logger.info(f"Filtered out AI Synthesis content")
-            return ""
-        
-        # Filter out AI Synthesis sections from combined content
-        if "\n---\n" in knowledge_content:
-            sections = knowledge_content.split("\n---\n")
-            filtered_sections = [section for section in sections if not section.strip().startswith("AI Synthesis:")]
-            
-            if len(filtered_sections) < len(sections):
-                logger.info(f"Filtered out {len(sections) - len(filtered_sections)} AI Synthesis sections")
-            
-            knowledge_content = "\n---\n".join(filtered_sections)
-        
-        # Final whitespace normalization
-        knowledge_content = re.sub(r'\n{3,}', '\n\n', knowledge_content)
-        knowledge_content = re.sub(r' +', ' ', knowledge_content)
-        knowledge_content = knowledge_content.strip()
-            
-        return knowledge_content
+    
     
     async def _user_story(self, user_profile: UserProfileModel) -> str:
         """Transform user profile into a compact narrative format."""
