@@ -1279,7 +1279,8 @@ class CoTProcessor:
         5. Use the same language as the user (Vietnamese/English) throughout
 
         COMMUNICATION STYLE SPECIFICS:
-        • Use the EXACT COMMUNICATION STYLE from COMMUNICATION KNOWLEDGE that matches this user's classification ({user_profile.classification})
+        • Use the EXACT COMMUNICATION from COMMUNICATION KNOWLEDGE that matches this user's classification ({user_profile.classification})
+        • READ, UNDERSTAND then FOLLOW the INSTRUCTIONS in the COMMUNICATION KNOWLEDGE to generate the response
         • Maintain the original language patterns and expressions (e.g., "kiểu như là í" in Vietnamese)
         • Use the correct pronouns as specified in the knowledge base (e.g., "em"/"anh" for Vietnamese users)
         • Avoid repetition by using varied expressions as instructed in the communication guidelines
