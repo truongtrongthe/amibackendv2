@@ -268,7 +268,7 @@ class CoTProcessor:
             processed = self._process_profiling_skills(profiling_skills)
             
             # Add additional logging
-            logger.info(f"Profiling knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
+            #logger.info(f"Profiling knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
             if processed.get('knowledge_context', '') == "No knowledge available.":
                 logger.warning("No profiling knowledge entries were extracted from the query results")
                 
@@ -348,7 +348,7 @@ class CoTProcessor:
             processed = self._process_business_objectives_knowledge(business_objectives)
             
             # Add additional logging
-            logger.info(f"Business objectives knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
+            #logger.info(f"Business objectives knowledge processed: {processed.get('metadata', {}).get('entry_count', 0)} entries")
             if processed.get('knowledge_context', '') == "No knowledge available.":
                 logger.warning("No business objectives knowledge entries were extracted from the query results")
                 
@@ -369,41 +369,56 @@ class CoTProcessor:
             str: The extracted knowledge content
         """
         knowledge_content = ""
+        #logger.info(f"KNOWLEDGE data: {knowledge_data}")
         
         # Handle string data
         if isinstance(knowledge_data, str):
             knowledge_content = knowledge_data
-            if extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                user_part = re.search(r'User:(.*?)(?=\n\nAI:)', knowledge_content, re.DOTALL)
-                if user_part:
-                    knowledge_content = user_part.group(1).strip()
-                    logger.info(f"Extracted User portion from string knowledge")
-            elif not extract_user_part and knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                ai_part = re.search(r'\n\nAI:(.*)', knowledge_content, re.DOTALL)
-                if ai_part:
-                    knowledge_content = ai_part.group(1).strip()
-                    logger.info(f"Extracted AI portion from string knowledge")
+            if extract_user_part and "AI:" in knowledge_content:
+                # Simple split approach: split by "AI:" and take first part
+                parts = knowledge_content.split("AI:", 1)
+                if len(parts) > 0:
+                    knowledge_content = parts[0].strip()
+                    # Remove "User:" prefix if it exists
+                    if knowledge_content.startswith("User:"):
+                        knowledge_content = knowledge_content[5:].strip()
+                    logger.info(f"Extracted User portion from string knowledge using split")
+                else:
+                    knowledge_content = ""
+            elif not extract_user_part and "AI:" in knowledge_content:
+                # Extract AI part: split by "AI:" and take the second part
+                parts = knowledge_content.split("AI:", 1)
+                if len(parts) > 1:
+                    knowledge_content = parts[1].strip()
+                    logger.info(f"Extracted AI portion from string knowledge using split")
+                else:
+                    knowledge_content = ""
         
         # Handle dict data
         elif isinstance(knowledge_data, dict):
             if "raw" in knowledge_data:
-                
                 raw_content = knowledge_data["raw"]
-                if extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
-                    user_part = re.search(r'User:(.*?)(?=\n\nAI:)', raw_content, re.DOTALL)
-                    if user_part:
-                        knowledge_content = user_part.group(1).strip()
-                        logger.info(f"Extracted User portion from dict knowledge")
+                if extract_user_part and "AI:" in raw_content:
+                    # Simple split approach: split by "AI:" and take first part
+                    parts = raw_content.split("AI:", 1)
+                    if len(parts) > 0:
+                        knowledge_content = parts[0].strip()
+                        # Remove "User:" prefix if it exists
+                        if knowledge_content.startswith("User:"):
+                            knowledge_content = knowledge_content[5:].strip()
+                        logger.info(f"Extracted User portion from dict knowledge using split")
                     else:
-                        knowledge_content = raw_content
-                elif not extract_user_part and raw_content.startswith("User:") and "\n\nAI:" in raw_content:
-                    ai_part = re.search(r'\n\nAI:(.*)', raw_content, re.DOTALL)
-                    if ai_part:
-                        knowledge_content = ai_part.group(1).strip()
-                        logger.info(f"Extracted AI portion from dict knowledge")
+                        knowledge_content = ""
+                elif not extract_user_part and "AI:" in raw_content:
+                    # Extract AI part: split by "AI:" and take the second part
+                    parts = raw_content.split("AI:", 1)
+                    if len(parts) > 1:
+                        knowledge_content = parts[1].strip()
+                        logger.info(f"Extracted AI portion from dict knowledge using split")
                     else:
-                        knowledge_content = raw_content
+                        knowledge_content = ""
                 else:
+                    # If no "AI:" delimiter found, use the raw content as is
                     knowledge_content = raw_content
             elif "content" in knowledge_data:
                 knowledge_content = knowledge_data["content"]
@@ -451,8 +466,10 @@ class CoTProcessor:
         knowledge_content = re.sub(r'\n{3,}', '\n\n', knowledge_content)
         knowledge_content = re.sub(r' +', ' ', knowledge_content)
         knowledge_content = knowledge_content.strip()
-            
+        logger.info(f"KNOWLEDGE content after extract knowledge content: {knowledge_content}")
         return knowledge_content
+    
+    
     def _clean_knowledge_content(self, knowledge_content: str) -> str:
         """Clean the knowledge content."""
         # Input validation
@@ -486,7 +503,7 @@ class CoTProcessor:
         # Combine all knowledge into a single context
         full_knowledge = "\n\n".join(cleaned_context) if cleaned_context else "No knowledge available."
 
-        logger.info(f"Raw Profiling knowledge: {full_knowledge}")
+        #logger.info(f"Raw Profiling knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
@@ -554,7 +571,7 @@ class CoTProcessor:
         # One final cleanup pass using the helper function
         full_knowledge = self._clean_knowledge_content(full_knowledge)
         
-        logger.info(f"Raw Business objectives knowledge: {full_knowledge}")
+        #logger.info(f"Raw Business objectives knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
