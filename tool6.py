@@ -241,7 +241,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.4) for query in queries],
                 return_exceptions=True
             )
             profiling_skills = {}
@@ -287,7 +287,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.4) for query in queries],
                 return_exceptions=True
             )
             communication_skills = {}
@@ -321,7 +321,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.4) for query in queries],
                 return_exceptions=True
             )
             business_objectives = {}
@@ -953,6 +953,133 @@ class CoTProcessor:
 
     
     
+    def _format_analysis_summary(self, analysis_summary: Dict[str, Any]) -> str:
+        """Convert analysis summary JSON to readable text format."""
+        if not analysis_summary:
+            return "No analysis available."
+        
+        key_findings = analysis_summary.get('key_findings', [])
+        user_needs = analysis_summary.get('user_needs', [])
+        potential_challenges = analysis_summary.get('potential_challenges', [])
+        narrative = analysis_summary.get('narrative', '')
+        
+        formatted = "ANALYSIS SUMMARY:\n"
+        
+        if key_findings:
+            formatted += "Key Findings:\n"
+            for i, finding in enumerate(key_findings, 1):
+                formatted += f"  {i}. {finding}\n"
+        
+        if user_needs:
+            formatted += "User Needs:\n"
+            for i, need in enumerate(user_needs, 1):
+                formatted += f"  {i}. {need}\n"
+        
+        if potential_challenges:
+            formatted += "Potential Challenges:\n"
+            for i, challenge in enumerate(potential_challenges, 1):
+                formatted += f"  {i}. {challenge}\n"
+        
+        if narrative:
+            formatted += f"Overall Assessment: {narrative}"
+        
+        return formatted.strip()
+    
+    def _format_action_plan(self, next_actions: List[Dict[str, Any]]) -> str:
+        """Convert action plan JSON to readable text format."""
+        if not next_actions:
+            return "No actions planned."
+        
+        formatted = "ACTION PLAN (Execute in this order):\n"
+        
+        for i, action in enumerate(next_actions, 1):
+            action_text = action.get('action', 'Unknown action')
+            priority = action.get('priority', 'normal')
+            reasoning = action.get('reasoning', '')
+            expected_outcome = action.get('expected_outcome', '')
+            
+            formatted += f"\n{i}. [{priority.upper()} PRIORITY] {action_text}\n"
+            if reasoning:
+                formatted += f"   Why: {reasoning}\n"
+            if expected_outcome:
+                formatted += f"   Expected Result: {expected_outcome}\n"
+        
+        return formatted.strip()
+    
+    def _format_important_notes(self, important_notes: Dict[str, Any]) -> str:
+        """Convert important notes JSON to readable text format."""
+        if not important_notes:
+            return "No special notes."
+        
+        immediate_concerns = important_notes.get('immediate_concerns', [])
+        long_term_considerations = important_notes.get('long_term_considerations', [])
+        additional_context_needed = important_notes.get('additional_context_needed', [])
+        narrative = important_notes.get('narrative', '')
+        
+        formatted = "IMPORTANT CONSIDERATIONS:\n"
+        
+        if immediate_concerns:
+            formatted += "Immediate Concerns:\n"
+            for concern in immediate_concerns:
+                formatted += f"  • {concern}\n"
+        
+        if long_term_considerations:
+            formatted += "Long-term Considerations:\n"
+            for consideration in long_term_considerations:
+                formatted += f"  • {consideration}\n"
+        
+        if additional_context_needed:
+            formatted += "Additional Context Needed:\n"
+            for context in additional_context_needed:
+                formatted += f"  • {context}\n"
+        
+        if narrative:
+            formatted += f"\nSummary: {narrative}"
+        
+        return formatted.strip()
+
+    async def _synthesize_knowledge_for_query(self, query: str, raw_knowledge: str) -> str:
+        """Synthesize raw knowledge to specifically answer the given query."""
+        if not raw_knowledge or not query:
+            return "No relevant knowledge available."
+        
+        synthesis_prompt = f"""You are a knowledge synthesizer. Your task is to analyze the provided knowledge and create a focused, actionable summary that specifically answers the given query.
+
+            QUERY TO ANSWER: {query}
+
+            RAW KNOWLEDGE TO SYNTHESIZE:
+            {raw_knowledge}
+
+            SYNTHESIS REQUIREMENTS:
+            1. Focus ONLY on information that directly answers the query
+            2. Organize the information in a clear, logical structure
+            3. Remove redundant or irrelevant information
+            4. Preserve specific examples, techniques, and actionable advice
+            5. Maintain the original language (Vietnamese/English) from the source
+            6. Keep cultural context and specific terminology intact
+            7. Present the synthesized knowledge as practical guidance
+
+            IMPORTANT LANGUAGE PRESERVATION:
+            - If the knowledge is in Vietnamese, respond COMPLETELY in Vietnamese
+            - If the knowledge is in English, respond COMPLETELY in English
+            - DO NOT translate or mix languages
+            - Preserve original expressions, pronouns, and cultural references exactly
+
+            FORMAT: Provide a concise, well-structured synthesis that directly addresses the query. Focus on actionable insights and specific guidance."""
+
+        try:
+            response = await LLM.ainvoke(synthesis_prompt)
+            synthesized = response.content.strip()
+            
+            # Log the synthesis for debugging
+            logger.info(f"Synthesized knowledge for query '{query}': {len(synthesized)} chars")
+            
+            return synthesized
+        except Exception as e:
+            logger.error(f"Error synthesizing knowledge for query '{query}': {str(e)}")
+            # Fallback to original knowledge if synthesis fails
+            return raw_knowledge
+
     async def _user_story(self, user_profile: UserProfileModel) -> str:
         """Transform user profile into a compact narrative format."""
         # Extract key elements
@@ -1205,6 +1332,11 @@ class CoTProcessor:
         next_actions = action_plan.get("next_actions", [])
         knowledge_queries = action_plan.get("knowledge_queries", [])
         
+        logger.info(f"Analysis summary: {analysis_summary}")
+        logger.info(f"Important notes: {important_notes}")
+        logger.info(f"Next actions: {next_actions}")
+        logger.info(f"Knowledge queries: {knowledge_queries}")
+
         # Extract resolved temporal references if available
         temporal_references = {}
         if "temporal_references" in user_profile.other_aspects:
@@ -1214,7 +1346,7 @@ class CoTProcessor:
         # Fetch additional knowledge if queries are provided
         additional_knowledge = ""
         if knowledge_queries:
-            logger.info(f"Fetching additional knowledge for {len(knowledge_queries)} queries")
+            logger.info(f"Fetching and synthesizing additional knowledge for {len(knowledge_queries)} queries")
             try:
                 knowledge_results = []
                 for query_info in knowledge_queries[:3]:  # Limit to top 3 queries
@@ -1222,17 +1354,21 @@ class CoTProcessor:
                         # Extract just the query string from the query info dictionary
                         query = query_info.get('query', '') if isinstance(query_info, dict) else query_info
                         if query:
+                            # Step 1: Fetch raw knowledge from graph
                             knowledge = await query_knowledge_from_graph(query, self.graph_version_id, exclude_categories=["ai_synthesis"])
                             if knowledge:
-                                # Extract knowledge content based on its type
-                                knowledge_content = self._extract_knowledge_content(knowledge)
+                                # Step 2: Extract knowledge content based on its type
+                                raw_knowledge_content = self._extract_knowledge_content(knowledge)
                                 
-                                knowledge_results.append(f"Query: {query}\nResult: {knowledge_content}")
+                                # Step 3: Synthesize the knowledge to specifically answer the query
+                                synthesized_knowledge = await self._synthesize_knowledge_for_query(query, raw_knowledge_content)
+                                
+                                knowledge_results.append(f"Query: {query}\nSynthesized Answer: {synthesized_knowledge}")
                     except Exception as e:
-                        logger.error(f"Error fetching knowledge for query '{query}': {str(e)}")
+                        logger.error(f"Error processing knowledge for query '{query}': {str(e)}")
                 
                 additional_knowledge = "\n\n".join(knowledge_results)
-                logger.info(f"Fetched additional knowledge: {len(additional_knowledge)} chars")
+                logger.info(f"Synthesized additional knowledge: {len(additional_knowledge)} chars")
             except Exception as e:
                 logger.error(f"Error fetching additional knowledge: {str(e)}")
 
@@ -1275,6 +1411,12 @@ class CoTProcessor:
         #logger.info(f"ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}")
         #logger.info(f"Conversation context: {conversation_context}")
 
+        
+        # Format structured data into readable text
+        formatted_analysis = self._format_analysis_summary(analysis_summary)
+        formatted_action_plan = self._format_action_plan(next_actions)
+        formatted_important_notes = self._format_important_notes(important_notes)
+        
         # Build prompt for LLM to generate response
         prompt = f"""Generate a response to the user that STRICTLY FOLLOWS the action plan and communication guidelines:
 
@@ -1282,26 +1424,46 @@ class CoTProcessor:
         CONVERSATION: {conversation_context}
         TIME CONTEXT: {temporal_context}
         {temporal_info if temporal_info else ""}
-        ANALYSIS: {json.dumps(analysis_summary, indent=2) if analysis_summary else "N/A"}
-        ACTION PLAN: {json.dumps(next_actions, indent=2) if next_actions else "N/A"}
+        
+        {formatted_analysis}
+        
+        {formatted_action_plan}
+        
+        {formatted_important_notes}
+        
         USER CONTEXT: Classification={user_profile.classification}, Business Goal={user_profile.business_goal}
         ADDITIONAL INFO: {additional_knowledge}
         COMMUNICATION KNOWLEDGE: {communication_knowledge}
 
+        PRIORITY ORDER (Follow in this exact sequence):
+        1. Execute ACTION PLAN actions exactly as specified - nothing more, nothing less
+        2. Apply COMMUNICATION STYLE from knowledge base for user classification: {user_profile.classification}
+        3. Maintain user's language (Vietnamese/English) consistently throughout
+        4. Follow FORMAT GUIDELINES for professional delivery
+
         STRICT EXECUTION REQUIREMENTS:
-        1. ONLY implement the actions listed in the ACTION PLAN - nothing more, nothing less
-        2. DO NOT introduce any external services, specialists, websites, or social media not mentioned in the plan
-        3. DO NOT mention or suggest Facebook, messengers, or any external contacts unless explicitly in the plan
-        4. Follow the exact priority order of the actions as they appear in the plan
-        5. Use the same language as the user (Vietnamese/English) throughout
+        • ONLY implement the actions listed in the ACTION PLAN
+        • DO NOT introduce any external services, specialists, websites, or social media not mentioned in the plan
+        • DO NOT mention or suggest Facebook, messengers, or any external contacts unless explicitly in the plan
+        • Follow the exact priority order of the actions as they appear in the plan
+
+        LANGUAGE REQUIREMENTS:
+        • Detect user language: Vietnamese → respond 100% in Vietnamese, English → respond 100% in English
+        • Use pronouns as specified in communication knowledge (e.g., "em"/"anh" for Vietnamese users)
+        • Maintain cultural communication patterns and expressions (e.g., "kiểu như là í" in Vietnamese)
+        • Keep original language tone and formality level
 
         COMMUNICATION STYLE SPECIFICS:
         • Use the EXACT COMMUNICATION from COMMUNICATION KNOWLEDGE that matches this user's classification ({user_profile.classification})
         • READ, UNDERSTAND then FOLLOW the INSTRUCTIONS in the COMMUNICATION KNOWLEDGE to generate the response
-        • Maintain the original language patterns and expressions (e.g., "kiểu như là í" in Vietnamese)
-        • Use the correct pronouns as specified in the knowledge base (e.g., "em"/"anh" for Vietnamese users)
         • Avoid repetition by using varied expressions as instructed in the communication guidelines
         • Adapt your tone to build trust with this specific user classification
+
+        CONFLICT RESOLUTION:
+        If communication knowledge suggests actions NOT in ACTION PLAN:
+        • Prioritize ACTION PLAN actions over communication suggestions
+        • Apply communication style and tone WITHOUT adding new actions
+        • Use communication knowledge for HOW to say things, not WHAT to say
 
         FORMAT GUIDELINES:
         • Be concise and professional
@@ -1311,6 +1473,11 @@ class CoTProcessor:
         • Follow communication patterns appropriate for the user's classification
 
         CRITICAL: Your response must implement the actions from the ACTION PLAN while applying the communication style specified above. Prioritize both action accuracy AND communication style."""
+        
+        # Check prompt complexity and use chunking if needed
+        prompt_length = len(prompt)
+        logger.info(f"Prompt length: {prompt_length} characters")
+                
         logger.info(f"Prompt Before Taking Action: {prompt}")
         try:
             response = await LLM.ainvoke(prompt)
