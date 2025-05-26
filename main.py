@@ -54,7 +54,7 @@ recent_requests = deque(maxlen=1000)
 
 # Register the API routers
 app.include_router(api_router)
-app.include_router(braingraph_router, prefix="/api")
+app.include_router(braingraph_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async
