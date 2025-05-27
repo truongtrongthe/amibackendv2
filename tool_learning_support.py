@@ -210,22 +210,22 @@ class LearningSupport:
                     
                     logger.info(f"Result for query '{query[:30]}...' yielded similarity: {query_similarity}, adjusted: {adjusted_similarity}, context relevance: {context_relevance}, content: '{knowledge_content[:50]}...'")
                     
-                    # Track the top 5 results using adjusted similarity instead of top 3
-                    if not highest_similarities or adjusted_similarity > min(highest_similarities) or len(highest_similarities) < 5:
+                    # Track the top 100 results using adjusted similarity
+                    if not highest_similarities or adjusted_similarity > min(highest_similarities) or len(highest_similarities) < 100:
                         # Add the new result to our collections
-                        if len(highest_similarities) < 5:
+                        if len(highest_similarities) < 100:
                             highest_similarities.append(adjusted_similarity)
                             best_results.append(result_item)
                             knowledge_contexts.append(knowledge_content)
                         else:
-                            # Find the minimum similarity in our top 5
+                            # Find the minimum similarity in our top 100
                             min_index = highest_similarities.index(min(highest_similarities))
                             # Replace it with the new result
                             highest_similarities[min_index] = adjusted_similarity
                             best_results[min_index] = result_item
                             knowledge_contexts[min_index] = knowledge_content
                         
-                        logger.info(f"Updated top 5 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
+                        logger.info(f"Updated top 100 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
 
             # Apply regular boost for priority topics
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
@@ -260,7 +260,7 @@ class LearningSupport:
                 knowledge_response_sections.append("KNOWLEDGE RESULTS:")
                 
                 # Log number of results
-                result_count = min(len(sorted_results), 5)  # Maximum 5 results
+                result_count = min(len(sorted_results), 100)  # Maximum 100 results
                 logger.info(f"Adding {result_count} knowledge items to response")
                 
                 # Add each result with numbering
@@ -415,9 +415,54 @@ class LearningSupport:
                 "confidence": 0.95,
                 "reasoning": "Direct Vietnamese practice request pattern detected"
             }
+        
+        # Dynamic detection of numerical references to previous content
+        # Check if message contains references to numbered items that likely came from a previous response
+        def detect_numerical_references(text: str) -> bool:
+            """Dynamically detect if text contains references to numbered items."""
+            text_lower = text.lower()
             
-        # Get the most recent prior message for context
-        prior_message = prior_messages[0] if prior_messages else ""
+            # Look for number words or digits with context indicators
+            number_indicators = [
+                r'\b(?:số|thứ|#)\s*[1-9]\d*\b',  # "số 4", "thứ 2"
+                r'\b[1-9]\d*\s*(?:st|nd|rd|th)\b',  # "4th", "2nd" 
+                r'\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b',
+                r'\b(?:đầu tiên|thứ hai|thứ ba|thứ tư|thứ năm|thứ sáu|thứ bảy|thứ tám|thứ chín|thứ mười)\b'
+            ]
+            
+            # Context words that suggest reference to previous content
+            context_words = [
+                r'\b(?:mục tiêu|điểm|phần|item|point|objective|goal|step|bước|giai đoạn)\b',
+                r'\b(?:cái|về|cho.*biết|tell.*about|explain)\b',
+                r'\b(?:option|lựa chọn|choice|phương án)\b'
+            ]
+            
+            # Special case: if "point" or "item" appears with numbers, it's very likely a reference
+            has_explicit_reference = any(re.search(pattern, text_lower) for pattern in [
+                r'\b(?:point|item|objective|goal)\s*[1-9]\d*\b',
+                r'\b(?:mục tiêu|điểm|phần)\s*(?:số|thứ)?\s*[1-9]\d*\b'
+            ])
+            
+            # Check if we have both number indicators and context
+            has_numbers = any(re.search(pattern, text_lower) for pattern in number_indicators)
+            has_context = any(re.search(pattern, text_lower) for pattern in context_words)
+            
+            return has_numbers and (has_context or has_explicit_reference or len(text.split()) <= 6)
+        
+        if detect_numerical_references(message):
+            logger.info(f"Dynamic numerical reference detected for FOLLOW_UP: '{message}'")
+            return {
+                "flow_type": "FOLLOW_UP",
+                "confidence": 0.95,
+                "reasoning": "Dynamic numerical reference to previous content detected"
+            }
+            
+        # Get recent context for better flow detection
+        recent_context = ""
+        if prior_messages:
+            # Use last 2-3 messages for better context understanding
+            recent_messages = prior_messages[-3:] if len(prior_messages) >= 3 else prior_messages
+            recent_context = "\n".join(recent_messages)
         
         # Prepare a context sample that's not too long (last 800 chars max)
         context_sample = conversation_context
@@ -436,21 +481,41 @@ class LearningSupport:
         4. CLOSING: Indicating the conversation is ending
         5. NEW_TOPIC: Starting a completely new conversation topic
         
-        CRITICAL VIETNAMESE PATTERNS:
-        - If "thử...xem" appears in any form, this is almost certainly a PRACTICE_REQUEST
-        - If "áp dụng" appears with "xem" or "nào", this is a PRACTICE_REQUEST
-        - "làm thử", "thử làm" indicate PRACTICE_REQUEST
-        - "ví dụ", "minh họa" indicate PRACTICE_REQUEST (asking for example)
-        - Short responses like "vâng", "đúng rồi", "được" usually mean CONFIRMATION
-        - "tạm biệt", "hẹn gặp lại" indicate CLOSING
+        ANALYSIS GUIDELINES:
         
-        PAY SPECIAL ATTENTION: The phrase "Em thử áp dụng..." or similar patterns STRONGLY indicate a PRACTICE_REQUEST where the user wants to demonstrate their knowledge.
+        Look for these SEMANTIC PATTERNS (not just exact phrases):
+        
+        PRACTICE_REQUEST indicators:
+        - Requests to demonstrate, apply, or try something previously discussed
+        - Words suggesting implementation: "thử", "áp dụng", "làm", "demonstrate", "show", "example"
+        - Phrases asking for practical application of knowledge
+        
+        FOLLOW_UP indicators:
+        - References to specific items from previous responses (numbered lists, points, categories)
+        - Requests for more details about something already mentioned
+        - Questions that build on previous conversation topics
+        - Numerical references combined with context words
+        
+        CONFIRMATION indicators:
+        - Agreement or acknowledgment responses
+        - Short affirmative responses in context
+        - Expressions of understanding or acceptance
+        
+        CLOSING indicators:
+        - Farewell expressions or conversation ending signals
+        - Thank you messages that seem final
+        - Expressions indicating satisfaction or completion
+        
+        CONTEXT ANALYSIS:
+        - Consider the conversation history to understand what "số 4", "that point", "cái đó" might refer to
+        - Look for semantic continuity between current message and previous topics
+        - Pay attention to question-answer patterns and natural conversation flow
         
         CONVERSATION CONTEXT:
         {context_sample}
         
-        PREVIOUS MESSAGE:
-        {prior_message}
+        RECENT CONVERSATION:
+        {recent_context}
         
         CURRENT MESSAGE:
         {message}
@@ -1062,12 +1127,30 @@ class LearningSupport:
         }
 
     def extract_prior_messages(self, conversation_context: str) -> List[str]:
-        """Extract prior messages from conversation context."""
+        """Extract prior messages from conversation context, including both User and AI messages."""
         prior_messages = []
         if conversation_context:
-            user_messages = re.findall(r'User: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
-            if user_messages and len(user_messages) > 1:
-                prior_messages = user_messages[:-1]  # All except current message
+            # Extract all messages in chronological order
+            all_messages = []
+            
+            # Find User messages
+            user_matches = re.finditer(r'User: (.*?)(?=\n\n(?:AI:|User:)|$)', conversation_context, re.DOTALL)
+            for match in user_matches:
+                all_messages.append(("User", match.group(1).strip(), match.start()))
+            
+            # Find AI messages  
+            ai_matches = re.finditer(r'AI: (.*?)(?=\n\n(?:AI:|User:)|$)', conversation_context, re.DOTALL)
+            for match in ai_matches:
+                all_messages.append(("AI", match.group(1).strip(), match.start()))
+            
+            # Sort by position in text to maintain chronological order
+            all_messages.sort(key=lambda x: x[2])
+            
+            # Format messages and exclude the current user message (last one)
+            if all_messages:
+                for role, content, _ in all_messages[:-1]:  # Exclude last message (current)
+                    prior_messages.append(f"{role}: {content}")
+                    
         return prior_messages
 
     def detect_message_characteristics(self, message_str: str) -> Dict[str, bool]:
@@ -1083,8 +1166,8 @@ class LearningSupport:
                             "here's how", "đây là cách", "the way to", "Important to know", 
                             "you should know", "bạn nên biết", "cần hiểu rằng", "phương pháp", "cách thức"]
         
-        # Check for Vietnamese greeting forms or names
-        vn_greeting_patterns = ["anh ", "chị ", "bạn ", "cô ", "ông ", "bác ", "em "]
+        # Check for Vietnamese greeting forms or names (more specific patterns)
+        vn_greeting_patterns = ["xin chào", "chào anh", "chào chị", "chào bạn", "hello anh", "hello chị"]
         common_vn_names = ["hùng", "hương", "minh", "tuấn", "thảo", "an", "hà", "thủy", "trung", "mai", "hoa", "quân", "dũng", "hiền", "nga", "tâm", "thanh", "tú", "hải", "hòa", "yến", "lan", "hạnh", "phương", "dung", "thu", "hiệp", "đức", "linh", "huy", "tùng", "bình", "giang", "tiến"]
         
         message_lower = message_str.lower()
@@ -1226,7 +1309,7 @@ class LearningSupport:
                 "similarity_score": max(similarity_score, 0.7) if not knowledge_response_sections else similarity_score
             }
         
-        elif (is_vn_greeting or contains_vn_name) and len(message_characteristics.get("message_str", "").split()) <= 3:
+        elif (is_vn_greeting or contains_vn_name) and is_short_message and similarity_score < 0.35:
             return {
                 "strategy": "GREETING",
                 "instructions": (
@@ -1431,15 +1514,22 @@ class LearningSupport:
                 - save_knowledge: Save knowledge with user_id (required), query/content, thread_id, topic, categories
 
                 **Instructions**:
-                1. **Intent Classification**: 
+                1. **Intent Classification & Knowledge Utilization**: 
                    - Determine whether the user is asking for information (query intent) or providing information (teaching intent)
                    - Base your classification on the semantic meaning and communicative purpose of the message
                    - For teaching intent, look for explanatory content, new information, or instructional tone
                    - For query intent, look for questions or requests for information
                    - Set has_teaching_intent=true when you detect teaching intent
-                   - Use EXISTING KNOWLEDGE for queries when available
-                   - When KNOWLEDGE RESULTS contains multiple entries, incorporate ALL relevant information from ALL entries
+                   
+                   **CRITICAL KNOWLEDGE UTILIZATION RULES:**
+                   - When EXISTING KNOWLEDGE is provided, you MUST demonstrate deep understanding by using specific details
+                   - NEVER give generic responses when rich knowledge is available
+                   - When KNOWLEDGE RESULTS contains multiple entries, you MUST incorporate ALL relevant information from ALL entries
                    - DO NOT ignore or skip any knowledge entries - review and use ALL of them in your response
+                   - PROVE your understanding by referencing specific concepts, processes, or techniques from the knowledge
+                   - For medium-high similarity (>0.5), structure your response to show comprehensive knowledge mastery
+                   - Transform retrieved knowledge into actionable, detailed responses that demonstrate expertise
+                   
                    - Match the user's language choice (Vietnamese/English)
                    - For closing messages, set intent_type="closing" and respond with a polite farewell
                    - When the user addresses you as "Ami" or refers to you as an AI, acknowledge this in your response naturally
@@ -1480,11 +1570,16 @@ class LearningSupport:
                      * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY APPLY those techniques in your response format and style
                      
                    - When handling RELEVANT_KNOWLEDGE:
-                     * Review and use ALL knowledge items provided - don't skip any
-                     * Present information clearly based on relevance
-                     * Structure your response logically with the most relevant information first
+                     * MANDATORY: Review and use ALL knowledge items provided - don't skip any
+                     * DEMONSTRATE EXPERTISE by organizing knowledge into clear frameworks, categories, or processes
+                     * Reference specific concepts, techniques, and methodologies from the retrieved knowledge
+                     * Structure your response to show comprehensive understanding (not just surface-level awareness)
+                     * Present information with confidence and authority, showing deep knowledge mastery
+                     * Connect related concepts and explain relationships between different knowledge items
+                     * Provide actionable insights based on the retrieved knowledge
                      * DO NOT include a SUMMARY section in your response - summaries are ONLY for teaching intent
                      * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY DEMONSTRATE those techniques in your response
+                     * NEVER give generic or superficial responses when detailed knowledge is available
 
                 2. **Priority Topics**:
                    - Identify topics of special importance to the business domain
@@ -1505,10 +1600,13 @@ class LearningSupport:
                      * Connect concepts and provide additional context where appropriate
                    
                    - For MEDIUM confidence queries (similarity 0.35-0.7):
-                     * Present the knowledge you have but express some uncertainty
-                     * Acknowledge limitations in your understanding
-                     * End with a specific question asking for clarification or confirmation
-                     * Use phrases like "Based on what I understand..." or "I believe that..."
+                     * FIRST: Present ALL the detailed knowledge you have - demonstrate comprehensive understanding
+                     * Show mastery by organizing information into clear categories, steps, or frameworks
+                     * Reference specific techniques, processes, or concepts from the retrieved knowledge
+                     * THEN: Express some uncertainty about completeness or ask for confirmation on specific aspects
+                     * End with targeted questions that would help reach high confidence (>0.7 similarity)
+                     * Use phrases like "Based on what I understand about [specific concept]..." 
+                     * NEVER give short, generic responses when detailed knowledge is available
                    
                    - For LOW confidence queries (similarity <0.35):
                      * Clearly state that you don't have sufficient knowledge on this topic
