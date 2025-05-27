@@ -110,18 +110,18 @@ class CoTProcessor:
         
         CONFLICT RESOLUTION INSTRUCTIONS:
         9. IDENTIFY CONFLICTS: When you find contradictory profiling approaches or classifications:
-           - Mark conflicts with "⚠️ CONFLICTING APPROACHES:" 
-           - Present each conflicting viewpoint clearly
+           - Mark conflicts using the source language (e.g., "⚠️ XUNG ĐỘT TRONG PHƯƠNG PHÁP:" for Vietnamese, "⚠️ CONFLICTING APPROACHES:" for English)
+           - Present each conflicting viewpoint clearly in the original language
            - Explain the context or situation where each approach might be most effective
         10. METHODOLOGY CONFLICTS: For different profiling methodologies:
            - Create separate subsections for each approach
-           - Include "WHEN TO USE:" criteria for each method
-           - Note "PROS:" and "CONS:" for conflicting approaches
+           - Include criteria labels in original language (e.g., "SỬ DỤNG KHI:" for Vietnamese, "WHEN TO USE:" for English)
+           - Note advantages/disadvantages using original language labels
         11. CLASSIFICATION CONFLICTS: When sources disagree on user types or categories:
            - Present all classification systems
-           - Explain "BEST FOR:" scenarios for each system
-           - Suggest "HYBRID APPROACH:" if possible to combine strengths
-        12. PRESERVE NUANCE: Don't force artificial harmony - acknowledge when experts disagree
+           - Use original language for scenario labels (e.g., "TỐT NHẤT CHO:" for Vietnamese, "BEST FOR:" for English)
+           - Suggest combination approaches using appropriate language
+        12. PRESERVE NUANCE: Don't force artificial harmony - acknowledge when experts disagree, using the source language for all explanations
         
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
@@ -145,22 +145,22 @@ class CoTProcessor:
         
         CONFLICT RESOLUTION INSTRUCTIONS:
         10. COMMUNICATION STYLE CONFLICTS: When sources suggest different communication approaches:
-           - Mark with "⚠️ STYLE VARIATIONS:" 
-           - Specify "FOR USER TYPE:" or "IN SITUATION:" for each style
-           - Include cultural context that might explain differences
+           - Mark using source language (e.g., "⚠️ BIẾN THỂ PHONG CÁCH:" for Vietnamese, "⚠️ STYLE VARIATIONS:" for English)
+           - Specify user/situation context in original language (e.g., "CHO LOẠI NGƯỜI DÙNG:" or "TRONG TÌNH HUỐNG:")
+           - Include cultural context explanations in the source language
         11. TONE CONFLICTS: For contradictory advice on formality, friendliness, etc.:
-           - Create "TONE GUIDELINES:" sections
-           - Specify "APPROPRIATE WHEN:" criteria
-           - Note "CULTURAL CONSIDERATIONS:" for Vietnamese vs international contexts
+           - Create guideline sections using original language headers (e.g., "HƯỚNG DẪN GIỌNG ĐIỆU:" for Vietnamese)
+           - Specify appropriateness criteria in source language (e.g., "THÍCH HỢP KHI:" for Vietnamese)
+           - Note cultural considerations using original language
         12. LANGUAGE CONFLICTS: When sources disagree on language choice or expressions:
-           - Present options as "LANGUAGE OPTIONS:"
-           - Include "AUDIENCE:" specifications for each option
-           - Preserve regional or demographic preferences
+           - Present options using source language headers (e.g., "LỰA CHỌN NGÔN NGỮ:" for Vietnamese)
+           - Include audience specifications in original language (e.g., "ĐỐI TƯỢNG:" for Vietnamese)
+           - Preserve regional or demographic preferences with original terminology
         13. TECHNIQUE CONFLICTS: For contradictory communication techniques:
-           - Use "ALTERNATIVE TECHNIQUES:" headers
-           - Include "EFFECTIVENESS:" ratings or contexts
-           - Suggest "COMBINATION STRATEGIES:" when possible
-        14. PRESERVE AUTHENTICITY: Don't homogenize - cultural communication differences are valuable
+           - Use alternative technique headers in source language (e.g., "KỸ THUẬT THAY THẾ:" for Vietnamese)
+           - Include effectiveness ratings or contexts in original language
+           - Suggest combination strategies using appropriate language
+        14. PRESERVE AUTHENTICITY: Don't homogenize - cultural communication differences are valuable, maintain all explanations in source language
         
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
@@ -183,26 +183,26 @@ class CoTProcessor:
         
         CONFLICT RESOLUTION INSTRUCTIONS:
         9. PRIORITY CONFLICTS: When sources prioritize different business objectives:
-           - Mark with "⚠️ PRIORITY VARIATIONS:"
-           - Specify "BUSINESS CONTEXT:" for each priority approach
-           - Include "TIMELINE:" considerations (short-term vs long-term)
+           - Mark using source language (e.g., "⚠️ BIẾN THỂ TRONG THỨ TỰ ƯU TIÊN:" for Vietnamese, "⚠️ PRIORITY VARIATIONS:" for English)
+           - Specify business context in original language (e.g., "BỐI CẢNH KINH DOANH:" for Vietnamese)
+           - Include timeline considerations using source language (e.g., "THỜI GIAN:" for Vietnamese)
         10. STRATEGY CONFLICTS: For contradictory business strategies or approaches:
-           - Create "STRATEGIC OPTIONS:" sections
-           - Include "SUITABLE FOR:" business types or situations
-           - Note "RISK LEVEL:" and "RESOURCE REQUIREMENTS:" for each
+           - Create strategic option sections in source language (e.g., "LỰA CHỌN CHIẾN LƯỢC:" for Vietnamese)
+           - Include suitability descriptions in original language (e.g., "PHÍCH HỢP CHO:" for Vietnamese)
+           - Note risk and resource information using source language labels
         11. METRIC CONFLICTS: When sources disagree on success measurements:
-           - Present as "MEASUREMENT APPROACHES:"
-           - Specify "BEST FOR:" different business goals
-           - Include "TRACKING DIFFICULTY:" and "ACCURACY:" considerations
+           - Present using source language headers (e.g., "PHƯƠNG PHÁP ĐO LƯỜNG:" for Vietnamese)
+           - Specify applicability in original language (e.g., "TỐT NHẤT CHO:" for Vietnamese)
+           - Include difficulty and accuracy considerations in source language
         12. GOAL CONFLICTS: For contradictory business goals or outcomes:
-           - Use "GOAL FRAMEWORKS:" headers
-           - Include "INDUSTRY RELEVANCE:" specifications
-           - Suggest "BALANCED APPROACHES:" when goals can coexist
+           - Use goal framework headers in source language (e.g., "KHUNG MỤC TIÊU:" for Vietnamese)
+           - Include industry relevance in original language (e.g., "LIÊN QUAN NGÀNH:" for Vietnamese)
+           - Suggest balanced approaches using appropriate language
         13. IMPLEMENTATION CONFLICTS: For different execution approaches:
-           - Mark as "IMPLEMENTATION PATHS:"
-           - Include "RESOURCE NEEDS:" and "TIMELINE:" for each
-           - Note "SUCCESS FACTORS:" that influence choice
-        14. PRESERVE BUSINESS CONTEXT: Different industries and company sizes may require different approaches
+           - Mark using source language (e.g., "PHƯƠNG PHÁP THỰC HIỆN:" for Vietnamese)
+           - Include resource and timeline information in original language
+           - Note success factors using source language terminology
+        14. PRESERVE BUSINESS CONTEXT: Different industries and company sizes may require different approaches, maintain all explanations in source language
         
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
