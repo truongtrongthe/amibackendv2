@@ -108,6 +108,21 @@ class CoTProcessor:
         7. Remove redundant information while preserving all unique content
         8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
         
+        CONFLICT RESOLUTION INSTRUCTIONS:
+        9. IDENTIFY CONFLICTS: When you find contradictory profiling approaches or classifications:
+           - Mark conflicts with "⚠️ CONFLICTING APPROACHES:" 
+           - Present each conflicting viewpoint clearly
+           - Explain the context or situation where each approach might be most effective
+        10. METHODOLOGY CONFLICTS: For different profiling methodologies:
+           - Create separate subsections for each approach
+           - Include "WHEN TO USE:" criteria for each method
+           - Note "PROS:" and "CONS:" for conflicting approaches
+        11. CLASSIFICATION CONFLICTS: When sources disagree on user types or categories:
+           - Present all classification systems
+           - Explain "BEST FOR:" scenarios for each system
+           - Suggest "HYBRID APPROACH:" if possible to combine strengths
+        12. PRESERVE NUANCE: Don't force artificial harmony - acknowledge when experts disagree
+        
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
         
@@ -128,6 +143,25 @@ class CoTProcessor:
         8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
         9. Preserve colloquial phrases if they appear in the original
         
+        CONFLICT RESOLUTION INSTRUCTIONS:
+        10. COMMUNICATION STYLE CONFLICTS: When sources suggest different communication approaches:
+           - Mark with "⚠️ STYLE VARIATIONS:" 
+           - Specify "FOR USER TYPE:" or "IN SITUATION:" for each style
+           - Include cultural context that might explain differences
+        11. TONE CONFLICTS: For contradictory advice on formality, friendliness, etc.:
+           - Create "TONE GUIDELINES:" sections
+           - Specify "APPROPRIATE WHEN:" criteria
+           - Note "CULTURAL CONSIDERATIONS:" for Vietnamese vs international contexts
+        12. LANGUAGE CONFLICTS: When sources disagree on language choice or expressions:
+           - Present options as "LANGUAGE OPTIONS:"
+           - Include "AUDIENCE:" specifications for each option
+           - Preserve regional or demographic preferences
+        13. TECHNIQUE CONFLICTS: For contradictory communication techniques:
+           - Use "ALTERNATIVE TECHNIQUES:" headers
+           - Include "EFFECTIVENESS:" ratings or contexts
+           - Suggest "COMBINATION STRATEGIES:" when possible
+        14. PRESERVE AUTHENTICITY: Don't homogenize - cultural communication differences are valuable
+        
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
         
@@ -146,6 +180,29 @@ class CoTProcessor:
         6. Organize the information logically with clear sections and categories
         7. Remove redundant information while preserving all unique content
         8. Preserve all references to specific services, courses, or products
+        
+        CONFLICT RESOLUTION INSTRUCTIONS:
+        9. PRIORITY CONFLICTS: When sources prioritize different business objectives:
+           - Mark with "⚠️ PRIORITY VARIATIONS:"
+           - Specify "BUSINESS CONTEXT:" for each priority approach
+           - Include "TIMELINE:" considerations (short-term vs long-term)
+        10. STRATEGY CONFLICTS: For contradictory business strategies or approaches:
+           - Create "STRATEGIC OPTIONS:" sections
+           - Include "SUITABLE FOR:" business types or situations
+           - Note "RISK LEVEL:" and "RESOURCE REQUIREMENTS:" for each
+        11. METRIC CONFLICTS: When sources disagree on success measurements:
+           - Present as "MEASUREMENT APPROACHES:"
+           - Specify "BEST FOR:" different business goals
+           - Include "TRACKING DIFFICULTY:" and "ACCURACY:" considerations
+        12. GOAL CONFLICTS: For contradictory business goals or outcomes:
+           - Use "GOAL FRAMEWORKS:" headers
+           - Include "INDUSTRY RELEVANCE:" specifications
+           - Suggest "BALANCED APPROACHES:" when goals can coexist
+        13. IMPLEMENTATION CONFLICTS: For different execution approaches:
+           - Mark as "IMPLEMENTATION PATHS:"
+           - Include "RESOURCE NEEDS:" and "TIMELINE:" for each
+           - Note "SUCCESS FACTORS:" that influence choice
+        14. PRESERVE BUSINESS CONTEXT: Different industries and company sizes may require different approaches
         
         FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
         """
