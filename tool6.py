@@ -110,6 +110,8 @@ class CoTProcessor:
         9. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
         
         CONFLICT RESOLUTION INSTRUCTIONS:
+        IMPORTANT: When you encounter contradictory instructions in the source knowledge, apply TEMPORAL PRECEDENCE - prioritize the instruction that appears LATER in the source sequence, as it represents the most recent update or override.
+        
         9. CONVERT CONFLICTS TO DIRECT INSTRUCTIONS: When you find contradictory profiling approaches:
            - Transform conflicts into clear decision rules using source language (e.g., "HƯỚNG DẪN QUYẾT ĐỊNH:" for Vietnamese, "DECISION GUIDE:" for English)
            - Write direct commands: "Use Method A when..." instead of "Method A is suitable for..."
@@ -146,6 +148,8 @@ class CoTProcessor:
         10. Preserve colloquial phrases if they appear in the original
         
         CONFLICT RESOLUTION INSTRUCTIONS:
+        IMPORTANT: When you encounter contradictory instructions in the source knowledge, apply TEMPORAL PRECEDENCE - prioritize the instruction that appears LATER in the source sequence, as it represents the most recent update or override.
+        
         10. COMMUNICATION EXECUTION RULES: When sources suggest different communication approaches:
            - Create direct execution commands using source language (e.g., "THỰC HIỆN GIAO TIẾP:" for Vietnamese, "EXECUTE COMMUNICATION:" for English)
            - Write specific instructions: "SPEAK formally IF user is [classification]" instead of describing style variations
@@ -185,6 +189,8 @@ class CoTProcessor:
         9. Preserve all references to specific services, courses, or products
         
         CONFLICT RESOLUTION INSTRUCTIONS:
+        IMPORTANT: When you encounter contradictory instructions in the source knowledge, apply TEMPORAL PRECEDENCE - prioritize the instruction that appears LATER in the source sequence, as it represents the most recent update or override.
+        
         9. PRIORITY EXECUTION COMMANDS: When sources prioritize different business objectives:
            - Create priority decision algorithms using source language (e.g., "THỰC HIỆN ƯU TIÊN:" for Vietnamese, "EXECUTE PRIORITY:" for English)
            - Write as conditional commands: "PRIORITIZE objective A IF business context X, PRIORITIZE objective B IF context Y"
@@ -301,7 +307,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.4) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.35) for query in queries],
                 return_exceptions=True
             )
             profiling_skills = {}
@@ -381,7 +387,7 @@ class CoTProcessor:
         
         try:
             results = await asyncio.gather(
-                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.4) for query in queries],
+                *[query_knowledge_from_graph(query, self.graph_version_id,top_k=100,min_similarity=0.25) for query in queries],
                 return_exceptions=True
             )
             business_objectives = {}
@@ -405,6 +411,7 @@ class CoTProcessor:
                         business_objectives[query] = {"content": result}
                         
             # Process the results
+            logger.info(f"Business objectives knowledge RAW: {business_objectives}")    
             processed = self._process_business_objectives_knowledge(business_objectives)
             
             # Add additional logging
@@ -526,7 +533,7 @@ class CoTProcessor:
         knowledge_content = re.sub(r'\n{3,}', '\n\n', knowledge_content)
         knowledge_content = re.sub(r' +', ' ', knowledge_content)
         knowledge_content = knowledge_content.strip()
-        logger.info(f"KNOWLEDGE content after extract knowledge content: {knowledge_content}")
+        #logger.info(f"KNOWLEDGE content after extract knowledge content: {knowledge_content}")
         return knowledge_content
     
     
@@ -631,7 +638,7 @@ class CoTProcessor:
         # One final cleanup pass using the helper function
         full_knowledge = self._clean_knowledge_content(full_knowledge)
         
-        #logger.info(f"Raw Business objectives knowledge: {full_knowledge}")
+        logger.info(f"Raw Business objectives knowledge: {full_knowledge}")
         
         return {
             "knowledge_context": full_knowledge,
