@@ -93,7 +93,7 @@ class CoTProcessor:
         
         # Create prompts for each comprehensive knowledge base with language preservation instructions
         profiling_prompt = f"""
-        TASK: Create a comprehensive, well-structured knowledge base about user profiling techniques.
+        TASK: Create a comprehensive, well-structured INSTRUCTION MANUAL for user profiling techniques.
         
         SOURCE KNOWLEDGE:
         {profiling_context}
@@ -103,31 +103,32 @@ class CoTProcessor:
         2. DO NOT translate Vietnamese terms or phrases into English or vice versa
         3. KEEP ALL ORIGINAL EXAMPLES exactly as they appear in the source
         4. Maintain cultural context and specific terminology from the original
-        5. Synthesize the source knowledge into a comprehensive, cohesive knowledge base
-        6. Organize the information logically with clear sections and categories
-        7. Remove redundant information while preserving all unique content
-        8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
+        5. CREATE EXECUTABLE INSTRUCTION MANUAL - transform all knowledge into direct, actionable commands
+        6. USE IMPERATIVE LANGUAGE - write "DO this" not "you can do this" or "this is suitable for"
+        7. ORGANIZE AS DECISION TREES - create IF-THEN-ELSE command structures
+        8. Remove redundant information while preserving all unique content
+        9. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
         
         CONFLICT RESOLUTION INSTRUCTIONS:
-        9. IDENTIFY CONFLICTS: When you find contradictory profiling approaches or classifications:
-           - Mark conflicts using the source language (e.g., "⚠️ XUNG ĐỘT TRONG PHƯƠNG PHÁP:" for Vietnamese, "⚠️ CONFLICTING APPROACHES:" for English)
-           - Present each conflicting viewpoint clearly in the original language
-           - Explain the context or situation where each approach might be most effective
-        10. METHODOLOGY CONFLICTS: For different profiling methodologies:
-           - Create separate subsections for each approach
-           - Include criteria labels in original language (e.g., "SỬ DỤNG KHI:" for Vietnamese, "WHEN TO USE:" for English)
-           - Note advantages/disadvantages using original language labels
-        11. CLASSIFICATION CONFLICTS: When sources disagree on user types or categories:
-           - Present all classification systems
-           - Use original language for scenario labels (e.g., "TỐT NHẤT CHO:" for Vietnamese, "BEST FOR:" for English)
-           - Suggest combination approaches using appropriate language
-        12. PRESERVE NUANCE: Don't force artificial harmony - acknowledge when experts disagree, using the source language for all explanations
+        9. CONVERT CONFLICTS TO DIRECT INSTRUCTIONS: When you find contradictory profiling approaches:
+           - Transform conflicts into clear decision rules using source language (e.g., "HƯỚNG DẪN QUYẾT ĐỊNH:" for Vietnamese, "DECISION GUIDE:" for English)
+           - Write direct commands: "Use Method A when..." instead of "Method A is suitable for..."
+           - Create IF-THEN instruction blocks for different scenarios
+        10. METHODOLOGY SELECTION RULES: For different profiling methodologies:
+           - Write as executable instructions: "EXECUTE this approach IF user shows X characteristics"
+           - Use imperative language in original language (e.g., "HÃY SỬ DỤNG:" for Vietnamese, "USE:" for English)
+           - Provide step-by-step decision trees rather than comparisons
+        11. CLASSIFICATION DECISION FRAMEWORK: When sources disagree on user types:
+           - Create classification flowcharts in text form
+           - Write as commands: "CLASSIFY as Type A IF conditions X, Y, Z are met"
+           - Use action-oriented language in source language (e.g., "PHÂN LOẠI:" for Vietnamese, "CLASSIFY:" for English)
+        12. ACTIONABLE GUIDANCE: Transform all expert disagreements into practical decision-making instructions using source language
         
-        FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
+        FORMAT: Respond with only the INSTRUCTION MANUAL text in the original language. Structure as executable commands, not descriptive analysis.
         """
         
         communication_prompt = f"""
-        TASK: Create a comprehensive, well-structured knowledge base about effective communication techniques.
+        TASK: Create a comprehensive, well-structured INSTRUCTION MANUAL for effective communication techniques.
         
         SOURCE KNOWLEDGE:
         {communication_context}
@@ -137,36 +138,37 @@ class CoTProcessor:
         2. DO NOT translate Vietnamese terms or phrases into English or vice versa
         3. KEEP ALL ORIGINAL EXAMPLES exactly as they appear in the source
         4. Maintain cultural context and specific terminology from the original
-        5. Synthesize the source knowledge into a comprehensive, cohesive knowledge base
-        6. Organize the information logically with clear sections and categories
-        7. Remove redundant information while preserving all unique content
-        8. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
-        9. Preserve colloquial phrases if they appear in the original
+        5. CREATE EXECUTABLE INSTRUCTION MANUAL - transform all knowledge into direct, actionable commands
+        6. USE IMPERATIVE LANGUAGE - write "DO this" not "you can do this" or "this is suitable for"
+        7. ORGANIZE AS DECISION TREES - create IF-THEN-ELSE command structures
+        8. Remove redundant information while preserving all unique content
+        9. Use the EXACT SAME PRONOUNS as the original (e.g., "em"/"anh" in Vietnamese)
+        10. Preserve colloquial phrases if they appear in the original
         
         CONFLICT RESOLUTION INSTRUCTIONS:
-        10. COMMUNICATION STYLE CONFLICTS: When sources suggest different communication approaches:
-           - Mark using source language (e.g., "⚠️ BIẾN THỂ PHONG CÁCH:" for Vietnamese, "⚠️ STYLE VARIATIONS:" for English)
-           - Specify user/situation context in original language (e.g., "CHO LOẠI NGƯỜI DÙNG:" or "TRONG TÌNH HUỐNG:")
-           - Include cultural context explanations in the source language
-        11. TONE CONFLICTS: For contradictory advice on formality, friendliness, etc.:
-           - Create guideline sections using original language headers (e.g., "HƯỚNG DẪN GIỌNG ĐIỆU:" for Vietnamese)
-           - Specify appropriateness criteria in source language (e.g., "THÍCH HỢP KHI:" for Vietnamese)
-           - Note cultural considerations using original language
-        12. LANGUAGE CONFLICTS: When sources disagree on language choice or expressions:
-           - Present options using source language headers (e.g., "LỰA CHỌN NGÔN NGỮ:" for Vietnamese)
-           - Include audience specifications in original language (e.g., "ĐỐI TƯỢNG:" for Vietnamese)
-           - Preserve regional or demographic preferences with original terminology
-        13. TECHNIQUE CONFLICTS: For contradictory communication techniques:
-           - Use alternative technique headers in source language (e.g., "KỸ THUẬT THAY THẾ:" for Vietnamese)
-           - Include effectiveness ratings or contexts in original language
-           - Suggest combination strategies using appropriate language
-        14. PRESERVE AUTHENTICITY: Don't homogenize - cultural communication differences are valuable, maintain all explanations in source language
+        10. COMMUNICATION EXECUTION RULES: When sources suggest different communication approaches:
+           - Create direct execution commands using source language (e.g., "THỰC HIỆN GIAO TIẾP:" for Vietnamese, "EXECUTE COMMUNICATION:" for English)
+           - Write specific instructions: "SPEAK formally IF user is [classification]" instead of describing style variations
+           - Use command format: "DO this, NOT that" for clear guidance
+        11. TONE COMMAND FRAMEWORK: For contradictory advice on formality, friendliness, etc.:
+           - Write as direct tone commands using original language (e.g., "SỬ DỤNG GIỌNG ĐIỆU:" for Vietnamese)
+           - Create conditional instructions: "BE formal IF situation X, BE casual IF situation Y"
+           - Use imperative verbs in source language for immediate action
+        12. LANGUAGE SELECTION COMMANDS: When sources disagree on language choice or expressions:
+           - Write as selection algorithms using source language (e.g., "CHỌN NGÔN NGỮ:" for Vietnamese)
+           - Create decision trees: "IF audience = X, THEN use expression Y"
+           - Provide exact phrases and expressions to use, not just options
+        13. TECHNIQUE EXECUTION GUIDE: For contradictory communication techniques:
+           - Transform into step-by-step execution guides in source language (e.g., "THỰC HIỆN KỸ THUẬT:" for Vietnamese)
+           - Write as procedures: "Step 1: Do X, Step 2: If response Y, then do Z"
+           - Focus on WHEN and HOW to execute, not just what techniques exist
+        14. DIRECT CULTURAL COMMANDS: Transform cultural considerations into specific behavioral instructions using source language
         
-        FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
+        FORMAT: Respond with only the INSTRUCTION MANUAL text in the original language. Structure as executable commands, not descriptive analysis.
         """
         
         business_prompt = f"""
-        TASK: Create a comprehensive, well-structured knowledge base about business objectives.
+        TASK: Create a comprehensive, well-structured INSTRUCTION MANUAL for business objectives.
         
         SOURCE KNOWLEDGE:
         {business_context}
@@ -176,35 +178,36 @@ class CoTProcessor:
         2. DO NOT translate Vietnamese terms or phrases into English or vice versa
         3. KEEP ALL ORIGINAL EXAMPLES exactly as they appear in the source
         4. Maintain cultural context and specific terminology from the original
-        5. Synthesize the source knowledge into a comprehensive, cohesive knowledge base
-        6. Organize the information logically with clear sections and categories
-        7. Remove redundant information while preserving all unique content
-        8. Preserve all references to specific services, courses, or products
+        5. CREATE EXECUTABLE INSTRUCTION MANUAL - transform all knowledge into direct, actionable commands
+        6. USE IMPERATIVE LANGUAGE - write "DO this" not "you can do this" or "this is suitable for"
+        7. ORGANIZE AS DECISION TREES - create IF-THEN-ELSE command structures
+        8. Remove redundant information while preserving all unique content
+        9. Preserve all references to specific services, courses, or products
         
         CONFLICT RESOLUTION INSTRUCTIONS:
-        9. PRIORITY CONFLICTS: When sources prioritize different business objectives:
-           - Mark using source language (e.g., "⚠️ BIẾN THỂ TRONG THỨ TỰ ƯU TIÊN:" for Vietnamese, "⚠️ PRIORITY VARIATIONS:" for English)
-           - Specify business context in original language (e.g., "BỐI CẢNH KINH DOANH:" for Vietnamese)
-           - Include timeline considerations using source language (e.g., "THỜI GIAN:" for Vietnamese)
-        10. STRATEGY CONFLICTS: For contradictory business strategies or approaches:
-           - Create strategic option sections in source language (e.g., "LỰA CHỌN CHIẾN LƯỢC:" for Vietnamese)
-           - Include suitability descriptions in original language (e.g., "PHÍCH HỢP CHO:" for Vietnamese)
-           - Note risk and resource information using source language labels
-        11. METRIC CONFLICTS: When sources disagree on success measurements:
-           - Present using source language headers (e.g., "PHƯƠNG PHÁP ĐO LƯỜNG:" for Vietnamese)
-           - Specify applicability in original language (e.g., "TỐT NHẤT CHO:" for Vietnamese)
-           - Include difficulty and accuracy considerations in source language
-        12. GOAL CONFLICTS: For contradictory business goals or outcomes:
-           - Use goal framework headers in source language (e.g., "KHUNG MỤC TIÊU:" for Vietnamese)
-           - Include industry relevance in original language (e.g., "LIÊN QUAN NGÀNH:" for Vietnamese)
-           - Suggest balanced approaches using appropriate language
-        13. IMPLEMENTATION CONFLICTS: For different execution approaches:
-           - Mark using source language (e.g., "PHƯƠNG PHÁP THỰC HIỆN:" for Vietnamese)
-           - Include resource and timeline information in original language
-           - Note success factors using source language terminology
-        14. PRESERVE BUSINESS CONTEXT: Different industries and company sizes may require different approaches, maintain all explanations in source language
+        9. PRIORITY EXECUTION COMMANDS: When sources prioritize different business objectives:
+           - Create priority decision algorithms using source language (e.g., "THỰC HIỆN ƯU TIÊN:" for Vietnamese, "EXECUTE PRIORITY:" for English)
+           - Write as conditional commands: "PRIORITIZE objective A IF business context X, PRIORITIZE objective B IF context Y"
+           - Use directive language: "FOCUS on X first, THEN move to Y" instead of describing variations
+        10. STRATEGY SELECTION RULES: For contradictory business strategies or approaches:
+           - Transform into strategy execution commands using source language (e.g., "THỰC HIỆN CHIẾN LƯỢC:" for Vietnamese)
+           - Write as decision algorithms: "APPLY strategy A IF conditions X, Y, Z are met"
+           - Create step-by-step implementation guides rather than option descriptions
+        11. MEASUREMENT EXECUTION FRAMEWORK: When sources disagree on success measurements:
+           - Write as measurement commands using source language (e.g., "ĐO LƯỜNG BẰNG CÁCH:" for Vietnamese)
+           - Create specific measurement protocols: "MEASURE X using method Y IF goal is Z"
+           - Provide exact metrics and calculation methods, not just approaches
+        12. GOAL ACHIEVEMENT COMMANDS: For contradictory business goals or outcomes:
+           - Transform into goal execution instructions using source language (e.g., "ĐẠT MỤC TIÊU:" for Vietnamese)
+           - Write as achievement pathways: "TO achieve goal X, EXECUTE steps A, B, C in sequence"
+           - Focus on HOW to achieve goals, not just what goals exist
+        13. IMPLEMENTATION EXECUTION GUIDE: For different execution approaches:
+           - Create step-by-step implementation commands using source language (e.g., "TRIỂN KHAI THEO BƯỚC:" for Vietnamese)
+           - Write as procedural instructions: "Step 1: ASSESS resources, Step 2: IF sufficient, THEN proceed with method A"
+           - Provide specific action sequences rather than approach comparisons
+        14. BUSINESS COMMAND FRAMEWORK: Transform all business context considerations into specific operational instructions using source language
         
-        FORMAT: Respond with only the synthesized knowledge base text, maintaining the original language.
+        FORMAT: Respond with only the INSTRUCTION MANUAL text in the original language. Structure as executable commands, not descriptive analysis.
         """
         
         try:
