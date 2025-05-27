@@ -172,18 +172,18 @@ class LearningSupport:
             highest_similarities = []  # Store top 3 similarity scores
             knowledge_contexts = []  # Store top 3 knowledge contexts
             
+            # Collect all result items for batch processing
+            all_result_items = []
             for query, results in zip(queries, results_list):
                 query_count += 1
                 if isinstance(results, Exception):
                     logger.warning(f"Query '{query[:30]}...' failed: {str(results)}")
-                    all_query_results.append(None)  # Add None for failed queries
                     continue
                 if not results:
                     logger.info(f"Query '{query[:30]}...' returned no results")
-                    all_query_results.append(None)  # Add None for empty results
                     continue
                 
-                # Process all results from a query, not just the first result
+                # Collect all result items with their query info
                 for result_item in results:
                     knowledge_content = result_item["raw"]
                     
@@ -194,8 +194,28 @@ class LearningSupport:
                             knowledge_content = user_part.group(1).strip()
                             logger.info(f"Extracted User portion from combined knowledge")
                     
-                    # Evaluate context relevance between query and retrieved knowledge
-                    context_relevance = await self.evaluate_context_relevance(primary_query, knowledge_content)
+                    # Store for batch processing
+                    all_result_items.append({
+                        "result_item": result_item,
+                        "knowledge_content": knowledge_content,
+                        "query": query
+                    })
+            
+            # Batch context relevance evaluation - MUCH faster!
+            if all_result_items:
+                logger.info(f"Batch evaluating context relevance for {len(all_result_items)} results")
+                
+                # Extract knowledge content for batch processing
+                knowledge_contents = [item["knowledge_content"] for item in all_result_items]
+                
+                # Single batch call instead of multiple individual calls
+                context_relevances = await self.evaluate_context_relevance_batch(primary_query, knowledge_contents)
+                
+                # Process results with their context relevance scores
+                for item_data, context_relevance in zip(all_result_items, context_relevances):
+                    result_item = item_data["result_item"]
+                    knowledge_content = item_data["knowledge_content"]
+                    query = item_data["query"]
                     
                     # Calculate adjusted similarity score with context relevance factor
                     query_similarity = result_item["score"]
@@ -226,6 +246,8 @@ class LearningSupport:
                             knowledge_contexts[min_index] = knowledge_content
                         
                         logger.info(f"Updated top 100 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
+                
+                logger.info(f"Completed batch context relevance evaluation for {len(all_result_items)} results")
 
             # Apply regular boost for priority topics
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
@@ -303,13 +325,120 @@ class LearningSupport:
             }
         except Exception as e:
             logger.error(f"Error fetching knowledge: {str(e)}")
+            # Default fallback without referencing undefined variables
             return {
-                "knowledge_context": prior_knowledge if is_follow_up else "",
-                "similarity": 0.7 if is_follow_up else 0.0,
+                "knowledge_context": "",
+                "similarity": 0.0,
                 "query_count": 0,
                 "prior_data": {"topic": prior_topic, "knowledge": prior_knowledge},
-                "metadata": {"similarity": 0.7 if is_follow_up else 0.0}
+                "metadata": {"similarity": 0.0}
             }
+
+    async def evaluate_context_relevance_batch(self, user_input: str, knowledge_items: List[str]) -> List[float]:
+        """
+        Batch evaluate context relevance for multiple knowledge items.
+        Returns a list of relevance scores between 0.0 and 1.0.
+        """
+        try:
+            if not knowledge_items:
+                return []
+            
+            # Batch embedding calls - much more efficient!
+            logger.info(f"Batch processing embeddings for {len(knowledge_items)} knowledge items")
+            
+            # Get user embedding once
+            user_embedding = await EMBEDDINGS.aembed_query(user_input)
+            
+            # Get all knowledge embeddings in parallel
+            knowledge_embeddings = await asyncio.gather(
+                *(EMBEDDINGS.aembed_query(knowledge) for knowledge in knowledge_items),
+                return_exceptions=True
+            )
+            
+            # Calculate similarities
+            similarities = []
+            ambiguous_items = []  # Items that need LLM evaluation
+            
+            for i, knowledge_embedding in enumerate(knowledge_embeddings):
+                if isinstance(knowledge_embedding, Exception):
+                    logger.warning(f"Embedding failed for item {i}: {knowledge_embedding}")
+                    similarities.append(0.5)  # Default score
+                    continue
+                
+                # Calculate cosine similarity
+                dot_product = sum(a * b for a, b in zip(user_embedding, knowledge_embedding))
+                user_norm = sum(a * a for a in user_embedding) ** 0.5
+                knowledge_norm = sum(b * b for b in knowledge_embedding) ** 0.5
+                
+                if user_norm * knowledge_norm == 0:
+                    similarity = 0
+                else:
+                    similarity = dot_product / (user_norm * knowledge_norm)
+                
+                similarities.append(similarity)
+                
+                # Mark for LLM evaluation if in ambiguous range
+                if 0.3 <= similarity <= 0.7:
+                    ambiguous_items.append((i, knowledge_items[i], similarity))
+            
+            # Batch LLM evaluation for ambiguous items
+            if ambiguous_items:
+                logger.info(f"LLM evaluating {len(ambiguous_items)} ambiguous items in parallel")
+                
+                llm_tasks = []
+                for idx, knowledge, embedding_sim in ambiguous_items:
+                    prompt = f"""
+                    Evaluate the relevance between USER INPUT and KNOWLEDGE on a scale of 0-10.
+                    
+                    USER INPUT:
+                    {user_input}
+                    
+                    KNOWLEDGE:
+                    {knowledge}
+                    
+                    Consider:
+                    - Topic alignment (not just keywords)
+                    - Whether the knowledge addresses the input's intent
+                    - Practical usefulness of the knowledge for the input
+                    
+                    Return ONLY a number between 0-10.
+                    """
+                    llm_tasks.append(LLM.ainvoke(prompt))
+                
+                # Execute all LLM evaluations in parallel
+                llm_responses = await asyncio.gather(*llm_tasks, return_exceptions=True)
+                
+                # Process LLM results
+                for (idx, knowledge, embedding_sim), llm_response in zip(ambiguous_items, llm_responses):
+                    if isinstance(llm_response, Exception):
+                        logger.warning(f"LLM evaluation failed for item {idx}: {llm_response}")
+                        continue
+                    
+                    try:
+                        llm_score_text = llm_response.content.strip()
+                        
+                        # Extract just the number from potential additional text
+                        import re
+                        score_match = re.search(r'(\d+(\.\d+)?)', llm_score_text)
+                        if score_match:
+                            llm_score = float(score_match.group(1))
+                            # Normalize to 0-1 range
+                            llm_score = min(10, max(0, llm_score)) / 10
+                            
+                            # Combine with embedding similarity (50/50)
+                            combined_score = 0.5 * embedding_sim + 0.5 * llm_score
+                            similarities[idx] = combined_score
+                            logger.info(f"Item {idx}: embedding={embedding_sim:.2f}, LLM={llm_score:.2f}, combined={combined_score:.2f}")
+                    except Exception as e:
+                        logger.warning(f"Failed to parse LLM score for item {idx}: {e}")
+            
+            logger.info(f"Batch context relevance completed for {len(knowledge_items)} items")
+            return similarities
+            
+        except Exception as e:
+            logger.error(f"Error in batch context relevance evaluation: {str(e)}")
+            # Return default scores on error
+            return [0.5] * len(knowledge_items)
 
     async def evaluate_context_relevance(self, user_input: str, retrieved_knowledge: str) -> float:
         """
@@ -390,6 +519,8 @@ class LearningSupport:
         Returns:
             Dictionary with flow type, confidence, and other analysis details
         """
+        import re  # Explicit import to avoid scope issues
+        
         # Skip LLM call if no context is available
         if not prior_messages:
             return {
@@ -420,6 +551,7 @@ class LearningSupport:
         # Check if message contains references to numbered items that likely came from a previous response
         def detect_numerical_references(text: str) -> bool:
             """Dynamically detect if text contains references to numbered items."""
+            import re  # Import re within the function scope
             text_lower = text.lower()
             
             # Look for number words or digits with context indicators

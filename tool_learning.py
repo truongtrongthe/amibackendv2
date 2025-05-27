@@ -340,18 +340,18 @@ class LearningProcessor:
             highest_similarities = []  # Store top 3 similarity scores
             knowledge_contexts = []  # Store top 3 knowledge contexts
             
+            # Collect all result items for parallel processing
+            all_result_items = []
             for query, results in zip(queries, results_list):
                 query_count += 1
                 if isinstance(results, Exception):
                     logger.warning(f"Query '{query[:30]}...' failed: {str(results)}")
-                    all_query_results.append(None)  # Add None for failed queries
                     continue
                 if not results:
                     logger.info(f"Query '{query[:30]}...' returned no results")
-                    all_query_results.append(None)  # Add None for empty results
                     continue
                 
-                # Xử lý tất cả các kết quả từ một query, không chỉ kết quả đầu tiên
+                # Collect all result items with their query info
                 for result_item in results:
                     knowledge_content = result_item["raw"]
                     
@@ -362,8 +362,35 @@ class LearningProcessor:
                             knowledge_content = user_part.group(1).strip()
                             logger.info(f"Extracted User portion from combined knowledge")
                     
-                    # Evaluate context relevance between query and retrieved knowledge
-                    context_relevance = await self.support.evaluate_context_relevance(primary_query, knowledge_content)
+                    # Store for parallel processing
+                    all_result_items.append({
+                        "result_item": result_item,
+                        "knowledge_content": knowledge_content,
+                        "query": query
+                    })
+            
+            # Parallel context relevance evaluation
+            if all_result_items:
+                logger.info(f"Evaluating context relevance for {len(all_result_items)} results in parallel")
+                
+                # Create parallel tasks for context relevance evaluation
+                relevance_tasks = [
+                    self.support.evaluate_context_relevance(primary_query, item["knowledge_content"])
+                    for item in all_result_items
+                ]
+                
+                # Execute all context relevance evaluations in parallel
+                context_relevances = await asyncio.gather(*relevance_tasks, return_exceptions=True)
+                
+                # Process results with their context relevance scores
+                for item_data, context_relevance in zip(all_result_items, context_relevances):
+                    if isinstance(context_relevance, Exception):
+                        logger.warning(f"Context relevance evaluation failed: {context_relevance}")
+                        context_relevance = 0.0  # Default to 0 if evaluation fails
+                    
+                    result_item = item_data["result_item"]
+                    knowledge_content = item_data["knowledge_content"]
+                    query = item_data["query"]
                     
                     # Calculate adjusted similarity score with context relevance factor
                     query_similarity = result_item["score"]
@@ -394,6 +421,8 @@ class LearningProcessor:
                             knowledge_contexts[min_index] = knowledge_content
                         
                         logger.info(f"Updated top 100 knowledge results with adjusted similarity: {adjusted_similarity}, context relevance: {context_relevance}")
+                
+                logger.info(f"Completed parallel context relevance evaluation for {len(all_result_items)} results")
 
             # Apply regular boost for priority topics
             if any(term in primary_query.lower() or (prior_topic and term in prior_topic.lower()) 
