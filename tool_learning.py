@@ -915,37 +915,64 @@ class LearningProcessor:
         state['graph_version_id'] = graph_version_id
         
         try:
-            response = await learning_processor.process_incoming_message(
+            # Use streaming version for real-time response
+            final_response = None
+            tool_results = []
+            
+            async for chunk in learning_processor.process_incoming_message_streaming(
                 user_message, 
                 conversation_context, 
                 user_id,
                 thread_id
-            )
-            
-            message_content = response["message"] if isinstance(response, dict) and "message" in response else str(response)
-            message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
-            logger.info("Stripped knowledge_queries from message for frontend")
-            
-            tool_results = []
-            if "metadata" in response and "tool_calls" in response["metadata"]:
-                for tool_call in response["metadata"]["tool_calls"]:
-                    if isinstance(tool_call, dict) and "name" in tool_call and "parameters" in tool_call:
-                        tool_result = await self.execute_tool(
-                            tool_name=tool_call["name"],
-                            parameters=tool_call["parameters"]
-                        )
-                        tool_results.append(tool_result)
-                        yield tool_result
-                        logger.info(f"Executed tool {tool_call['name']} with result: {tool_result}")
-                    else:
-                        logger.warning(f"Invalid tool call format: {tool_call}")
+            ):
+                if chunk.get("type") == "response_chunk":
+                    # Stream chunks immediately to frontend
+                    yield {"status": "streaming", "content": chunk["content"], "complete": False}
+                elif chunk.get("type") == "response_complete":
+                    # Store final response for post-processing
+                    final_response = chunk
+                    
+                    # Extract message content and clean it
+                    message_content = chunk["message"] if "message" in chunk else str(chunk)
+                    message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                    logger.info("Stripped knowledge_queries from message for frontend")
+                    
+                    # Execute any tool calls
+                    if "metadata" in chunk and "tool_calls" in chunk["metadata"]:
+                        for tool_call in chunk["metadata"]["tool_calls"]:
+                            if isinstance(tool_call, dict) and "name" in tool_call and "parameters" in tool_call:
+                                tool_result = await self.execute_tool(
+                                    tool_name=tool_call["name"],
+                                    parameters=tool_call["parameters"]
+                                )
+                                tool_results.append(tool_result)
+                                yield tool_result
+                                logger.info(f"Executed tool {tool_call['name']} with result: {tool_result}")
+                            else:
+                                logger.warning(f"Invalid tool call format: {tool_call}")
+                    
+                    # Yield final complete response with metadata
+                    final_response_data = {
+                        "status": "success", 
+                        "message": message_content, 
+                        "complete": True
+                    }
+                    
+                    # Include metadata if available
+                    if "metadata" in chunk:
+                        final_response_data["metadata"] = chunk["metadata"]
+                    
+                    yield final_response_data
+                    state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
+                    
+                elif chunk.get("type") == "error":
+                    # Handle errors
+                    yield chunk
+                    return
 
             # Force cleanup of tasks before returning final result
             if 'learning_processor' in state:
                 await state['learning_processor'].cleanup()
-                
-            yield {"status": "success", "message": message_content}
-            state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
 
             if tool_results:
                 state["last_tool_results"] = tool_results
@@ -1354,4 +1381,293 @@ class LearningProcessor:
                 logger.error(f"Failed to enhance response for context: {str(e)}")
         
         return response
+
+    async def process_incoming_message_streaming(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
+        """Streaming version of process_incoming_message that yields chunks as they come."""
+        logger.info(f"Processing streaming message from user {user_id}")
+        try:
+            if not message.strip():
+                logger.error("Empty message")
+                yield {"status": "error", "message": "Empty message provided", "complete": True}
+                return
+            
+            # Step 1: Get suggested knowledge queries from previous responses
+            suggested_queries = []
+            if conversation_context:
+                ai_messages = re.findall(r'AI: (.*?)(?:\n\n|$)', conversation_context, re.DOTALL)
+                if ai_messages:
+                    last_ai_message = ai_messages[-1]
+                    query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', last_ai_message, re.DOTALL)
+                    if query_section:
+                        try:
+                            queries_data = json.loads(query_section.group(1).strip())
+                            suggested_queries = queries_data if isinstance(queries_data, list) else queries_data.get("queries", [])
+                            logger.info(f"Extracted {len(suggested_queries)} suggested knowledge queries")
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse query section as JSON")
+
+            # Step 2: Search for relevant knowledge
+            logger.info(f"Searching for knowledge based on message...")
+            analysis_knowledge = await self.support.search_knowledge(message, conversation_context, user_id, thread_id)
+            
+            # Step 3: Enrich with suggested queries if we don't have sufficient results
+            if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
+                logger.info(f"Searching for additional knowledge using {len(suggested_queries)} suggested queries")
+                primary_similarity = analysis_knowledge.get("similarity", 0.0)
+                primary_knowledge = analysis_knowledge.get("knowledge_context", "")
+                primary_queries = analysis_knowledge.get("queries", [])
+                primary_query_results = analysis_knowledge.get("query_results", [])
+                
+                for query in suggested_queries:
+                    if query not in primary_queries:  # Avoid duplicate queries
+                        query_knowledge = await self.support.search_knowledge(query, conversation_context, user_id, thread_id)
+                        query_similarity = query_knowledge.get("similarity", 0.0)
+                        query_results = query_knowledge.get("query_results", [])
+                        
+                        logger.info(f"Suggested query '{query}' yielded similarity score: {query_similarity}")
+                        
+                        # Add the new query and its results to our collection
+                        if query_results:
+                            primary_queries.append(query)
+                            primary_query_results.extend(query_results)
+                            logger.info(f"Added results from suggested query '{query}'")
+                
+                # Update analysis_knowledge with enriched data
+                if len(primary_query_results) > len(analysis_knowledge.get("query_results", [])):
+                    analysis_knowledge["queries"] = primary_queries
+                    analysis_knowledge["query_results"] = primary_query_results
+                    logger.info(f"Updated knowledge with {len(primary_query_results)} total query results")
+            
+            # Step 4: Log similarity score
+            similarity = analysis_knowledge.get("similarity", 0.0)
+            
+            # Step 5: Generate streaming response
+            prior_data = analysis_knowledge.get("prior_data", {})
+            
+            # Stream the response as it comes from LLM
+            final_response = None
+            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data):
+                if chunk.get("type") == "response_chunk":
+                    # Yield streaming chunks immediately
+                    yield chunk
+                elif chunk.get("type") == "response_complete":
+                    # Store final response for post-processing
+                    final_response = chunk
+                    yield chunk
+                elif chunk.get("type") == "error":
+                    yield chunk
+                    return
+            
+            # Step 6: Enhanced knowledge saving with similarity gating (after streaming is complete)
+            if final_response and final_response.get("status") == "success":
+                # Get teaching intent and priority topic info from LLM evaluation
+                metadata = final_response.get("metadata", {})
+                has_teaching_intent = metadata.get("has_teaching_intent", False)
+                is_priority_topic = metadata.get("is_priority_topic", False)
+                should_save_knowledge = metadata.get("should_save_knowledge", False)
+                priority_topic_name = metadata.get("priority_topic_name", "")
+                intent_type = metadata.get("intent_type", "unknown")
+                
+                # Get similarity score from analysis
+                similarity_score = analysis_knowledge.get("similarity", 0.0) if analysis_knowledge else 0.0
+                
+                # Use new similarity-based gating system
+                save_decision = await self.should_save_knowledge_with_similarity_gate(final_response, similarity_score, message)
+                
+                logger.info(f"Knowledge saving decision: {save_decision}")
+                logger.info(f"LLM evaluation: intent={intent_type}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}, similarity={similarity_score:.2f}")
+                
+                # Only save knowledge when similarity-based gating approves
+                if save_decision.get("should_save", False):
+                    # Run knowledge saving in background to not block the response
+                    self._create_background_task(
+                        self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name)
+                    )
+
+        except Exception as e:
+            logger.error(f"Error processing streaming message: {str(e)}")
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            yield {"status": "error", "message": f"Error: {str(e)}", "complete": True}
+
+    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None) -> AsyncGenerator[Union[str, Dict], None]:
+        """Streaming version of active learning method that yields chunks as they come from LLM."""
+        logger.info("Starting streaming active learning approach")
+        
+        try:
+            # Step 1: Setup and validation
+            temporal_context = self.support.setup_temporal_context()
+            message_str = self.support.validate_and_normalize_message(message)
+            
+            # Step 2: Extract and organize data
+            analysis_data = self.support.extract_analysis_data(analysis_knowledge)
+            prior_data_extracted = self.support.extract_prior_data(prior_data)
+            prior_messages = self.support.extract_prior_messages(conversation_context)
+            
+            knowledge_context = analysis_data["knowledge_context"]
+            similarity_score = analysis_data["similarity_score"]
+            queries = analysis_data["queries"]
+            query_results = analysis_data["query_results"]
+            prior_topic = prior_data_extracted["prior_topic"]
+            prior_knowledge = prior_data_extracted["prior_knowledge"]
+            
+            logger.info(f"Using similarity score: {similarity_score}")
+            
+            # Step 3: Detect conversation flow and message characteristics
+            flow_result = await self.support.detect_conversation_flow(
+                message=message_str,
+                prior_messages=prior_messages,
+                conversation_context=conversation_context
+            )
+            
+            flow_type = flow_result.get("flow_type", "NEW_TOPIC")
+            flow_confidence = flow_result.get("confidence", 0.5)
+            logger.info(f"Active learning conversation flow: {flow_type} (confidence: {flow_confidence})")
+            
+            message_characteristics = self.support.detect_message_characteristics(message_str)
+            knowledge_relevance = self.support.check_knowledge_relevance(analysis_knowledge)
+            
+            # Step 4: Determine response strategy
+            knowledge_response_sections = []
+            strategy_result = self.support.determine_response_strategy(
+                flow_type=flow_type,
+                flow_confidence=flow_confidence,
+                message_characteristics=message_characteristics,
+                knowledge_relevance=knowledge_relevance,
+                similarity_score=similarity_score,
+                prior_knowledge=prior_knowledge,
+                queries=queries,
+                query_results=query_results,
+                knowledge_response_sections=knowledge_response_sections
+            )
+            
+            response_strategy = strategy_result["strategy"]
+            strategy_instructions = strategy_result["instructions"]
+            
+            # Update knowledge context and similarity score from strategy
+            if "knowledge_context" in strategy_result and strategy_result["knowledge_context"]:
+                knowledge_context = strategy_result["knowledge_context"]
+            if "similarity_score" in strategy_result:
+                similarity_score = strategy_result["similarity_score"]
+            
+            # Handle fallback knowledge sections if needed
+            if not knowledge_context and queries and query_results:
+                fallback_context = self.support.build_knowledge_fallback_sections(queries, query_results)
+                if fallback_context:
+                    knowledge_context = fallback_context
+            
+            logger.info(f"Knowledge context: {knowledge_context}")
+            
+            # Step 5: Build LLM prompt
+            prompt = self.support.build_llm_prompt(
+                message_str=message_str,
+                conversation_context=conversation_context,
+                temporal_context=temporal_context,
+                knowledge_context=knowledge_context,
+                response_strategy=response_strategy,
+                strategy_instructions=strategy_instructions,
+                core_prior_topic=prior_topic,
+                user_id=user_id
+            )
+            
+            # Step 6: Stream LLM response and process it
+            from langchain_openai import ChatOpenAI
+            StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True, temperature=0.01)
+            
+            content_buffer = ""
+            evaluation_started = False
+            logger.info("Starting LLM streaming response")
+            
+            async for chunk in StreamLLM.astream(prompt):
+                chunk_content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                if chunk_content:
+                    content_buffer += chunk_content
+                    
+                    # Check if we're entering an evaluation section
+                    if '<evaluation>' in content_buffer and not evaluation_started:
+                        evaluation_started = True
+                        # Extract content before evaluation and yield it
+                        pre_evaluation = content_buffer.split('<evaluation>')[0]
+                        remaining_content = pre_evaluation[len(content_buffer) - len(chunk_content):]
+                        if remaining_content:
+                            yield {
+                                "type": "response_chunk",
+                                "content": remaining_content,
+                                "complete": False
+                            }
+                        continue
+                    
+                    # Skip chunks if we're in evaluation section
+                    if evaluation_started and '</evaluation>' not in content_buffer:
+                        continue
+                    
+                    # If evaluation section ended, reset flag and continue
+                    if evaluation_started and '</evaluation>' in content_buffer:
+                        evaluation_started = False
+                        continue
+                    
+                    # Only yield chunks if we're not in evaluation section
+                    if not evaluation_started:
+                        yield {
+                            "type": "response_chunk",
+                            "content": chunk_content,
+                            "complete": False
+                        }
+            
+            logger.info(f"LLM streaming completed, total content length: {len(content_buffer)}")
+            
+            # Step 7: Process the complete response
+            content = content_buffer.strip()
+            
+            # Extract structured sections and metadata
+            structured_sections = self.support.extract_structured_sections(content)
+            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content)
+            
+            # Step 8: Handle teaching intent regeneration if needed
+            if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
+                content, response_strategy = await self._handle_teaching_intent_regeneration(
+                    message_str, content, response_strategy
+                )
+            
+            # Step 9: Extract user-facing content
+            user_facing_content = self._extract_user_facing_content(content, response_strategy, structured_sections)
+            
+            # Step 10: Handle empty response fallbacks
+            user_facing_content = self.support.handle_empty_response_fallbacks(
+                user_facing_content, response_strategy, message_str
+            )
+            
+            # Step 11: Yield final complete response with metadata
+            yield {
+                "type": "response_complete",
+                "status": "success",
+                "message": user_facing_content,
+                "complete": True,
+                "metadata": {
+                    "timestamp": datetime.now().isoformat(),
+                    "user_id": user_id,
+                    "additional_knowledge_found": bool(knowledge_context),
+                    "similarity_score": similarity_score,
+                    "response_strategy": response_strategy,
+                    "core_prior_topic": prior_topic,
+                    "tool_calls": tool_calls,
+                    "has_teaching_intent": evaluation.get("has_teaching_intent", False),
+                    "is_priority_topic": evaluation.get("is_priority_topic", False),
+                    "priority_topic_name": evaluation.get("priority_topic_name", ""),
+                    "should_save_knowledge": evaluation.get("should_save_knowledge", False),
+                    "full_structured_response": content
+                }
+            }
+            
+        except ValueError as e:
+            logger.error(f"Validation error in streaming active learning: {str(e)}")
+            yield {"type": "error", "status": "error", "message": "Empty message provided", "complete": True}
+        except Exception as e:
+            logger.error(f"Error in streaming active learning: {str(e)}")
+            yield {
+                "type": "error",
+                "status": "error", 
+                "message": "Tôi xin lỗi, nhưng tôi gặp lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại.",
+                "complete": True
+            }
 

@@ -350,13 +350,26 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
         learning_processor = LearningProcessor()
         await learning_processor.initialize()
         
-        # Process the message using the learning processor
-        response = await learning_processor.process_incoming_message(
+        # Process the message using the streaming learning processor
+        final_response = None
+        async for chunk in learning_processor.process_incoming_message_streaming(
             user_input,
             conversation_context="",  # Initialize with empty context
             user_id=user_id,
             thread_id=thread_id
-        )
+        ):
+            if chunk.get("type") == "response_chunk":
+                # Stream chunks immediately
+                yield f"data: {json.dumps({'status': 'streaming', 'content': chunk['content'], 'complete': False})}\n\n"
+            elif chunk.get("type") == "response_complete":
+                # Store final response for post-processing
+                final_response = chunk
+            elif chunk.get("type") == "error":
+                yield f"data: {json.dumps(chunk)}\n\n"
+                return
+        
+        # Use final_response for tool execution and final output
+        response = final_response
         
         # Execute any tool calls found in the response
         if isinstance(response, dict) and "metadata" in response and "tool_calls" in response["metadata"]:

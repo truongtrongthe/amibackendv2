@@ -106,35 +106,11 @@ class LearningSupport:
                 similarity = 0.0
                 knowledge_context = ""
 
-            temp_response = await self.active_learning(primary_query, conversation_context, {}, user_id, {})
-            if "message" in temp_response:
-                query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
-                if query_section:
-                    try:
-                        llm_queries = json.loads(query_section.group(1).strip())
-                        valid_llm_queries = [
-                            q for q in llm_queries 
-                            if q not in queries and len(q.strip()) > 5 and 
-                            not any(vague in q.lower() for vague in ["core topic", "chủ đề chính", "cuộc sống"])
-                        ]
-                        queries.extend(valid_llm_queries)
-                        logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries")
-                    except json.JSONDecodeError:
-                        logger.warning("Failed to parse LLM queries, retrying once")
-                        temp_response = await self.active_learning(primary_query, conversation_context, {}, user_id, {})
-                        query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', temp_response["message"], re.DOTALL)
-                        if query_section:
-                            try:
-                                llm_queries = json.loads(query_section.group(1).strip())
-                                valid_llm_queries = [
-                                    q for q in llm_queries 
-                                    if q not in queries and len(q.strip()) > 5 and 
-                                    not any(vague in q.lower() for vague in ["core topic", "chủ đề chính", "cuộc sống"])
-                                ]
-                                queries.extend(valid_llm_queries)
-                                logger.info(f"Added {len(valid_llm_queries)} LLM-generated queries on retry")
-                            except json.JSONDecodeError:
-                                logger.error("Failed to parse LLM queries after retry")
+            # Use fast rule-based query generation instead of expensive LLM call
+            fast_queries = await self.generate_knowledge_queries_fast(primary_query, conversation_context, user_id)
+            for query in fast_queries:
+                if query not in queries:
+                    queries.append(query)
             logger.info(f"Queries: {queries}")
             queries = list(dict.fromkeys(queries))
             queries = [q for q in queries if len(q.strip()) > 5]
@@ -1865,3 +1841,62 @@ class LearningSupport:
             logger.info(f"Added default response for empty LLM response to short/unclear query: '{message_str}'")
         
         return user_facing_content 
+
+    async def generate_knowledge_queries_fast(self, primary_query: str, conversation_context: str, user_id: str) -> List[str]:
+        """
+        Fast rule-based query generation without expensive LLM calls.
+        This replaces the slow active_learning call for query generation.
+        """
+        queries = [primary_query]
+        
+        # Extract key terms from the query
+        query_lower = primary_query.lower()
+        
+        # Rule-based query expansion based on common patterns
+        if any(term in query_lower for term in ["mục tiêu", "goals", "objective"]):
+            queries.extend([
+                "mục tiêu hỗ trợ khách hàng",
+                "chiến lược tư vấn",
+                "phương pháp tiếp cận khách hàng"
+            ])
+        
+        if any(term in query_lower for term in ["phân nhóm", "segmentation", "nhóm khách hàng"]):
+            queries.extend([
+                "phân nhóm khách hàng",
+                "phân tích chân dung khách hàng",
+                "customer segmentation"
+            ])
+        
+        if any(term in query_lower for term in ["tư vấn", "consultation", "hỗ trợ"]):
+            queries.extend([
+                "phương pháp tư vấn",
+                "kỹ thuật giao tiếp",
+                "xây dựng mối quan hệ"
+            ])
+        
+        if any(term in query_lower for term in ["giao tiếp", "communication", "nói chuyện"]):
+            queries.extend([
+                "kỹ thuật giao tiếp",
+                "cách nói chuyện hiệu quả",
+                "xây dựng rapport"
+            ])
+        
+        # Add context-based queries from conversation
+        if conversation_context:
+            # Extract recent topics from conversation
+            recent_topics = re.findall(r'User: ([^?]*(?:\?|$))', conversation_context)
+            if recent_topics:
+                last_topic = recent_topics[-1].strip()
+                if len(last_topic) > 10 and last_topic not in queries:
+                    queries.append(last_topic)
+        
+        # Remove duplicates while preserving order
+        unique_queries = []
+        seen = set()
+        for query in queries:
+            if query not in seen and len(query.strip()) > 5:
+                unique_queries.append(query)
+                seen.add(query)
+        
+        logger.info(f"Fast query generation: {len(unique_queries)} queries from '{primary_query[:50]}...'")
+        return unique_queries[:5]  # Limit to 5 queries max
