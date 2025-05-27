@@ -462,9 +462,22 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
             # Prepare response with vector IDs if available
             response_data = {"message": message_content}
             
-            # Extract vector IDs from metadata if present
+            # Extract ALL metadata if present and include in response
             if "metadata" in response:
                 metadata = response["metadata"]
+                
+                # Include ALL metadata fields for frontend
+                response_data.update({
+                    "has_teaching_intent": metadata.get("has_teaching_intent", False),
+                    "response_strategy": metadata.get("response_strategy", "UNKNOWN"),
+                    "is_priority_topic": metadata.get("is_priority_topic", False),
+                    "priority_topic_name": metadata.get("priority_topic_name", ""),
+                    "should_save_knowledge": metadata.get("should_save_knowledge", False),
+                    "similarity_score": metadata.get("similarity_score", 0.0),
+                    "additional_knowledge_found": metadata.get("additional_knowledge_found", False),
+                    "timestamp": metadata.get("timestamp", ""),
+                    "user_id": metadata.get("user_id", "")
+                })
                 
                 # Add vector IDs to response if they exist
                 if "combined_knowledge_vector_id" in metadata:
@@ -475,12 +488,7 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                     response_data["synthesis_vector_id"] = metadata["synthesis_vector_id"]
                     logger.info(f"Including synthesis_vector_id in response: {metadata['synthesis_vector_id']}")
                 
-                # Also include other useful metadata
-                if "has_teaching_intent" in metadata:
-                    response_data["has_teaching_intent"] = metadata["has_teaching_intent"]
-                    
-                if "response_strategy" in metadata:
-                    response_data["response_strategy"] = metadata["response_strategy"]
+                logger.info(f"Sending complete metadata to frontend: has_teaching_intent={metadata.get('has_teaching_intent')}, response_strategy={metadata.get('response_strategy')}")
             
             yield f"data: {json.dumps(response_data)}\n\n"
         else:

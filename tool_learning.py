@@ -1289,7 +1289,17 @@ class LearningProcessor:
                 "needs_review": True
             }
         
-        # Case 5: Low similarity - never save, encourage more context
+        # Case 5: Low similarity with teaching intent and substantial content - new knowledge
+        if similarity_score < MEDIUM_SIMILARITY_THRESHOLD and has_teaching_intent and len(message.split()) > 15:
+            logger.info(f"✅ Low similarity ({similarity_score:.2f}) + teaching intent + substantial content - saving as new knowledge")
+            return {
+                "should_save": True,
+                "reason": "new_knowledge_teaching",
+                "confidence": "medium",
+                "is_new_knowledge": True
+            }
+        
+        # Case 6: Low similarity - never save, encourage more context
         if similarity_score < MEDIUM_SIMILARITY_THRESHOLD:
             logger.info(f"❌ Low similarity ({similarity_score:.2f}) - not saving, encouraging context")
             return {
@@ -1477,8 +1487,17 @@ class LearningProcessor:
                 logger.info(f"Knowledge saving decision: {save_decision}")
                 logger.info(f"LLM evaluation: intent={intent_type}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}, similarity={similarity_score:.2f}")
                 
-                # Only save knowledge when similarity-based gating approves
+                # Update metadata based on similarity gating decision
                 if save_decision.get("should_save", False):
+                    # Override metadata to reflect actual teaching intent decision
+                    final_response["metadata"]["has_teaching_intent"] = True
+                    final_response["metadata"]["should_save_knowledge"] = True
+                    final_response["metadata"]["response_strategy"] = "TEACHING_INTENT"
+                    final_response["metadata"]["similarity_gating_reason"] = save_decision.get("reason", "")
+                    final_response["metadata"]["similarity_gating_confidence"] = save_decision.get("confidence", "")
+                    
+                    logger.info(f"Updated metadata: has_teaching_intent=True, response_strategy=TEACHING_INTENT based on similarity gating")
+                    
                     # Run knowledge saving in background to not block the response
                     self._create_background_task(
                         self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name)
