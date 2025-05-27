@@ -63,12 +63,12 @@ class LearningProcessor:
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse query section as JSON")
 
-            # Step 2: Search for relevant knowledge
-            logger.info(f"Searching for knowledge based on message...")
-            analysis_knowledge = await self.support.search_knowledge(message, conversation_context, user_id, thread_id)
+            # Step 2: Search for relevant knowledge using iterative exploration
+            logger.info(f"Searching for knowledge based on message using iterative exploration...")
+            analysis_knowledge = await self._iterative_knowledge_exploration(message, conversation_context, user_id, thread_id)
             
-            # Step 3: Enrich with suggested queries if we don't have sufficient results
-            if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
+            # Step 3: Enrich with suggested queries if iterative exploration didn't achieve high similarity
+            if suggested_queries and analysis_knowledge.get("similarity", 0.0) < 0.70:
                 logger.info(f"Searching for additional knowledge using {len(suggested_queries)} suggested queries")
                 primary_similarity = analysis_knowledge.get("similarity", 0.0)
                 primary_knowledge = analysis_knowledge.get("knowledge_context", "")
@@ -1416,9 +1416,9 @@ class LearningProcessor:
                         except json.JSONDecodeError:
                             logger.warning("Failed to parse query section as JSON")
 
-            # Step 2: Search for relevant knowledge
-            logger.info(f"Searching for knowledge based on message...")
-            analysis_knowledge = await self.support.search_knowledge(message, conversation_context, user_id, thread_id)
+            # Step 2: Search for relevant knowledge using iterative exploration
+            logger.info(f"Searching for knowledge based on message using iterative exploration...")
+            analysis_knowledge = await self._iterative_knowledge_exploration(message, conversation_context, user_id, thread_id)
             
             # Step 3: Enrich with suggested queries if we don't have sufficient results
             if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
@@ -1489,19 +1489,31 @@ class LearningProcessor:
                 
                 # Update metadata based on similarity gating decision
                 if save_decision.get("should_save", False):
-                    # Override metadata to reflect actual teaching intent decision
-                    final_response["metadata"]["has_teaching_intent"] = True
+                    # Only update knowledge saving flags, NOT intent classification
                     final_response["metadata"]["should_save_knowledge"] = True
-                    final_response["metadata"]["response_strategy"] = "TEACHING_INTENT"
                     final_response["metadata"]["similarity_gating_reason"] = save_decision.get("reason", "")
                     final_response["metadata"]["similarity_gating_confidence"] = save_decision.get("confidence", "")
                     
-                    logger.info(f"Updated metadata: has_teaching_intent=True, response_strategy=TEACHING_INTENT based on similarity gating")
+                    # Only override teaching intent if LLM actually detected teaching intent
+                    # Don't force teaching intent just because of high similarity
+                    original_teaching_intent = final_response["metadata"].get("has_teaching_intent", False)
+                    if original_teaching_intent:
+                        final_response["metadata"]["response_strategy"] = "TEACHING_INTENT"
+                        logger.info(f"Confirmed teaching intent with similarity gating - will save knowledge")
+                    else:
+                        logger.info(f"High similarity ({similarity_score:.2f}) - saving knowledge but preserving original intent classification")
                     
                     # Run knowledge saving in background to not block the response
-                    self._create_background_task(
-                        self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name)
-                    )
+                    if original_teaching_intent:
+                        # Handle as teaching intent
+                        self._create_background_task(
+                            self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name)
+                        )
+                    else:
+                        # Save as regular high-quality conversation without teaching intent processing
+                        self._create_background_task(
+                            self._save_high_quality_conversation(message, final_response, user_id, thread_id)
+                        )
 
         except Exception as e:
             logger.error(f"Error processing streaming message: {str(e)}")
@@ -1689,4 +1701,463 @@ class LearningProcessor:
                 "message": "Tôi xin lỗi, nhưng tôi gặp lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại.",
                 "complete": True
             }
+
+    async def _iterative_knowledge_exploration(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None, max_rounds: int = 3) -> Dict[str, Any]:
+        """
+        Perform iterative knowledge exploration to achieve higher similarity scores.
+        
+        This method addresses the multi-round discovery problem by:
+        1. Starting with initial queries
+        2. Using partial results to generate refined queries
+        3. Exploring semantic neighborhoods
+        4. Synthesizing multi-round findings
+        
+        Args:
+            message: User's input message
+            conversation_context: Full conversation history
+            user_id: User identifier
+            thread_id: Thread identifier
+            max_rounds: Maximum exploration rounds (default: 3)
+            
+        Returns:
+            Dict containing best knowledge found across all rounds
+        """
+        logger.info(f"Starting iterative knowledge exploration for: '{message[:50]}...' (max_rounds: {max_rounds})")
+        
+        # Track all rounds
+        all_rounds_data = []
+        best_similarity = 0.0
+        best_knowledge_context = ""
+        best_query_results = []
+        best_queries = []
+        cumulative_knowledge_items = []
+        
+        # Round 1: Initial search (existing logic)
+        logger.info("🔍 Round 1: Initial knowledge search")
+        round1_result = await self.support.search_knowledge(message, conversation_context, user_id, thread_id)
+        
+        round1_similarity = round1_result.get("similarity", 0.0)
+        round1_context = round1_result.get("knowledge_context", "")
+        round1_queries = round1_result.get("queries", [])
+        round1_results = round1_result.get("query_results", [])
+        
+        all_rounds_data.append({
+            "round": 1,
+            "similarity": round1_similarity,
+            "queries": round1_queries,
+            "result_count": len(round1_results),
+            "strategy": "initial_search"
+        })
+        
+        # Update best results
+        if round1_similarity > best_similarity:
+            best_similarity = round1_similarity
+            best_knowledge_context = round1_context
+            best_query_results = round1_results
+            best_queries = round1_queries
+        
+        cumulative_knowledge_items.extend(round1_results)
+        logger.info(f"Round 1 complete: similarity={round1_similarity:.3f}, queries={len(round1_queries)}, results={len(round1_results)}")
+        
+        # Early exit if we already have high similarity
+        if round1_similarity >= 0.70:
+            logger.info(f"✅ Round 1 achieved high similarity ({round1_similarity:.3f}) - stopping early")
+            return self._build_exploration_result(best_similarity, best_knowledge_context, best_query_results, best_queries, all_rounds_data, cumulative_knowledge_items)
+        
+        # Round 2: Refined search based on partial results
+        if max_rounds >= 2 and round1_results:
+            logger.info("🔍 Round 2: Refined search based on partial results")
+            round2_queries = await self._generate_refined_queries(message, round1_results, round1_queries)
+            
+            if round2_queries:
+                round2_result = await self._execute_query_batch(round2_queries, user_id, thread_id)
+                round2_similarity = round2_result.get("similarity", 0.0)
+                round2_context = round2_result.get("knowledge_context", "")
+                round2_results = round2_result.get("query_results", [])
+                
+                all_rounds_data.append({
+                    "round": 2,
+                    "similarity": round2_similarity,
+                    "queries": round2_queries,
+                    "result_count": len(round2_results),
+                    "strategy": "refined_search"
+                })
+                
+                # Update best results if improved
+                if round2_similarity > best_similarity:
+                    best_similarity = round2_similarity
+                    best_knowledge_context = round2_context
+                    best_query_results = round2_results
+                    best_queries = round2_queries
+                
+                cumulative_knowledge_items.extend(round2_results)
+                logger.info(f"Round 2 complete: similarity={round2_similarity:.3f}, queries={len(round2_queries)}, results={len(round2_results)}")
+                
+                # Early exit if we achieved high similarity
+                if round2_similarity >= 0.70:
+                    logger.info(f"✅ Round 2 achieved high similarity ({round2_similarity:.3f}) - stopping early")
+                    return self._build_exploration_result(best_similarity, best_knowledge_context, best_query_results, best_queries, all_rounds_data, cumulative_knowledge_items)
+        
+        # Round 3: Semantic neighborhood exploration
+        if max_rounds >= 3 and best_similarity < 0.70:
+            logger.info("🔍 Round 3: Semantic neighborhood exploration")
+            round3_queries = await self._generate_semantic_queries(message, cumulative_knowledge_items, best_queries)
+            
+            if round3_queries:
+                round3_result = await self._execute_query_batch(round3_queries, user_id, thread_id)
+                round3_similarity = round3_result.get("similarity", 0.0)
+                round3_context = round3_result.get("knowledge_context", "")
+                round3_results = round3_result.get("query_results", [])
+                
+                all_rounds_data.append({
+                    "round": 3,
+                    "similarity": round3_similarity,
+                    "queries": round3_queries,
+                    "result_count": len(round3_results),
+                    "strategy": "semantic_exploration"
+                })
+                
+                # Update best results if improved
+                if round3_similarity > best_similarity:
+                    best_similarity = round3_similarity
+                    best_knowledge_context = round3_context
+                    best_query_results = round3_results
+                    best_queries = round3_queries
+                
+                cumulative_knowledge_items.extend(round3_results)
+                logger.info(f"Round 3 complete: similarity={round3_similarity:.3f}, queries={len(round3_queries)}, results={len(round3_results)}")
+        
+        # Final synthesis: Combine insights from all rounds
+        if len(all_rounds_data) > 1:
+            logger.info("🔍 Final synthesis: Combining insights from all rounds")
+            final_result = await self._synthesize_multi_round_knowledge(message, cumulative_knowledge_items, all_rounds_data, best_queries)
+            
+            final_similarity = final_result.get("similarity", best_similarity)
+            final_context = final_result.get("knowledge_context", best_knowledge_context)
+            final_results = final_result.get("query_results", best_query_results)
+            
+            # Use final synthesis if it's better
+            if final_similarity > best_similarity:
+                best_similarity = final_similarity
+                best_knowledge_context = final_context
+                best_query_results = final_results
+                logger.info(f"Final synthesis improved similarity: {best_similarity:.3f}")
+        
+        logger.info(f"🎯 Iterative exploration complete: best_similarity={best_similarity:.3f} across {len(all_rounds_data)} rounds")
+        return self._build_exploration_result(best_similarity, best_knowledge_context, best_query_results, best_queries, all_rounds_data, cumulative_knowledge_items)
+
+    async def _generate_refined_queries(self, original_message: str, partial_results: List[Dict], original_queries: List[str]) -> List[str]:
+        """Generate refined queries based on partial search results."""
+        if not partial_results:
+            return []
+        
+        # Extract key concepts from partial results
+        result_snippets = []
+        for result in partial_results[:5]:  # Use top 5 results
+            content = result.get("raw", "")
+            if content:
+                # Extract first 100 characters as snippet
+                snippet = content[:100].replace("\n", " ").strip()
+                result_snippets.append(snippet)
+        
+        combined_snippets = " | ".join(result_snippets)
+        
+        refinement_prompt = f"""Based on the user's message and partial search results, generate 3-5 refined search queries that could find more relevant knowledge.
+
+            User message: {original_message}
+
+            Partial results found: {combined_snippets}
+
+            Original queries used: {original_queries}
+
+            Generate refined queries that:
+            1. Explore related concepts mentioned in the partial results
+            2. Use different terminology or synonyms
+            3. Focus on specific aspects that might yield higher similarity
+            4. Avoid repeating the original queries
+
+            Return only a JSON array of strings: ["query1", "query2", "query3"]
+            """
+        
+        try:
+            response = await LLM.ainvoke(refinement_prompt)
+            refined_queries = json.loads(response.content.strip())
+            
+            # Filter out duplicates and original queries
+            unique_queries = []
+            for query in refined_queries:
+                if isinstance(query, str) and len(query.strip()) > 5:
+                    query_clean = query.strip()
+                    if query_clean not in original_queries and query_clean not in unique_queries:
+                        unique_queries.append(query_clean)
+            
+            logger.info(f"Generated {len(unique_queries)} refined queries from {len(partial_results)} partial results")
+            return unique_queries[:5]  # Limit to 5 queries
+            
+        except Exception as e:
+            logger.error(f"Failed to generate refined queries: {str(e)}")
+            return []
+
+    async def _generate_semantic_queries(self, original_message: str, all_knowledge_items: List[Dict], all_queries: List[str]) -> List[str]:
+        """Generate semantic neighborhood queries to explore related concepts."""
+        if not all_knowledge_items:
+            return []
+        
+        # Extract key themes from all knowledge found so far
+        knowledge_themes = []
+        for item in all_knowledge_items[:10]:  # Use top 10 items
+            content = item.get("raw", "")
+            if content:
+                # Extract key phrases (simple approach)
+                words = content.lower().split()
+                # Look for potential key terms (longer words, capitalized terms)
+                key_terms = [word for word in words if len(word) > 6 and word.isalpha()]
+                knowledge_themes.extend(key_terms[:3])  # Take first 3 from each
+        
+        # Remove duplicates and get most common themes
+        unique_themes = list(set(knowledge_themes))[:10]
+        
+        semantic_prompt = f"""Based on the user's message and discovered knowledge themes, generate 3-5 semantic neighborhood queries to explore related concepts.
+
+        User message: {original_message}
+
+        Discovered themes: {unique_themes}
+
+        Previous queries: {all_queries}
+
+        Generate semantic queries that:
+        1. Explore broader categories or frameworks
+        2. Look for related methodologies or approaches  
+        3. Search for contextual applications
+        4. Find complementary or alternative concepts
+        5. Avoid repeating previous queries
+
+        Return only a JSON array of strings: ["query1", "query2", "query3"]
+        """
+        
+        try:
+            response = await LLM.ainvoke(semantic_prompt)
+            semantic_queries = json.loads(response.content.strip())
+            
+            # Filter out duplicates
+            unique_queries = []
+            for query in semantic_queries:
+                if isinstance(query, str) and len(query.strip()) > 5:
+                    query_clean = query.strip()
+                    if query_clean not in all_queries and query_clean not in unique_queries:
+                        unique_queries.append(query_clean)
+            
+            logger.info(f"Generated {len(unique_queries)} semantic queries from {len(unique_themes)} themes")
+            return unique_queries[:5]  # Limit to 5 queries
+            
+        except Exception as e:
+            logger.error(f"Failed to generate semantic queries: {str(e)}")
+            return []
+
+    async def _execute_query_batch(self, queries: List[str], user_id: str, thread_id: Optional[str]) -> Dict[str, Any]:
+        """Execute a batch of queries and return consolidated results."""
+        if not queries:
+            return {"similarity": 0.0, "knowledge_context": "", "query_results": []}
+        
+        logger.info(f"Executing batch of {len(queries)} queries")
+        
+        # Execute all queries in parallel
+        results_list = await asyncio.gather(
+            *(query_knowledge_from_graph(
+                query=query,
+                graph_version_id=self.graph_version_id,
+                user_id=user_id,
+                thread_id=None,
+                topic=None,
+                top_k=50,  # Reduced from 100 for efficiency
+                min_similarity=0.2,
+                exclude_categories=["ai_synthesis"]
+            ) for query in queries),
+            return_exceptions=True
+        )
+        
+        # Consolidate results
+        all_results = []
+        best_similarity = 0.0
+        
+        for query, results in zip(queries, results_list):
+            if isinstance(results, Exception):
+                logger.warning(f"Query '{query[:30]}...' failed: {str(results)}")
+                continue
+            if not results:
+                continue
+                
+            for result_item in results:
+                result_item["query"] = query
+                all_results.append(result_item)
+                
+                # Track best similarity
+                similarity = result_item.get("score", 0.0)
+                if similarity > best_similarity:
+                    best_similarity = similarity
+        
+        # Build knowledge context from top results
+        if all_results:
+            # Sort by similarity and take top results
+            sorted_results = sorted(all_results, key=lambda x: x.get("score", 0.0), reverse=True)
+            top_results = sorted_results[:20]  # Top 20 results
+            
+            knowledge_sections = ["KNOWLEDGE RESULTS:"]
+            for i, result in enumerate(top_results, 1):
+                query = result.get("query", "unknown")
+                score = result.get("score", 0.0)
+                content = result.get("raw", "")
+                
+                # Clean content
+                if content.startswith("AI: "):
+                    content = content[4:]
+                elif content.startswith("AI Synthesis: "):
+                    content = content[14:]
+                
+                knowledge_sections.append(f"[{i}] Query: '{query}' (score: {score:.2f})\n{content}")
+            
+            knowledge_context = "\n\n".join(knowledge_sections)
+        else:
+            knowledge_context = ""
+        
+        return {
+            "similarity": best_similarity,
+            "knowledge_context": knowledge_context,
+            "query_results": all_results,
+            "queries": queries
+        }
+
+    async def _synthesize_multi_round_knowledge(self, original_message: str, all_knowledge_items: List[Dict], rounds_data: List[Dict], all_queries: List[str]) -> Dict[str, Any]:
+        """Synthesize knowledge from multiple exploration rounds."""
+        if not all_knowledge_items:
+            return {"similarity": 0.0, "knowledge_context": "", "query_results": []}
+        
+        logger.info(f"Synthesizing knowledge from {len(all_knowledge_items)} items across {len(rounds_data)} rounds")
+        
+        # Remove duplicates based on content similarity
+        unique_items = []
+        seen_content = set()
+        
+        for item in all_knowledge_items:
+            content = item.get("raw", "")
+            content_hash = hash(content[:100])  # Use first 100 chars as fingerprint
+            
+            if content_hash not in seen_content:
+                seen_content.add(content_hash)
+                unique_items.append(item)
+        
+        logger.info(f"Deduplicated to {len(unique_items)} unique knowledge items")
+        
+        # Sort by similarity and take best items
+        sorted_items = sorted(unique_items, key=lambda x: x.get("score", 0.0), reverse=True)
+        best_items = sorted_items[:30]  # Top 30 unique items
+        
+        # Calculate synthesized similarity (weighted average with boost for diversity)
+        if best_items:
+            # Base similarity from top item
+            base_similarity = best_items[0].get("score", 0.0)
+            
+            # Diversity bonus: more rounds and unique results = higher confidence
+            diversity_bonus = min(0.15, len(rounds_data) * 0.05)  # Up to 15% bonus
+            coverage_bonus = min(0.10, len(best_items) * 0.003)   # Up to 10% bonus
+            
+            synthesized_similarity = min(1.0, base_similarity + diversity_bonus + coverage_bonus)
+            
+            logger.info(f"Synthesized similarity: {base_similarity:.3f} + {diversity_bonus:.3f} (diversity) + {coverage_bonus:.3f} (coverage) = {synthesized_similarity:.3f}")
+        else:
+            synthesized_similarity = 0.0
+        
+        # Build synthesized knowledge context
+        if best_items:
+            knowledge_sections = ["SYNTHESIZED KNOWLEDGE (Multi-round exploration):"]
+            
+            for i, item in enumerate(best_items, 1):
+                query = item.get("query", "unknown")
+                score = item.get("score", 0.0)
+                content = item.get("raw", "")
+                
+                # Clean content
+                if content.startswith("AI: "):
+                    content = content[4:]
+                elif content.startswith("AI Synthesis: "):
+                    content = content[14:]
+                
+                knowledge_sections.append(f"[{i}] Query: '{query}' (score: {score:.2f})\n{content}")
+            
+            # Add exploration summary
+            rounds_summary = []
+            for round_data in rounds_data:
+                rounds_summary.append(f"Round {round_data['round']} ({round_data['strategy']}): {round_data['similarity']:.3f} similarity, {round_data['result_count']} results")
+            
+            knowledge_sections.append(f"\nExploration Summary:\n" + "\n".join(rounds_summary))
+            
+            knowledge_context = "\n\n".join(knowledge_sections)
+        else:
+            knowledge_context = ""
+        
+        return {
+            "similarity": synthesized_similarity,
+            "knowledge_context": knowledge_context,
+            "query_results": best_items,
+            "synthesis_metadata": {
+                "rounds_count": len(rounds_data),
+                "total_items": len(all_knowledge_items),
+                "unique_items": len(unique_items),
+                "final_items": len(best_items)
+            }
+        }
+
+    def _build_exploration_result(self, similarity: float, knowledge_context: str, query_results: List[Dict], queries: List[str], rounds_data: List[Dict], all_items: List[Dict]) -> Dict[str, Any]:
+        """Build the final exploration result."""
+        return {
+            "knowledge_context": knowledge_context,
+            "similarity": similarity,
+            "query_count": len(queries),
+            "queries": queries,
+            "query_results": query_results,
+            "exploration_metadata": {
+                "rounds_completed": len(rounds_data),
+                "total_items_found": len(all_items),
+                "final_similarity": similarity,
+                "rounds_data": rounds_data,
+                "exploration_strategy": "iterative_multi_round"
+            },
+            "prior_data": {"topic": "", "knowledge": ""},
+            "metadata": {"similarity": similarity, "iterative_exploration": True}
+        }
+
+    async def _save_high_quality_conversation(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str]) -> None:
+        """Save high-quality conversation that doesn't have teaching intent but has high similarity."""
+        try:
+            logger.info("Saving high-quality conversation without teaching intent")
+            
+            # Extract response content
+            response_content = response.get("message", "")
+            similarity_score = response.get("metadata", {}).get("similarity_score", 0.0)
+            
+            # Create combined knowledge entry
+            combined_knowledge = f"User: {message}\n\nAI: {response_content}"
+            
+            # Determine categories
+            categories = ["general", "high_quality_conversation"]
+            
+            # Add similarity-based category
+            if similarity_score >= 0.70:
+                categories.append("high_similarity")
+            
+            # Save to knowledge base
+            await self._save_combined_knowledge(
+                combined_knowledge=combined_knowledge,
+                user_id=user_id,
+                bank_name="conversation",
+                thread_id=thread_id,
+                priority_topic_name="general_conversation",
+                categories=categories,
+                response=response
+            )
+            
+            logger.info(f"Successfully saved high-quality conversation (similarity: {similarity_score:.3f})")
+            
+        except Exception as e:
+            logger.error(f"Failed to save high-quality conversation: {str(e)}")
 
