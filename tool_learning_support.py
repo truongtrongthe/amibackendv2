@@ -1596,14 +1596,22 @@ class LearningSupport:
                         knowledge_context: str, response_strategy: str, strategy_instructions: str,
                         core_prior_topic: str, user_id: str) -> str:
         """Build the comprehensive LLM prompt."""
+        
+        # Generate dynamic conversational awareness based on actual conversation patterns
+        conversational_awareness = self._generate_dynamic_conversational_awareness(
+            message_str, conversation_context
+        )
+        
         return f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
 
-                **Identity Awareness**:
+                **Identity & Conversational Awareness**:
                 - Your name is "Ami" - acknowledge when users call you by name
                 - Notice when users refer to you as AI, assistant, bot, or similar terms
                 - Recognize context clues that indicate the user is speaking directly to you
                 - Maintain your identity consistently throughout the conversation
                 - Do not explicitly state "My name is Ami" unless directly asked
+                
+                {conversational_awareness}
 
                 **Input**:
                 - CURRENT MESSAGE: {message_str}
@@ -1795,15 +1803,27 @@ class LearningSupport:
                    ❌ "Em không hiểu..." → QUERY (expressing confusion)
                    
                    **🎯 DETECTION STRATEGY**:
-                   1. Look for SHARING patterns (not asking patterns)
-                   2. Vietnamese workplace/role sharing is VERY common → treat as teaching
-                   3. Personal experience sharing = teaching intent
-                   4. Factual statements/information providing = teaching intent
-                   5. When user elaborates or continues a topic = teaching intent
-                   6. When in doubt about information sharing, lean towards teaching intent
+                   1. Look for INFORMATION SHARING vs INFORMATION SEEKING patterns
+                   2. Identify declarative statements vs interrogative statements
+                   3. Check for explanatory language vs help-seeking language
+                   4. Consider context: is the user explaining something or asking for explanation?
+                   5. Vietnamese cultural context: "em" sharing work details = teaching about their role
+                   
+                   **CRITICAL: Direct Address Recognition**
+                   - "Em có kiến thức gì rồi" = QUERY about YOUR knowledge (not teaching)
+                   - "Em có muốn nhận thêm việc nữa không" = QUERY about YOUR willingness (not teaching)
+                   - "What do you know about..." = QUERY about YOUR knowledge (not teaching)
+                   - When user asks about YOUR capabilities, knowledge, or willingness → ALWAYS QUERY intent
+                   - Respond by discussing YOUR actual knowledge base, capabilities, and role as an AI assistant
+                   
+                   Remember: The user is asking about YOU (the AI), not teaching you about themselves!
 
-                8. **Output Format**:
-                Maintain topic continuity, ensure proper JSON formatting, and include user_id in all tool calls.
+                **Response Generation Guidelines**:
+                - When user asks about YOUR knowledge: Discuss what information you have access to and can help with
+                - When user asks about YOUR capabilities: Explain what tasks you can assist with
+                - When user asks about YOUR willingness: Acknowledge your role as a helpful AI assistant
+                - Always maintain awareness of whether the user is asking ABOUT you or TEACHING you something
+                - Respond appropriately based on this distinction
                 """
 
     def extract_structured_sections(self, content: str) -> Dict[str, str]:
@@ -2039,3 +2059,178 @@ class LearningSupport:
         
         logger.info(f"Fast query generation: {len(unique_queries)} queries from '{primary_query[:50]}...'")
         return unique_queries[:5]  # Limit to 5 queries max
+
+    def _generate_dynamic_conversational_awareness(self, message_str: str, conversation_context: str) -> str:
+        """Generate dynamic conversational awareness instructions based on actual conversation patterns."""
+        
+        # Analyze conversation patterns
+        analysis = self._analyze_conversation_patterns(message_str, conversation_context)
+        
+        # Build dynamic instructions based on analysis
+        awareness_instructions = []
+        
+        # Language and cultural context
+        if analysis['language_context']:
+            awareness_instructions.append(f"**Language Context**: {analysis['language_context']}")
+        
+        # Pronoun and reference patterns
+        if analysis['pronoun_patterns']:
+            awareness_instructions.append(f"**Reference Patterns**: {analysis['pronoun_patterns']}")
+        
+        # Conversational style
+        if analysis['conversational_style']:
+            awareness_instructions.append(f"**Conversational Style**: {analysis['conversational_style']}")
+        
+        # Emotional tone and empathy cues
+        if analysis['empathy_cues']:
+            awareness_instructions.append(f"**Empathy & Tone**: {analysis['empathy_cues']}")
+        
+        return "\n".join(awareness_instructions) if awareness_instructions else ""
+
+    def _analyze_conversation_patterns(self, message_str: str, conversation_context: str) -> Dict[str, str]:
+        """Analyze conversation patterns to generate dynamic awareness instructions."""
+        
+        # Combine current message with recent context for analysis
+        full_text = f"{conversation_context}\nUser: {message_str}".lower()
+        
+        analysis = {
+            'language_context': '',
+            'pronoun_patterns': '',
+            'conversational_style': '',
+            'empathy_cues': ''
+        }
+        
+        # Detect language and cultural patterns
+        analysis['language_context'] = self._detect_language_context(message_str, conversation_context)
+        
+        # Analyze pronoun usage and reference patterns
+        analysis['pronoun_patterns'] = self._detect_pronoun_patterns(message_str, conversation_context)
+        
+        # Detect conversational style and formality
+        analysis['conversational_style'] = self._detect_conversational_style(message_str, conversation_context)
+        
+        # Generate empathy and tone guidance
+        analysis['empathy_cues'] = self._generate_empathy_guidance(message_str, conversation_context)
+        
+        return analysis
+
+    def _detect_language_context(self, message_str: str, conversation_context: str) -> str:
+        """Detect language context and generate appropriate guidance."""
+        
+        # Vietnamese language indicators
+        vietnamese_patterns = {
+            'pronouns': ['em', 'anh', 'chị', 'bạn', 'mình'],
+            'particles': ['ạ', 'ơi', 'nhé', 'nha', 'à', 'ừm'],
+            'common_words': ['của', 'những', 'và', 'các', 'là', 'không', 'có', 'được', 'người', 'trong', 'để'],
+            'expressions': ['vầng', 'ừm', 'ờm', 'uhm', 'à ha', 'ồ']
+        }
+        
+        # English language indicators
+        english_patterns = {
+            'pronouns': ['you', 'your', 'yours', 'i', 'me', 'my', 'we', 'us'],
+            'particles': ['yeah', 'yep', 'hmm', 'oh', 'ah', 'well'],
+            'expressions': ['got it', 'i see', 'makes sense', 'interesting', 'cool']
+        }
+        
+        text_lower = f"{conversation_context} {message_str}".lower()
+        
+        # Count Vietnamese patterns
+        vietnamese_score = 0
+        for category, patterns in vietnamese_patterns.items():
+            vietnamese_score += sum(1 for pattern in patterns if pattern in text_lower)
+        
+        # Count English patterns
+        english_score = 0
+        for category, patterns in english_patterns.items():
+            english_score += sum(1 for pattern in patterns if pattern in text_lower)
+        
+        if vietnamese_score > english_score and vietnamese_score > 2:
+            return """Respond in Vietnamese with natural, varied expressions. Use conversational particles like 'vầng', 'ừm', 'à' naturally. 
+                     Avoid repetitive formal responses like 'Vâng ạ' repeatedly. Show curiosity with expressions like 'Ồ thật à?', 'Thú vị nhỉ!', 'À, mình hiểu rồi!'."""
+        elif english_score > vietnamese_score and english_score > 2:
+            return """Respond in English with natural, varied expressions. Use conversational particles like 'hmm', 'oh', 'ah' naturally. 
+                     Vary your acknowledgments with 'I see', 'got it', 'interesting', 'makes sense' instead of repetitive responses."""
+        else:
+            return "Match the user's language and use natural, varied expressions appropriate to their communication style."
+
+    def _detect_pronoun_patterns(self, message_str: str, conversation_context: str) -> str:
+        """Detect pronoun usage patterns and generate guidance."""
+        
+        text_lower = message_str.lower()
+        context_lower = conversation_context.lower()
+        
+        # Vietnamese pronoun analysis
+        if 'em' in text_lower:
+            # Check if 'em' is used in context that suggests addressing the AI
+            ai_addressing_patterns = [
+                'em có', 'em biết', 'em hiểu', 'em làm', 'em nghĩ', 'em thấy',
+                'em muốn', 'em cần', 'em giúp', 'em có thể'
+            ]
+            
+            if any(pattern in text_lower for pattern in ai_addressing_patterns):
+                return """The user is likely addressing YOU directly using 'em'. Respond as if they're speaking TO you, not ABOUT someone else. 
+                         Acknowledge their questions about your knowledge, capabilities, or opinions directly."""
+        
+        # English pronoun analysis
+        if any(phrase in text_lower for phrase in ['what do you', 'can you', 'do you know', 'are you']):
+            return "The user is directly addressing YOU. Respond to their questions about your capabilities, knowledge, or opinions directly."
+        
+        return ""
+
+    def _detect_conversational_style(self, message_str: str, conversation_context: str) -> str:
+        """Detect conversational style and formality level."""
+        
+        text = f"{conversation_context} {message_str}".lower()
+        
+        # Formal indicators
+        formal_indicators = ['xin chào', 'cảm ơn', 'vâng ạ', 'dạ', 'please', 'thank you', 'could you']
+        formal_score = sum(1 for indicator in formal_indicators if indicator in text)
+        
+        # Casual indicators  
+        casual_indicators = ['hey', 'hi', 'yeah', 'yep', 'nah', 'ờm', 'ừm', 'ok', 'okay']
+        casual_score = sum(1 for indicator in casual_indicators if indicator in text)
+        
+        # Enthusiastic indicators
+        enthusiastic_indicators = ['!', 'wow', 'cool', 'awesome', 'tuyệt', 'hay quá', 'thú vị']
+        enthusiastic_score = sum(1 for indicator in enthusiastic_indicators if indicator in text)
+        
+        if formal_score > casual_score:
+            return "Maintain a respectful, professional tone while being warm and approachable."
+        elif casual_score > formal_score:
+            return "Use a casual, friendly tone. Be conversational and relaxed in your responses."
+        elif enthusiastic_score > 0:
+            return "Match the user's enthusiasm. Use energetic, positive language and show genuine interest."
+        else:
+            return "Adapt your tone to match the user's communication style naturally."
+
+    def _generate_empathy_guidance(self, message_str: str, conversation_context: str) -> str:
+        """Generate empathy and emotional awareness guidance."""
+        
+        text = f"{conversation_context} {message_str}".lower()
+        
+        # Emotional indicators
+        emotional_cues = {
+            'curiosity': ['tại sao', 'như thế nào', 'why', 'how', 'what if', '?'],
+            'confusion': ['không hiểu', 'confused', 'unclear', 'huh', 'what do you mean'],
+            'excitement': ['!', 'wow', 'amazing', 'tuyệt vời', 'hay quá'],
+            'concern': ['lo lắng', 'worried', 'concerned', 'problem', 'issue'],
+            'appreciation': ['cảm ơn', 'thank', 'appreciate', 'helpful', 'great']
+        }
+        
+        detected_emotions = []
+        for emotion, indicators in emotional_cues.items():
+            if any(indicator in text for indicator in indicators):
+                detected_emotions.append(emotion)
+        
+        if 'curiosity' in detected_emotions:
+            return "Show genuine curiosity and interest. Use expressions that demonstrate you're engaged and want to explore the topic further."
+        elif 'confusion' in detected_emotions:
+            return "Be patient and empathetic. Clarify gently and check for understanding. Use reassuring language."
+        elif 'excitement' in detected_emotions:
+            return "Match their enthusiasm! Use energetic language and show that you share their excitement about the topic."
+        elif 'concern' in detected_emotions:
+            return "Be supportive and understanding. Acknowledge their concerns and offer helpful, reassuring responses."
+        elif 'appreciation' in detected_emotions:
+            return "Acknowledge their appreciation warmly. Show that you value the interaction and are happy to help."
+        else:
+            return "Be empathetic and responsive to the user's emotional state. Show genuine interest and care in your responses."

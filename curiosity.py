@@ -322,7 +322,46 @@ class KnowledgeExplorer:
         
         try:
             response = await LLM.ainvoke(refinement_prompt)
-            refined_queries = json.loads(response.content.strip())
+            
+            # Debug: Log the actual response content
+            response_content = response.content.strip() if hasattr(response, 'content') else str(response)
+            logger.info(f"LLM refined query response (first 200 chars): {response_content[:200]}")
+            
+            # Check if response is empty
+            if not response_content:
+                logger.warning("LLM returned empty response for refined queries")
+                return []
+            
+            # Clean markdown code blocks if present
+            cleaned_content = response_content
+            if cleaned_content.startswith("```json"):
+                cleaned_content = cleaned_content.replace("```json", "").replace("```", "").strip()
+            elif cleaned_content.startswith("```"):
+                cleaned_content = cleaned_content.replace("```", "").strip()
+            
+            # Try to parse JSON
+            try:
+                refined_queries = json.loads(cleaned_content)
+            except json.JSONDecodeError as json_error:
+                logger.error(f"JSON parsing failed for refined queries: {json_error}")
+                logger.error(f"Raw LLM response: {response_content}")
+                logger.error(f"Cleaned content: {cleaned_content}")
+                
+                # Fallback: try to extract queries using regex if JSON parsing fails
+                import re
+                query_pattern = r'"([^"]+)"'
+                fallback_queries = re.findall(query_pattern, response_content)
+                if fallback_queries:
+                    logger.info(f"Extracted {len(fallback_queries)} queries using regex fallback")
+                    refined_queries = fallback_queries
+                else:
+                    logger.warning("No queries found in LLM response, returning empty list")
+                    return []
+            
+            # Validate that we got a list
+            if not isinstance(refined_queries, list):
+                logger.warning(f"LLM returned non-list response: {type(refined_queries)}")
+                return []
             
             # Filter out duplicates and original queries
             unique_queries = []
@@ -337,6 +376,8 @@ class KnowledgeExplorer:
             
         except Exception as e:
             logger.error(f"Failed to generate refined queries: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return []
 
     async def _generate_semantic_queries(self, original_message: str, all_knowledge_items: List[Dict], all_queries: List[str]) -> List[str]:
@@ -378,7 +419,46 @@ class KnowledgeExplorer:
         
         try:
             response = await LLM.ainvoke(semantic_prompt)
-            semantic_queries = json.loads(response.content.strip())
+            
+            # Debug: Log the actual response content
+            response_content = response.content.strip() if hasattr(response, 'content') else str(response)
+            logger.info(f"LLM semantic query response (first 200 chars): {response_content[:200]}")
+            
+            # Check if response is empty
+            if not response_content:
+                logger.warning("LLM returned empty response for semantic queries")
+                return []
+            
+            # Clean markdown code blocks if present
+            cleaned_content = response_content
+            if cleaned_content.startswith("```json"):
+                cleaned_content = cleaned_content.replace("```json", "").replace("```", "").strip()
+            elif cleaned_content.startswith("```"):
+                cleaned_content = cleaned_content.replace("```", "").strip()
+            
+            # Try to parse JSON
+            try:
+                semantic_queries = json.loads(cleaned_content)
+            except json.JSONDecodeError as json_error:
+                logger.error(f"JSON parsing failed for semantic queries: {json_error}")
+                logger.error(f"Raw LLM response: {response_content}")
+                logger.error(f"Cleaned content: {cleaned_content}")
+                
+                # Fallback: try to extract queries using regex if JSON parsing fails
+                import re
+                query_pattern = r'"([^"]+)"'
+                fallback_queries = re.findall(query_pattern, response_content)
+                if fallback_queries:
+                    logger.info(f"Extracted {len(fallback_queries)} queries using regex fallback")
+                    semantic_queries = fallback_queries
+                else:
+                    logger.warning("No queries found in LLM response, returning empty list")
+                    return []
+            
+            # Validate that we got a list
+            if not isinstance(semantic_queries, list):
+                logger.warning(f"LLM returned non-list response: {type(semantic_queries)}")
+                return []
             
             # Filter out duplicates
             unique_queries = []
@@ -393,6 +473,8 @@ class KnowledgeExplorer:
             
         except Exception as e:
             logger.error(f"Failed to generate semantic queries: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return []
 
     async def _execute_query_batch(self, queries: List[str], user_id: str, thread_id: Optional[str]) -> Dict[str, Any]:
