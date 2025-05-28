@@ -1904,7 +1904,7 @@ class LearningSupport:
                 "position của em", "job của em", "work của em"
             ]
             
-            # Information sharing patterns (Vietnamese)
+            # Information sharing patterns (Vietnamese) - MADE MORE SPECIFIC
             info_sharing_patterns = [
                 "em ơi anh bảo", "em bảo anh", "anh biết không", "em nói cho anh biết",
                 "để em kể", "em muốn chia sẻ", "em muốn kể", "em muốn hướng dẫn",
@@ -1921,7 +1921,45 @@ class LearningSupport:
                 "basically", "essentially", "in reality"
             ]
             
+            # CRITICAL: Casual conversational phrases that should NEVER be teaching intent
+            casual_exclusion_patterns = [
+                # Standalone casual phrases (must be exact or at start/end)
+                "^anh bảo$", "^chị bảo$", "^bạn bảo$", "^ai bảo$", "^em bảo$", 
+                "^anh nói$", "^chị nói$", "^bạn nói$", "^ai nói$", "^em nói$",
+                # Casual phrases with common endings
+                "anh bảo gì", "anh bảo sao", "anh bảo thế nào", "anh bảo cái gì",
+                "chị bảo gì", "bạn bảo gì", "bạn bảo sao", "bạn bảo thế nào",
+                # Short casual phrases
+                "^anh bảo cái này$", "^anh bảo cái đó$", "^anh bảo vậy$",
+                # English equivalents
+                "^you said$", "^you tell me$", "what did you say", "you mentioned"
+            ]
+            
             message_lower = message_str.lower().strip()
+            
+            # FIRST: Check for casual exclusion patterns - if found, NEVER classify as teaching
+            # Use regex matching for more precise pattern detection
+            import re
+            is_casual_phrase = False
+            for pattern in casual_exclusion_patterns:
+                if pattern.startswith("^") and pattern.endswith("$"):
+                    # Exact match patterns
+                    if re.match(pattern, message_lower):
+                        is_casual_phrase = True
+                        break
+                else:
+                    # Substring patterns
+                    if pattern in message_lower:
+                        is_casual_phrase = True
+                        break
+            
+            if is_casual_phrase:
+                logger.info(f"🚫 Rule-based exclusion: Detected casual conversational phrase in '{message_str[:50]}...' - NOT teaching intent")
+                # Explicitly ensure this is not classified as teaching intent
+                evaluation["has_teaching_intent"] = False
+                evaluation["intent_type"] = "query"  # Treat as query/request instead
+                evaluation["should_save_knowledge"] = False
+                return content, tool_calls, evaluation
             
             # Check for teaching continuation
             if any(phrase in message_lower for phrase in teaching_continuation_phrases):
@@ -1938,12 +1976,16 @@ class LearningSupport:
                 evaluation["intent_type"] = "teaching"
                 evaluation["should_save_knowledge"] = True
             
-            # Check for information sharing patterns
+            # Check for information sharing patterns - BUT ONLY if not casual
             elif any(pattern in message_lower for pattern in info_sharing_patterns):
-                logger.info(f"🔧 Rule-based override: Detected information sharing in '{message_str[:50]}...'")
-                evaluation["has_teaching_intent"] = True
-                evaluation["intent_type"] = "teaching"
-                evaluation["should_save_knowledge"] = True
+                # Double-check this isn't a casual phrase that slipped through
+                if not any(casual in message_lower for casual in casual_exclusion_patterns):
+                    logger.info(f"🔧 Rule-based override: Detected information sharing in '{message_str[:50]}...'")
+                    evaluation["has_teaching_intent"] = True
+                    evaluation["intent_type"] = "teaching"
+                    evaluation["should_save_knowledge"] = True
+                else:
+                    logger.info(f"🚫 Skipped info sharing pattern due to casual exclusion in '{message_str[:50]}...'")
             
             # Check for factual statements (when user is stating facts/information)
             elif any(pattern in message_lower for pattern in factual_patterns):
@@ -1961,14 +2003,16 @@ class LearningSupport:
                 evaluation["intent_type"] = "teaching"
                 evaluation["should_save_knowledge"] = True
             
-            # Catch any "X là Y" pattern (Vietnamese factual statements)
+            # Catch any "X là Y" pattern (Vietnamese factual statements) - BUT exclude casual questions
             elif " là " in message_lower and len(message_str.strip()) > 15:
-                # Avoid false positives for questions
+                # Avoid false positives for questions AND casual phrases
                 if not any(q_word in message_lower for q_word in ["làm sao", "như thế nào", "tại sao", "why", "how"]):
-                    logger.info(f"🔧 Rule-based override: Detected Vietnamese factual pattern 'X là Y' in '{message_str[:50]}...'")
-                    evaluation["has_teaching_intent"] = True
-                    evaluation["intent_type"] = "teaching"
-                    evaluation["should_save_knowledge"] = True
+                    # Also exclude if it's just a casual reference
+                    if not any(casual in message_lower for casual in casual_exclusion_patterns):
+                        logger.info(f"🔧 Rule-based override: Detected Vietnamese factual pattern 'X là Y' in '{message_str[:50]}...'")
+                        evaluation["has_teaching_intent"] = True
+                        evaluation["intent_type"] = "teaching"
+                        evaluation["should_save_knowledge"] = True
         
         return content, tool_calls, evaluation
 
