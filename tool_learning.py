@@ -603,7 +603,7 @@ class LearningProcessor:
             
             # Step 7: Extract structured sections and metadata
             structured_sections = self.support.extract_structured_sections(content)
-            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content)
+            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
             # Step 8: Handle teaching intent regeneration if needed
             if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
@@ -1650,7 +1650,7 @@ class LearningProcessor:
             
             # Extract structured sections and metadata
             structured_sections = self.support.extract_structured_sections(content)
-            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content)
+            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
             # Step 8: Handle teaching intent regeneration if needed
             if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":

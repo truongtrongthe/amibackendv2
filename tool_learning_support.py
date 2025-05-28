@@ -1629,6 +1629,17 @@ class LearningSupport:
                    - For query intent, look for questions or requests for information
                    - Set has_teaching_intent=true when you detect teaching intent
                    
+                   **CRITICAL: Teaching Continuation Detection**
+                   - ALWAYS set has_teaching_intent=true when the user starts with confirmation phrases like:
+                     * "Đúng rồi..." (That's right...)
+                     * "Chính xác..." (Exactly...)
+                     * "Đúng vậy..." (That's correct...)
+                     * "Exactly..." / "Right..." / "Correct..."
+                     * "Yes, and..." / "Vâng, và..."
+                   - These phrases followed by additional information indicate TEACHING CONTINUATION
+                   - Even if the additional content seems like examples or clarifications, treat it as teaching intent
+                   - The user is confirming and expanding on a previous teaching topic
+                   
                    **CRITICAL KNOWLEDGE UTILIZATION RULES:**
                    - When EXISTING KNOWLEDGE is provided, you MUST demonstrate deep understanding by using specific details
                    - NEVER give generic responses when rich knowledge is available
@@ -1776,7 +1787,7 @@ class LearningSupport:
         
         return sections
 
-    def extract_tool_calls_and_evaluation(self, content: str) -> tuple:
+    def extract_tool_calls_and_evaluation(self, content: str, message_str: str = "") -> tuple:
         """Extract tool calls and evaluation from LLM response."""
         tool_calls = []
         evaluation = {
@@ -1810,6 +1821,22 @@ class LearningSupport:
                     logger.info(f"Extracted LLM evaluation: {evaluation}")
                 except json.JSONDecodeError:
                     logger.warning("Failed to parse evaluation")
+        
+        # Rule-based fallback for teaching continuation detection
+        if message_str and not evaluation.get("has_teaching_intent", False):
+            teaching_continuation_phrases = [
+                "đúng rồi", "chính xác", "đúng vậy", "exactly", "right", "correct", 
+                "yes, and", "vâng, và", "that's right", "that's correct"
+            ]
+            
+            message_lower = message_str.lower().strip()
+            if any(phrase in message_lower for phrase in teaching_continuation_phrases):
+                # Check if there's additional content after the confirmation phrase
+                if len(message_str.strip()) > 20:  # More than just the confirmation phrase
+                    logger.info(f"🔧 Rule-based override: Detected teaching continuation in '{message_str[:50]}...'")
+                    evaluation["has_teaching_intent"] = True
+                    evaluation["intent_type"] = "teaching"
+                    evaluation["should_save_knowledge"] = True
         
         return content, tool_calls, evaluation
 

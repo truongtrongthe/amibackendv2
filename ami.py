@@ -21,6 +21,115 @@ except ImportError:
     socketio_imports_success = False
     logger.warning("Could not import socketio_manager_async in ami.py - WebSocket events may not be delivered")
 
+# Tool execution helper functions for AMI
+async def execute_save_knowledge_tool(parameters: dict, user_id: str, thread_id: str) -> dict:
+    """Execute save_knowledge tool call with proper error handling and vector ID capture."""
+    from pccontroller import save_knowledge
+    try:
+        # Get required parameters
+        input_text = parameters.get("query", "")
+        if not input_text and "content" in parameters:
+            input_text = parameters.get("content", "")
+        
+        # If we still don't have input text, try to use both query and content
+        if not input_text and "query" in parameters and "content" in parameters:
+            input_text = f"{parameters['query']} {parameters['content']}".strip()
+        
+        if not input_text:
+            logger.error("Missing required parameter for save_knowledge: query or content")
+            return {"success": False, "error": "Missing required content"}
+            
+        # Get optional parameters
+        user_id_param = parameters.get("user_id", user_id)
+        bank_name = parameters.get("bank_name", "default")
+        thread_id_param = parameters.get("thread_id", thread_id)
+        topic = parameters.get("topic", None)
+        categories = parameters.get("categories", ["general"])
+        
+        # Check if this is a health-related query and adjust bank_name
+        if not parameters.get("bank_name"):
+            if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", "phân tích chân dung khách hàng"]):
+                bank_name = "health"
+                if "health_segmentation" not in categories:
+                    categories.append("health_segmentation")
+        
+        logger.info(f"Executing save_knowledge tool: '{input_text[:50]}...' for user {user_id_param}")
+        
+        # Execute save_knowledge
+        result = await save_knowledge(
+            input=input_text,
+            user_id=user_id_param,
+            bank_name=bank_name,
+            thread_id=thread_id_param,
+            topic=topic,
+            categories=categories
+        )
+        logger.info(f"Save knowledge tool result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error executing save_knowledge tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+async def execute_save_teaching_synthesis_tool(parameters: dict, user_id: str, thread_id: str) -> dict:
+    """Execute save_teaching_synthesis tool call for human-in-the-loop scenarios."""
+    try:
+        from alpha import save_teaching_synthesis
+        
+        # Extract parameters
+        conversation_turns = parameters.get("conversation_turns", [])
+        final_synthesis = parameters.get("final_synthesis", "")
+        topic = parameters.get("topic", "user_teaching")
+        priority_topic_name = parameters.get("priority_topic_name", "")
+        
+        logger.info(f"Executing save_teaching_synthesis tool for topic: {topic}")
+        
+        # Execute save_teaching_synthesis
+        result = await save_teaching_synthesis(
+            conversation_turns=conversation_turns,
+            final_synthesis=final_synthesis,
+            topic=topic,
+            user_id=user_id,
+            thread_id=thread_id,
+            priority_topic_name=priority_topic_name
+        )
+        logger.info(f"Save teaching synthesis tool result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error executing save_teaching_synthesis tool: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+async def handle_save_approval_request(parameters: dict, user_id: str, thread_id: str) -> dict:
+    """Handle save approval request for human-in-the-loop scenarios."""
+    try:
+        # Future implementation for human-in-the-loop
+        preview = parameters.get("preview", "")
+        content = parameters.get("content", "")
+        requires_approval = parameters.get("requires_approval", True)
+        
+        logger.info(f"Creating save approval request for user {user_id}")
+        
+        # For now, return a placeholder structure
+        # In the future, this would:
+        # 1. Store the pending save request
+        # 2. Send approval request to frontend
+        # 3. Wait for human response
+        # 4. Execute save based on approval
+        
+        request_id = f"approval_{thread_id}_{int(time.time())}"
+        
+        return {
+            "success": True,
+            "request_id": request_id,
+            "status": "pending_approval",
+            "preview": preview,
+            "message": "Save approval request created (future feature)"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling save approval request: {str(e)}")
+        return {"success": False, "error": str(e)}
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
@@ -372,6 +481,8 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
         response = final_response
         
         # Execute any tool calls found in the response
+        tool_execution_results = {}  # Store results for potential frontend updates
+        
         if isinstance(response, dict) and "metadata" in response and "tool_calls" in response["metadata"]:
             tool_calls = response["metadata"]["tool_calls"]
             logger.info(f"Found {len(tool_calls)} tool calls to execute")
@@ -394,54 +505,22 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                     
                     # Execute the tool call
                     if tool_name == "save_knowledge":
-                        from pccontroller import save_knowledge
-                        try:
-                            # Get required parameters
-                            input_text = parameters.get("query", "")
-                            if not input_text and "content" in parameters:
-                                input_text = parameters.get("content", "")
-                            
-                            # If we still don't have input text, try to use both query and content
-                            if not input_text and "query" in parameters and "content" in parameters:
-                                input_text = f"{parameters['query']} {parameters['content']}".strip()
-                            
-                            if not input_text:
-                                logger.error("Missing required parameter for save_knowledge: query or content")
-                                continue
-                                
-                            # Get optional parameters
-                            user_id = parameters.get("user_id", user_id)
-                            bank_name = parameters.get("bank_name", "default")
-                            thread_id_param = parameters.get("thread_id", thread_id)
-                            topic = parameters.get("topic", None)
-                            categories = parameters.get("categories", ["general"])
-                            
-                            # Check if this is a health-related query and adjust bank_name
-                            if not parameters.get("bank_name"):
-                                if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", "phân tích chân dung khách hàng"]):
-                                    bank_name = "health"
-                                    if "health_segmentation" not in categories:
-                                        categories.append("health_segmentation")
-                            
-                            logger.info(f"Saving knowledge: '{input_text[:50]}...' for user {user_id}")
-                            
-                            # Execute save_knowledge
-                            result = await save_knowledge(
-                                input=input_text,
-                                user_id=user_id,
-                                bank_name=bank_name,
-                                thread_id=thread_id_param,
-                                topic=topic,
-                                categories=categories
-                            )
-                            logger.info(f"Save knowledge result: {result}")
-                            
-                            # Log vector ID if available
-                            if isinstance(result, dict) and result.get("success") and result.get("vector_id"):
-                                logger.info(f"Knowledge saved with vector ID: {result.get('vector_id')}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error executing save_knowledge: {str(e)}")
+                        result = await execute_save_knowledge_tool(parameters, user_id, thread_id)
+                        if result and result.get("success"):
+                            tool_execution_results["save_knowledge_vector_id"] = result.get("vector_id")
+                            logger.info(f"✅ Captured save_knowledge vector ID: {result.get('vector_id')}")
+                    
+                    elif tool_name == "save_teaching_synthesis":
+                        result = await execute_save_teaching_synthesis_tool(parameters, user_id, thread_id)
+                        if result and result.get("success"):
+                            tool_execution_results["teaching_synthesis_vector_id"] = result.get("vector_id")
+                            logger.info(f"✅ Captured teaching_synthesis vector ID: {result.get('vector_id')}")
+                    
+                    elif tool_name == "request_save_approval":
+                        # Future: Human-in-the-loop approval flow
+                        result = await handle_save_approval_request(parameters, user_id, thread_id)
+                        tool_execution_results["approval_request_id"] = result.get("request_id")
+                        logger.info(f"📋 Created save approval request: {result.get('request_id')}")
                     
                     elif tool_name == "knowledge_query":
                         logger.info("Skipping knowledge_query tool call in response processing")
@@ -479,7 +558,7 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                     "user_id": metadata.get("user_id", "")
                 })
                 
-                # Add vector IDs to response if they exist
+                # Add vector IDs to response if they exist (from background tasks)
                 if "combined_knowledge_vector_id" in metadata:
                     response_data["combined_knowledge_vector_id"] = metadata["combined_knowledge_vector_id"]
                     logger.info(f"Including combined_knowledge_vector_id in response: {metadata['combined_knowledge_vector_id']}")
@@ -487,6 +566,13 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                 if "synthesis_vector_id" in metadata:
                     response_data["synthesis_vector_id"] = metadata["synthesis_vector_id"]
                     logger.info(f"Including synthesis_vector_id in response: {metadata['synthesis_vector_id']}")
+                
+                # Add tool execution results (from immediate tool calls)
+                if tool_execution_results:
+                    for key, value in tool_execution_results.items():
+                        if value:  # Only include non-empty values
+                            response_data[key] = value
+                            logger.info(f"Including tool execution result {key}: {value}")
                 
                 logger.info(f"Sending complete metadata to frontend: has_teaching_intent={metadata.get('has_teaching_intent')}, response_strategy={metadata.get('response_strategy')}")
             

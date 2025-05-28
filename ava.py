@@ -611,7 +611,7 @@ class AVA:
             
             # Step 7: Extract structured sections and metadata
             structured_sections = self.support.extract_structured_sections(content)
-            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content)
+            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
             # Step 8: Handle teaching intent regeneration if needed
             if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
@@ -919,7 +919,7 @@ class AVA:
                 logger.info(f"Added {len(recent_messages)} messages from conversation history")
         
         if 'learning_processor' not in state:
-            learning_processor = LearningProcessor()
+            learning_processor = AVA()
             await learning_processor.initialize()
             state['learning_processor'] = learning_processor
         else:
@@ -1290,7 +1290,7 @@ class AVA:
         is_priority_topic = response.get("metadata", {}).get("is_priority_topic", False)
         
         # High similarity threshold for automatic saving
-        HIGH_SIMILARITY_THRESHOLD = 0.70
+        HIGH_SIMILARITY_THRESHOLD = 0.65
         MEDIUM_SIMILARITY_THRESHOLD = 0.35
         
         logger.info(f"Evaluating knowledge saving: similarity={similarity_score}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}")
@@ -1327,7 +1327,7 @@ class AVA:
             }
         
         # Case 3: Low similarity + teaching intent + substantial content - new knowledge
-        if similarity_score < MEDIUM_SIMILARITY_THRESHOLD and len(message.split()) > 15:
+        if similarity_score < MEDIUM_SIMILARITY_THRESHOLD and len(message.split()) > 10:
             logger.info(f"✅ Low similarity ({similarity_score:.2f}) + teaching intent + substantial content - saving as new knowledge")
             return {
                 "should_save": True,
@@ -1689,7 +1689,7 @@ class AVA:
             
             # Extract structured sections and metadata
             structured_sections = self.support.extract_structured_sections(content)
-            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content)
+            content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
             # Step 8: Handle teaching intent regeneration if needed
             if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
