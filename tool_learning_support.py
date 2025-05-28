@@ -1620,6 +1620,7 @@ class LearningSupport:
                 **Tools**:
                 - knowledge_query: Query the knowledge base with query (required), user_id (required), context, thread_id, topic, top_k, min_similarity
                 - save_knowledge: Save knowledge with user_id (required), query/content, thread_id, topic, categories
+                - handle_update_decision: Handle human decision for UPDATE vs CREATE with request_id (required), action (required: "CREATE_NEW" or "UPDATE_EXISTING"), target_id (required for UPDATE_EXISTING)
 
                 **Instructions**:
                 1. **Intent Classification & Knowledge Utilization**: 
@@ -1758,6 +1759,50 @@ class LearningSupport:
                    - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
                    - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up", "name_addressed": true/false, "ai_referenced": true/false}}</evaluation>
 
+                7. **Teaching Intent Detection - CRITICAL CLASSIFICATION**:
+                   
+                   **CORE PRINCIPLE**: Teaching intent = User is SHARING information, knowledge, or experiences (not asking for help)
+                   
+                   **🟢 ALWAYS TEACHING INTENT when user:**
+                   - Shares work role/responsibilities: "việc của em là...", "công việc của em...", "my job is...", "I work as..."
+                   - Describes processes/methods: "cách làm là...", "quy trình...", "the way to do this is...", "my approach is..."
+                   - Shares experiences: "em từng...", "em đã...", "I have experienced...", "I learned that..."
+                   - States facts/information: "X là Y", "X is Y", definitions, explanations, corrections
+                   - Provides insights: "em thấy...", "theo em...", "in my opinion...", "I think...", "my observation is..."
+                   - Gives instructions: "nên làm...", "you should...", "cần phải...", "it's important to..."
+                   - Continues/elaborates: "đúng rồi, và...", "exactly, and...", "yes, also..."
+                   
+                   **🔴 NEVER TEACHING INTENT when user:**
+                   - Asks questions: "làm sao để...", "how do I...", "what should I...", "can you help..."
+                   - Seeks advice: "em nên...", "should I...", "what's the best way..."
+                   - Expresses confusion: "em không biết...", "I don't know...", "I'm confused about..."
+                   - Requests help: "giúp em...", "help me...", "I need assistance with..."
+                   
+                   **📝 SPECIFIC EXAMPLES**:
+                   ✅ "Em ơi anh bảo, việc của em là trực page nhé" → TEACHING (sharing work role)
+                   ✅ "Mục tiêu công việc của em là tăng doanh số" → TEACHING (sharing work goals)  
+                   ✅ "Cách em làm marketing là..." → TEACHING (sharing methods)
+                   ✅ "Em thấy khách hàng thường..." → TEACHING (sharing observations)
+                   ✅ "Quy trình onboarding ở công ty em..." → TEACHING (sharing processes)
+                   ✅ "My role involves managing..." → TEACHING (sharing responsibilities)
+                   ✅ "The best way to handle this is..." → TEACHING (sharing best practices)
+                   ✅ "Đúng rồi, và em còn..." → TEACHING (continuing/elaborating)
+                   
+                   ❌ "Em muốn biết..." → QUERY (asking for information)
+                   ❌ "Làm sao để..." → QUERY (asking for help)  
+                   ❌ "Có thể giải thích..." → QUERY (requesting explanation)
+                   ❌ "What should I do..." → QUERY (seeking advice)
+                   ❌ "Em không hiểu..." → QUERY (expressing confusion)
+                   
+                   **🎯 DETECTION STRATEGY**:
+                   1. Look for SHARING patterns (not asking patterns)
+                   2. Vietnamese workplace/role sharing is VERY common → treat as teaching
+                   3. Personal experience sharing = teaching intent
+                   4. Factual statements/information providing = teaching intent
+                   5. When user elaborates or continues a topic = teaching intent
+                   6. When in doubt about information sharing, lean towards teaching intent
+
+                8. **Output Format**:
                 Maintain topic continuity, ensure proper JSON formatting, and include user_id in all tool calls.
                 """
 
@@ -1824,16 +1869,83 @@ class LearningSupport:
         
         # Rule-based fallback for teaching continuation detection
         if message_str and not evaluation.get("has_teaching_intent", False):
+            # Enhanced teaching intent detection patterns
             teaching_continuation_phrases = [
                 "đúng rồi", "chính xác", "đúng vậy", "exactly", "right", "correct", 
                 "yes, and", "vâng, và", "that's right", "that's correct"
             ]
             
+            # Work/goal sharing patterns (Vietnamese) - ENHANCED
+            work_sharing_patterns = [
+                "việc của em là", "công việc của em là", "em làm việc", 
+                "mục tiêu công việc của em là", "nhiệm vụ của em", "vai trò của em", 
+                "trách nhiệm của em", "em phụ trách", "em đảm nhận", "em quản lý",
+                "em trực", "em làm", "em đang làm", "chức vụ của em",
+                "position của em", "job của em", "work của em"
+            ]
+            
+            # Information sharing patterns (Vietnamese)
+            info_sharing_patterns = [
+                "em ơi anh bảo", "em bảo anh", "anh biết không", "em nói cho anh biết",
+                "để em kể", "em muốn chia sẻ", "em muốn kể", "em muốn hướng dẫn",
+                "cách em làm là", "phương pháp của em", "kinh nghiệm của em",
+                "em thường", "em hay", "em sẽ", "theo em thì", "em thấy",
+                "i want to share", "let me tell you", "here's how", "my approach",
+                "the way i do", "my method", "my experience", "my job is", "i work"
+            ]
+            
+            # Factual statement patterns
+            factual_patterns = [
+                "thực ra", "sự thật là", "điều này", "vấn đề này", "tình hình là",
+                "actually", "the thing is", "what happens is", "the fact is",
+                "basically", "essentially", "in reality"
+            ]
+            
             message_lower = message_str.lower().strip()
+            
+            # Check for teaching continuation
             if any(phrase in message_lower for phrase in teaching_continuation_phrases):
-                # Check if there's additional content after the confirmation phrase
                 if len(message_str.strip()) > 20:  # More than just the confirmation phrase
                     logger.info(f"🔧 Rule-based override: Detected teaching continuation in '{message_str[:50]}...'")
+                    evaluation["has_teaching_intent"] = True
+                    evaluation["intent_type"] = "teaching"
+                    evaluation["should_save_knowledge"] = True
+            
+            # Check for work/goal sharing (MOST COMMON PATTERN that LLM misses)
+            elif any(pattern in message_lower for pattern in work_sharing_patterns):
+                logger.info(f"🔧 Rule-based override: Detected work/goal sharing in '{message_str[:50]}...'")
+                evaluation["has_teaching_intent"] = True
+                evaluation["intent_type"] = "teaching"
+                evaluation["should_save_knowledge"] = True
+            
+            # Check for information sharing patterns
+            elif any(pattern in message_lower for pattern in info_sharing_patterns):
+                logger.info(f"🔧 Rule-based override: Detected information sharing in '{message_str[:50]}...'")
+                evaluation["has_teaching_intent"] = True
+                evaluation["intent_type"] = "teaching"
+                evaluation["should_save_knowledge"] = True
+            
+            # Check for factual statements (when user is stating facts/information)
+            elif any(pattern in message_lower for pattern in factual_patterns):
+                # Only if it's substantial content (not just a short response)
+                if len(message_str.strip()) > 30:
+                    logger.info(f"🔧 Rule-based override: Detected factual statement in '{message_str[:50]}...'")
+                    evaluation["has_teaching_intent"] = True
+                    evaluation["intent_type"] = "teaching"
+                    evaluation["should_save_knowledge"] = True
+            
+            # SPECIFIC PATTERN: "Em ơi anh bảo, việc của em là..." - this is ALWAYS teaching
+            elif "em ơi" in message_lower and ("việc" in message_lower or "công việc" in message_lower):
+                logger.info(f"🔧 Rule-based override: Detected Vietnamese work sharing pattern in '{message_str[:50]}...'")
+                evaluation["has_teaching_intent"] = True
+                evaluation["intent_type"] = "teaching"
+                evaluation["should_save_knowledge"] = True
+            
+            # Catch any "X là Y" pattern (Vietnamese factual statements)
+            elif " là " in message_lower and len(message_str.strip()) > 15:
+                # Avoid false positives for questions
+                if not any(q_word in message_lower for q_word in ["làm sao", "như thế nào", "tại sao", "why", "how"]):
+                    logger.info(f"🔧 Rule-based override: Detected Vietnamese factual pattern 'X là Y' in '{message_str[:50]}...'")
                     evaluation["has_teaching_intent"] = True
                     evaluation["intent_type"] = "teaching"
                     evaluation["should_save_knowledge"] = True

@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from utilities import EMBEDDINGS, logger
 from datetime import datetime, timedelta
@@ -10,6 +11,9 @@ from pinecone import Pinecone, ServerlessSpec
 import backoff
 from supabase import create_client, Client
 import traceback
+
+# Load environment variables from .env file
+load_dotenv()
 
 spb_url = os.getenv("SUPABASE_URL")
 spb_key = os.getenv("SUPABASE_KEY")

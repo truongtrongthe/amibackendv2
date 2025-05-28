@@ -446,15 +446,15 @@ async def generate_sse_stream(request: HaveFunRequest, thread_lock: asyncio.Lock
                     # Format the response as SSE
                     if isinstance(result, str) and result.startswith("data: "):
                         # Already formatted for SSE
-                        logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding string SSE response for thread {thread_id}")
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding string SSE response for thread {thread_id}")
                         yield result + "\n"
                     elif isinstance(result, dict):
                         # Format JSON for SSE
-                        logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding dict response for thread {thread_id}: {str(result)[:100]}...")
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding dict response for thread {thread_id}: {str(result)[:100]}...")
                         yield f"data: {json.dumps(result)}\n\n"
                     else:
                         # For string responses without SSE format
-                        logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding message response for thread {thread_id}: {str(result)[:100]}...")
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding message response for thread {thread_id}: {str(result)[:100]}...")
                         yield f"data: {json.dumps({'message': result})}\n\n"
                 
                 logger.info(f"[REQUEST:{request_id}] Completed yielding {response_count} responses for thread {thread_id}")
@@ -769,15 +769,15 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
                     # Format the response as SSE
                     if isinstance(result, str) and result.startswith("data: "):
                         # Already formatted for SSE
-                        logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding string SSE response for thread {thread_id}")
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding string SSE response for thread {thread_id}")
                         yield result + "\n"
                     elif isinstance(result, dict):
                         # Format JSON for SSE
-                        logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding dict response for thread {thread_id}: {str(result)[:100]}...")
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding dict response for thread {thread_id}: {str(result)[:100]}...")
                         yield f"data: {json.dumps(result)}\n\n"
                     else:
                         # For string responses without SSE format
-                        logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding message response for thread {thread_id}: {str(result)[:100]}...")
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding message response for thread {thread_id}: {str(result)[:100]}...")
                         yield f"data: {json.dumps({'message': result})}\n\n"
                 
                 logger.info(f"[REQUEST:{request_id}] Completed yielding {response_count} responses for thread {thread_id}")

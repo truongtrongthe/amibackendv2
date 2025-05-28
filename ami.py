@@ -131,6 +131,49 @@ async def handle_save_approval_request(parameters: dict, user_id: str, thread_id
         logger.error(f"Error handling save approval request: {str(e)}")
         return {"success": False, "error": str(e)}
 
+async def handle_update_decision_tool(parameters: dict, user_id: str, thread_id: str) -> dict:
+    """Handle UPDATE vs CREATE decision from human."""
+    try:
+        request_id = parameters.get("request_id", "")
+        action = parameters.get("action", "")
+        target_id = parameters.get("target_id", "")
+        
+        if not request_id:
+            return {"success": False, "error": "Missing request_id parameter"}
+        
+        if not action:
+            return {"success": False, "error": "Missing action parameter"}
+        
+        logger.info(f"Processing UPDATE vs CREATE decision: {action} for request {request_id}")
+        
+        # Get the AVA instance to handle the decision
+        # Note: In a production system, this would be handled differently
+        # For now, we'll create a temporary instance
+        from ava import AVA
+        ava = AVA()
+        await ava.initialize()
+        
+        # Prepare user decision
+        user_decision = {
+            "action": action,
+            "target_id": target_id if action == "UPDATE_EXISTING" else None
+        }
+        
+        # Handle the decision
+        result = await ava.handle_update_decision(
+            request_id=request_id,
+            user_decision=user_decision,
+            user_id=user_id,
+            thread_id=thread_id
+        )
+        
+        logger.info(f"UPDATE vs CREATE decision result: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error handling UPDATE vs CREATE decision: {str(e)}")
+        return {"success": False, "error": str(e)}
+
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     prompt_str: str
@@ -522,6 +565,17 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                         tool_execution_results["approval_request_id"] = result.get("request_id")
                         logger.info(f"📋 Created save approval request: {result.get('request_id')}")
                     
+                    elif tool_name == "handle_update_decision":
+                        # Handle UPDATE vs CREATE decision from human
+                        result = await handle_update_decision_tool(parameters, user_id, thread_id)
+                        if result and result.get("success"):
+                            tool_execution_results["update_decision_result"] = result
+                            if result.get("action") == "UPDATE_EXISTING":
+                                tool_execution_results["updated_vector_id"] = result.get("new_vector_id")
+                            elif result.get("action") == "CREATE_NEW":
+                                tool_execution_results["created_vector_id"] = result.get("vector_id")
+                        logger.info(f"🔄 Processed UPDATE vs CREATE decision: {result}")
+                    
                     elif tool_name == "knowledge_query":
                         logger.info("Skipping knowledge_query tool call in response processing")
                     
@@ -557,6 +611,17 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
                     "timestamp": metadata.get("timestamp", ""),
                     "user_id": metadata.get("user_id", "")
                 })
+                
+                # Add UPDATE decision request info if present
+                if "update_decision_request" in metadata:
+                    update_request = metadata["update_decision_request"]
+                    response_data.update({
+                        "update_decision_request": update_request,
+                        "requires_human_decision": update_request.get("requires_human_input", False),
+                        "decision_type": update_request.get("decision_type", ""),
+                        "candidates_count": update_request.get("candidates_count", 0)
+                    })
+                    logger.info(f"Including UPDATE decision request in response: {update_request['request_id']}")
                 
                 # Add vector IDs to response if they exist (from background tasks)
                 if "combined_knowledge_vector_id" in metadata:
