@@ -344,15 +344,15 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
     # Use our tool_learning.py's process_llm_with_tools function to process the message
     try:
         # Import directly from tool_learning to ensure we're using the updated version
-        from tool_learning import LearningProcessor
+        from ava import AVA
         
         # Create a learning processor instance directly
-        learning_processor = LearningProcessor()
-        await learning_processor.initialize()
+        ava = AVA()
+        await ava.initialize()
         
         # Process the message using the streaming learning processor
         final_response = None
-        async for chunk in learning_processor.process_incoming_message_streaming(
+        async for chunk in ava.read_human_input(
             user_input,
             conversation_context="",  # Initialize with empty context
             user_id=user_id,
