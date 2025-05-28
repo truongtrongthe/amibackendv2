@@ -1544,4 +1544,3 @@ class AVA:
         if hasattr(self, '_pending_decisions'):
             self._pending_decisions.clear()
             logger.info("Cleared all pending decisions")
-
