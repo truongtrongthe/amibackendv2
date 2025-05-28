@@ -2159,20 +2159,164 @@ class LearningSupport:
         text_lower = message_str.lower()
         context_lower = conversation_context.lower()
         
-        # Vietnamese pronoun analysis
-        if 'em' in text_lower:
-            # Check if 'em' is used in context that suggests addressing the AI
-            ai_addressing_patterns = [
-                'em có', 'em biết', 'em hiểu', 'em làm', 'em nghĩ', 'em thấy',
-                'em muốn', 'em cần', 'em giúp', 'em có thể'
-            ]
-            
-            if any(pattern in text_lower for pattern in ai_addressing_patterns):
-                return """The user is likely addressing YOU directly using 'em'. Respond as if they're speaking TO you, not ABOUT someone else. 
-                         Acknowledge their questions about your knowledge, capabilities, or opinions directly."""
+        # Extract pronoun mirroring guidance
+        pronoun_guidance = self._analyze_pronoun_mirroring(message_str, conversation_context)
         
-        # English pronoun analysis
-        if any(phrase in text_lower for phrase in ['what do you', 'can you', 'do you know', 'are you']):
+        # Detect direct addressing patterns
+        addressing_guidance = self._detect_direct_addressing(message_str, conversation_context)
+        
+        # Combine guidance
+        guidance_parts = []
+        if pronoun_guidance:
+            guidance_parts.append(pronoun_guidance)
+        if addressing_guidance:
+            guidance_parts.append(addressing_guidance)
+        
+        return " ".join(guidance_parts) if guidance_parts else ""
+
+    def _analyze_pronoun_mirroring(self, message_str: str, conversation_context: str) -> str:
+        """Analyze how the human addresses the AI and suggest appropriate self-reference pronouns."""
+        
+        # Extract pronouns used to address the AI from current message and recent context
+        full_context = f"{conversation_context}\nUser: {message_str}"
+        
+        # Look for patterns where human addresses the AI
+        addressing_patterns = self._extract_addressing_patterns(message_str, conversation_context)
+        
+        if addressing_patterns:
+            return f"**Pronoun Mirroring**: {addressing_patterns}"
+        
+        return ""
+
+    def _extract_addressing_patterns(self, message_str: str, conversation_context: str) -> str:
+        """Extract how the human addresses the AI and suggest mirroring."""
+        
+        # Analyze current message for AI-addressing patterns
+        message_lower = message_str.lower()
+        
+        # Common addressing patterns across languages
+        addressing_indicators = {
+            # Vietnamese patterns
+            'em có': 'em',
+            'em biết': 'em', 
+            'em hiểu': 'em',
+            'em làm': 'em',
+            'em nghĩ': 'em',
+            'em thấy': 'em',
+            'em muốn': 'em',
+            'em cần': 'em',
+            'em giúp': 'em',
+            'em có thể': 'em',
+            'em ăn': 'em',
+            'em đang': 'em',
+            
+            # English patterns
+            'you know': 'I',
+            'you think': 'I',
+            'you can': 'I',
+            'you are': 'I',
+            'you have': 'I',
+            'you want': 'I',
+            'you need': 'I',
+            'do you': 'I',
+            'are you': 'I',
+            'can you': 'I',
+            
+            # Other language patterns can be added dynamically
+        }
+        
+        # Find which pronoun the human uses to address the AI
+        for pattern, suggested_pronoun in addressing_indicators.items():
+            if pattern in message_lower:
+                # Determine the appropriate response guidance
+                if suggested_pronoun == 'em':
+                    return "When referring to yourself, use 'Em' (capitalized) to mirror the relationship the human has established. Example: 'Em có thể giúp...', 'Em hiểu rồi...', 'Em nghĩ rằng...'"
+                elif suggested_pronoun == 'I':
+                    return "When referring to yourself, use 'I' to respond to their direct questions about you. Example: 'I can help...', 'I understand...', 'I think...'"
+        
+        # Check conversation context for established patterns
+        context_patterns = self._analyze_context_pronouns(conversation_context)
+        if context_patterns:
+            return context_patterns
+        
+        return ""
+
+    def _analyze_context_pronouns(self, conversation_context: str) -> str:
+        """Analyze conversation history to identify established pronoun patterns."""
+        
+        if not conversation_context:
+            return ""
+        
+        # Look for established patterns in conversation history
+        lines = conversation_context.split('\n')
+        
+        # Track how human addresses AI and how AI responds
+        human_to_ai_pronouns = []
+        ai_self_references = []
+        
+        for line in lines:
+            line_lower = line.lower()
+            if line.startswith('User:') or line.startswith('user:'):
+                # Check how user addresses AI
+                if any(pattern in line_lower for pattern in ['em có', 'em biết', 'em làm', 'em hiểu']):
+                    human_to_ai_pronouns.append('em')
+                elif any(pattern in line_lower for pattern in ['you are', 'you can', 'you know']):
+                    human_to_ai_pronouns.append('you')
+            elif line.startswith('AI:') or line.startswith('ai:'):
+                # Check how AI refers to itself
+                if any(pattern in line_lower for pattern in ['em có', 'em sẽ', 'em hiểu']):
+                    ai_self_references.append('em')
+                elif any(pattern in line_lower for pattern in ['i can', 'i will', 'i understand']):
+                    ai_self_references.append('i')
+        
+        # Determine if there's an established pattern
+        if human_to_ai_pronouns:
+            most_common = max(set(human_to_ai_pronouns), key=human_to_ai_pronouns.count)
+            if most_common == 'em':
+                return "Continue using 'Em' to refer to yourself, as this relationship pattern has been established in the conversation."
+            elif most_common == 'you':
+                return "Continue using 'I' to refer to yourself, as this is the established pattern in English conversation."
+        
+        return ""
+
+    def _detect_direct_addressing(self, message_str: str, conversation_context: str) -> str:
+        """Detect when user is directly addressing the AI."""
+        
+        text_lower = message_str.lower()
+        
+        # Universal direct addressing patterns (language-agnostic)
+        direct_patterns = [
+            # Question patterns
+            ('?', 'question'),
+            ('how', 'question'),
+            ('what', 'question'), 
+            ('why', 'question'),
+            ('when', 'question'),
+            ('where', 'question'),
+            ('làm sao', 'question'),
+            ('như thế nào', 'question'),
+            ('tại sao', 'question'),
+            ('khi nào', 'question'),
+            
+            # Capability questions
+            ('can you', 'capability'),
+            ('are you able', 'capability'),
+            ('có thể', 'capability'),
+            ('có làm được', 'capability'),
+            
+            # Knowledge questions  
+            ('do you know', 'knowledge'),
+            ('have you heard', 'knowledge'),
+            ('biết không', 'knowledge'),
+            ('có hiểu', 'knowledge'),
+        ]
+        
+        detected_patterns = []
+        for pattern, pattern_type in direct_patterns:
+            if pattern in text_lower:
+                detected_patterns.append(pattern_type)
+        
+        if detected_patterns:
             return "The user is directly addressing YOU. Respond to their questions about your capabilities, knowledge, or opinions directly."
         
         return ""
