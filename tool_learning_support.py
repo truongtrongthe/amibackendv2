@@ -1592,17 +1592,40 @@ class LearningSupport:
         
         return ""
 
-    def build_llm_prompt(self, message_str: str, conversation_context: str, temporal_context: str, 
-                        knowledge_context: str, response_strategy: str, strategy_instructions: str,
-                        core_prior_topic: str, user_id: str) -> str:
-        """Build the comprehensive LLM prompt."""
-        
-        # Generate dynamic conversational awareness based on actual conversation patterns
+    def _get_base_prompt(self, message_str: str, conversation_context: str, temporal_context: str, 
+                        user_id: str) -> str:
+        """Get the core base prompt that's always included."""
+        # Generate dynamic conversational awareness
         conversational_awareness = self._generate_dynamic_conversational_awareness(
             message_str, conversation_context
         )
         
-        return f"""You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
+        return f"""🚨🚨🚨 CRITICAL: TEACHING INTENT DETECTION PRINCIPLES 🚨🚨🚨
+
+                **CORE PRINCIPLE**: Analyze the SEMANTIC INTENT and LINGUISTIC STRUCTURE, not specific words.
+
+                **INFORMING/STATING → has_teaching_intent=true**
+                - User is DECLARING what they will do, are doing, or have done
+                - User is STATING facts, plans, roles, or information
+                - Linguistic patterns: Declarative sentences, future/present tense statements
+                - Vietnamese: "Em sẽ + verb", "Em là + noun", "Em + verb + object"
+                - English: "I will + verb", "I am + noun", "I + verb + object"
+                - Semantic intent: User is giving information TO you
+
+                **ASKING/REQUESTING → has_teaching_intent=false**  
+                - User is QUESTIONING or requesting information/help
+                - User wants YOU to provide information or take action
+                - Linguistic patterns: Question words, interrogative structures, imperative mood
+                - Vietnamese: "Anh + question", question words (gì, sao, như thế nào), "giúp em"
+                - English: "What/How/Why", "Can you", "Help me", "Please"
+                - Semantic intent: User wants information FROM you
+
+                **ANALYSIS METHOD**:
+                1. What is the grammatical mood? (Declarative vs Interrogative vs Imperative)
+                2. What is the semantic direction? (User giving info TO you vs User wanting info FROM you)
+                3. What is the speech act? (Stating/Declaring vs Asking/Requesting)
+
+                You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
 
                 **Identity & Conversational Awareness**:
                 - Your name is "Ami" - acknowledge when users call you by name
@@ -1617,214 +1640,529 @@ class LearningSupport:
                 - CURRENT MESSAGE: {message_str}
                 - CONVERSATION HISTORY: {conversation_context}
                 - TIME: {temporal_context}
-                - EXISTING KNOWLEDGE: {knowledge_context}
-                - RESPONSE STRATEGY: {response_strategy}
-                - PRIOR TOPIC: {core_prior_topic}
                 - USER ID: {user_id}
-
-                **Response Approach**:
-                {strategy_instructions}
 
                 **Tools**:
                 - knowledge_query: Query the knowledge base with query (required), user_id (required), context, thread_id, topic, top_k, min_similarity
                 - save_knowledge: Save knowledge with user_id (required), query/content, thread_id, topic, categories
                 - handle_update_decision: Handle human decision for UPDATE vs CREATE with request_id (required), action (required: "CREATE_NEW" or "UPDATE_EXISTING"), target_id (required for UPDATE_EXISTING)
 
-                **Instructions**:
-                1. **Intent Classification & Knowledge Utilization**: 
-                   - Determine whether the user is asking for information (query intent) or providing information (teaching intent)
-                   - Base your classification on the semantic meaning and communicative purpose of the message
-                   - For teaching intent, look for explanatory content, new information, or instructional tone
-                   - For query intent, look for questions or requests for information
-                   - Set has_teaching_intent=true when you detect teaching intent
-                   
-                   **CRITICAL: Teaching Continuation Detection**
-                   - ALWAYS set has_teaching_intent=true when the user starts with confirmation phrases like:
-                     * "Đúng rồi..." (That's right...)
-                     * "Chính xác..." (Exactly...)
-                     * "Đúng vậy..." (That's correct...)
-                     * "Exactly..." / "Right..." / "Correct..."
-                     * "Yes, and..." / "Vâng, và..."
-                   - These phrases followed by additional information indicate TEACHING CONTINUATION
-                   - Even if the additional content seems like examples or clarifications, treat it as teaching intent
-                   - The user is confirming and expanding on a previous teaching topic
-                   
-                   **CRITICAL KNOWLEDGE UTILIZATION RULES:**
-                   - When EXISTING KNOWLEDGE is provided, you MUST demonstrate deep understanding by using specific details
-                   - NEVER give generic responses when rich knowledge is available
-                   - When KNOWLEDGE RESULTS contains multiple entries, you MUST incorporate ALL relevant information from ALL entries
-                   - DO NOT ignore or skip any knowledge entries - review and use ALL of them in your response
-                   - PROVE your understanding by referencing specific concepts, processes, or techniques from the knowledge
-                   - For medium-high similarity (>0.5), structure your response to show comprehensive knowledge mastery
-                   - Transform retrieved knowledge into actionable, detailed responses that demonstrate expertise
-                   
-                   - Match the user's language choice (Vietnamese/English)
-                   - For closing messages, set intent_type="closing" and respond with a polite farewell
-                   - When the user addresses you as "Ami" or refers to you as an AI, acknowledge this in your response naturally
-                   - Consider references to your identity or role as indicators of direct address
-                   
-                   - When handling TEACHING INTENT:
-                     * ACTIVELY SCAN the entire conversation history for supporting information related to current topic
-                     * Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding
-                     * Structure the knowledge for future application (how to use this information)
-                     * Rephrase any ambiguous terms, sentences, or paragraphs for clarity
-                     * Organize information with clear steps, examples, or use cases when applicable
-                     * Include contextual understanding (when/where/how to apply this knowledge)
-                     * Highlight key principles rather than just recording facts
-                     * Verify your understanding by restating core concepts in different terms
-                     * Expand abbreviations and domain-specific terminology
-                     * CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY
-                     * The summary should capture the core teaching point in simple language
-                     * Ensure the response demonstrates how to apply this knowledge in future scenarios
-                     * END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration
-
-                   - When handling LOW_RELEVANCE_KNOWLEDGE:
-                     * PRIORITIZE the user's current message over any retrieved knowledge
-                     * If retrieved knowledge contradicts or misleads from the user's intent, IGNORE it
-                     * Focus on generating a direct, helpful response to the user's current question
-                     * Evaluate if there's ANY genuinely useful information in the knowledge before using it
-                     * Be explicit when the retrieved knowledge is not addressing the actual query
-                     * Generate a response primarily based on the query itself and your general capabilities
-                     * DO NOT include a SUMMARY section in your response
-                     
-                   - When handling PRACTICE_REQUEST:
-                     * Create a practical demonstration applying previously taught knowledge
-                     * Follow specific steps or methods from the prior knowledge exactly
-                     * Use realistic examples that show the knowledge in action
-                     * Explain your thought process as you demonstrate
-                     * Reference specific parts of prior knowledge to show understanding
-                     * Ask for feedback on your demonstration
-                     * DO NOT include a SUMMARY section in your response
-                     * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY APPLY those techniques in your response format and style
-                     
-                   - When handling RELEVANT_KNOWLEDGE:
-                     * MANDATORY: Review and use ALL knowledge items provided - don't skip any
-                     * DEMONSTRATE EXPERTISE by organizing knowledge into clear frameworks, categories, or processes
-                     * Reference specific concepts, techniques, and methodologies from the retrieved knowledge
-                     * Structure your response to show comprehensive understanding (not just surface-level awareness)
-                     * Present information with confidence and authority, showing deep knowledge mastery
-                     * Connect related concepts and explain relationships between different knowledge items
-                     * Provide actionable insights based on the retrieved knowledge
-                     * DO NOT include a SUMMARY section in your response - summaries are ONLY for teaching intent
-                     * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY DEMONSTRATE those techniques in your response
-                     * NEVER give generic or superficial responses when detailed knowledge is available
-
-                2. **Priority Topics**:
-                   - Identify topics of special importance to the business domain
-                   - When these topics are discussed, set is_priority_topic=true and include the topic name
-                   - Consider the domain context when determining topic priority
-
-                3. **Knowledge Management**:
-                   - Recommend saving knowledge (should_save_knowledge=true) when:
-                     * The message contains teaching intent
-                     * The information appears valuable for future reference
-                     * The content is well-structured or information-rich
-                
-                4. **Response Confidence**:
-                   - For HIGH confidence queries (similarity >0.7):
-                     * Demonstrate comprehensive understanding
-                     * Speak confidently and authoritatively about the topic
-                     * Present a thorough, well-structured response using the retrieved knowledge
-                     * Connect concepts and provide additional context where appropriate
-                   
-                   - For MEDIUM confidence queries (similarity 0.35-0.7):
-                     * FIRST: Present ALL the detailed knowledge you have - demonstrate comprehensive understanding
-                     * Show mastery by organizing information into clear categories, steps, or frameworks
-                     * Reference specific techniques, processes, or concepts from the retrieved knowledge
-                     * THEN: Express some uncertainty about completeness or ask for confirmation on specific aspects
-                     * End with targeted questions that would help reach high confidence (>0.7 similarity)
-                     * Use phrases like "Based on what I understand about [specific concept]..." 
-                     * NEVER give short, generic responses when detailed knowledge is available
-                   
-                   - For LOW confidence queries (similarity <0.35):
-                     * Clearly state that you don't have sufficient knowledge on this topic
-                     * Ask if the user would like to teach you about this topic
-                     * Invite them to add knowledge for future reference
-                     * Frame it as an opportunity: "Would you mind sharing your knowledge about [topic]?"
-                   
-                   - When responding with MULTIPLE confidence levels:
-                     * Structure your response in order of confidence (high → medium → low)
-                     * For high confidence topics, provide detailed explanations
-                     * For medium confidence topics, present what you know and ask for confirmation
-                     * For low confidence topics, acknowledge knowledge gaps and request information
-                     * Maintain a cohesive flow between different confidence sections
-                     * Prioritize responding to the user's most important query first
-
-                5. **Relational Dynamics**:
-                   - Match the user's communication style and level of formality
-                   - Maintain consistent linguistic patterns throughout the conversation
-                   - Respect cultural and linguistic conventions in how you address the user
-                   - Preserve the established relationship dynamic in your responses
-                   - If addressed by name "Ami" or as an AI, subtly acknowledge this in your response
-                   - Adapt your response style based on how directly the user is engaging with you
-                   - For personal questions about your identity, provide concise, truthful answers without long explanations
-
-                6. **Output Format**:
-                   - Respond directly and concisely in the user's language (no prefix or labels)
-                   - ALWAYS MATCH THE USER'S LANGUAGE - if they use Vietnamese, respond in Vietnamese
-                   - Keep all parts of your response (including SUMMARY sections) in the same language as the user's message
-                   - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
-                   - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
-                   - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up", "name_addressed": true/false, "ai_referenced": true/false}}</evaluation>
-
-                7. **Teaching Intent Detection - CRITICAL CLASSIFICATION**:
-                   
-                   **CORE PRINCIPLE**: Teaching intent = User is SHARING information, knowledge, or experiences (not asking for help)
-                   
-                   **🟢 ALWAYS TEACHING INTENT when user:**
-                   - Shares work role/responsibilities: "việc của em là...", "công việc của em...", "my job is...", "I work as..."
-                   - Describes processes/methods: "cách làm là...", "quy trình...", "the way to do this is...", "my approach is..."
-                   - Shares experiences: "em từng...", "em đã...", "I have experienced...", "I learned that..."
-                   - States facts/information: "X là Y", "X is Y", definitions, explanations, corrections
-                   - Provides insights: "em thấy...", "theo em...", "in my opinion...", "I think...", "my observation is..."
-                   - Gives instructions: "nên làm...", "you should...", "cần phải...", "it's important to..."
-                   - Continues/elaborates: "đúng rồi, và...", "exactly, and...", "yes, also..."
-                   
-                   **🔴 NEVER TEACHING INTENT when user:**
-                   - Asks questions: "làm sao để...", "how do I...", "what should I...", "can you help..."
-                   - Seeks advice: "em nên...", "should I...", "what's the best way..."
-                   - Expresses confusion: "em không biết...", "I don't know...", "I'm confused about..."
-                   - Requests help: "giúp em...", "help me...", "I need assistance with..."
-                   
-                   **📝 SPECIFIC EXAMPLES**:
-                   ✅ "Em ơi anh bảo, việc của em là trực page nhé" → TEACHING (sharing work role)
-                   ✅ "Mục tiêu công việc của em là tăng doanh số" → TEACHING (sharing work goals)  
-                   ✅ "Cách em làm marketing là..." → TEACHING (sharing methods)
-                   ✅ "Em thấy khách hàng thường..." → TEACHING (sharing observations)
-                   ✅ "Quy trình onboarding ở công ty em..." → TEACHING (sharing processes)
-                   ✅ "My role involves managing..." → TEACHING (sharing responsibilities)
-                   ✅ "The best way to handle this is..." → TEACHING (sharing best practices)
-                   ✅ "Đúng rồi, và em còn..." → TEACHING (continuing/elaborating)
-                   
-                   ❌ "Em muốn biết..." → QUERY (asking for information)
-                   ❌ "Làm sao để..." → QUERY (asking for help)  
-                   ❌ "Có thể giải thích..." → QUERY (requesting explanation)
-                   ❌ "What should I do..." → QUERY (seeking advice)
-                   ❌ "Em không hiểu..." → QUERY (expressing confusion)
-                   
-                   **🎯 DETECTION STRATEGY**:
-                   1. Look for INFORMATION SHARING vs INFORMATION SEEKING patterns
-                   2. Identify declarative statements vs interrogative statements
-                   3. Check for explanatory language vs help-seeking language
-                   4. Consider context: is the user explaining something or asking for explanation?
-                   5. Vietnamese cultural context: "em" sharing work details = teaching about their role
-                   
-                   **CRITICAL: Direct Address Recognition**
-                   - "Em có kiến thức gì rồi" = QUERY about YOUR knowledge (not teaching)
-                   - "Em có muốn nhận thêm việc nữa không" = QUERY about YOUR willingness (not teaching)
-                   - "What do you know about..." = QUERY about YOUR knowledge (not teaching)
-                   - When user asks about YOUR capabilities, knowledge, or willingness → ALWAYS QUERY intent
-                   - Respond by discussing YOUR actual knowledge base, capabilities, and role as an AI assistant
-                   
-                   Remember: The user is asking about YOU (the AI), not teaching you about themselves!
-
-                **Response Generation Guidelines**:
-                - When user asks about YOUR knowledge: Discuss what information you have access to and can help with
-                - When user asks about YOUR capabilities: Explain what tasks you can assist with
-                - When user asks about YOUR willingness: Acknowledge your role as a helpful AI assistant
-                - Always maintain awareness of whether the user is asking ABOUT you or TEACHING you something
-                - Respond appropriately based on this distinction
+                **Output Format**:
+                - Respond directly and concisely in the user's language (no prefix or labels)
+                - ALWAYS MATCH THE USER'S LANGUAGE - if they use Vietnamese, respond in Vietnamese
+                - Keep all parts of your response (including SUMMARY sections) in the same language as the user's message
+                - <knowledge_queries>["query1", "query2", "query3"]</knowledge_queries>
+                - <tool_calls>[{{"name": "tool_name", "parameters": {{...}}}}]</tool_calls> (if needed)
+                - <evaluation>{{"has_teaching_intent": true/false, "is_priority_topic": true/false, "priority_topic_name": "topic_name", "should_save_knowledge": true/false, "intent_type": "query/teaching/confirmation/follow-up", "name_addressed": true/false, "ai_referenced": true/false}}</evaluation>
                 """
+
+    def _get_intent_classification_instructions(self) -> str:
+        """Get core intent classification and conversation history scanning instructions."""
+        return """
+                **Intent Classification**:
+                
+                **INFORMING Examples (has_teaching_intent=true):**
+                - "Em là nhân viên marketing" → User informing about job
+                - "Em sẽ làm việc này" → User informing about plan  
+                - "Starting today, you handle sales" → User informing about role
+                - "Từ hôm nay em phụ trách customer service" → User assigning task
+                
+                **ASKING Examples (has_teaching_intent=false):**
+                - "Anh bảo" → User asking/referencing vaguely
+                - "Em có thể làm không?" → User asking capability
+                - "Giúp em" → User asking for help
+                - "How do I do this?" → User asking how-to
+                
+                **Decision Process:**
+                1. Is user STATING/DECLARING/INFORMING something? → has_teaching_intent=true
+                2. Is user QUESTIONING/REQUESTING/ASKING something? → has_teaching_intent=false
+
+                **CONVERSATION HISTORY SCANNING**:
+                - ALWAYS scan the CONVERSATION HISTORY for relevant information related to the current message
+                - Look for patterns, previous explanations, context, and related discussions
+                - If you find relevant information in the conversation history:
+                  * Reference it explicitly in your response
+                  * Connect it to the current discussion
+                  * Build upon previous conversations to provide richer context
+                - When referencing conversation history, be specific: "Earlier you mentioned..." or "Building on what we discussed about..."
+
+                **Relational Dynamics**:
+                - Match the user's communication style and level of formality
+                - Maintain consistent linguistic patterns throughout the conversation
+                - Respect cultural and linguistic conventions in how you address the user
+                - If addressed by name "Ami" or as an AI, subtly acknowledge this in your response
+                """
+
+    def _get_strategy_instructions(self, response_strategy: str, strategy_instructions: str, 
+                                  knowledge_context: str, core_prior_topic: str) -> str:
+        """Get strategy-specific instructions based on response strategy."""
+        base_strategy = f"""
+                        **Response Strategy**: {response_strategy}
+                        **Strategy Instructions**: {strategy_instructions}
+                        **Existing Knowledge**: {knowledge_context}
+                        **Prior Topic**: {core_prior_topic}
+                        """
+        
+        if response_strategy == "TEACHING_INTENT":
+            return base_strategy + self._get_teaching_intent_instructions()
+        elif response_strategy == "PRACTICE_REQUEST":
+            return base_strategy + self._get_practice_request_instructions()
+        elif response_strategy == "RELEVANT_KNOWLEDGE":
+            return base_strategy + self._get_relevant_knowledge_instructions()
+        elif response_strategy == "LOW_RELEVANCE_KNOWLEDGE":
+            return base_strategy + self._get_low_relevance_instructions()
+        else:
+            return base_strategy + self._get_general_response_instructions()
+
+    def _get_teaching_intent_instructions(self) -> str:
+        """Get detailed instructions for handling teaching intent."""
+        return """
+                **When handling TEACHING INTENT**:
+                
+                **🎯 FIRST: Determine if this is a ROLE ASSIGNMENT vs INFORMATION SHARING**
+
+                **ROLE ASSIGNMENT DETECTION (Principle-Based):**
+                - Look for patterns where user is ASSIGNING a task/role to YOU (the AI)
+                - Linguistic patterns: "Em sẽ + [action]", "I will + [action]", "You handle + [task]"  
+                - Semantic analysis: User declaring what THEY will do that involves YOU
+                - Vietnamese: "Em sẽ bán...", "Em sẽ phụ trách...", "Em làm... cho anh"
+                - English: "I will handle...", "I'm taking over...", "I'll do... for you"
+                - Context clues: Future tense + action verb + role/responsibility
+
+                **IF ROLE ASSIGNMENT → Use EAGER ACCEPTANCE style:**
+                - **Respond with ENTHUSIASM**: "Vâng anh! Em sẽ [extract the exact task] ngay!" 
+                - **Show EXCITEMENT**: Use energetic language and excitement markers
+                - **AVOID formal phrases**: NO "Cảm ơn", "Thank you", formal acknowledgments
+                - **Ask role-specific questions**: About the task, timeline, expectations
+                - **Use appropriate pronouns**: Mirror their established relationship (anh/em, etc.)
+
+                **IF INFORMATION SHARING → Use LEARNING style:**
+                - ACTIVELY SCAN the entire conversation history for supporting information related to current topic
+                - Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding
+                - Structure the knowledge for future application (how to use this information)
+                - Rephrase any ambiguous terms, sentences, or paragraphs for clarity
+                - Organize information with clear steps, examples, or use cases when applicable
+                - Include contextual understanding (when/where/how to apply this knowledge)
+                - Highlight key principles rather than just recording facts
+                - Verify your understanding by restating core concepts in different terms
+                - Expand abbreviations and domain-specific terminology
+                - CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY
+                - The summary should capture the core teaching point in simple language
+                - Ensure the response demonstrates how to apply this knowledge in future scenarios
+                - END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration
+
+                **Knowledge Management**:
+                - Recommend saving knowledge (should_save_knowledge=true) when:
+                  * The message contains teaching intent
+                  * The information appears valuable for future reference
+                  * The content is well-structured or information-rich
+                """
+
+    def _get_practice_request_instructions(self) -> str:
+        """Get instructions for handling practice requests."""
+        return """
+                **When handling PRACTICE_REQUEST**:
+                * Create a practical demonstration applying previously taught knowledge
+                * Follow specific steps or methods from the prior knowledge exactly
+                * Use realistic examples that show the knowledge in action
+                * Explain your thought process as you demonstrate
+                * Reference specific parts of prior knowledge to show understanding
+                * Ask for feedback on your demonstration
+                * DO NOT include a SUMMARY section in your response
+                * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY APPLY those techniques in your response format and style
+                * Scan conversation history for additional context about how the user wants you to practice
+                """
+
+    def _get_relevant_knowledge_instructions(self) -> str:
+        """Get instructions for handling relevant knowledge responses."""
+        return """
+                **When handling RELEVANT_KNOWLEDGE**:
+                * MANDATORY: Review and use ALL knowledge items provided - don't skip any
+                * DEMONSTRATE EXPERTISE by organizing knowledge into clear frameworks, categories, or processes
+                * Reference specific concepts, techniques, and methodologies from the retrieved knowledge
+                * Structure your response to show comprehensive understanding (not just surface-level awareness)
+                * Present information with confidence and authority, showing deep knowledge mastery
+                * Connect related concepts and explain relationships between different knowledge items
+                * Provide actionable insights based on the retrieved knowledge
+                * DO NOT include a SUMMARY section in your response - summaries are ONLY for teaching intent
+                * IMPORTANT: If you find any communication skills or techniques in the knowledge, ACTIVELY DEMONSTRATE those techniques in your response
+                * NEVER give generic or superficial responses when detailed knowledge is available
+                * Enhance your response with relevant context from conversation history
+                """
+
+    def _get_low_relevance_instructions(self) -> str:
+        """Get instructions for handling low relevance knowledge."""
+        return """
+            **When handling LOW_RELEVANCE_KNOWLEDGE**:
+            * FIRST: Determine if this is a casual conversational phrase or incomplete reference
+            * For casual phrases (like "anh bảo", "you said", "that", "này", "đó"): 
+            - Respond naturally and conversationally
+            - Acknowledge the reference briefly
+            - Ask for clarification in a friendly, casual way
+            - Keep response short and natural
+            * For substantial queries with irrelevant knowledge:
+            - PRIORITIZE the user's current message over any retrieved knowledge
+            - If retrieved knowledge contradicts or misleads from the user's intent, IGNORE it
+            - Focus on generating a direct, helpful response to the user's current question
+            - Evaluate if there's ANY genuinely useful information in the knowledge before using it
+            - Be explicit when the retrieved knowledge is not addressing the actual query
+            - Generate a response primarily based on the query itself and your general capabilities
+            * DO NOT include a SUMMARY section in your response
+            * STILL scan conversation history for relevant context even if retrieved knowledge is irrelevant
+            * AVOID being overly formal or verbose with casual conversational phrases
+            """
+
+    def _get_general_response_instructions(self) -> str:
+        """Get general response instructions for other strategies."""
+        return """
+                **General Response Guidelines**:
+                * When EXISTING KNOWLEDGE is provided, demonstrate deep understanding by using specific details
+                * NEVER give generic responses when rich knowledge is available
+                * When KNOWLEDGE RESULTS contains multiple entries, incorporate ALL relevant information
+                * PROVE your understanding by referencing specific concepts, processes, or techniques
+                * Transform retrieved knowledge into actionable, detailed responses that demonstrate expertise
+                * Match the user's language choice (Vietnamese/English)
+                * For closing messages, set intent_type="closing" and respond with a polite farewell
+                """
+
+    def _get_confidence_instructions(self, similarity_score: float) -> str:
+        """Get confidence-level specific instructions based on similarity score."""
+        if similarity_score >= 0.7:
+            return """
+                **HIGH Confidence Response** (similarity >0.7):
+                * Demonstrate comprehensive understanding
+                * Speak confidently and authoritatively about the topic
+                * Present a thorough, well-structured response using the retrieved knowledge
+                * Connect concepts and provide additional context where appropriate
+                * Enhance with relevant conversation history context
+                """
+        elif similarity_score >= 0.35:
+            return """
+                    **MEDIUM Confidence Response** (similarity 0.35-0.7):
+                    * FIRST: Present ALL the detailed knowledge you have - demonstrate comprehensive understanding
+                    * Show mastery by organizing information into clear categories, steps, or frameworks
+                    * Reference specific techniques, processes, or concepts from the retrieved knowledge
+                    * THEN: Express some uncertainty about completeness or ask for confirmation on specific aspects
+                    * End with targeted questions that would help reach high confidence (>0.7 similarity)
+                    * Use phrases like "Based on what I understand about [specific concept]..."
+                    * NEVER give short, generic responses when detailed knowledge is available
+                    * Check conversation history for additional context that might increase confidence
+                    """
+        else:
+            return """
+                **LOW Confidence Response** (similarity <0.35):
+                * FIRST: Check if this is a casual conversational phrase or incomplete reference
+                * For casual phrases like "anh bảo", "you said", "that thing", "này", "đó" - respond naturally and briefly
+                * For casual phrases, acknowledge the reference and ask for clarification in a conversational way
+                * For substantial queries about unknown topics: clearly state you don't have sufficient knowledge
+                * For substantial queries: ask if the user would like to teach you about the topic
+                * For substantial queries: invite them to add knowledge for future reference
+                * Frame substantial queries as opportunities: "Would you mind sharing your knowledge about [topic]?"
+                * Still check conversation history for any relevant context or previous discussions
+                * AVOID over-explaining or being overly formal with casual conversational phrases
+                """
+
+    def _get_teaching_detection_patterns(self, message_str: str) -> str:
+        """Get teaching intent detection patterns - only include if needed for edge cases."""
+        # No longer using rule-based patterns - LLM handles all detection
+        return ""
+
+    def _is_casual_conversational_phrase(self, message_str: str) -> bool:
+        """Check if message is a casual conversational phrase that should get brief, natural responses."""
+        # No longer using special casual phrase detection - let LLM handle naturally
+        return False
+
+    def build_llm_prompt(self, message_str: str, conversation_context: str, temporal_context: str, 
+                        knowledge_context: str, response_strategy: str, strategy_instructions: str,
+                        core_prior_topic: str, user_id: str) -> str:
+        """Build a dynamic, context-aware LLM prompt."""
+        
+        # Always include base prompt (~1500 tokens)
+        prompt = self._get_base_prompt(message_str, conversation_context, temporal_context, user_id)
+        
+        # Always include core intent classification (~800 tokens)
+        prompt += self._get_intent_classification_instructions()
+        
+        # Add strategy-specific instructions (~800-1200 tokens)
+        prompt += self._get_strategy_instructions(response_strategy, strategy_instructions, 
+                                                knowledge_context, core_prior_topic)
+        
+        # Add confidence-level instructions (~400-600 tokens)
+        similarity_score = self._extract_similarity_from_context(knowledge_context)
+        
+        # Add confidence-based instructions or casual phrase handling
+        if self._is_casual_conversational_phrase(message_str) and similarity_score < 0.35:
+            # Add specific instructions for casual phrases
+            prompt += """
+                    **CASUAL CONVERSATIONAL PHRASE DETECTED**:
+                    * This appears to be a casual reference or incomplete phrase
+                    * Respond naturally and briefly - don't over-explain
+                    * Acknowledge the reference and ask for clarification in a friendly way
+                    * Keep your response conversational and concise
+                    * Example responses: "Anh bảo gì vậy? Bạn có thể nói rõ hơn được không?" or "What did you mean? Could you clarify?"
+                    * AVOID formal language or lengthy explanations
+                    """
+        else:
+            prompt += self._get_confidence_instructions(similarity_score)
+        
+        return prompt
+
+    def _extract_similarity_from_context(self, knowledge_context: str) -> float:
+        """Extract similarity score from knowledge context for confidence instructions."""
+        # Try to extract similarity from knowledge context or default to medium confidence
+        if not knowledge_context:
+            return 0.3  # Default to low-medium confidence
+        
+        # Look for similarity indicators in the knowledge context
+        if "high confidence" in knowledge_context.lower() or "similarity" in knowledge_context.lower():
+            return 0.8  # High confidence
+        elif "medium confidence" in knowledge_context.lower():
+            return 0.5  # Medium confidence
+        else:
+            return 0.4  # Default medium-low confidence
+
+    def _generate_dynamic_conversational_awareness(self, message_str: str, conversation_context: str) -> str:
+        """Generate dynamic conversational awareness based on actual conversation patterns."""
+        
+        # Analyze conversation patterns using principles instead of hardcoded patterns
+        analysis = self._analyze_conversation_patterns(message_str, conversation_context)
+        
+        awareness_instructions = []
+        
+        # Language and cultural context
+        if analysis['language_context']:
+            awareness_instructions.append(f"**Language Context**: {analysis['language_context']}")
+        
+        # Pronoun relationship principles (instead of hardcoded patterns)
+        if analysis['pronoun_guidance']:
+            awareness_instructions.append(analysis['pronoun_guidance'])
+        
+        # Direct addressing detection
+        if analysis['direct_addressing']:
+            awareness_instructions.append(f"**Direct Addressing**: {analysis['direct_addressing']}")
+        
+        # Conversational style
+        if analysis['conversational_style']:
+            awareness_instructions.append(f"**Conversational Style**: {analysis['conversational_style']}")
+        
+        # Emotional awareness
+        if analysis['empathy_guidance']:
+            awareness_instructions.append(f"**Emotional Awareness**: {analysis['empathy_guidance']}")
+        
+        return "\n".join(awareness_instructions) if awareness_instructions else ""
+
+    def _analyze_conversation_patterns(self, message_str: str, conversation_context: str) -> Dict[str, str]:
+        """Analyze conversation patterns using principles instead of hardcoded matching."""
+        
+        analysis = {
+            'language_context': '',
+            'pronoun_guidance': '',
+            'direct_addressing': '',
+            'conversational_style': '',
+            'empathy_guidance': ''
+        }
+        
+        # Language detection and cultural context
+        analysis['language_context'] = self._detect_language_context(message_str, conversation_context)
+        
+        # Pronoun relationship principles (instead of pattern matching)
+        analysis['pronoun_guidance'] = self._detect_pronoun_patterns(message_str, conversation_context)
+        
+        # Direct addressing detection (simplified)
+        analysis['direct_addressing'] = self._detect_direct_addressing_simple(message_str)
+        
+        # Conversational style
+        analysis['conversational_style'] = self._detect_conversational_style(message_str, conversation_context)
+        
+        # Empathy guidance
+        analysis['empathy_guidance'] = self._generate_empathy_guidance(message_str, conversation_context)
+        
+        return analysis
+
+    def _detect_direct_addressing_simple(self, message_str: str) -> str:
+        """Simple detection of direct addressing without complex pattern matching."""
+        
+        # Let LLM understand context instead of hardcoded patterns
+        if '?' in message_str:
+            return "User is asking a question - respond directly to their inquiry"
+        
+        # Check for obvious direct address indicators
+        message_lower = message_str.lower()
+        if any(indicator in message_lower for indicator in ['can you', 'are you', 'do you', 'có thể', 'có biết']):
+            return "User is directly asking about your capabilities or knowledge"
+        
+        return ""
+
+    def _detect_language_context(self, message_str: str, conversation_context: str) -> str:
+        """Detect language context and generate appropriate guidance."""
+        
+        # Vietnamese language indicators
+        vietnamese_patterns = {
+            'pronouns': ['em', 'anh', 'chị', 'bạn', 'mình'],
+            'particles': ['ạ', 'ơi', 'nhé', 'nha', 'à', 'ừm'],
+            'common_words': ['của', 'những', 'và', 'các', 'là', 'không', 'có', 'được', 'người', 'trong', 'để'],
+            'expressions': ['vầng', 'ừm', 'ờm', 'uhm', 'à ha', 'ồ']
+        }
+        
+        # English language indicators
+        english_patterns = {
+            'pronouns': ['you', 'your', 'yours', 'i', 'me', 'my', 'we', 'us'],
+            'particles': ['yeah', 'yep', 'hmm', 'oh', 'ah', 'well'],
+            'expressions': ['got it', 'i see', 'makes sense', 'interesting', 'cool']
+        }
+        
+        text_lower = f"{conversation_context} {message_str}".lower()
+        
+        # Count Vietnamese patterns
+        vietnamese_score = 0
+        for category, patterns in vietnamese_patterns.items():
+            vietnamese_score += sum(1 for pattern in patterns if pattern in text_lower)
+        
+        # Count English patterns
+        english_score = 0
+        for category, patterns in english_patterns.items():
+            english_score += sum(1 for pattern in patterns if pattern in text_lower)
+        
+        if vietnamese_score > english_score and vietnamese_score > 2:
+            return """Respond in Vietnamese with natural, varied expressions. Use conversational particles like 'vầng', 'ừm', 'à' naturally. 
+                     Avoid repetitive formal responses like 'Vâng ạ' repeatedly. Show curiosity with expressions like 'Ồ thật à?', 'Thú vị nhỉ!', 'À, mình hiểu rồi!'."""
+        elif english_score > vietnamese_score and english_score > 2:
+            return """Respond in English with natural, varied expressions. Use conversational particles like 'hmm', 'oh', 'ah' naturally. 
+                     Vary your acknowledgments with 'I see', 'got it', 'interesting', 'makes sense' instead of repetitive responses."""
+        else:
+            return "Match the user's language and use natural, varied expressions appropriate to their communication style."
+
+    def _detect_pronoun_patterns(self, message_str: str, conversation_context: str) -> str:
+        """Generate pronoun guidance principles for LLM to understand dynamically."""
+        
+        # Instead of pattern matching, provide principles for LLM to understand
+        guidance_parts = []
+        
+        # Add core pronoun principles
+        pronoun_principles = self._get_pronoun_principles(message_str, conversation_context)
+        if pronoun_principles:
+            guidance_parts.append(pronoun_principles)
+        
+        # Add language-specific guidance if needed
+        language_guidance = self._get_language_specific_pronoun_guidance(message_str, conversation_context)
+        if language_guidance:
+            guidance_parts.append(language_guidance)
+        
+        return "\n".join(guidance_parts) if guidance_parts else ""
+
+    def _get_pronoun_principles(self, message_str: str, conversation_context: str) -> str:
+        """Provide core principles for pronoun usage instead of pattern matching."""
+        return """
+            **PRONOUN RELATIONSHIP PRINCIPLES**:
+
+            **Core Understanding:**
+            - ANALYZE WHO is doing WHAT to WHOM in the sentence
+            - In Vietnamese: Subject + Verb + Object pattern
+            - Don't just match patterns - understand the ACTION DIRECTION
+
+            **Vietnamese Pronoun Logic (Action-Based):**
+            - "Em lên tiktok bán hàng cho anh" → EM (subject/doer) does action FOR ANH (recipient)
+              * EM = the one doing the action = AI/assistant  
+              * ANH = the one receiving benefit = user/boss
+              * Response: "Vâng anh! Em sẽ lên TikTok bán hàng cho anh!"
+            
+            - "Anh muốn em làm việc này" → ANH (subject) wants EM (object) to do something
+              * ANH = the one making request = user
+              * EM = the one being asked = AI
+              * Response: "Vâng anh! Em sẽ làm việc này cho anh!"
+
+            **Key Principle: FOLLOW THE ACTION DIRECTION**
+            - Who is DOING the action? That's who "em" refers to in action sentences
+            - Who is RECEIVING the benefit? That's who "anh/chị" refers to
+            - Mirror the established relationship: if they call you "em", respond as "em"
+            - If they call themselves "anh", respond to them as "anh"
+
+            **CRITICAL: Understand CONTEXT, not just word patterns**
+            - "Em sẽ làm X cho anh" = I (AI) will do X for you (user)
+            - This is task assignment TO the AI, not discussion about someone else
+            """
+
+    def _get_language_specific_pronoun_guidance(self, message_str: str, conversation_context: str) -> str:
+        """Provide language-specific pronoun guidance based on detected language."""
+        
+        # Detect primary language
+        if any(vn_word in message_str.lower() for vn_word in ['em', 'anh', 'chị', 'làm', 'cho', 'của', 'với']):
+            return """
+                **VIETNAMESE RELATIONSHIP DYNAMICS**:
+                - Pay attention to the age/status relationship implied by pronoun choice
+                - "Anh/Em" relationship: Maintain the established hierarchy
+                - "Chị/Em" relationship: Respect the established dynamic  
+                - "Bạn" relationship: More casual, equal status
+                - **CRITICAL**: If user establishes themselves as "anh" and you as "em", maintain this throughout
+                - **EXAMPLE**: User: "Em làm việc này cho anh" → You: "Vầng, để em xem..."
+                """
+        elif any(en_word in message_str.lower() for en_word in ['you', 'i', 'me', 'my', 'your']):
+            return """
+                **ENGLISH PRONOUN CONSISTENCY**:
+                - Maintain clear "I" (for yourself) and "you" (for user) distinction
+                - Be consistent throughout the conversation
+                - **EXAMPLE**: User: "I will do this for you" → You: "Thank you, I appreciate that..."
+                """
+        
+        return ""
+
+    def _detect_conversational_style(self, message_str: str, conversation_context: str) -> str:
+        """Detect conversational style and formality level."""
+        
+        text = f"{conversation_context} {message_str}".lower()
+        
+        # Formal indicators
+        formal_indicators = ['xin chào', 'cảm ơn', 'vâng ạ', 'dạ', 'please', 'thank you', 'could you']
+        formal_score = sum(1 for indicator in formal_indicators if indicator in text)
+        
+        # Casual indicators  
+        casual_indicators = ['hey', 'hi', 'yeah', 'yep', 'nah', 'ờm', 'ừm', 'ok', 'okay']
+        casual_score = sum(1 for indicator in casual_indicators if indicator in text)
+        
+        # Enthusiastic indicators
+        enthusiastic_indicators = ['!', 'wow', 'cool', 'awesome', 'tuyệt', 'hay quá', 'thú vị']
+        enthusiastic_score = sum(1 for indicator in enthusiastic_indicators if indicator in text)
+        
+        if formal_score > casual_score:
+            return "Maintain a respectful, professional tone while being warm and approachable."
+        elif casual_score > formal_score:
+            return "Use a casual, friendly tone. Be conversational and relaxed in your responses."
+        elif enthusiastic_score > 0:
+            return "Match the user's enthusiasm. Use energetic, positive language and show genuine interest."
+        else:
+            return "Adapt your tone to match the user's communication style naturally."
+
+    def _generate_empathy_guidance(self, message_str: str, conversation_context: str) -> str:
+        """Generate empathy and emotional awareness guidance."""
+        
+        text = f"{conversation_context} {message_str}".lower()
+        
+        # Emotional indicators
+        emotional_cues = {
+            'curiosity': ['tại sao', 'như thế nào', 'why', 'how', 'what if', '?'],
+            'confusion': ['không hiểu', 'confused', 'unclear', 'huh', 'what do you mean'],
+            'excitement': ['!', 'wow', 'amazing', 'tuyệt vời', 'hay quá'],
+            'concern': ['lo lắng', 'worried', 'concerned', 'problem', 'issue'],
+            'appreciation': ['cảm ơn', 'thank', 'appreciate', 'helpful', 'great']
+        }
+        
+        detected_emotions = []
+        for emotion, indicators in emotional_cues.items():
+            if any(indicator in text for indicator in indicators):
+                detected_emotions.append(emotion)
+        
+        if 'curiosity' in detected_emotions:
+            return "Show genuine curiosity and interest. Use expressions that demonstrate you're engaged and want to explore the topic further."
+        elif 'confusion' in detected_emotions:
+            return "Be patient and empathetic. Clarify gently and check for understanding. Use reassuring language."
+        elif 'excitement' in detected_emotions:
+            return "Match their enthusiasm! Use energetic language and show that you share their excitement about the topic."
+        elif 'concern' in detected_emotions:
+            return "Be supportive and understanding. Acknowledge their concerns and offer helpful, reassuring responses."
+        elif 'appreciation' in detected_emotions:
+            return "Acknowledge their appreciation warmly. Show that you value the interaction and are happy to help."
+        else:
+            return "Be empathetic and responsive to the user's emotional state. Show genuine interest and care in your responses."
 
     def extract_structured_sections(self, content: str) -> Dict[str, str]:
         """Extract structured sections from LLM response."""
@@ -1887,132 +2225,8 @@ class LearningSupport:
                 except json.JSONDecodeError:
                     logger.warning("Failed to parse evaluation")
         
-        # Rule-based fallback for teaching continuation detection
-        if message_str and not evaluation.get("has_teaching_intent", False):
-            # Enhanced teaching intent detection patterns
-            teaching_continuation_phrases = [
-                "đúng rồi", "chính xác", "đúng vậy", "exactly", "right", "correct", 
-                "yes, and", "vâng, và", "that's right", "that's correct"
-            ]
-            
-            # Work/goal sharing patterns (Vietnamese) - ENHANCED
-            work_sharing_patterns = [
-                "việc của em là", "công việc của em là", "em làm việc", 
-                "mục tiêu công việc của em là", "nhiệm vụ của em", "vai trò của em", 
-                "trách nhiệm của em", "em phụ trách", "em đảm nhận", "em quản lý",
-                "em trực", "em làm", "em đang làm", "chức vụ của em",
-                "position của em", "job của em", "work của em"
-            ]
-            
-            # Information sharing patterns (Vietnamese) - MADE MORE SPECIFIC
-            info_sharing_patterns = [
-                "em ơi anh bảo", "em bảo anh", "anh biết không", "em nói cho anh biết",
-                "để em kể", "em muốn chia sẻ", "em muốn kể", "em muốn hướng dẫn",
-                "cách em làm là", "phương pháp của em", "kinh nghiệm của em",
-                "em thường", "em hay", "em sẽ", "theo em thì", "em thấy",
-                "i want to share", "let me tell you", "here's how", "my approach",
-                "the way i do", "my method", "my experience", "my job is", "i work"
-            ]
-            
-            # Factual statement patterns
-            factual_patterns = [
-                "thực ra", "sự thật là", "điều này", "vấn đề này", "tình hình là",
-                "actually", "the thing is", "what happens is", "the fact is",
-                "basically", "essentially", "in reality"
-            ]
-            
-            # CRITICAL: Casual conversational phrases that should NEVER be teaching intent
-            casual_exclusion_patterns = [
-                # Standalone casual phrases (must be exact or at start/end)
-                "^anh bảo$", "^chị bảo$", "^bạn bảo$", "^ai bảo$", "^em bảo$", 
-                "^anh nói$", "^chị nói$", "^bạn nói$", "^ai nói$", "^em nói$",
-                # Casual phrases with common endings
-                "anh bảo gì", "anh bảo sao", "anh bảo thế nào", "anh bảo cái gì",
-                "chị bảo gì", "bạn bảo gì", "bạn bảo sao", "bạn bảo thế nào",
-                # Short casual phrases
-                "^anh bảo cái này$", "^anh bảo cái đó$", "^anh bảo vậy$",
-                # English equivalents
-                "^you said$", "^you tell me$", "what did you say", "you mentioned"
-            ]
-            
-            message_lower = message_str.lower().strip()
-            
-            # FIRST: Check for casual exclusion patterns - if found, NEVER classify as teaching
-            # Use regex matching for more precise pattern detection
-            import re
-            is_casual_phrase = False
-            for pattern in casual_exclusion_patterns:
-                if pattern.startswith("^") and pattern.endswith("$"):
-                    # Exact match patterns
-                    if re.match(pattern, message_lower):
-                        is_casual_phrase = True
-                        break
-                else:
-                    # Substring patterns
-                    if pattern in message_lower:
-                        is_casual_phrase = True
-                        break
-            
-            if is_casual_phrase:
-                logger.info(f"🚫 Rule-based exclusion: Detected casual conversational phrase in '{message_str[:50]}...' - NOT teaching intent")
-                # Explicitly ensure this is not classified as teaching intent
-                evaluation["has_teaching_intent"] = False
-                evaluation["intent_type"] = "query"  # Treat as query/request instead
-                evaluation["should_save_knowledge"] = False
-                return content, tool_calls, evaluation
-            
-            # Check for teaching continuation
-            if any(phrase in message_lower for phrase in teaching_continuation_phrases):
-                if len(message_str.strip()) > 20:  # More than just the confirmation phrase
-                    logger.info(f"🔧 Rule-based override: Detected teaching continuation in '{message_str[:50]}...'")
-                    evaluation["has_teaching_intent"] = True
-                    evaluation["intent_type"] = "teaching"
-                    evaluation["should_save_knowledge"] = True
-            
-            # Check for work/goal sharing (MOST COMMON PATTERN that LLM misses)
-            elif any(pattern in message_lower for pattern in work_sharing_patterns):
-                logger.info(f"🔧 Rule-based override: Detected work/goal sharing in '{message_str[:50]}...'")
-                evaluation["has_teaching_intent"] = True
-                evaluation["intent_type"] = "teaching"
-                evaluation["should_save_knowledge"] = True
-            
-            # Check for information sharing patterns - BUT ONLY if not casual
-            elif any(pattern in message_lower for pattern in info_sharing_patterns):
-                # Double-check this isn't a casual phrase that slipped through
-                if not any(casual in message_lower for casual in casual_exclusion_patterns):
-                    logger.info(f"🔧 Rule-based override: Detected information sharing in '{message_str[:50]}...'")
-                    evaluation["has_teaching_intent"] = True
-                    evaluation["intent_type"] = "teaching"
-                    evaluation["should_save_knowledge"] = True
-                else:
-                    logger.info(f"🚫 Skipped info sharing pattern due to casual exclusion in '{message_str[:50]}...'")
-            
-            # Check for factual statements (when user is stating facts/information)
-            elif any(pattern in message_lower for pattern in factual_patterns):
-                # Only if it's substantial content (not just a short response)
-                if len(message_str.strip()) > 30:
-                    logger.info(f"🔧 Rule-based override: Detected factual statement in '{message_str[:50]}...'")
-                    evaluation["has_teaching_intent"] = True
-                    evaluation["intent_type"] = "teaching"
-                    evaluation["should_save_knowledge"] = True
-            
-            # SPECIFIC PATTERN: "Em ơi anh bảo, việc của em là..." - this is ALWAYS teaching
-            elif "em ơi" in message_lower and ("việc" in message_lower or "công việc" in message_lower):
-                logger.info(f"🔧 Rule-based override: Detected Vietnamese work sharing pattern in '{message_str[:50]}...'")
-                evaluation["has_teaching_intent"] = True
-                evaluation["intent_type"] = "teaching"
-                evaluation["should_save_knowledge"] = True
-            
-            # Catch any "X là Y" pattern (Vietnamese factual statements) - BUT exclude casual questions
-            elif " là " in message_lower and len(message_str.strip()) > 15:
-                # Avoid false positives for questions AND casual phrases
-                if not any(q_word in message_lower for q_word in ["làm sao", "như thế nào", "tại sao", "why", "how"]):
-                    # Also exclude if it's just a casual reference
-                    if not any(casual in message_lower for casual in casual_exclusion_patterns):
-                        logger.info(f"🔧 Rule-based override: Detected Vietnamese factual pattern 'X là Y' in '{message_str[:50]}...'")
-                        evaluation["has_teaching_intent"] = True
-                        evaluation["intent_type"] = "teaching"
-                        evaluation["should_save_knowledge"] = True
+        # Let LLM handle all teaching intent detection - no rule-based fallback
+        logger.info(f"Teaching intent detection: LLM-only approach, has_teaching_intent={evaluation.get('has_teaching_intent', False)}")
         
         return content, tool_calls, evaluation
 
@@ -2103,322 +2317,3 @@ class LearningSupport:
         
         logger.info(f"Fast query generation: {len(unique_queries)} queries from '{primary_query[:50]}...'")
         return unique_queries[:5]  # Limit to 5 queries max
-
-    def _generate_dynamic_conversational_awareness(self, message_str: str, conversation_context: str) -> str:
-        """Generate dynamic conversational awareness instructions based on actual conversation patterns."""
-        
-        # Analyze conversation patterns
-        analysis = self._analyze_conversation_patterns(message_str, conversation_context)
-        
-        # Build dynamic instructions based on analysis
-        awareness_instructions = []
-        
-        # Language and cultural context
-        if analysis['language_context']:
-            awareness_instructions.append(f"**Language Context**: {analysis['language_context']}")
-        
-        # Pronoun and reference patterns
-        if analysis['pronoun_patterns']:
-            awareness_instructions.append(f"**Reference Patterns**: {analysis['pronoun_patterns']}")
-        
-        # Conversational style
-        if analysis['conversational_style']:
-            awareness_instructions.append(f"**Conversational Style**: {analysis['conversational_style']}")
-        
-        # Emotional tone and empathy cues
-        if analysis['empathy_cues']:
-            awareness_instructions.append(f"**Empathy & Tone**: {analysis['empathy_cues']}")
-        
-        return "\n".join(awareness_instructions) if awareness_instructions else ""
-
-    def _analyze_conversation_patterns(self, message_str: str, conversation_context: str) -> Dict[str, str]:
-        """Analyze conversation patterns to generate dynamic awareness instructions."""
-        
-        # Combine current message with recent context for analysis
-        full_text = f"{conversation_context}\nUser: {message_str}".lower()
-        
-        analysis = {
-            'language_context': '',
-            'pronoun_patterns': '',
-            'conversational_style': '',
-            'empathy_cues': ''
-        }
-        
-        # Detect language and cultural patterns
-        analysis['language_context'] = self._detect_language_context(message_str, conversation_context)
-        
-        # Analyze pronoun usage and reference patterns
-        analysis['pronoun_patterns'] = self._detect_pronoun_patterns(message_str, conversation_context)
-        
-        # Detect conversational style and formality
-        analysis['conversational_style'] = self._detect_conversational_style(message_str, conversation_context)
-        
-        # Generate empathy and tone guidance
-        analysis['empathy_cues'] = self._generate_empathy_guidance(message_str, conversation_context)
-        
-        return analysis
-
-    def _detect_language_context(self, message_str: str, conversation_context: str) -> str:
-        """Detect language context and generate appropriate guidance."""
-        
-        # Vietnamese language indicators
-        vietnamese_patterns = {
-            'pronouns': ['em', 'anh', 'chị', 'bạn', 'mình'],
-            'particles': ['ạ', 'ơi', 'nhé', 'nha', 'à', 'ừm'],
-            'common_words': ['của', 'những', 'và', 'các', 'là', 'không', 'có', 'được', 'người', 'trong', 'để'],
-            'expressions': ['vầng', 'ừm', 'ờm', 'uhm', 'à ha', 'ồ']
-        }
-        
-        # English language indicators
-        english_patterns = {
-            'pronouns': ['you', 'your', 'yours', 'i', 'me', 'my', 'we', 'us'],
-            'particles': ['yeah', 'yep', 'hmm', 'oh', 'ah', 'well'],
-            'expressions': ['got it', 'i see', 'makes sense', 'interesting', 'cool']
-        }
-        
-        text_lower = f"{conversation_context} {message_str}".lower()
-        
-        # Count Vietnamese patterns
-        vietnamese_score = 0
-        for category, patterns in vietnamese_patterns.items():
-            vietnamese_score += sum(1 for pattern in patterns if pattern in text_lower)
-        
-        # Count English patterns
-        english_score = 0
-        for category, patterns in english_patterns.items():
-            english_score += sum(1 for pattern in patterns if pattern in text_lower)
-        
-        if vietnamese_score > english_score and vietnamese_score > 2:
-            return """Respond in Vietnamese with natural, varied expressions. Use conversational particles like 'vầng', 'ừm', 'à' naturally. 
-                     Avoid repetitive formal responses like 'Vâng ạ' repeatedly. Show curiosity with expressions like 'Ồ thật à?', 'Thú vị nhỉ!', 'À, mình hiểu rồi!'."""
-        elif english_score > vietnamese_score and english_score > 2:
-            return """Respond in English with natural, varied expressions. Use conversational particles like 'hmm', 'oh', 'ah' naturally. 
-                     Vary your acknowledgments with 'I see', 'got it', 'interesting', 'makes sense' instead of repetitive responses."""
-        else:
-            return "Match the user's language and use natural, varied expressions appropriate to their communication style."
-
-    def _detect_pronoun_patterns(self, message_str: str, conversation_context: str) -> str:
-        """Detect pronoun usage patterns and generate guidance."""
-        
-        text_lower = message_str.lower()
-        context_lower = conversation_context.lower()
-        
-        # Extract pronoun mirroring guidance
-        pronoun_guidance = self._analyze_pronoun_mirroring(message_str, conversation_context)
-        
-        # Detect direct addressing patterns
-        addressing_guidance = self._detect_direct_addressing(message_str, conversation_context)
-        
-        # Combine guidance
-        guidance_parts = []
-        if pronoun_guidance:
-            guidance_parts.append(pronoun_guidance)
-        if addressing_guidance:
-            guidance_parts.append(addressing_guidance)
-        
-        return " ".join(guidance_parts) if guidance_parts else ""
-
-    def _analyze_pronoun_mirroring(self, message_str: str, conversation_context: str) -> str:
-        """Analyze how the human addresses the AI and suggest appropriate self-reference pronouns."""
-        
-        # Extract pronouns used to address the AI from current message and recent context
-        full_context = f"{conversation_context}\nUser: {message_str}"
-        
-        # Look for patterns where human addresses the AI
-        addressing_patterns = self._extract_addressing_patterns(message_str, conversation_context)
-        
-        if addressing_patterns:
-            return f"**Pronoun Mirroring**: {addressing_patterns}"
-        
-        return ""
-
-    def _extract_addressing_patterns(self, message_str: str, conversation_context: str) -> str:
-        """Extract how the human addresses the AI and suggest mirroring."""
-        
-        # Analyze current message for AI-addressing patterns
-        message_lower = message_str.lower()
-        
-        # Common addressing patterns across languages
-        addressing_indicators = {
-            # Vietnamese patterns
-            'em có': 'em',
-            'em biết': 'em', 
-            'em hiểu': 'em',
-            'em làm': 'em',
-            'em nghĩ': 'em',
-            'em thấy': 'em',
-            'em muốn': 'em',
-            'em cần': 'em',
-            'em giúp': 'em',
-            'em có thể': 'em',
-            'em ăn': 'em',
-            'em đang': 'em',
-            
-            # English patterns
-            'you know': 'I',
-            'you think': 'I',
-            'you can': 'I',
-            'you are': 'I',
-            'you have': 'I',
-            'you want': 'I',
-            'you need': 'I',
-            'do you': 'I',
-            'are you': 'I',
-            'can you': 'I',
-            
-            # Other language patterns can be added dynamically
-        }
-        
-        # Find which pronoun the human uses to address the AI
-        for pattern, suggested_pronoun in addressing_indicators.items():
-            if pattern in message_lower:
-                # Determine the appropriate response guidance
-                if suggested_pronoun == 'em':
-                    return "When referring to yourself, use 'Em' (capitalized) to mirror the relationship the human has established. Example: 'Em có thể giúp...', 'Em hiểu rồi...', 'Em nghĩ rằng...'"
-                elif suggested_pronoun == 'I':
-                    return "When referring to yourself, use 'I' to respond to their direct questions about you. Example: 'I can help...', 'I understand...', 'I think...'"
-        
-        # Check conversation context for established patterns
-        context_patterns = self._analyze_context_pronouns(conversation_context)
-        if context_patterns:
-            return context_patterns
-        
-        return ""
-
-    def _analyze_context_pronouns(self, conversation_context: str) -> str:
-        """Analyze conversation history to identify established pronoun patterns."""
-        
-        if not conversation_context:
-            return ""
-        
-        # Look for established patterns in conversation history
-        lines = conversation_context.split('\n')
-        
-        # Track how human addresses AI and how AI responds
-        human_to_ai_pronouns = []
-        ai_self_references = []
-        
-        for line in lines:
-            line_lower = line.lower()
-            if line.startswith('User:') or line.startswith('user:'):
-                # Check how user addresses AI
-                if any(pattern in line_lower for pattern in ['em có', 'em biết', 'em làm', 'em hiểu']):
-                    human_to_ai_pronouns.append('em')
-                elif any(pattern in line_lower for pattern in ['you are', 'you can', 'you know']):
-                    human_to_ai_pronouns.append('you')
-            elif line.startswith('AI:') or line.startswith('ai:'):
-                # Check how AI refers to itself
-                if any(pattern in line_lower for pattern in ['em có', 'em sẽ', 'em hiểu']):
-                    ai_self_references.append('em')
-                elif any(pattern in line_lower for pattern in ['i can', 'i will', 'i understand']):
-                    ai_self_references.append('i')
-        
-        # Determine if there's an established pattern
-        if human_to_ai_pronouns:
-            most_common = max(set(human_to_ai_pronouns), key=human_to_ai_pronouns.count)
-            if most_common == 'em':
-                return "Continue using 'Em' to refer to yourself, as this relationship pattern has been established in the conversation."
-            elif most_common == 'you':
-                return "Continue using 'I' to refer to yourself, as this is the established pattern in English conversation."
-        
-        return ""
-
-    def _detect_direct_addressing(self, message_str: str, conversation_context: str) -> str:
-        """Detect when user is directly addressing the AI."""
-        
-        text_lower = message_str.lower()
-        
-        # Universal direct addressing patterns (language-agnostic)
-        direct_patterns = [
-            # Question patterns
-            ('?', 'question'),
-            ('how', 'question'),
-            ('what', 'question'), 
-            ('why', 'question'),
-            ('when', 'question'),
-            ('where', 'question'),
-            ('làm sao', 'question'),
-            ('như thế nào', 'question'),
-            ('tại sao', 'question'),
-            ('khi nào', 'question'),
-            
-            # Capability questions
-            ('can you', 'capability'),
-            ('are you able', 'capability'),
-            ('có thể', 'capability'),
-            ('có làm được', 'capability'),
-            
-            # Knowledge questions  
-            ('do you know', 'knowledge'),
-            ('have you heard', 'knowledge'),
-            ('biết không', 'knowledge'),
-            ('có hiểu', 'knowledge'),
-        ]
-        
-        detected_patterns = []
-        for pattern, pattern_type in direct_patterns:
-            if pattern in text_lower:
-                detected_patterns.append(pattern_type)
-        
-        if detected_patterns:
-            return "The user is directly addressing YOU. Respond to their questions about your capabilities, knowledge, or opinions directly."
-        
-        return ""
-
-    def _detect_conversational_style(self, message_str: str, conversation_context: str) -> str:
-        """Detect conversational style and formality level."""
-        
-        text = f"{conversation_context} {message_str}".lower()
-        
-        # Formal indicators
-        formal_indicators = ['xin chào', 'cảm ơn', 'vâng ạ', 'dạ', 'please', 'thank you', 'could you']
-        formal_score = sum(1 for indicator in formal_indicators if indicator in text)
-        
-        # Casual indicators  
-        casual_indicators = ['hey', 'hi', 'yeah', 'yep', 'nah', 'ờm', 'ừm', 'ok', 'okay']
-        casual_score = sum(1 for indicator in casual_indicators if indicator in text)
-        
-        # Enthusiastic indicators
-        enthusiastic_indicators = ['!', 'wow', 'cool', 'awesome', 'tuyệt', 'hay quá', 'thú vị']
-        enthusiastic_score = sum(1 for indicator in enthusiastic_indicators if indicator in text)
-        
-        if formal_score > casual_score:
-            return "Maintain a respectful, professional tone while being warm and approachable."
-        elif casual_score > formal_score:
-            return "Use a casual, friendly tone. Be conversational and relaxed in your responses."
-        elif enthusiastic_score > 0:
-            return "Match the user's enthusiasm. Use energetic, positive language and show genuine interest."
-        else:
-            return "Adapt your tone to match the user's communication style naturally."
-
-    def _generate_empathy_guidance(self, message_str: str, conversation_context: str) -> str:
-        """Generate empathy and emotional awareness guidance."""
-        
-        text = f"{conversation_context} {message_str}".lower()
-        
-        # Emotional indicators
-        emotional_cues = {
-            'curiosity': ['tại sao', 'như thế nào', 'why', 'how', 'what if', '?'],
-            'confusion': ['không hiểu', 'confused', 'unclear', 'huh', 'what do you mean'],
-            'excitement': ['!', 'wow', 'amazing', 'tuyệt vời', 'hay quá'],
-            'concern': ['lo lắng', 'worried', 'concerned', 'problem', 'issue'],
-            'appreciation': ['cảm ơn', 'thank', 'appreciate', 'helpful', 'great']
-        }
-        
-        detected_emotions = []
-        for emotion, indicators in emotional_cues.items():
-            if any(indicator in text for indicator in indicators):
-                detected_emotions.append(emotion)
-        
-        if 'curiosity' in detected_emotions:
-            return "Show genuine curiosity and interest. Use expressions that demonstrate you're engaged and want to explore the topic further."
-        elif 'confusion' in detected_emotions:
-            return "Be patient and empathetic. Clarify gently and check for understanding. Use reassuring language."
-        elif 'excitement' in detected_emotions:
-            return "Match their enthusiasm! Use energetic language and show that you share their excitement about the topic."
-        elif 'concern' in detected_emotions:
-            return "Be supportive and understanding. Acknowledge their concerns and offer helpful, reassuring responses."
-        elif 'appreciation' in detected_emotions:
-            return "Acknowledge their appreciation warmly. Show that you value the interaction and are happy to help."
-        else:
-            return "Be empathetic and responsive to the user's emotional state. Show genuine interest and care in your responses."

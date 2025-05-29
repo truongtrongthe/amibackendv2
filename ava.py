@@ -1188,97 +1188,7 @@ class AVA:
         # Fall back to regular teaching intent handling
         await self.handle_teaching_intent(message, response, user_id, thread_id, priority_topic_name)
 
-    async def _search_conversation_history_for_knowledge(self, queries: List[str], conversation_context: str, user_id: str, thread_id: Optional[str]) -> Dict[str, Any]:
-        """
-        Search through conversation history for relevant knowledge using expanded queries.
-        This provides an additional layer of knowledge discovery from the conversation itself.
-        """
-        logger.info(f"Searching conversation history for knowledge using {len(queries)} queries")
-        
-        if not conversation_context or not queries:
-            return {"similarity": 0.0, "knowledge_context": "", "query_results": [], "conversation_matches": []}
-        
-        # Extract all AI responses from conversation history
-        ai_messages = re.findall(r'AI: (.*?)(?:\n\n|User:|$)', conversation_context, re.DOTALL)
-        user_messages = re.findall(r'User: (.*?)(?:\n\n|AI:|$)', conversation_context, re.DOTALL)
-        
-        conversation_matches = []
-        max_similarity = 0.0
-        relevant_context = ""
-        
-        try:
-            # Search through AI responses for relevant knowledge
-            for i, ai_message in enumerate(ai_messages):
-                ai_content = ai_message.strip()
-                if len(ai_content) < 20:  # Skip very short responses
-                    continue
-                
-                # Check similarity against each query
-                for query in queries:
-                    try:
-                        # Use embeddings to calculate similarity
-                        query_embedding = await EMBEDDINGS.aembed_query(query)
-                        content_embedding = await EMBEDDINGS.aembed_query(ai_content)
-                        
-                        # Calculate cosine similarity
-                        import numpy as np
-                        similarity = np.dot(query_embedding, content_embedding) / (
-                            np.linalg.norm(query_embedding) * np.linalg.norm(content_embedding)
-                        )
-                        
-                        # If similarity is above threshold, include it
-                        if similarity > 0.3:  # Adjustable threshold
-                            # Get corresponding user message if available
-                            user_context = user_messages[i] if i < len(user_messages) else ""
-                            
-                            match = {
-                                "query": query,
-                                "similarity": float(similarity),
-                                "ai_content": ai_content,
-                                "user_context": user_context.strip(),
-                                "turn_index": i,
-                                "combined_context": f"User: {user_context.strip()}\nAI: {ai_content}" if user_context else f"AI: {ai_content}"
-                            }
-                            conversation_matches.append(match)
-                            
-                            if similarity > max_similarity:
-                                max_similarity = similarity
-                                relevant_context = match["combined_context"]
-                                
-                            logger.info(f"Found conversation match for query '{query}' with similarity {similarity:.3f}")
-                    
-                    except Exception as e:
-                        logger.warning(f"Error calculating similarity for query '{query}': {str(e)}")
-                        continue
-            
-            # Sort matches by similarity (highest first)
-            conversation_matches.sort(key=lambda x: x["similarity"], reverse=True)
-            
-            # Build knowledge context from top matches
-            if conversation_matches:
-                top_matches = conversation_matches[:3]  # Take top 3 matches
-                context_parts = []
-                
-                for match in top_matches:
-                    context_parts.append(f"[Conversation Context - Similarity: {match['similarity']:.3f}]\n{match['combined_context']}")
-                
-                if context_parts:
-                    relevant_context = "\n\n".join(context_parts)
-            
-            logger.info(f"Conversation history search completed: {len(conversation_matches)} matches found, max similarity: {max_similarity:.3f}")
-            
-            return {
-                "similarity": max_similarity,
-                "knowledge_context": relevant_context,
-                "query_results": conversation_matches,
-                "conversation_matches": conversation_matches,
-                "source": "conversation_history"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error searching conversation history: {str(e)}")
-            return {"similarity": 0.0, "knowledge_context": "", "query_results": [], "conversation_matches": []}
-
+    
     async def read_human_input(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of process_incoming_message that yields chunks as they come."""
         logger.info(f"Processing streaming message from user {user_id}")
@@ -1335,50 +1245,11 @@ class AVA:
                     analysis_knowledge["query_results"] = primary_query_results
                     logger.info(f"Updated knowledge with {len(primary_query_results)} total query results")
             
-            # Step 4: NEW - Search conversation history for additional knowledge
-            all_queries = analysis_knowledge.get("queries", []) + [message]  # Include current message as query
-            conversation_knowledge = await self._search_conversation_history_for_knowledge(
-                queries=all_queries,
-                conversation_context=conversation_context,
-                user_id=user_id,
-                thread_id=thread_id
-            )
-            
-            # Step 5: Merge conversation history knowledge with existing knowledge
-            if conversation_knowledge.get("conversation_matches"):
-                logger.info(f"Found {len(conversation_knowledge['conversation_matches'])} relevant conversation matches")
-                
-                # Update similarity if conversation history has higher similarity
-                conversation_similarity = conversation_knowledge.get("similarity", 0.0)
-                current_similarity = analysis_knowledge.get("similarity", 0.0)
-                
-                if conversation_similarity > current_similarity:
-                    analysis_knowledge["similarity"] = conversation_similarity
-                    logger.info(f"Updated similarity from conversation history: {conversation_similarity:.3f}")
-                
-                # Merge knowledge contexts
-                existing_context = analysis_knowledge.get("knowledge_context", "")
-                conversation_context_knowledge = conversation_knowledge.get("knowledge_context", "")
-                
-                if conversation_context_knowledge:
-                    if existing_context:
-                        # Combine both knowledge sources
-                        merged_context = f"{existing_context}\n\n--- CONVERSATION HISTORY KNOWLEDGE ---\n{conversation_context_knowledge}"
-                    else:
-                        merged_context = conversation_context_knowledge
-                    
-                    analysis_knowledge["knowledge_context"] = merged_context
-                    logger.info(f"Merged conversation history knowledge with existing knowledge")
-                
-                # Add conversation matches to metadata for tracking
-                analysis_knowledge["conversation_matches"] = conversation_knowledge["conversation_matches"]
-                analysis_knowledge["knowledge_sources"] = analysis_knowledge.get("knowledge_sources", []) + ["conversation_history"]
-            
-            # Step 6: Log final similarity score
+            # Step 4: Log final similarity score (conversation history scanning now handled by LLM)
             similarity = analysis_knowledge.get("similarity", 0.0)
-            logger.info(f"Final knowledge similarity after conversation history search: {similarity:.3f}")
+            logger.info(f"Final knowledge similarity: {similarity:.3f}")
             
-            # Step 7: Generate streaming response
+            # Step 5: Generate streaming response (LLM will scan conversation history automatically)
             prior_data = analysis_knowledge.get("prior_data", {})
             
             # Stream the response as it comes from LLM
@@ -1395,7 +1266,7 @@ class AVA:
                     yield chunk
                     return
             
-            # Step 8: Enhanced knowledge saving with similarity gating (after streaming is complete)
+            # Step 6: Enhanced knowledge saving with similarity gating (after streaming is complete)
             if final_response and final_response.get("status") == "success":
                 # Get teaching intent and priority topic info from LLM evaluation
                 metadata = final_response.get("metadata", {})
@@ -1420,11 +1291,6 @@ class AVA:
                     final_response["metadata"]["should_save_knowledge"] = True
                     final_response["metadata"]["similarity_gating_reason"] = save_decision.get("reason", "")
                     final_response["metadata"]["similarity_gating_confidence"] = save_decision.get("confidence", "")
-                    
-                    # Add conversation history metadata if available
-                    if analysis_knowledge.get("conversation_matches"):
-                        final_response["metadata"]["conversation_matches_count"] = len(analysis_knowledge["conversation_matches"])
-                        final_response["metadata"]["knowledge_sources"] = analysis_knowledge.get("knowledge_sources", [])
                     
                     # Only override teaching intent if LLM actually detected teaching intent
                     # Don't force teaching intent just because of high similarity
