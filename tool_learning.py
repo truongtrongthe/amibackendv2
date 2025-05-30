@@ -563,7 +563,9 @@ class LearningProcessor:
                 prior_knowledge=prior_knowledge,
                 queries=queries,
                 query_results=query_results,
-                knowledge_response_sections=knowledge_response_sections
+                knowledge_response_sections=knowledge_response_sections,
+                conversation_context=conversation_context,
+                message_str=message_str
             )
             
             response_strategy = strategy_result["strategy"]
@@ -1567,7 +1569,9 @@ class LearningProcessor:
                 prior_knowledge=prior_knowledge,
                 queries=queries,
                 query_results=query_results,
-                knowledge_response_sections=knowledge_response_sections
+                knowledge_response_sections=knowledge_response_sections,
+                conversation_context=conversation_context,
+                message_str=message_str
             )
             
             response_strategy = strategy_result["strategy"]

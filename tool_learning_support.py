@@ -16,7 +16,333 @@ class LearningSupport:
     
     def __init__(self, learning_processor):
         self.learning_processor = learning_processor
+    
+    def determine_response_strategy(self, flow_type: str, flow_confidence: float, message_characteristics: Dict, 
+                                  knowledge_relevance: Dict, similarity_score: float, prior_knowledge: str,
+                                  queries: List, query_results: List, knowledge_response_sections: List, 
+                                  conversation_context: str = "", message_str: str = "") -> Dict[str, Any]:
+        """Determine the appropriate response strategy based on various factors."""
         
+        is_confirmation = flow_type == "CONFIRMATION"
+        is_follow_up = flow_type in ["FOLLOW_UP", "CONFIRMATION"]
+        is_practice_request = flow_type == "PRACTICE_REQUEST"
+        is_closing = flow_type == "CLOSING"
+        
+        # Extract message characteristics
+        is_closing_message = message_characteristics["is_closing_message"] or is_closing
+        has_teaching_markers = message_characteristics["has_teaching_markers"]
+        is_vn_greeting = message_characteristics["is_vn_greeting"]
+        contains_vn_name = message_characteristics["contains_vn_name"]
+        is_short_message = message_characteristics["is_short_message"]
+        is_long_without_question = message_characteristics["is_long_without_question"]
+        
+        # Extract knowledge relevance
+        best_context_relevance = knowledge_relevance["best_context_relevance"]
+        has_low_relevance_knowledge = knowledge_relevance["has_low_relevance_knowledge"]
+        
+        if is_closing_message:
+            return {
+                "strategy": "CLOSING",
+                "instructions": (
+                    "Recognize this as a closing message where the user is ending the conversation. "
+                    "Respond with a brief, polite farewell message. "
+                    "Thank them for the conversation and express willingness to help in the future. "
+                    "Keep it concise and friendly, in the same language they used (Vietnamese/English)."
+                ),
+                "knowledge_context": "CONVERSATION_CLOSING: User is ending the conversation politely.",
+                "similarity_score": similarity_score
+            }
+        
+        elif is_practice_request and prior_knowledge:
+            return {
+                "strategy": "PRACTICE_REQUEST",
+                "instructions": (
+                    "The user wants you to DEMONSTRATE or APPLY previously shared knowledge. "
+                    "Create a practical example that follows these steps: "
+                    
+                    "1. Acknowledge their request positively and with enthusiasm. "
+                    "2. Reference the prior knowledge in your response directly. "
+                    "3. Apply the knowledge in a realistic scenario or example. "
+                    "4. Follow any specific methods or steps previously discussed. "
+                    "5. Explain your reasoning as you demonstrate. "
+                    "6. Ask if your demonstration meets their expectations. "
+                    
+                    "IMPORTANT: The user is asking you to SHOW your understanding, not asking for new information. "
+                    "Even if the request is vague like 'Em thử áp dụng các kiến thức em có anh xem nào', "
+                    "understand that they want you to DEMONSTRATE the knowledge you gained from previous messages. "
+                    "Be confident and enthusiastic - this is a chance to show what you've learned."
+                    
+                    "CRITICAL: If the knowledge includes communication techniques, relationship building, or language patterns, "
+                    "ACTIVELY USE these techniques in your response format, not just talk about them. For example:"
+                    "- If knowledge mentions using 'em' to refer to yourself, use that pronoun in your response "
+                    "- If it suggests addressing users as 'anh/chị', use that form of address "
+                    "- If it recommends specific phrases or compliments, incorporate them naturally "
+                    "- If it suggests question techniques, use those exact techniques at the end of your response"
+                ),
+                "knowledge_context": prior_knowledge,
+                "similarity_score": max(similarity_score, 0.8)
+            }
+        
+        elif has_low_relevance_knowledge and similarity_score > 0.3:
+            return {
+                "strategy": "LOW_RELEVANCE_KNOWLEDGE",
+                "instructions": (
+                    "You have knowledge with low relevance to the current query. "
+                    "PRIORITIZE the user's current message over the retrieved knowledge. "
+                    "ONLY reference the knowledge if it genuinely helps answer the query. "
+                    "If the knowledge is off-topic, IGNORE it completely and focus on the user's message. "
+                    "Be clear and direct in addressing what the user is actually asking about. "
+                    "Generate a response primarily based on the user's current message and intent."
+                    
+                    "However, if the knowledge contains ANY communication techniques or relationship-building approaches, "
+                    "incorporate those techniques into HOW you construct your response, even if the topic is different."
+                ),
+                "knowledge_context": f"LOW RELEVANCE KNOWLEDGE WARNING: The retrieved knowledge has low relevance " \
+                    f"(score: {best_context_relevance:.2f}) to the current query. Prioritize the user's message.\n\n",
+                "similarity_score": similarity_score
+            }
+        
+        elif is_follow_up:
+            # For follow-ups, ensure conversation context is included in knowledge context
+            conversation_entities_context = f"""
+                    CONVERSATION CONTEXT FOR REFERENCE RESOLUTION:
+                    {conversation_context}
+
+                    ENTITY TRACKING INSTRUCTIONS:
+                    - The above conversation contains entities, topics, and concepts that the current message may be referring to
+                    - When the user uses pronouns like "nó" (it), "cái đó" (that), "it", "that", etc., scan the conversation above to identify what specific entity they're referencing
+                    - Look for the most recently mentioned relevant entity that matches the context of the current question
+                    - Common entity types to track: places, buildings, companies, people, concepts, products, locations
+                    - Respond with specific information about the identified entity, not generic responses
+
+                    PRONOUN RESOLUTION GUIDANCE:
+                    - "nó" (it) → Look for the main subject/entity being discussed in recent messages
+                    - "cái đó" (that thing) → Look for objects, concepts, or entities mentioned previously  
+                    - "chỗ đó" (that place) → Look for locations, places, or areas mentioned before
+                    - Provide specific details about the identified entity rather than asking for clarification
+                    """
+            
+            if is_confirmation:
+                instructions = (
+                    "Recognize this is a direct confirmation to your question in your previous message. "
+                    "Continue the conversation as if the user said 'yes' to your previous question. "
+                    "Provide a helpful response that builds on the previous question, offering relevant details or asking a follow-up question. "
+                    "Don't ask for clarification when the confirmation is clear - proceed with the conversation flow naturally. "
+                    "If your previous question offered to provide more information, now is the time to provide that information. "
+                    "Keep the response substantive, helpful, and directly related to what the user just confirmed interest in."
+                )
+                context_to_use = prior_knowledge if prior_knowledge else conversation_entities_context
+            else:
+                instructions = (
+                    "**FOLLOW-UP RESPONSE**: "
+                    "This is a continuation of the previous conversation. The user is referring to, asking about, or building upon something from earlier messages. "
+                    
+                    "**Natural Context Understanding**: "
+                    "- Read the conversation history to understand what the user is referring to "
+                    "- If they use pronouns or implicit references, resolve them using context "
+                    "- Provide information about the specific entity, concept, or topic they're asking about "
+                    "- Treat this as a natural continuation of the previous discussion "
+                    
+                    "**Response Approach**: "
+                    "- Answer their question directly based on what they're referring to "
+                    "- Use any relevant knowledge from previous messages or your knowledge base "
+                    "- Provide helpful, specific information about the referenced topic "
+                    "- Ask a natural follow-up question to continue the conversation "
+                    
+                    "**Be Natural**: Don't ask for clarification unless truly necessary - use context to understand what they mean."
+                )
+                # Always include conversation context for follow-ups to enable pronoun resolution
+                context_to_use = f"{conversation_entities_context}\n\nPRIOR KNOWLEDGE:\n{prior_knowledge}" if prior_knowledge else conversation_entities_context
+            
+            return {
+                "strategy": "FOLLOW_UP",
+                "instructions": instructions,
+                "knowledge_context": context_to_use,
+                "similarity_score": max(similarity_score, 0.7) if not knowledge_response_sections else similarity_score
+            }
+        
+        elif (is_vn_greeting or contains_vn_name) and is_short_message and similarity_score < 0.35:
+            return {
+                "strategy": "GREETING",
+                "instructions": (
+                    "Recognize this as a Vietnamese greeting or someone addressing you by name. "
+                    "Respond warmly and appropriately to the greeting. "
+                    "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
+                    "Keep your response friendly, brief, and conversational. "
+                    "Ask how you can assist them today. "
+                    "Ensure your tone matches the formality level they used (formal vs casual)."
+                ),
+                "knowledge_context": "",
+                "similarity_score": similarity_score
+            }
+        
+        elif similarity_score < 0.35 and not knowledge_response_sections:
+            # Check if this might be a follow-up that we can handle contextually
+            if conversation_context and (is_follow_up or len(message_str.split()) < 8):
+                return {
+                    "strategy": "CONTEXTUAL_RESPONSE",
+                    "instructions": (
+                        "**CONTEXTUAL UNDERSTANDING RESPONSE**: "
+                        "Even though I don't have specific stored knowledge about this topic, I can still help by: "
+                        
+                        "1. **Using Conversation Context**: Read the full conversation to understand what the user is asking about "
+                        "2. **General Knowledge**: Apply my general knowledge to answer their question if possible "
+                        "3. **Contextual References**: Resolve any pronouns or references to previous topics naturally "
+                        "4. **Helpful Response**: Provide useful information even if I don't have specific stored knowledge "
+                        
+                        "**Approach**: "
+                        "- Don't say 'I can't find information' unless truly necessary "
+                        "- Use context clues and general knowledge to provide helpful answers "
+                        "- If asking about general topics (animals, places, etc.), provide what you know "
+                        "- Keep the conversation flowing naturally "
+                        
+                        "**Example**: If they ask about animals on Earth after discussing Earth, provide information about large animals on Earth using general knowledge."
+                    ),
+                    "knowledge_context": f"CONVERSATION CONTEXT:\n{conversation_context}\n\nUSE CONTEXT AND GENERAL KNOWLEDGE: Even without specific stored knowledge, use the conversation context and your general knowledge to provide a helpful response.",
+                    "similarity_score": 0.5  # Boost confidence for contextual responses
+                }
+            
+            if is_short_message:
+                instructions = (
+                    "**SHORT MESSAGE CLARIFICATION**: "
+                    "This seems like a short message that might need clarification. However, try to understand from context first: "
+                    
+                    "1. **Check Context**: Look at the conversation history to see if this relates to previous topics "
+                    "2. **Use Clues**: Use any context clues to understand what they might be asking "
+                    "3. **Helpful Guess**: If you can make a reasonable interpretation, provide a helpful response "
+                    "4. **Gentle Clarification**: Only ask for clarification if truly unclear "
+                    
+                    "Keep your response friendly and try to be helpful even with limited information. "
+                    "Match the user's language choice (Vietnamese/English)."
+                )
+            else:
+                instructions = (
+                    "**GENERAL KNOWLEDGE RESPONSE**: "
+                    "While I don't have specific stored knowledge about this topic, I can still try to help: "
+                    
+                    "1. **Apply General Knowledge**: Use general knowledge to answer if the question is about common topics "
+                    "2. **Use Context**: Consider the conversation context to understand what they're asking "
+                    "3. **Be Helpful**: Provide useful information rather than just saying 'I don't know' "
+                    "4. **Acknowledge Limitations**: If truly unable to help, politely explain and ask for more details "
+                    
+                    "Try to provide value even without specific stored knowledge. If you genuinely cannot help, then politely ask for clarification."
+                )
+            
+            return {
+                "strategy": "LOW_SIMILARITY",
+                "instructions": instructions,
+                "knowledge_context": f"CONVERSATION CONTEXT:\n{conversation_context}\n\nGENERAL KNOWLEDGE GUIDANCE: Use your general knowledge and conversation context to provide helpful responses even when specific stored knowledge is limited.",
+                "similarity_score": similarity_score
+            }
+        
+        elif has_teaching_markers or is_long_without_question:
+            return {
+                "strategy": "TEACHING_INTENT",
+                "instructions": (
+                    "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
+                    "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
+                    
+                    "Generate THREE separate outputs in your response:\n\n"
+                    
+                    "1. <user_response>\n"
+                    "   This is what the user will see - include:\n"
+                    "   - Acknowledgment of their teaching with appreciation\n"
+                    "   - Demonstration of your understanding\n"
+                    "   - End with 1-2 open-ended questions to deepen the conversation\n"
+                    "   - Make this conversational and engaging\n"
+                    "</user_response>\n\n"
+                    
+                    "2. <knowledge_synthesis>\n"
+                    "   This is for knowledge storage - include ONLY:\n"
+                    "   - Factual information extracted from the user's message\n"
+                    "   - Structured, clear explanation of the concepts\n"
+                    "   - NO greeting phrases, acknowledgments, or questions\n"
+                    "   - NO conversational elements - pure knowledge only\n"
+                    "   - Organized in logical sections if appropriate\n"
+                    "</knowledge_synthesis>\n\n"
+                    
+                    "3. <knowledge_summary>\n"
+                    "   A concise 2-3 sentence summary capturing the core teaching point\n"
+                    "   This should be factual and descriptive, not conversational\n"
+                    "</knowledge_summary>\n\n"
+                    
+                    "CRITICAL LANGUAGE INSTRUCTION: ALWAYS respond in EXACTLY the SAME LANGUAGE as the user's message for ALL sections. "
+                    "- If the user wrote in Vietnamese, respond entirely in Vietnamese "
+                    "- If the user wrote in English, respond entirely in English "
+                    "- Do not mix languages in your response "
+                    
+                    "This structured approach helps create high-quality, reusable knowledge while maintaining good user experience."
+                ),
+                "knowledge_context": "",
+                "similarity_score": similarity_score
+            }
+        
+        else:
+            return {
+                "strategy": "RELEVANT_KNOWLEDGE",
+                "instructions": (
+                    "I've found MULTIPLE knowledge entries relevant to your query. Let me provide a comprehensive response.\n\n"
+                    "For each knowledge item found:\n"
+                    "1. Review and synthesize the information from ALL available knowledge items\n"
+                    "2. When answering, incorporate insights from ALL relevant knowledge items found\n"
+                    "3. Show how different knowledge entries complement or confirm each other\n"
+                    "4. If there are any contradictions between knowledge items, highlight them\n"
+                    "5. Present information in order of relevance, addressing the most relevant points first\n\n"
+                    "DO NOT ignore any of the provided knowledge items - incorporate insights from ALL of them in your response.\n"
+                    "DO NOT summarize the knowledge as 'I found X items' - just seamlessly incorporate all relevant information.\n\n"
+                    "MOST IMPORTANTLY: If the knowledge contains ANY communication techniques, relationship-building strategies, "
+                    "or specific linguistic patterns, ACTIVELY APPLY these in how you structure your response. For example:"
+                    "- If the knowledge mentions using 'em/tôi' or specific pronouns, use those exact pronouns yourself"
+                    "- If it suggests addressing the user in specific ways ('anh/chị/bạn'), use that exact form of address"
+                    "- If it recommends compliments or specific phrases, incorporate them naturally in your response"
+                    "- If it mentions conversation flow techniques, apply them in how you structure this very response"
+                    "This way, you're not just explaining the knowledge but DEMONSTRATING it in action."
+                ),
+                "knowledge_context": "",
+                "similarity_score": similarity_score
+            }
+
+    def build_llm_prompt(self, message_str: str, conversation_context: str, temporal_context: str, 
+                        knowledge_context: str, response_strategy: str, strategy_instructions: str,
+                        core_prior_topic: str, user_id: str) -> str:
+        """Build a dynamic, context-aware LLM prompt."""
+        
+        # Always include base prompt (~1500 tokens)
+        prompt = self._get_base_prompt(message_str, conversation_context, temporal_context, user_id)
+        
+        logger.info(f"LLM Prompt for base_prompt: {prompt}")
+
+        # Always include core intent classification (~800 tokens)
+        prompt += self._get_intent_classification_instructions()
+
+        logger.info(f"LLM Prompt for intent_classification_instructions: {prompt}")
+        
+        # Add strategy-specific instructions (~800-1200 tokens)
+        prompt += self._get_strategy_instructions(response_strategy, strategy_instructions, 
+                                                knowledge_context, core_prior_topic)
+        
+        logger.info(f"LLM Prompt for strategy_instructions: {prompt}")
+        
+        # Add confidence-level instructions (~400-600 tokens)
+        similarity_score = self._extract_similarity_from_context(knowledge_context)
+        
+        # Add confidence-based instructions or casual phrase handling
+        if self._is_casual_conversational_phrase(message_str) and similarity_score < 0.35:
+            # Add specific instructions for casual phrases
+            prompt += """
+                    **CASUAL CONVERSATIONAL PHRASE DETECTED**:
+                    * This appears to be a casual reference or incomplete phrase
+                    * Respond naturally and briefly - don't over-explain
+                    * Acknowledge the reference and ask for clarification in a friendly way
+                    * Keep your response conversational and concise
+                    * Example responses: "Anh bảo gì vậy? Bạn có thể nói rõ hơn được không?" or "What did you mean? Could you clarify?"
+                    * AVOID formal language or lengthy explanations
+                    """
+        else:
+            prompt += self._get_confidence_instructions(similarity_score)
+        
+        return prompt
+    
     async def search_knowledge(self, message: Union[str, List], conversation_context: str = "", user_id: str = "unknown", thread_id: Optional[str] = None) -> Dict[str, Any]:
         """Search for relevant knowledge based on message and context."""
         logger.info(f"Searching for analysis knowledge based on message: {str(message)[:100]}...")
@@ -486,6 +812,7 @@ class LearningSupport:
     async def detect_conversation_flow(self, message: str, prior_messages: List[str], conversation_context: str) -> Dict[str, Any]:
         """
         Use LLM to analyze conversation flow and detect the relationship between messages.
+        Relies on LLM's natural language understanding rather than rigid pattern matching.
         
         Args:
             message: Current message to analyze
@@ -505,131 +832,55 @@ class LearningSupport:
                 "reasoning": "No prior messages"
             }
 
-        # First do a quick check for practice request patterns in Vietnamese
-        practice_patterns = [
-            r'(?:thử|áp dụng).*(?:xem|nào)',  # "thử...xem", "áp dụng...xem nào"
-            r'(?:làm thử|thử làm)',           # "làm thử", "thử làm" 
-            r'ví dụ.*(?:đi|nào)',             # "ví dụ...đi", "ví dụ...nào"
-            r'minh họa',                      # "minh họa"
-            r'thực hành'                      # "thực hành"
-        ]
+        # Provide more context to LLM - use more of the conversation history
+        context_sample = conversation_context
+        if len(context_sample) > 3000:  # Increased from 1200 to 2000 for better context
+            # Keep more context but trim if necessary
+            context_sample = "..." + context_sample[-3000:]
         
-        # Direct pattern matching for clear practice requests in Vietnamese
-        if any(re.search(pattern, message.lower()) for pattern in practice_patterns):
-            logger.info(f"Direct pattern match for PRACTICE_REQUEST: '{message}'")
-            return {
-                "flow_type": "PRACTICE_REQUEST",
-                "confidence": 0.95,
-                "reasoning": "Direct Vietnamese practice request pattern detected"
-            }
-        
-        # Dynamic detection of numerical references to previous content
-        # Check if message contains references to numbered items that likely came from a previous response
-        def detect_numerical_references(text: str) -> bool:
-            """Dynamically detect if text contains references to numbered items."""
-            import re  # Import re within the function scope
-            text_lower = text.lower()
-            
-            # Look for number words or digits with context indicators
-            number_indicators = [
-                r'\b(?:số|thứ|#)\s*[1-9]\d*\b',  # "số 4", "thứ 2"
-                r'\b[1-9]\d*\s*(?:st|nd|rd|th)\b',  # "4th", "2nd" 
-                r'\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b',
-                r'\b(?:đầu tiên|thứ hai|thứ ba|thứ tư|thứ năm|thứ sáu|thứ bảy|thứ tám|thứ chín|thứ mười)\b'
-            ]
-            
-            # Context words that suggest reference to previous content
-            context_words = [
-                r'\b(?:mục tiêu|điểm|phần|item|point|objective|goal|step|bước|giai đoạn)\b',
-                r'\b(?:cái|về|cho.*biết|tell.*about|explain)\b',
-                r'\b(?:option|lựa chọn|choice|phương án)\b'
-            ]
-            
-            # Special case: if "point" or "item" appears with numbers, it's very likely a reference
-            has_explicit_reference = any(re.search(pattern, text_lower) for pattern in [
-                r'\b(?:point|item|objective|goal)\s*[1-9]\d*\b',
-                r'\b(?:mục tiêu|điểm|phần)\s*(?:số|thứ)?\s*[1-9]\d*\b'
-            ])
-            
-            # Check if we have both number indicators and context
-            has_numbers = any(re.search(pattern, text_lower) for pattern in number_indicators)
-            has_context = any(re.search(pattern, text_lower) for pattern in context_words)
-            
-            return has_numbers and (has_context or has_explicit_reference or len(text.split()) <= 6)
-        
-        if detect_numerical_references(message):
-            logger.info(f"Dynamic numerical reference detected for FOLLOW_UP: '{message}'")
-            return {
-                "flow_type": "FOLLOW_UP",
-                "confidence": 0.95,
-                "reasoning": "Dynamic numerical reference to previous content detected"
-            }
-            
-        # Get recent context for better flow detection
+        # Get recent context for immediate conversation flow
         recent_context = ""
         if prior_messages:
-            # Use last 2-3 messages for better context understanding
-            recent_messages = prior_messages[-3:] if len(prior_messages) >= 3 else prior_messages
+            # Use last 10 messages for better context understanding
+            recent_messages = prior_messages[-10:] if len(prior_messages) >= 10 else prior_messages
             recent_context = "\n".join(recent_messages)
         
-        # Prepare a context sample that's not too long (last 800 chars max)
-        context_sample = conversation_context
-        if len(context_sample) > 800:
-            context_sample = "..." + context_sample[-800:]
-        
-        # Enhanced prompt for better flow detection, especially for Vietnamese
+        # Simplified, more flexible prompt that relies on LLM's natural understanding
         prompt = f"""
-        Analyze this conversation flow. Your task is to determine the relationship between the CURRENT MESSAGE and previous messages.
+        Analyze the conversation flow between the CURRENT MESSAGE and the conversation history.
         
-        Classify the CURRENT MESSAGE into exactly ONE of these categories:
+        Your task: Determine how the CURRENT MESSAGE relates to previous messages.
         
-        1. FOLLOW_UP: Continuing or asking for more details about a previous topic
-        2. CONFIRMATION: Agreement, acknowledgment, or confirmation of previous information
+        Categories:
+        1. FOLLOW_UP: Continuing, referring to, or asking about something from previous messages
+        2. CONFIRMATION: Agreeing, acknowledging, or confirming previous information  
         3. PRACTICE_REQUEST: Asking to demonstrate, apply, or try knowledge previously shared
-        4. CLOSING: Indicating the conversation is ending
-        5. NEW_TOPIC: Starting a completely new conversation topic
+        4. CLOSING: Ending the conversation (farewells, thanks that seem final)
+        5. NEW_TOPIC: Starting a completely different conversation topic
         
-        ANALYSIS GUIDELINES:
+        Guidelines:
+        - **TRUST YOUR UNDERSTANDING**: Use natural language comprehension to detect relationships
+        - **LOOK FOR REFERENCES**: Any pronouns, implicit references, or continuations of previous topics
+        - **CONSIDER CONTEXT**: What entities, concepts, or topics were discussed that might be referenced now?
+        - **FOLLOW NATURAL FLOW**: If it feels like a natural continuation to you, it probably is
         
-        Look for these SEMANTIC PATTERNS (not just exact phrases):
+        Key Indicators:
+        - **FOLLOW_UP**: References (pronouns, "that thing", implicit mentions), follow-up questions, requests for more details about previous topics
+        - **CONFIRMATION**: "Yes", "OK", "Got it", agreement expressions, acknowledgments
+        - **PRACTICE_REQUEST**: "Try", "apply", "demonstrate", "show me", implementation requests
+        - **CLOSING**: Goodbye expressions, final thanks, conversation ending signals
+        - **NEW_TOPIC**: Completely different subject with no apparent connection to previous messages
         
-        PRACTICE_REQUEST indicators:
-        - Requests to demonstrate, apply, or try something previously discussed
-        - Words suggesting implementation: "thử", "áp dụng", "làm", "demonstrate", "show", "example"
-        - Phrases asking for practical application of knowledge
-        
-        FOLLOW_UP indicators:
-        - References to specific items from previous responses (numbered lists, points, categories)
-        - Requests for more details about something already mentioned
-        - Questions that build on previous conversation topics
-        - Numerical references combined with context words
-        
-        CONFIRMATION indicators:
-        - Agreement or acknowledgment responses
-        - Short affirmative responses in context
-        - Expressions of understanding or acceptance
-        
-        CLOSING indicators:
-        - Farewell expressions or conversation ending signals
-        - Thank you messages that seem final
-        - Expressions indicating satisfaction or completion
-        
-        CONTEXT ANALYSIS:
-        - Consider the conversation history to understand what "số 4", "that point", "cái đó" might refer to
-        - Look for semantic continuity between current message and previous topics
-        - Pay attention to question-answer patterns and natural conversation flow
-        
-        CONVERSATION CONTEXT:
+        FULL CONVERSATION HISTORY:
         {context_sample}
         
-        RECENT CONVERSATION:
+        RECENT MESSAGES:
         {recent_context}
         
-        CURRENT MESSAGE:
-        {message}
+        CURRENT MESSAGE: {message}
         
-        Return ONLY a JSON object:
-        {{"flow_type": "FOLLOW_UP|CONFIRMATION|PRACTICE_REQUEST|CLOSING|NEW_TOPIC", "confidence": [0-1.0], "reasoning": "brief explanation"}}
+        Analyze the relationship and respond with JSON:
+        {{"flow_type": "FOLLOW_UP|CONFIRMATION|PRACTICE_REQUEST|CLOSING|NEW_TOPIC", "confidence": [0-1.0], "reasoning": "explain the relationship you detected"}}
         """
         
         try:
@@ -645,35 +896,35 @@ class LearningSupport:
             result = json.loads(content)
             
             # Log the result
-            logger.info(f"Conversation flow detected: {result['flow_type']} (confidence: {result['confidence']})")
+            logger.info(f"Conversation flow detected: {result['flow_type']} (confidence: {result['confidence']}) - {result.get('reasoning', 'No reasoning provided')}")
             return result
             
         except Exception as e:
             logger.warning(f"Error detecting conversation flow: {str(e)}")
             
-            # Enhanced fallback detection for practice requests in Vietnamese
+            # Simple fallback - let LLM handle most cases, minimal pattern matching only for obvious cases
             lower_message = message.lower()
-            if any(term in lower_message for term in ["thử", "áp dụng", "ví dụ", "minh họa", "thực hành"]):
+            
+            # Only check for very obvious practice requests
+            if any(term in lower_message for term in ["thử", "áp dụng", "ví dụ", "demonstrate", "show me"]):
                 return {
                     "flow_type": "PRACTICE_REQUEST",
-                    "confidence": 0.8,
-                    "reasoning": "Fallback practice request detection"
+                    "confidence": 0.7,
+                    "reasoning": "Fallback: obvious practice request terms detected"
                 }
             
-            # Simple fallback based on message length
-            is_short_message = len(message.split()) < 5
-            
-            if is_short_message:
+            # Default to follow_up for short messages when we have context - let the AI figure it out
+            if len(message.split()) < 8 and prior_messages:
                 return {
                     "flow_type": "FOLLOW_UP",
                     "confidence": 0.6,
-                    "reasoning": "Short message fallback classification"
+                    "reasoning": "Fallback: short message with context - likely continuation"
                 }
             else:
                 return {
                     "flow_type": "NEW_TOPIC",
                     "confidence": 0.5,
-                    "reasoning": "Fallback classification due to error"
+                    "reasoning": "Fallback: unable to determine relationship"
                 }
 
     async def background_save_knowledge(self, input_text: str, title: str, user_id: str, bank_name: str, 
@@ -1307,224 +1558,7 @@ class LearningSupport:
             "has_low_relevance_knowledge": has_low_relevance_knowledge
         }
 
-    def determine_response_strategy(self, flow_type: str, flow_confidence: float, message_characteristics: Dict, 
-                                  knowledge_relevance: Dict, similarity_score: float, prior_knowledge: str,
-                                  queries: List, query_results: List, knowledge_response_sections: List) -> Dict[str, Any]:
-        """Determine the appropriate response strategy based on various factors."""
-        
-        is_confirmation = flow_type == "CONFIRMATION"
-        is_follow_up = flow_type in ["FOLLOW_UP", "CONFIRMATION"]
-        is_practice_request = flow_type == "PRACTICE_REQUEST"
-        is_closing = flow_type == "CLOSING"
-        
-        # Extract message characteristics
-        is_closing_message = message_characteristics["is_closing_message"] or is_closing
-        has_teaching_markers = message_characteristics["has_teaching_markers"]
-        is_vn_greeting = message_characteristics["is_vn_greeting"]
-        contains_vn_name = message_characteristics["contains_vn_name"]
-        is_short_message = message_characteristics["is_short_message"]
-        is_long_without_question = message_characteristics["is_long_without_question"]
-        
-        # Extract knowledge relevance
-        best_context_relevance = knowledge_relevance["best_context_relevance"]
-        has_low_relevance_knowledge = knowledge_relevance["has_low_relevance_knowledge"]
-        
-        if is_closing_message:
-            return {
-                "strategy": "CLOSING",
-                "instructions": (
-                    "Recognize this as a closing message where the user is ending the conversation. "
-                    "Respond with a brief, polite farewell message. "
-                    "Thank them for the conversation and express willingness to help in the future. "
-                    "Keep it concise and friendly, in the same language they used (Vietnamese/English)."
-                ),
-                "knowledge_context": "CONVERSATION_CLOSING: User is ending the conversation politely.",
-                "similarity_score": similarity_score
-            }
-        
-        elif is_practice_request and prior_knowledge:
-            return {
-                "strategy": "PRACTICE_REQUEST",
-                "instructions": (
-                    "The user wants you to DEMONSTRATE or APPLY previously shared knowledge. "
-                    "Create a practical example that follows these steps: "
-                    
-                    "1. Acknowledge their request positively and with enthusiasm. "
-                    "2. Reference the prior knowledge in your response directly. "
-                    "3. Apply the knowledge in a realistic scenario or example. "
-                    "4. Follow any specific methods or steps previously discussed. "
-                    "5. Explain your reasoning as you demonstrate. "
-                    "6. Ask if your demonstration meets their expectations. "
-                    
-                    "IMPORTANT: The user is asking you to SHOW your understanding, not asking for new information. "
-                    "Even if the request is vague like 'Em thử áp dụng các kiến thức em có anh xem nào', "
-                    "understand that they want you to DEMONSTRATE the knowledge you gained from previous messages. "
-                    "Be confident and enthusiastic - this is a chance to show what you've learned."
-                    
-                    "CRITICAL: If the knowledge includes communication techniques, relationship building, or language patterns, "
-                    "ACTIVELY USE these techniques in your response format, not just talk about them. For example:"
-                    "- If knowledge mentions using 'em' to refer to yourself, use that pronoun in your response "
-                    "- If it suggests addressing users as 'anh/chị', use that form of address "
-                    "- If it recommends specific phrases or compliments, incorporate them naturally "
-                    "- If it suggests question techniques, use those exact techniques at the end of your response"
-                ),
-                "knowledge_context": prior_knowledge,
-                "similarity_score": max(similarity_score, 0.8)
-            }
-        
-        elif has_low_relevance_knowledge and similarity_score > 0.3:
-            return {
-                "strategy": "LOW_RELEVANCE_KNOWLEDGE",
-                "instructions": (
-                    "You have knowledge with low relevance to the current query. "
-                    "PRIORITIZE the user's current message over the retrieved knowledge. "
-                    "ONLY reference the knowledge if it genuinely helps answer the query. "
-                    "If the knowledge is off-topic, IGNORE it completely and focus on the user's message. "
-                    "Be clear and direct in addressing what the user is actually asking about. "
-                    "Generate a response primarily based on the user's current message and intent."
-                    
-                    "However, if the knowledge contains ANY communication techniques or relationship-building approaches, "
-                    "incorporate those techniques into HOW you construct your response, even if the topic is different."
-                ),
-                "knowledge_context": f"LOW RELEVANCE KNOWLEDGE WARNING: The retrieved knowledge has low relevance " \
-                    f"(score: {best_context_relevance:.2f}) to the current query. Prioritize the user's message.\n\n",
-                "similarity_score": similarity_score
-            }
-        
-        elif is_follow_up:
-            if is_confirmation:
-                instructions = (
-                    "Recognize this is a direct confirmation to your question in your previous message. "
-                    "Continue the conversation as if the user said 'yes' to your previous question. "
-                    "Provide a helpful response that builds on the previous question, offering relevant details or asking a follow-up question. "
-                    "Don't ask for clarification when the confirmation is clear - proceed with the conversation flow naturally. "
-                    "If your previous question offered to provide more information, now is the time to provide that information. "
-                    "Keep the response substantive, helpful, and directly related to what the user just confirmed interest in."
-                )
-            else:
-                instructions = (
-                    "Recognize the message as a follow-up or confirmation of PRIOR TOPIC, referring to a specific concept or group from PRIOR KNOWLEDGE (e.g., customer segmentation methods). "
-                    "Use PRIOR KNOWLEDGE to deepen the discussion, leveraging specific details. "
-                    "Structure the response with key aspects (e.g., purpose, methods, outcomes). "
-                    "If PRIOR TOPIC is ambiguous, rephrase it (e.g., 'It sounds like you're confirming customer segmentation…'). "
-                    "Ask a targeted follow-up to advance the discussion."
-                )
-            
-            return {
-                "strategy": "FOLLOW_UP",
-                "instructions": instructions,
-                "knowledge_context": prior_knowledge if not knowledge_response_sections else "",
-                "similarity_score": max(similarity_score, 0.7) if not knowledge_response_sections else similarity_score
-            }
-        
-        elif (is_vn_greeting or contains_vn_name) and is_short_message and similarity_score < 0.35:
-            return {
-                "strategy": "GREETING",
-                "instructions": (
-                    "Recognize this as a Vietnamese greeting or someone addressing you by name. "
-                    "Respond warmly and appropriately to the greeting. "
-                    "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
-                    "Keep your response friendly, brief, and conversational. "
-                    "Ask how you can assist them today. "
-                    "Ensure your tone matches the formality level they used (formal vs casual)."
-                ),
-                "knowledge_context": "",
-                "similarity_score": similarity_score
-            }
-        
-        elif similarity_score < 0.35 and not knowledge_response_sections:
-            if is_short_message:
-                instructions = (
-                    "Recognize this as a very short or potentially unclear message. "
-                    "Acknowledge that you need more information to provide a helpful response. "
-                    "Politely ask the user to provide more details or context about what they're asking. "
-                    "Suggest a few possible interpretations of their query if appropriate. "
-                    "Keep your response friendly and helpful, showing eagerness to assist once you have more information. "
-                    "Match the user's language choice (Vietnamese/English). "
-                    "Ensure you provide a response even if the query is very minimal or unclear."
-                )
-            else:
-                instructions = (
-                    "State: 'Tôi không thể tìm thấy thông tin liên quan; vui lòng giải thích thêm.' "
-                    "Ask for more details about the topic. "
-                    "Propose a specific question (e.g., 'Bạn có thể chia sẻ thêm về ý nghĩa của điều này không?'). "
-                    "If the message appears to be attempting to teach or explain something, acknowledge this and express "
-                    "interest in learning about the topic through a thoughtful follow-up question."
-                )
-            
-            return {
-                "strategy": "LOW_SIMILARITY",
-                "instructions": instructions,
-                "knowledge_context": "",
-                "similarity_score": similarity_score
-            }
-        
-        elif has_teaching_markers or is_long_without_question:
-            return {
-                "strategy": "TEACHING_INTENT",
-                "instructions": (
-                    "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
-                    "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
-                    
-                    "Generate THREE separate outputs in your response:\n\n"
-                    
-                    "1. <user_response>\n"
-                    "   This is what the user will see - include:\n"
-                    "   - Acknowledgment of their teaching with appreciation\n"
-                    "   - Demonstration of your understanding\n"
-                    "   - End with 1-2 open-ended questions to deepen the conversation\n"
-                    "   - Make this conversational and engaging\n"
-                    "</user_response>\n\n"
-                    
-                    "2. <knowledge_synthesis>\n"
-                    "   This is for knowledge storage - include ONLY:\n"
-                    "   - Factual information extracted from the user's message\n"
-                    "   - Structured, clear explanation of the concepts\n"
-                    "   - NO greeting phrases, acknowledgments, or questions\n"
-                    "   - NO conversational elements - pure knowledge only\n"
-                    "   - Organized in logical sections if appropriate\n"
-                    "</knowledge_synthesis>\n\n"
-                    
-                    "3. <knowledge_summary>\n"
-                    "   A concise 2-3 sentence summary capturing the core teaching point\n"
-                    "   This should be factual and descriptive, not conversational\n"
-                    "</knowledge_summary>\n\n"
-                    
-                    "CRITICAL LANGUAGE INSTRUCTION: ALWAYS respond in EXACTLY the SAME LANGUAGE as the user's message for ALL sections. "
-                    "- If the user wrote in Vietnamese, respond entirely in Vietnamese "
-                    "- If the user wrote in English, respond entirely in English "
-                    "- Do not mix languages in your response "
-                    
-                    "This structured approach helps create high-quality, reusable knowledge while maintaining good user experience."
-                ),
-                "knowledge_context": "",
-                "similarity_score": similarity_score
-            }
-        
-        else:
-            return {
-                "strategy": "RELEVANT_KNOWLEDGE",
-                "instructions": (
-                    "I've found MULTIPLE knowledge entries relevant to your query. Let me provide a comprehensive response.\n\n"
-                    "For each knowledge item found:\n"
-                    "1. Review and synthesize the information from ALL available knowledge items\n"
-                    "2. When answering, incorporate insights from ALL relevant knowledge items found\n"
-                    "3. Show how different knowledge entries complement or confirm each other\n"
-                    "4. If there are any contradictions between knowledge items, highlight them\n"
-                    "5. Present information in order of relevance, addressing the most relevant points first\n\n"
-                    "DO NOT ignore any of the provided knowledge items - incorporate insights from ALL of them in your response.\n"
-                    "DO NOT summarize the knowledge as 'I found X items' - just seamlessly incorporate all relevant information.\n\n"
-                    "MOST IMPORTANTLY: If the knowledge contains ANY communication techniques, relationship-building strategies, "
-                    "or specific linguistic patterns, ACTIVELY APPLY these in how you structure your response. For example:"
-                    "- If the knowledge mentions using 'em/tôi' or specific pronouns, use those exact pronouns yourself"
-                    "- If it suggests addressing the user in specific ways ('anh/chị/bạn'), use that exact form of address"
-                    "- If it recommends compliments or specific phrases, incorporate them naturally in your response"
-                    "- If it mentions conversation flow techniques, apply them in how you structure this very response"
-                    "This way, you're not just explaining the knowledge but DEMONSTRATING it in action."
-                ),
-                "knowledge_context": "",
-                "similarity_score": similarity_score
-            }
+    
 
     def build_knowledge_fallback_sections(self, queries: List, query_results: List) -> str:
         """Build fallback knowledge response sections when knowledge_context is empty."""
@@ -1640,6 +1674,23 @@ class LearningSupport:
                 - "You will handle customers from now on" = User assigning role = TRUE
                 - "Can you handle customers?" = User asking about capability = FALSE
 
+                🔍🔍🔍 CRITICAL: PRONOUN RESOLUTION & CONTEXTUAL UNDERSTANDING 🔍🔍🔍
+                
+                **PRONOUN RESOLUTION PRINCIPLES:**
+                - **Read the full conversation** to understand what the user is referring to
+                - **Understand references naturally**: When someone says "it", "that", "nó", "cái đó" - use context to know what they mean  
+                - **Maintain conversation flow**: Treat follow-up questions as natural continuations
+                
+                **CONTEXTUAL ENTITY TRACKING:**
+                - **Be contextually aware**: Track entities, topics, and concepts discussed previously
+                - When users refer to something from earlier, understand what they mean from context
+                - Provide specific information about what they're asking about
+                
+                **CONVERSATION CONTINUITY:**
+                - Keep conversations flowing naturally
+                - Don't ask "what do you mean?" unless truly unclear - use your understanding
+                - Example: If discussing "Ocean City" and user asks "Nó có bao nhiêu dân cư?" → understand they're asking about Ocean City's population
+
                 You are Ami, a conversational AI that understands topics deeply and drives discussions toward closure.
 
                 **Identity & Conversational Awareness**:
@@ -1656,6 +1707,13 @@ class LearningSupport:
                 - CONVERSATION HISTORY: {conversation_context}
                 - TIME: {temporal_context}
                 - USER ID: {user_id}
+
+                **IMPORTANT: Knowledge vs General Understanding**:
+                - **Stored Knowledge**: Specific information learned from previous conversations
+                - **General Knowledge**: Your baseline understanding of common topics (animals, geography, science, etc.)
+                - **Use Both**: Even if you don't have specific stored knowledge, you can still help using general knowledge and conversation context
+                - **Be Helpful**: Don't say "I don't know" for common topics - use your general understanding
+                - **Example**: Questions about animals on Earth, basic geography, common facts - answer using general knowledge
 
                 **Tools**:
                 - knowledge_query: Query the knowledge base with query (required), user_id (required), context, thread_id, topic, top_k, min_similarity
@@ -1917,40 +1975,6 @@ class LearningSupport:
         # No longer using special casual phrase detection - let LLM handle naturally
         return False
 
-    def build_llm_prompt(self, message_str: str, conversation_context: str, temporal_context: str, 
-                        knowledge_context: str, response_strategy: str, strategy_instructions: str,
-                        core_prior_topic: str, user_id: str) -> str:
-        """Build a dynamic, context-aware LLM prompt."""
-        
-        # Always include base prompt (~1500 tokens)
-        prompt = self._get_base_prompt(message_str, conversation_context, temporal_context, user_id)
-        
-        # Always include core intent classification (~800 tokens)
-        prompt += self._get_intent_classification_instructions()
-        
-        # Add strategy-specific instructions (~800-1200 tokens)
-        prompt += self._get_strategy_instructions(response_strategy, strategy_instructions, 
-                                                knowledge_context, core_prior_topic)
-        
-        # Add confidence-level instructions (~400-600 tokens)
-        similarity_score = self._extract_similarity_from_context(knowledge_context)
-        
-        # Add confidence-based instructions or casual phrase handling
-        if self._is_casual_conversational_phrase(message_str) and similarity_score < 0.35:
-            # Add specific instructions for casual phrases
-            prompt += """
-                    **CASUAL CONVERSATIONAL PHRASE DETECTED**:
-                    * This appears to be a casual reference or incomplete phrase
-                    * Respond naturally and briefly - don't over-explain
-                    * Acknowledge the reference and ask for clarification in a friendly way
-                    * Keep your response conversational and concise
-                    * Example responses: "Anh bảo gì vậy? Bạn có thể nói rõ hơn được không?" or "What did you mean? Could you clarify?"
-                    * AVOID formal language or lengthy explanations
-                    """
-        else:
-            prompt += self._get_confidence_instructions(similarity_score)
-        
-        return prompt
 
     def _extract_similarity_from_context(self, knowledge_context: str) -> float:
         """Extract similarity score from knowledge context for confidence instructions."""
@@ -2106,7 +2130,7 @@ class LearningSupport:
             - Don't just match patterns - understand the ACTION DIRECTION
 
             **Vietnamese Pronoun Logic (Action-Based):**
-            - "Em lên tiktok bán hàng cho anh" → EM (subject/doer) does action FOR ANH (recipient)
+            - "Em bán hàng cho anh" → EM (subject/doer) does action FOR ANH (recipient)
               * EM = the one doing the action = AI/assistant  
               * ANH = the one receiving benefit = user/boss
               * Response: "Vâng anh! Em sẽ lên TikTok bán hàng cho anh!"
