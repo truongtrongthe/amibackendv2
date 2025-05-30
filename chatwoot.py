@@ -104,7 +104,7 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
     data = {
         'content': message,
         'message_type': 'outgoing',
-        'private': False
+        'private': 'false'  # Send as string "false" instead of boolean False
     }
     
     start_time = time.time()
@@ -128,7 +128,7 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
                     data = {
                         'content': attachment_url,
                         'message_type': 'outgoing',
-                        'private': False
+                        'private': 'false'  # Send as string "false" instead of boolean False
                     }
                     url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
                     response = requests.post(
@@ -163,7 +163,7 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
                             data={
                                 'content': message,
                                 'message_type': 'outgoing',
-                                'private': False
+                                'private': 'false'  # Send as string "false" instead of boolean False
                             },
                             files=files,
                             timeout=15
@@ -180,7 +180,7 @@ def send_message(conversation_id: int, message: str, attachment_url: str = None)
                         data = {
                             'content': attachment_url,
                             'message_type': 'outgoing',
-                            'private': False
+                            'private': 'false'  # Send as string "false" instead of boolean False
                         }
                         url = f"{CHATWOOT_BASE_URL}/api/v1/accounts/{CHATWOOT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
                         response = requests.post(
