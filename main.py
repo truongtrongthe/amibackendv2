@@ -20,6 +20,7 @@ from pydantic import BaseModel
 # Import router from fastapi_routes
 from fastapi_routes import router as api_router
 from braingraph_routes import router as braingraph_router
+from contact_apis import router as contact_router
 from supabase import create_client, Client
 
 from utilities import logger
@@ -55,6 +56,7 @@ recent_requests = deque(maxlen=1000)
 # Register the API routers
 app.include_router(api_router)
 app.include_router(braingraph_router)
+app.include_router(contact_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async
