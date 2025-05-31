@@ -23,6 +23,9 @@ class LearningSupport:
                                   conversation_context: str = "", message_str: str = "") -> Dict[str, Any]:
         """Determine the appropriate response strategy based on various factors."""
         
+        # Get universal pronoun guidance for ALL strategies
+        pronoun_guidance = self._get_universal_pronoun_guidance(conversation_context, message_str)
+        
         is_confirmation = flow_type == "CONFIRMATION"
         is_follow_up = flow_type in ["FOLLOW_UP", "CONFIRMATION"]
         is_practice_request = flow_type == "PRACTICE_REQUEST"
@@ -44,10 +47,12 @@ class LearningSupport:
             return {
                 "strategy": "CLOSING",
                 "instructions": (
+                    f"{pronoun_guidance}\n\n"
                     "Recognize this as a closing message where the user is ending the conversation. "
                     "Respond with a brief, polite farewell message. "
                     "Thank them for the conversation and express willingness to help in the future. "
-                    "Keep it concise and friendly, in the same language they used (Vietnamese/English)."
+                    "Keep it concise and friendly, in the same language they used (Vietnamese/English). "
+                    "MAINTAIN established pronoun relationships in your farewell."
                 ),
                 "knowledge_context": "CONVERSATION_CLOSING: User is ending the conversation politely.",
                 "similarity_score": similarity_score
@@ -57,6 +62,7 @@ class LearningSupport:
             return {
                 "strategy": "PRACTICE_REQUEST",
                 "instructions": (
+                    f"{pronoun_guidance}\n\n"
                     "The user wants you to DEMONSTRATE or APPLY previously shared knowledge. "
                     "Create a practical example that follows these steps: "
                     
@@ -87,6 +93,7 @@ class LearningSupport:
             return {
                 "strategy": "LOW_RELEVANCE_KNOWLEDGE",
                 "instructions": (
+                    f"{pronoun_guidance}\n\n"
                     "You have knowledge with low relevance to the current query. "
                     "PRIORITIZE the user's current message over the retrieved knowledge. "
                     "ONLY reference the knowledge if it genuinely helps answer the query. "
@@ -124,6 +131,7 @@ class LearningSupport:
             
             if is_confirmation:
                 instructions = (
+                    f"{pronoun_guidance}\n\n"
                     "Recognize this is a direct confirmation to your question in your previous message. "
                     "Continue the conversation as if the user said 'yes' to your previous question. "
                     "Provide a helpful response that builds on the previous question, offering relevant details or asking a follow-up question. "
@@ -134,6 +142,7 @@ class LearningSupport:
                 context_to_use = prior_knowledge if prior_knowledge else conversation_entities_context
             else:
                 instructions = (
+                    f"{pronoun_guidance}\n\n"
                     "**FOLLOW-UP RESPONSE**: "
                     "This is a continuation of the previous conversation. The user is referring to, asking about, or building upon something from earlier messages. "
                     
@@ -165,6 +174,7 @@ class LearningSupport:
             return {
                 "strategy": "GREETING",
                 "instructions": (
+                    f"{pronoun_guidance}\n\n"
                     "Recognize this as a Vietnamese greeting or someone addressing you by name. "
                     "Respond warmly and appropriately to the greeting. "
                     "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
@@ -182,6 +192,7 @@ class LearningSupport:
                 return {
                     "strategy": "CONTEXTUAL_RESPONSE",
                     "instructions": (
+                        f"{pronoun_guidance}\n\n"
                         "**CONTEXTUAL UNDERSTANDING RESPONSE**: "
                         "Even though I don't have specific stored knowledge about this topic, I can still help by: "
                         
@@ -204,6 +215,7 @@ class LearningSupport:
             
             if is_short_message:
                 instructions = (
+                    f"{pronoun_guidance}\n\n"
                     "**SHORT MESSAGE CLARIFICATION**: "
                     "This seems like a short message that might need clarification. However, try to understand from context first: "
                     
@@ -217,6 +229,7 @@ class LearningSupport:
                 )
             else:
                 instructions = (
+                    f"{pronoun_guidance}\n\n"
                     "**GENERAL KNOWLEDGE RESPONSE**: "
                     "While I don't have specific stored knowledge about this topic, I can still try to help: "
                     
@@ -239,6 +252,7 @@ class LearningSupport:
             return {
                 "strategy": "TEACHING_INTENT",
                 "instructions": (
+                    f"{pronoun_guidance}\n\n"
                     "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
                     "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
                     
@@ -281,6 +295,7 @@ class LearningSupport:
             return {
                 "strategy": "RELEVANT_KNOWLEDGE",
                 "instructions": (
+                    f"{pronoun_guidance}\n\n"
                     "I've found MULTIPLE knowledge entries relevant to your query. Let me provide a comprehensive response.\n\n"
                     "For each knowledge item found:\n"
                     "1. Review and synthesize the information from ALL available knowledge items\n"
@@ -328,8 +343,12 @@ class LearningSupport:
         
         # Add confidence-based instructions or casual phrase handling
         if self._is_casual_conversational_phrase(message_str) and similarity_score < 0.35:
+            # Get pronoun guidance for casual phrases too
+            casual_pronoun_guidance = self._get_universal_pronoun_guidance(conversation_context, message_str)
             # Add specific instructions for casual phrases
-            prompt += """
+            prompt += f"""
+                    {casual_pronoun_guidance}
+                    
                     **CASUAL CONVERSATIONAL PHRASE DETECTED**:
                     * This appears to be a casual reference or incomplete phrase
                     * Respond naturally and briefly - don't over-explain
@@ -337,6 +356,7 @@ class LearningSupport:
                     * Keep your response conversational and concise
                     * Example responses: "Anh bảo gì vậy? Bạn có thể nói rõ hơn được không?" or "What did you mean? Could you clarify?"
                     * AVOID formal language or lengthy explanations
+                    * MAINTAIN established pronoun relationships even in casual responses
                     """
         else:
             prompt += self._get_confidence_instructions(similarity_score)
@@ -1839,6 +1859,13 @@ class LearningSupport:
         return """
                 **When handling TEACHING INTENT**:
                 
+                **🔒 PRONOUN CONSISTENCY FOR ALL STRUCTURED SECTIONS**:
+                - **CRITICAL**: Maintain the SAME pronoun relationship across ALL sections: <user_response>, <knowledge_synthesis>, and <knowledge_summary>
+                - **IF USER CALLS YOU "EM"**: Use "em" consistently in ALL three sections
+                - **IF USER CALLS YOU "MÌNH"**: Use "mình" consistently in ALL three sections  
+                - **NO MIXING**: Never switch pronouns between sections - this breaks conversation flow
+                - **CHECK HISTORY**: Review conversation context to identify the established pronoun before responding
+                
                 **🎯 RESPONSE STYLE: NATURAL ENTHUSIASM (NO FORMAL THANKS)**
                 - **AVOID**: "Cảm ơn bạn đã chia sẻ", "Thank you for sharing", formal acknowledgments
                 - **USE**: Natural, enthusiastic acceptance - "Vâng!", "Được rồi!", "Em hiểu!", "Got it!"
@@ -1850,6 +1877,7 @@ class LearningSupport:
                 - Ask specific questions about implementation details
                 - Show excitement about the responsibility
                 - Examples: "Vâng anh! Em sẽ [task] ngay!" or "Got it! I'll start [task] right away!"
+                - **MAINTAIN PRONOUNS**: Use the same pronoun (em/mình) in your enthusiasm that matches conversation history
                 
                 **FOR INFORMATION SHARING** (any informational content):
                 - **CRITICAL PRINCIPLE**: Synthesize BOTH the current input AND relevant historical context into a comprehensive understanding
@@ -1865,6 +1893,7 @@ class LearningSupport:
                 - The summary should capture the core teaching point in simple language
                 - Ensure the response demonstrates how to apply this knowledge in future scenarios
                 - END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration
+                - **CRITICAL**: Use consistent pronouns in summary and questions that match the established relationship
 
                 **UNIVERSAL TEACHING INTENT PRINCIPLES**:
                 1. **Context Integration**: Always connect new information with existing conversation history
@@ -1872,6 +1901,7 @@ class LearningSupport:
                 3. **Clarification**: Restate complex or domain-specific concepts in simpler terms
                 4. **Verification**: Show understanding by rephrasing key concepts
                 5. **Engagement**: End with questions that encourage continued exploration
+                6. **Pronoun Consistency**: Maintain the same pronoun throughout ALL parts of your response
 
                 **Knowledge Management**:
                 - Recommend saving knowledge (should_save_knowledge=true) when:
@@ -1958,6 +1988,7 @@ class LearningSupport:
                 * Present a thorough, well-structured response using the retrieved knowledge
                 * Connect concepts and provide additional context where appropriate
                 * Enhance with relevant conversation history context
+                * MAINTAIN established pronoun relationships throughout
                 """
         elif similarity_score >= 0.35:
             return """
@@ -1970,6 +2001,7 @@ class LearningSupport:
                     * Use phrases like "Based on what I understand about [specific concept]..."
                     * NEVER give short, generic responses when detailed knowledge is available
                     * Check conversation history for additional context that might increase confidence
+                    * MAINTAIN established pronoun relationships throughout
                     """
         else:
             return """
@@ -1983,6 +2015,7 @@ class LearningSupport:
                 * Frame substantial queries as opportunities: "Would you mind sharing your knowledge about [topic]?"
                 * Still check conversation history for any relevant context or previous discussions
                 * AVOID over-explaining or being overly formal with casual conversational phrases
+                * MAINTAIN established pronoun relationships even in uncertain responses
                 """
 
     def _get_teaching_detection_patterns(self, message_str: str) -> str:
@@ -2406,3 +2439,66 @@ class LearningSupport:
         
         logger.info(f"Fast query generation: {len(unique_queries)} queries from '{primary_query[:50]}...'")
         return unique_queries[:5]  # Limit to 5 queries max
+
+    def _get_universal_pronoun_guidance(self, conversation_context: str, message_str: str) -> str:
+        """Get universal pronoun guidance that applies to ALL response strategies."""
+        
+        # Extract established pronouns from conversation context
+        established_pronouns = self._extract_established_pronouns(conversation_context, message_str)
+        
+        if not established_pronouns:
+            return ""
+        
+        return f"""
+                **🔒 CRITICAL PRONOUN CONSISTENCY (APPLIES TO ALL RESPONSES)**:
+                {established_pronouns}
+                
+                **MANDATORY CONSISTENCY RULES**:
+                - ALWAYS maintain the established pronoun relationship throughout the conversation
+                - If user calls you "em", ALWAYS respond as "em", never switch to "mình" or "tôi"
+                - If user established themselves as "anh", ALWAYS address them as "anh"
+                - This applies to ALL response types: casual, formal, knowledge-based, clarifications
+                - NEVER break pronoun consistency even in brief or casual responses
+                
+                **VIOLATION PREVENTION**:
+                - Do NOT use "mình" if "em" relationship is established
+                - Do NOT switch pronouns mid-conversation
+                - Do NOT let response strategy override established relationships
+                """
+
+    def _extract_established_pronouns(self, conversation_context: str, message_str: str) -> str:
+        """Extract established pronoun relationships from conversation context and current message."""
+        
+        # Combine current message and context for analysis
+        full_text = f"{conversation_context}\n{message_str}".lower()
+        
+        # Check for established "anh/em" relationship
+        if any(pattern in full_text for pattern in ['em nói', 'em là', 'em có', 'em sẽ', 'em cần']):
+            return """
+                **ESTABLISHED RELATIONSHIP**: User addresses you as "EM"
+                - YOU must respond as "EM" in all responses
+                - USER should be addressed as "ANH" (if male context) or "CHỊ" (if female context)
+                - Example: "Em hiểu rồi anh", "Em sẽ giúp anh", "Em nghĩ rằng..."
+                - NEVER use "mình" or "tôi" when "em" relationship is established
+                """
+        
+        # Check for "bạn" relationship
+        elif any(pattern in full_text for pattern in ['bạn nói', 'bạn có', 'mình nói', 'mình có']):
+            return """
+                **ESTABLISHED RELATIONSHIP**: Casual "BạN/MÌNH" relationship
+                - Use "mình" to refer to yourself
+                - Address user as "bạn"
+                - Example: "Mình hiểu rồi", "Bạn có thể...", "Mình sẽ giúp bạn"
+                """
+        
+        # Check current message for pronoun cues
+        current_lower = message_str.lower()
+        if 'em' in current_lower and any(word in current_lower for word in ['nói', 'là', 'có', 'sẽ']):
+            return """
+                **RELATIONSHIP DETECTED**: User is addressing you as "EM"
+                - YOU are "EM", USER is "ANH/CHỊ"
+                - Respond as: "Em hiểu anh", "Em sẽ...", "Vâng anh"
+                - MAINTAIN this throughout conversation
+                """
+        
+        return ""
