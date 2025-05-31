@@ -1331,6 +1331,7 @@ class AVA:
             # Step 2: Extract and organize data
             analysis_data = self.support.extract_analysis_data(analysis_knowledge)
             prior_data_extracted = self.support.extract_prior_data(prior_data)
+            logger.info(f"Conversation Context data at _active_learning_streaming: {conversation_context}")
             prior_messages = self.support.extract_prior_messages(conversation_context)
             
             knowledge_context = analysis_data["knowledge_context"]
@@ -1343,12 +1344,16 @@ class AVA:
             logger.info(f"Using similarity score: {similarity_score}")
             
             # Step 3: Detect conversation flow and message characteristics
+            
+            logger.info(f"Prior messages: {prior_messages}")
+            logger.info(f"Conversation context: {conversation_context}")
+            logger.info(f"Message: {message_str}")
             flow_result = await self.support.detect_conversation_flow(
                 message=message_str,
                 prior_messages=prior_messages,
                 conversation_context=conversation_context
             )
-            
+            logger.info(f"Convo Flow detection result: {flow_result}")
             flow_type = flow_result.get("flow_type", "NEW_TOPIC")
             flow_confidence = flow_result.get("confidence", 0.5)
             logger.info(f"Active learning conversation flow: {flow_type} (confidence: {flow_confidence})")

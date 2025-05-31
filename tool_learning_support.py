@@ -310,18 +310,18 @@ class LearningSupport:
         # Always include base prompt (~1500 tokens)
         prompt = self._get_base_prompt(message_str, conversation_context, temporal_context, user_id)
         
-        logger.info(f"LLM Prompt for base_prompt: {prompt}")
+        #logger.info(f"LLM Prompt for base_prompt: {prompt}")
 
         # Always include core intent classification (~800 tokens)
         prompt += self._get_intent_classification_instructions()
 
-        logger.info(f"LLM Prompt for intent_classification_instructions: {prompt}")
+        #logger.info(f"LLM Prompt for intent_classification_instructions: {prompt}")
         
         # Add strategy-specific instructions (~800-1200 tokens)
         prompt += self._get_strategy_instructions(response_strategy, strategy_instructions, 
                                                 knowledge_context, core_prior_topic)
         
-        logger.info(f"LLM Prompt for strategy_instructions: {prompt}")
+       # logger.info(f"LLM Prompt for strategy_instructions: {prompt}")
         
         # Add confidence-level instructions (~400-600 tokens)
         similarity_score = self._extract_similarity_from_context(knowledge_context)
@@ -1488,27 +1488,49 @@ class LearningSupport:
     def extract_prior_messages(self, conversation_context: str) -> List[str]:
         """Extract prior messages from conversation context, including both User and AI messages."""
         prior_messages = []
+        logger.info(f"DEBUG: Extracting conversation_context {conversation_context}")
         if conversation_context:
+            logger.info(f"DEBUG: Processing conversation_context length: {len(conversation_context)}")
+            logger.info(f"DEBUG: Conversation context content:\n{conversation_context}")
+            
             # Extract all messages in chronological order
             all_messages = []
             
             # Find User messages
-            user_matches = re.finditer(r'User: (.*?)(?=\n\n(?:AI:|User:)|$)', conversation_context, re.DOTALL)
+            user_pattern = r'User:\s*(.*?)(?=\n\s*(?:AI:|User:)|$)'
+            user_matches = re.finditer(user_pattern, conversation_context, re.DOTALL | re.MULTILINE)
             for match in user_matches:
-                all_messages.append(("User", match.group(1).strip(), match.start()))
+                content = match.group(1).strip()
+                if content:
+                    all_messages.append(("User", content, match.start()))
+                    logger.info(f"DEBUG: Found User message: {content[:50]}...")
             
             # Find AI messages  
-            ai_matches = re.finditer(r'AI: (.*?)(?=\n\n(?:AI:|User:)|$)', conversation_context, re.DOTALL)
+            ai_pattern = r'AI:\s*(.*?)(?=\n\s*(?:AI:|User:)|$)'
+            ai_matches = re.finditer(ai_pattern, conversation_context, re.DOTALL | re.MULTILINE)
             for match in ai_matches:
-                all_messages.append(("AI", match.group(1).strip(), match.start()))
+                content = match.group(1).strip()
+                if content:
+                    all_messages.append(("AI", content, match.start()))
+                    logger.info(f"DEBUG: Found AI message: {content[:50]}...")
             
             # Sort by position in text to maintain chronological order
             all_messages.sort(key=lambda x: x[2])
             
-            # Format messages and exclude the current user message (last one)
+            logger.info(f"DEBUG: Found {len(all_messages)} total messages")
+            for i, (role, content, pos) in enumerate(all_messages):
+                logger.info(f"DEBUG: Message {i}: {role}: {content[:50]}...")
+            
+            # Exclude last message (current user message) since it's the current interaction
             if all_messages:
-                for role, content, _ in all_messages[:-1]:  # Exclude last message (current)
-                    prior_messages.append(f"{role}: {content}")
+                for i, (role, content, _) in enumerate(all_messages[:-1]):  # Exclude last message (current)
+                    formatted_message = f"{role}: {content}"
+                    prior_messages.append(formatted_message)
+                    logger.info(f"DEBUG: Added prior message {i}: {formatted_message[:80]}...")
+            
+            logger.info(f"DEBUG: Final prior_messages count: {len(prior_messages)}")
+            for i, msg in enumerate(prior_messages):
+                logger.info(f"DEBUG: Final prior message {i}: {msg[:100]}...")
                     
         return prior_messages
 
@@ -1557,8 +1579,6 @@ class LearningSupport:
             "best_context_relevance": best_context_relevance,
             "has_low_relevance_knowledge": has_low_relevance_knowledge
         }
-
-    
 
     def build_knowledge_fallback_sections(self, queries: List, query_results: List) -> str:
         """Build fallback knowledge response sections when knowledge_context is empty."""

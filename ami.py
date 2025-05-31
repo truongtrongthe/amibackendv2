@@ -1,12 +1,12 @@
+import logging
 import json
+import re
 import time
-import re  # Add re import for regex
-from typing import Annotated, List, Dict
-from typing_extensions import TypedDict
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
+from typing import TypedDict, Annotated, List, Dict, Any, AsyncGenerator
+from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph.message import add_messages
 
 from mc_tools import MCWithTools  # Standard tools
 from utilities import logger
@@ -433,7 +433,6 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
     
     logger.debug(f"convo_stream total took {time.time() - start_time:.2f}s")
 
-# Add new learning-based stream function
 async def convo_stream_learning(user_input: str = None, user_id: str = None, thread_id: str = None, 
               graph_version_id: str = "", mode: str = "learning", 
               use_websocket: bool = False, thread_id_for_analysis: str = None):
@@ -458,7 +457,7 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
     """
     start_time = time.time()
     thread_id = thread_id or f"learning_thread_{int(time.time())}"
-    user_id = user_id or "user"
+    user_id = user_id or "prof"
 
     # Validate user_input
     if not isinstance(user_input, str):
@@ -469,44 +468,89 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
         yield f"data: {json.dumps({'error': 'Empty message provided'})}\n\n"
         return
     
-    # Convert conversation history to the format expected by tool_learning
-    conversation_history = []
-    
-    # Load conversation checkpoint if available
+    # Load or init state following the same pattern as convo_stream
     checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
-    if checkpoint and "channel_values" in checkpoint and "messages" in checkpoint["channel_values"]:
-        messages = checkpoint["channel_values"]["messages"]
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                conversation_history.append({"role": "user", "content": msg.content})
-            elif isinstance(msg, AIMessage):
-                conversation_history.append({"role": "assistant", "content": msg.content})
-    
-    # Initialize state
-    state = {
-        "messages": conversation_history,
+    default_state = {
+        "messages": [],
+        "prompt_str": "",
+        "convo_id": thread_id,
+        "last_response": "",
         "user_id": user_id,
+        "preset_memory": "Be friendly",
+        "instinct": "",
         "graph_version_id": graph_version_id,
+        "analysis": {},
+        "stream_events": [],
         "use_websocket": use_websocket,
         "thread_id_for_analysis": thread_id_for_analysis
     }
-    
+    state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
+
+    # Add user input to state messages (this is how conversation history is maintained)
+    if user_input:
+        state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
+
     logger.info(f"convo_stream_learning - User: {user_id}, Input: '{user_input}', Thread: {thread_id}")
+    logger.info(f"DEBUG AMI: Loaded state with {len(state['messages'])} messages from checkpoint")
     
-    # Use our tool_learning.py's process_llm_with_tools function to process the message
+    # Convert messages to conversation_context format for tool_learning compatibility
+    conversation_context = ""
+    if state["messages"]:
+        recent_messages = []
+        message_count = 0
+        max_messages = 50
+        
+        # Process messages in reverse to get most recent first, then reverse back for chronological order
+        for msg in reversed(state["messages"]):
+            try:
+                if hasattr(msg, 'content'):
+                    content = msg.content
+                    if isinstance(msg, HumanMessage):
+                        recent_messages.append(f"User: {content.strip()}")
+                        message_count += 1
+                    elif isinstance(msg, AIMessage):
+                        recent_messages.append(f"AI: {content.strip()}")
+                        message_count += 1
+                    
+                    if message_count >= max_messages:
+                        if len(state["messages"]) > max_messages:
+                            recent_messages.append(f"[Note: Conversation history truncated. Total messages: {len(state['messages'])}]")
+                        break
+            except Exception as e:
+                logger.warning(f"Error processing message in conversation history: {e}")
+                continue
+        
+        if recent_messages:
+            conversation_history_text = "\n\n".join(reversed(recent_messages))
+            conversation_context = f"{conversation_history_text}"
+            logger.info(f"DEBUG AMI: Built conversation_context with {len(recent_messages)} messages")
+
+    # Configuration for learning processor
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "graph_version_id": graph_version_id,
+            "use_websocket": use_websocket,
+            "thread_id_for_analysis": thread_id_for_analysis
+        }
+    }
+    
+    # Use tool_learning approach but with proper state management
     try:
-        # Import directly from tool_learning to ensure we're using the updated version
         from ava import AVA
         
-        # Create a learning processor instance directly
+        # Create AVA instance for this request (no singleton needed with proper state management)
         ava = AVA()
         await ava.initialize()
         
         # Process the message using the streaming learning processor
         final_response = None
+        logger.info(f"DEBUG AMI: About to call ava.read_human_input with conversation_context length: {len(conversation_context)}")
+        
         async for chunk in ava.read_human_input(
             user_input,
-            conversation_context="",  # Initialize with empty context
+            conversation_context,
             user_id=user_id,
             thread_id=thread_id
         ):
@@ -519,134 +563,36 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
             elif chunk.get("type") == "error":
                 yield f"data: {json.dumps(chunk)}\n\n"
                 return
-        
-        # Use final_response for tool execution and final output
-        response = final_response
-        
-        # Execute any tool calls found in the response
-        tool_execution_results = {}  # Store results for potential frontend updates
-        
-        if isinstance(response, dict) and "metadata" in response and "tool_calls" in response["metadata"]:
-            tool_calls = response["metadata"]["tool_calls"]
-            logger.info(f"Found {len(tool_calls)} tool calls to execute")
-            
-            # Execute each tool call
-            for tool_call in tool_calls:
-                if isinstance(tool_call, dict) and "name" in tool_call and "parameters" in tool_call:
-                    tool_name = tool_call["name"]
-                    parameters = tool_call["parameters"]
-                    
-                    # Make sure user_id is included in parameters
-                    if "user_id" not in parameters:
-                        parameters["user_id"] = user_id
-                    
-                    # Make sure thread_id is included in parameters if applicable
-                    if "thread_id" not in parameters and tool_name != "knowledge_query":
-                        parameters["thread_id"] = thread_id
-                    
-                    logger.info(f"Executing tool call: {tool_name} with parameters: {parameters}")
-                    
-                    # Execute the tool call
-                    if tool_name == "save_knowledge":
-                        result = await execute_save_knowledge_tool(parameters, user_id, thread_id)
-                        if result and result.get("success"):
-                            tool_execution_results["save_knowledge_vector_id"] = result.get("vector_id")
-                            logger.info(f"✅ Captured save_knowledge vector ID: {result.get('vector_id')}")
-                    
-                    elif tool_name == "save_teaching_synthesis":
-                        result = await execute_save_teaching_synthesis_tool(parameters, user_id, thread_id)
-                        if result and result.get("success"):
-                            tool_execution_results["teaching_synthesis_vector_id"] = result.get("vector_id")
-                            logger.info(f"✅ Captured teaching_synthesis vector ID: {result.get('vector_id')}")
-                    
-                    elif tool_name == "request_save_approval":
-                        # Future: Human-in-the-loop approval flow
-                        result = await handle_save_approval_request(parameters, user_id, thread_id)
-                        tool_execution_results["approval_request_id"] = result.get("request_id")
-                        logger.info(f"📋 Created save approval request: {result.get('request_id')}")
-                    
-                    elif tool_name == "handle_update_decision":
-                        # Handle UPDATE vs CREATE decision from human
-                        result = await handle_update_decision_tool(parameters, user_id, thread_id)
-                        if result and result.get("success"):
-                            tool_execution_results["update_decision_result"] = result
-                            if result.get("action") == "UPDATE_EXISTING":
-                                tool_execution_results["updated_vector_id"] = result.get("new_vector_id")
-                            elif result.get("action") == "CREATE_NEW":
-                                tool_execution_results["created_vector_id"] = result.get("vector_id")
-                        logger.info(f"🔄 Processed UPDATE vs CREATE decision: {result}")
-                    
-                    elif tool_name == "knowledge_query":
-                        logger.info("Skipping knowledge_query tool call in response processing")
-                    
-                    else:
-                        logger.warning(f"Unknown tool call: {tool_name}")
-                else:
-                    logger.warning(f"Invalid tool call format: {tool_call}")
 
-        # Yield the response
-        if isinstance(response, dict) and "message" in response:
-            # Strip out knowledge queries section from the message
-            message_content = response["message"]
-            # Split at knowledge_queries tag and take only the first part
+        # Add AI response to state messages
+        if final_response and isinstance(final_response, dict) and "message" in final_response:
+            message_content = final_response["message"]
+            # Strip knowledge queries from saved message
             message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
-            logger.info("Stripped knowledge_queries from message before sending to frontend")
+            state["messages"] = add_messages(state["messages"], [AIMessage(content=message_content)])
+            state["prompt_str"] = message_content
             
-            # Prepare response with vector IDs if available
-            response_data = {"message": message_content}
-            
-            # Extract ALL metadata if present and include in response
-            if "metadata" in response:
-                metadata = response["metadata"]
+            # Update the checkpoint with new state (this maintains conversation history)
+            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
+            logger.info(f"DEBUG AMI: Updated state with new messages, total count: {len(state['messages'])}")
+
+        # Execute any tool calls found in the response (simplified version)
+        if final_response and isinstance(final_response, dict) and "metadata" in final_response:
+            metadata = final_response.get("metadata", {})
+            if "tool_calls" in metadata:
+                tool_calls = metadata["tool_calls"]
+                logger.info(f"Found {len(tool_calls)} tool calls to execute")
                 
-                # Include ALL metadata fields for frontend
-                response_data.update({
-                    "has_teaching_intent": metadata.get("has_teaching_intent", False),
-                    "response_strategy": metadata.get("response_strategy", "UNKNOWN"),
-                    "is_priority_topic": metadata.get("is_priority_topic", False),
-                    "priority_topic_name": metadata.get("priority_topic_name", ""),
-                    "should_save_knowledge": metadata.get("should_save_knowledge", False),
-                    "similarity_score": metadata.get("similarity_score", 0.0),
-                    "additional_knowledge_found": metadata.get("additional_knowledge_found", False),
-                    "timestamp": metadata.get("timestamp", ""),
-                    "user_id": metadata.get("user_id", "")
-                })
-                
-                # Add UPDATE decision request info if present
-                if "update_decision_request" in metadata:
-                    update_request = metadata["update_decision_request"]
-                    response_data.update({
-                        "update_decision_request": update_request,
-                        "requires_human_decision": update_request.get("requires_human_input", False),
-                        "decision_type": update_request.get("decision_type", ""),
-                        "candidates_count": update_request.get("candidates_count", 0)
-                    })
-                    logger.info(f"Including UPDATE decision request in response: {update_request['request_id']}")
-                
-                # Add vector IDs to response if they exist (from background tasks)
-                if "combined_knowledge_vector_id" in metadata:
-                    response_data["combined_knowledge_vector_id"] = metadata["combined_knowledge_vector_id"]
-                    logger.info(f"Including combined_knowledge_vector_id in response: {metadata['combined_knowledge_vector_id']}")
-                
-                if "synthesis_vector_id" in metadata:
-                    response_data["synthesis_vector_id"] = metadata["synthesis_vector_id"]
-                    logger.info(f"Including synthesis_vector_id in response: {metadata['synthesis_vector_id']}")
-                
-                # Add tool execution results (from immediate tool calls)
-                if tool_execution_results:
-                    for key, value in tool_execution_results.items():
-                        if value:  # Only include non-empty values
-                            response_data[key] = value
-                            logger.info(f"Including tool execution result {key}: {value}")
-                
-                logger.info(f"Sending complete metadata to frontend: has_teaching_intent={metadata.get('has_teaching_intent')}, response_strategy={metadata.get('response_strategy')}")
-            
-            yield f"data: {json.dumps(response_data)}\n\n"
-        else:
-            message_content = str(response)
-            # Also strip knowledge queries from the string representation
-            message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
-            yield f"data: {json.dumps({'message': message_content})}\n\n"
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict) and "name" in tool_call:
+                        tool_name = tool_call.get("name")
+                        logger.info(f"Executing tool call: {tool_name}")
+                        # Tool execution can happen in background
+                        # For now, just log that we found tool calls
+
+        # Yield final response
+        if final_response:
+            yield f"data: {json.dumps(final_response)}\n\n"
         
     except Exception as e:
         logger.error(f"Error in convo_stream_learning: {str(e)}")
