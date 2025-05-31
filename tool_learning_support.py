@@ -1488,10 +1488,10 @@ class LearningSupport:
     def extract_prior_messages(self, conversation_context: str) -> List[str]:
         """Extract prior messages from conversation context, including both User and AI messages."""
         prior_messages = []
-        logger.info(f"DEBUG: Extracting conversation_context {conversation_context}")
+        #logger.info(f"DEBUG: Extracting conversation_context {conversation_context}")
         if conversation_context:
             logger.info(f"DEBUG: Processing conversation_context length: {len(conversation_context)}")
-            logger.info(f"DEBUG: Conversation context content:\n{conversation_context}")
+            #logger.info(f"DEBUG: Conversation context content:\n{conversation_context}")
             
             # Extract all messages in chronological order
             all_messages = []
