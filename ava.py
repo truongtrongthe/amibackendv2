@@ -96,7 +96,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from pccontroller import save_knowledge, query_knowledge, query_knowledge_from_graph
 from utilities import logger, EMBEDDINGS
-from tool_learning_support import LearningSupport
+from learning_support import LearningSupport
 from curiosity import KnowledgeExplorer
 from alpha import save_teaching_synthesis
 from time import time

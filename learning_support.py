@@ -1399,70 +1399,6 @@ class LearningSupport:
         
         return indicators
 
-    async def detect_follow_up_hybrid(self, message: str, prior_topic: str = "", conversation_history: List[str] = None) -> Dict[str, Any]:
-        """
-        Hybrid approach combining static and dynamic follow-up detection.
-        Uses the dynamic method as primary with static as fallback.
-        
-        Args:
-            message: The current message to check
-            prior_topic: The previous topic or message for context
-            conversation_history: List of recent messages for context
-            
-        Returns:
-            Dictionary with comprehensive detection results
-        """
-        try:
-            # Start with dynamic detection
-            dynamic_result = await self.detect_follow_up_dynamic(message, prior_topic, conversation_history)
-            
-            # If dynamic detection has high confidence, use it
-            if dynamic_result.get("confidence", 0.0) > 0.7:
-                logger.info(f"Using dynamic detection result (high confidence: {dynamic_result['confidence']:.3f})")
-                return dynamic_result
-            
-            # Otherwise, combine with static detection for validation
-            static_result = self.detect_follow_up(message, prior_topic)
-            
-            # Combine results intelligently
-            combined_result = {
-                "is_confirmation": dynamic_result.get("is_confirmation", False) or static_result.get("is_confirmation", False),
-                "is_follow_up": dynamic_result.get("is_follow_up", False) or static_result.get("is_follow_up", False),
-                "confidence": max(dynamic_result.get("confidence", 0.0), 0.6 if static_result.get("is_follow_up", False) else 0.3),
-                "reasoning": f"Hybrid: {dynamic_result.get('reasoning', '')} + Static patterns: {static_result.get('has_pattern_match', False)}",
-                "semantic_similarity": dynamic_result.get("semantic_similarity", 0.0),
-                "linguistic_patterns": dynamic_result.get("linguistic_patterns", []),
-                "static_patterns": static_result,
-                "method": "hybrid"
-            }
-            
-            logger.info(f"Using hybrid detection result (combined confidence: {combined_result['confidence']:.3f})")
-            return combined_result
-            
-        except Exception as e:
-            logger.error(f"Error in hybrid follow-up detection: {e}")
-            # Fallback to static method
-            static_result = self.detect_follow_up(message, prior_topic)
-            return {
-                "is_confirmation": static_result.get("is_confirmation", False),
-                "is_follow_up": static_result.get("is_follow_up", False),
-                "confidence": 0.6 if static_result.get("is_follow_up", False) else 0.3,
-                "reasoning": f"Fallback to static detection due to error: {str(e)}",
-                "method": "static_fallback"
-            }
-
-    async def active_learning(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None) -> Dict[str, Any]:
-        """
-        Placeholder for active learning functionality.
-        This method should be implemented based on specific requirements.
-        """
-        # This is a placeholder implementation
-        return {
-            "status": "success",
-            "message": "Active learning functionality not yet implemented",
-            "metadata": {}
-        }
-
     def setup_temporal_context(self) -> str:
         """Setup temporal context with current Vietnam time."""
         vietnam_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -2027,7 +1963,6 @@ class LearningSupport:
         """Check if message is a casual conversational phrase that should get brief, natural responses."""
         # No longer using special casual phrase detection - let LLM handle naturally
         return False
-
 
     def _extract_similarity_from_context(self, knowledge_context: str) -> float:
         """Extract similarity score from knowledge context for confidence instructions."""
