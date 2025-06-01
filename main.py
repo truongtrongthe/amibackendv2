@@ -261,6 +261,22 @@ async def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
     # Use socketio_manager_async version
     return await socketio_manager_async.emit_next_action_event(thread_id, data)
 
+async def emit_learning_intent_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """Emit a learning intent event to all clients in a thread room"""
+    if "thread_id" not in data:
+        data["thread_id"] = thread_id
+    
+    # Use socketio_manager_async version
+    return await socketio_manager_async.emit_learning_intent_event(thread_id, data)
+
+async def emit_learning_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """Emit a learning knowledge event to all clients in a thread room"""
+    if "thread_id" not in data:
+        data["thread_id"] = thread_id
+    
+    # Use socketio_manager_async version
+    return await socketio_manager_async.emit_learning_knowledge_event(thread_id, data)
+
 # Request models
 class HaveFunRequest(BaseModel):
     user_input: str

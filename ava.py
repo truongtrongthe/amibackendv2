@@ -1188,10 +1188,22 @@ class AVA:
         # Fall back to regular teaching intent handling
         await self.handle_teaching_intent(message, response, user_id, thread_id, priority_topic_name)
 
-    
-    async def read_human_input(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
+    async def read_human_input(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of process_incoming_message that yields chunks as they come."""
         logger.info(f"Processing streaming message from user {user_id}")
+        
+        # Import WebSocket functions if needed
+        if use_websocket and thread_id_for_analysis:
+            try:
+                from socketio_manager_async import emit_learning_intent_event, emit_learning_knowledge_event
+                socket_imports_success = True
+                logger.info(f"Successfully imported learning WebSocket functions for thread {thread_id_for_analysis}")
+            except Exception as e:
+                socket_imports_success = False
+                logger.error(f"Failed to import learning WebSocket functions: {str(e)}")
+        else:
+            socket_imports_success = False
+        
         try:
             if not message.strip():
                 logger.error("Empty message")
@@ -1216,6 +1228,26 @@ class AVA:
             # Step 2: Search for relevant knowledge using iterative exploration
             logger.info(f"Searching for knowledge based on message using iterative exploration...")
             analysis_knowledge = await self.knowledge_explorer.explore(message, conversation_context, user_id, thread_id)
+            
+            # WEBSOCKET EMISSION POINT 2: Emit learning knowledge event when knowledge is found
+            if use_websocket and thread_id_for_analysis and socket_imports_success and analysis_knowledge:
+                try:
+                    learning_knowledge_event = {
+                        "type": "learning_knowledge",
+                        "thread_id": thread_id_for_analysis,
+                        "timestamp": datetime.now().isoformat(),
+                        "content": {
+                            "message": "Found relevant knowledge for learning",
+                            "similarity_score": analysis_knowledge.get("similarity", 0.0),
+                            "knowledge_count": len(analysis_knowledge.get("query_results", [])),
+                            "queries": analysis_knowledge.get("queries", []),
+                            "complete": False
+                        }
+                    }
+                    await emit_learning_knowledge_event(thread_id_for_analysis, learning_knowledge_event)
+                    logger.info(f"Emitted learning knowledge event for thread {thread_id_for_analysis}")
+                except Exception as e:
+                    logger.error(f"Error emitting learning knowledge event: {str(e)}")
             
             # Step 3: Enrich with suggested queries if we don't have sufficient results
             if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
@@ -1254,7 +1286,7 @@ class AVA:
             
             # Stream the response as it comes from LLM
             final_response = None
-            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data):
+            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data, use_websocket, thread_id_for_analysis):
                 if chunk.get("type") == "response_chunk":
                     # Yield streaming chunks immediately
                     yield chunk
@@ -1275,6 +1307,28 @@ class AVA:
                 should_save_knowledge = metadata.get("should_save_knowledge", False)
                 priority_topic_name = metadata.get("priority_topic_name", "")
                 intent_type = metadata.get("intent_type", "unknown")
+                
+                # WEBSOCKET EMISSION POINT 1: Emit learning intent event when intent is understood
+                if use_websocket and thread_id_for_analysis and socket_imports_success:
+                    try:
+                        learning_intent_event = {
+                            "type": "learning_intent",
+                            "thread_id": thread_id_for_analysis,
+                            "timestamp": datetime.now().isoformat(),
+                            "content": {
+                                "message": "Understanding human intent",
+                                "intent_type": intent_type,
+                                "has_teaching_intent": has_teaching_intent,
+                                "is_priority_topic": is_priority_topic,
+                                "priority_topic_name": priority_topic_name,
+                                "should_save_knowledge": should_save_knowledge,
+                                "complete": True
+                            }
+                        }
+                        await emit_learning_intent_event(thread_id_for_analysis, learning_intent_event)
+                        logger.info(f"Emitted learning intent event for thread {thread_id_for_analysis}: {intent_type}")
+                    except Exception as e:
+                        logger.error(f"Error emitting learning intent event: {str(e)}")
                 
                 # Get similarity score from analysis
                 similarity_score = analysis_knowledge.get("similarity", 0.0) if analysis_knowledge else 0.0
@@ -1319,7 +1373,7 @@ class AVA:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             yield {"status": "error", "message": f"Error: {str(e)}", "complete": True}
 
-    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None) -> AsyncGenerator[Union[str, Dict], None]:
+    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of active learning method that yields chunks as they come from LLM."""
         logger.info("Starting streaming active learning approach")
         

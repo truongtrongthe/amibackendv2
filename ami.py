@@ -14,7 +14,7 @@ import asyncio
 
 # Import socketio manager for WebSocket support
 try:
-    from socketio_manager_async import emit_analysis_event, emit_knowledge_event, emit_next_action_event
+    from socketio_manager_async import emit_analysis_event, emit_knowledge_event, emit_next_action_event, emit_learning_intent_event, emit_learning_knowledge_event
     socketio_imports_success = True
     logger.info("Successfully imported socketio_manager_async functions in ami.py")
 except ImportError:
@@ -552,7 +552,9 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
             user_input,
             conversation_context,
             user_id=user_id,
-            thread_id=thread_id
+            thread_id=thread_id,
+            use_websocket=use_websocket,
+            thread_id_for_analysis=thread_id_for_analysis
         ):
             if chunk.get("type") == "response_chunk":
                 # Stream chunks immediately

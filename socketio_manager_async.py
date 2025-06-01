@@ -623,6 +623,219 @@ async def emit_next_action_event(thread_id: str, data: Dict[str, Any]) -> bool:
         
         return False
 
+async def emit_learning_intent_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """
+    Emit a learning intent event to all clients in a thread room
+    
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    if not sio:
+        logger.error("Cannot emit - sio instance not initialized")
+        return False
+        
+    # Access sessions using either main_ws_sessions or local ws_sessions
+    sessions_to_use = main_ws_sessions if main_ws_sessions is not None else ws_sessions
+    
+    if not sessions_to_use:
+        logger.error("No session dictionary available - both main_ws_sessions and ws_sessions are empty or None")
+        
+    logger.info(f"[WS_EMISSION] Starting emit_learning_intent_event for thread {thread_id}, data type: {type(data)}")
+    if isinstance(data, dict):
+        logger.info(f"[WS_EMISSION] Data keys: {list(data.keys())}")
+        if 'type' in data:
+            logger.info(f"[WS_EMISSION] Event type: {data['type']}")
+    
+    # Check if there are any active sessions in this thread room
+    active_sessions_count = 0
+    active_session_ids = []
+    
+    # Add detailed debugging
+    logger.info(f"emit_learning_intent_event: Looking for sessions for thread {thread_id}")
+    
+    async with session_lock:
+        # For debugging, always log this
+        total_sessions = len(sessions_to_use)
+        # Log the thread_ids of all sessions for debugging
+        all_thread_ids = [data.get('thread_id') for sid, data in sessions_to_use.items()]
+        
+        logger.info(f"emit_learning_intent_event: Total {total_sessions} sessions, Thread IDs: {all_thread_ids}")
+        
+        # Check sessions directly
+        if total_sessions > 0:
+            for sid, session_data in sessions_to_use.items():
+                stored_thread_id = session_data.get('thread_id')
+                logger.info(f"Checking session {sid} with thread_id {stored_thread_id} against {thread_id}")
+                if stored_thread_id == thread_id:
+                    active_sessions_count += 1
+                    active_session_ids.append(sid)
+                    # Update last activity timestamp to mark session as active
+                    session_data['last_activity'] = datetime.now().isoformat()
+                    logger.info(f"Found active session {sid} for thread {thread_id}")
+        
+        # Log what we found for debugging
+        if total_sessions > 0:
+            logger.info(f"emit_learning_intent_event: Found {active_sessions_count} active sessions (out of {total_sessions} total)")
+        else:
+            logger.info(f"emit_learning_intent_event: No sessions found (total: {total_sessions})")
+    
+    # Try to emit to the room regardless of whether we found active sessions
+    # This handles case where room exists but we didn't find sessions
+    try:
+        logger.info(f"[WS_EMISSION] Emitting learning_intent to room {thread_id}")
+        await sio.emit('learning_intent', data, room=thread_id)
+        logger.info(f"emit_learning_intent_event: Emitted to room {thread_id}")
+    except Exception as e:
+        logger.error(f"Error emitting to room {thread_id}: {str(e)}")
+    
+    if active_sessions_count > 0:
+        logger.info(f"emit_learning_intent_event: Found {active_sessions_count} active sessions for thread {thread_id}: {active_session_ids}")
+        
+        # Also send directly to each session as a backup
+        success = False
+        for session_id in active_session_ids:
+            try:
+                logger.info(f"[WS_EMISSION] Emitting learning_intent directly to session {session_id}")
+                await sio.emit('learning_intent', data, room=session_id)
+                success = True
+                logger.info(f"emit_learning_intent_event: Successfully sent learning_intent to session {session_id}")
+            except Exception as e:
+                logger.error(f"Failed direct delivery to session {session_id}: {str(e)}")
+        
+        # Store message in case not all deliveries were successful
+        if not success:
+            logger.info(f"[WS_EMISSION] No successful direct deliveries, storing message for later retrieval")
+            async with message_lock:
+                if thread_id not in undelivered_messages:
+                    undelivered_messages[thread_id] = {}
+                if 'learning_intent' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['learning_intent'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['learning_intent'] = (undelivered_messages[thread_id]['learning_intent'] + [data])[-50:]
+        
+        logger.info(f"[WS_EMISSION] Completed emission to {active_sessions_count} sessions for thread {thread_id}")
+        return True
+    else:
+        logger.warning(f"No active sessions found for thread {thread_id}, learning intent event not delivered directly")
+        
+        # Store undelivered message for later retrieval
+        logger.info(f"[WS_EMISSION] Storing message for thread {thread_id} for later retrieval")
+        async with message_lock:
+            if thread_id not in undelivered_messages:
+                undelivered_messages[thread_id] = {}
+            if 'learning_intent' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['learning_intent'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['learning_intent'] = (undelivered_messages[thread_id]['learning_intent'] + [data])[-50:]
+        
+        return False
+
+async def emit_learning_knowledge_event(thread_id: str, data: Dict[str, Any]) -> bool:
+    """
+    Emit a learning knowledge event to all clients in a thread room
+    
+    Returns:
+        bool: True if message was delivered to active sessions, False otherwise
+    """
+    if not sio:
+        logger.error("Cannot emit - sio instance not initialized")
+        return False
+    
+    # Access sessions using either main_ws_sessions or local ws_sessions
+    sessions_to_use = main_ws_sessions if main_ws_sessions is not None else ws_sessions
+    
+    if not sessions_to_use:
+        logger.error("No session dictionary available - both main_ws_sessions and ws_sessions are empty or None")
+        
+    logger.info(f"[WS_EMISSION] Starting emit_learning_knowledge_event for thread {thread_id}, data type: {type(data)}")
+    if isinstance(data, dict):
+        logger.info(f"[WS_EMISSION] Data keys: {list(data.keys())}")
+        if 'type' in data:
+            logger.info(f"[WS_EMISSION] Event type: {data['type']}")
+    
+    # Check if there are any active sessions in this thread room
+    active_sessions_count = 0
+    active_session_ids = []
+    
+    # Add detailed debugging
+    logger.info(f"emit_learning_knowledge_event: Looking for sessions for thread {thread_id}")
+    
+    async with session_lock:
+        # For debugging, always log this
+        total_sessions = len(sessions_to_use)
+        # Log the thread_ids of all sessions for debugging
+        all_thread_ids = [data.get('thread_id') for sid, data in sessions_to_use.items()]
+        
+        logger.info(f"emit_learning_knowledge_event: Total {total_sessions} sessions, Thread IDs: {all_thread_ids}")
+        
+        # Check sessions directly
+        if total_sessions > 0:
+            for sid, session_data in sessions_to_use.items():
+                stored_thread_id = session_data.get('thread_id')
+                logger.info(f"Checking session {sid} with thread_id {stored_thread_id} against {thread_id}")
+                if stored_thread_id == thread_id:
+                    active_sessions_count += 1
+                    active_session_ids.append(sid)
+                    # Update last activity timestamp to mark session as active
+                    session_data['last_activity'] = datetime.now().isoformat()
+                    logger.info(f"Found active session {sid} for thread {thread_id}")
+        
+        # Log what we found for debugging
+        if total_sessions > 0:
+            logger.info(f"emit_learning_knowledge_event: Found {active_sessions_count} active sessions (out of {total_sessions} total)")
+        else:
+            logger.info(f"emit_learning_knowledge_event: No sessions found (total: {total_sessions})")
+    
+    # Try to emit to the room regardless of whether we found active sessions
+    try:
+        logger.info(f"[WS_EMISSION] Emitting learning_knowledge to room {thread_id}")
+        await sio.emit('learning_knowledge', data, room=thread_id)
+        logger.info(f"emit_learning_knowledge_event: Emitted to room {thread_id}")
+    except Exception as e:
+        logger.error(f"Error emitting to room {thread_id}: {str(e)}")
+    
+    if active_sessions_count > 0:
+        logger.info(f"emit_learning_knowledge_event: Found {active_sessions_count} active sessions for thread {thread_id}: {active_session_ids}")
+        
+        # Also send directly to each session as a backup
+        success = False
+        for session_id in active_session_ids:
+            try:
+                logger.info(f"[WS_EMISSION] Emitting learning_knowledge directly to session {session_id}")
+                await sio.emit('learning_knowledge', data, room=session_id)
+                success = True
+                logger.info(f"emit_learning_knowledge_event: Successfully sent learning_knowledge to session {session_id}")
+            except Exception as e:
+                logger.error(f"Failed direct delivery to session {session_id}: {str(e)}")
+        
+        # Store message in case not all deliveries were successful
+        if not success:
+            logger.info(f"[WS_EMISSION] No successful direct deliveries, storing message for later retrieval")
+            async with message_lock:
+                if thread_id not in undelivered_messages:
+                    undelivered_messages[thread_id] = {}
+                if 'learning_knowledge' not in undelivered_messages[thread_id]:
+                    undelivered_messages[thread_id]['learning_knowledge'] = []
+                # Only keep the last 50 messages per thread
+                undelivered_messages[thread_id]['learning_knowledge'] = (undelivered_messages[thread_id]['learning_knowledge'] + [data])[-50:]
+        
+        logger.info(f"[WS_EMISSION] Completed emission to {active_sessions_count} sessions for thread {thread_id}")
+        return True
+    else:
+        logger.warning(f"No active sessions found for thread {thread_id}, learning knowledge event not delivered directly")
+        
+        # Store undelivered message for later retrieval
+        logger.info(f"[WS_EMISSION] Storing message for thread {thread_id} for later retrieval")
+        async with message_lock:
+            if thread_id not in undelivered_messages:
+                undelivered_messages[thread_id] = {}
+            if 'learning_knowledge' not in undelivered_messages[thread_id]:
+                undelivered_messages[thread_id]['learning_knowledge'] = []
+            # Only keep the last 50 messages per thread
+            undelivered_messages[thread_id]['learning_knowledge'] = (undelivered_messages[thread_id]['learning_knowledge'] + [data])[-50:]
+        
+        return False
+
 async def start_session_cleanup():
     """Start a background task to clean up stale sessions"""
     while True:
