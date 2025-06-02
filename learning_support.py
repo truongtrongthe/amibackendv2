@@ -542,17 +542,15 @@ class LearningSupport:
                 for result_item in results:
                     knowledge_content = result_item["raw"]
                     
-                    # Extract just the User portion if this is a combined knowledge entry
-                    if knowledge_content.startswith("User:") and "\n\nAI:" in knowledge_content:
-                        user_part = re.search(r'User:(.*?)(?=\n\nAI:)', knowledge_content, re.DOTALL)
-                        if user_part:
-                            knowledge_content = user_part.group(1).strip()
-                            logger.info(f"Extracted User portion from combined knowledge")
+                    # PRESERVE FULL KNOWLEDGE CONTENT - DO NOT TRUNCATE
+                    # The original code was truncating by extracting only User portion
+                    # This caused massive information loss of AI responses and knowledge summaries
+                    # Now we keep the complete knowledge entry for comprehensive responses
                     
                     # Store for batch processing
                     all_result_items.append({
                         "result_item": result_item,
-                        "knowledge_content": knowledge_content,
+                        "knowledge_content": knowledge_content,  # Full content preserved
                         "query": query
                     })
             
