@@ -451,8 +451,10 @@ class AVA:
             
             # Step 6: Stream LLM response and process it
             from langchain_openai import ChatOpenAI
-            StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True, temperature=0.3)
+            StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True, temperature=0.25)
             
+
+
             content_buffer = ""
             evaluation_started = False
             logger.info("Starting LLM streaming response")
@@ -497,6 +499,7 @@ class AVA:
             
             # Step 7: Process the complete response
             content = content_buffer.strip()
+            logger.info(f"LLM streaming completed, Content: {content}")
             
             # Extract structured sections and metadata
             structured_sections = self.support.extract_structured_sections(content)
@@ -670,6 +673,7 @@ class AVA:
         # Clean up the set
         self._background_tasks.clear()
         logger.info("Background task cleanup completed")
+    
     async def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with enhanced parameter validation and metadata enrichment."""
         logger.info(f"Executing tool: {tool_name} with parameters: {parameters}")
@@ -1605,9 +1609,6 @@ class AVA:
         
         # Fall back to regular teaching intent handling
         await self.handle_teaching_intent(message, response, user_id, thread_id, priority_topic_name)
-
-    
-    
 
     async def _save_high_quality_conversation(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str]) -> None:
         """Save high-quality conversation that doesn't have teaching intent but has high similarity."""
