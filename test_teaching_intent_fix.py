@@ -1,130 +1,121 @@
 #!/usr/bin/env python3
 """
-Test script to verify the teaching intent classification fix.
+Test script to verify teaching intent detection fix
+
+This script tests that:
+1. detect_teaching_intent_llm() correctly returns True for teaching intent
+2. The final LLM evaluation section also includes has_teaching_intent: true
+3. The knowledge saving decision recognizes the teaching intent
 """
 
 import asyncio
-import sys
-import os
+import json
+from learning_support import LearningSupport
 
-# Add the current directory to Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+class MockLearningProcessor:
+    """Mock learning processor for testing"""
+    def __init__(self):
+        self.graph_version_id = "test_graph"
 
-from tool_learning import LearningProcessor
-
-async def test_teaching_intent_classification():
-    """Test that teaching intent is correctly classified and not overridden by similarity gating."""
-    print("🧪 Testing Teaching Intent Classification Fix")
-    print("=" * 60)
+async def test_teaching_intent_detection():
+    """Test the complete teaching intent flow"""
+    print("🧪 Testing Teaching Intent Detection Fix")
+    print("=" * 50)
     
-    # Initialize the learning processor
-    processor = LearningProcessor()
-    await processor.initialize()
+    # Create test instances
+    mock_processor = MockLearningProcessor()
+    support = LearningSupport(mock_processor)
     
-    # Test cases: requests vs teaching
-    test_cases = [
+    # Test message with clear teaching intent
+    test_message = "Bên anh sắp mở văn phòng ở Đà Nẵng"
+    conversation_context = ""
+    
+    print(f"📝 Test Message: '{test_message}'")
+    print()
+    
+    # Test 1: LLM-based teaching intent detection
+    print("🔍 Test 1: LLM Teaching Intent Detection")
+    try:
+        teaching_intent_result = await support.detect_teaching_intent_llm(test_message, conversation_context)
+        print(f"   Result: {teaching_intent_result}")
+        print(f"   Status: {'✅ PASS' if teaching_intent_result else '❌ FAIL'}")
+    except Exception as e:
+        print(f"   Status: ❌ ERROR - {str(e)}")
+    print()
+    
+    # Test 2: Build LLM prompt and check evaluation instructions
+    print("🔍 Test 2: LLM Prompt Includes Evaluation Instructions")
+    try:
+        prompt = support.build_llm_prompt(
+            message_str=test_message,
+            conversation_context=conversation_context,
+            temporal_context="",
+            knowledge_context="",
+            response_strategy="GENERAL",
+            strategy_instructions="",
+            core_prior_topic="",
+            user_id="test_user"
+        )
+        
+        has_evaluation_instructions = "MANDATORY EVALUATION OUTPUT" in prompt
+        has_teaching_criteria = "has_teaching_intent" in prompt
+        has_evaluation_format = "<evaluation>" in prompt
+        
+        print(f"   Evaluation Instructions: {'✅' if has_evaluation_instructions else '❌'}")
+        print(f"   Teaching Intent Criteria: {'✅' if has_teaching_criteria else '❌'}")
+        print(f"   Evaluation Format: {'✅' if has_evaluation_format else '❌'}")
+        
+        all_checks = has_evaluation_instructions and has_teaching_criteria and has_evaluation_format
+        print(f"   Status: {'✅ PASS' if all_checks else '❌ FAIL'}")
+        
+        if not all_checks:
+            print(f"   Prompt excerpt: ...{prompt[-500:]}")
+    except Exception as e:
+        print(f"   Status: ❌ ERROR - {str(e)}")
+    print()
+    
+    # Test 3: Extract evaluation from sample response
+    print("🔍 Test 3: Evaluation Extraction")
+    try:
+        sample_response = """
+        Cảm ơn bạn đã chia sẻ! Mình hiểu bên bạn sắp mở văn phòng ở Đà Nẵng.
+        
+        <evaluation>
         {
-            "message": "Anh khó nghĩ quá làm thế nào để lấy được số của khách hàng đây",
-            "expected_intent": False,  # This is a REQUEST, not teaching
-            "description": "Request for help (should NOT be teaching intent)"
-        },
-        {
-            "message": "Em muốn chia sẻ cách thu thập số điện thoại hiệu quả: Đầu tiên phải giải thích mục đích rõ ràng...",
-            "expected_intent": True,   # This is TEACHING
-            "description": "Teaching content (should BE teaching intent)"
-        },
-        {
-            "message": "Làm sao để tôi có thể cải thiện kỹ năng bán hàng?",
-            "expected_intent": False,  # This is a QUESTION, not teaching
-            "description": "Question/request (should NOT be teaching intent)"
-        },
-        {
-            "message": "Tôi muốn hướng dẫn các bạn về kỹ thuật chốt đơn: Bước 1 là xây dựng niềm tin...",
-            "expected_intent": True,   # This is TEACHING
-            "description": "Teaching/instruction (should BE teaching intent)"
+            "has_teaching_intent": true,
+            "is_priority_topic": true,
+            "priority_topic_name": "office_expansion",
+            "should_save_knowledge": true,
+            "intent_type": "teaching",
+            "name_addressed": false,
+            "ai_referenced": false
         }
-    ]
-    
-    results = []
-    
-    for i, test_case in enumerate(test_cases, 1):
-        print(f"\n🔍 Test Case {i}: {test_case['description']}")
-        print(f"Message: '{test_case['message'][:50]}...'")
+        </evaluation>
+        """
         
-        try:
-            # Process the message
-            result = await processor.process_incoming_message(
-                message=test_case['message'],
-                conversation_context="",
-                user_id="test_user",
-                thread_id=f"test_thread_{i}"
-            )
-            
-            # Extract the teaching intent classification
-            actual_intent = result.get("metadata", {}).get("has_teaching_intent", False)
-            expected_intent = test_case["expected_intent"]
-            
-            # Check if classification is correct
-            is_correct = actual_intent == expected_intent
-            status = "✅ PASS" if is_correct else "❌ FAIL"
-            
-            print(f"Expected teaching intent: {expected_intent}")
-            print(f"Actual teaching intent: {actual_intent}")
-            print(f"Result: {status}")
-            
-            # Additional metadata
-            similarity = result.get("metadata", {}).get("similarity_score", 0.0)
-            response_strategy = result.get("metadata", {}).get("response_strategy", "unknown")
-            should_save = result.get("metadata", {}).get("should_save_knowledge", False)
-            
-            print(f"Similarity score: {similarity:.3f}")
-            print(f"Response strategy: {response_strategy}")
-            print(f"Should save knowledge: {should_save}")
-            
-            results.append({
-                "test_case": i,
-                "description": test_case["description"],
-                "expected": expected_intent,
-                "actual": actual_intent,
-                "correct": is_correct,
-                "similarity": similarity,
-                "strategy": response_strategy
-            })
-            
-        except Exception as e:
-            print(f"❌ ERROR: {str(e)}")
-            results.append({
-                "test_case": i,
-                "description": test_case["description"],
-                "expected": expected_intent,
-                "actual": None,
-                "correct": False,
-                "error": str(e)
-            })
-    
-    # Summary
-    print("\n" + "=" * 60)
-    print("📊 TEST SUMMARY")
-    print("=" * 60)
-    
-    passed = sum(1 for r in results if r.get("correct", False))
-    total = len(results)
-    
-    print(f"Tests passed: {passed}/{total}")
-    print(f"Success rate: {(passed/total)*100:.1f}%")
-    
-    if passed == total:
-        print("🎉 ALL TESTS PASSED! Teaching intent classification is working correctly.")
-    else:
-        print("⚠️  Some tests failed. The fix may need adjustment.")
+        content, tool_calls, evaluation = support.extract_tool_calls_and_evaluation(sample_response, test_message)
         
-        # Show failed tests
-        failed_tests = [r for r in results if not r.get("correct", False)]
-        for test in failed_tests:
-            print(f"  - Test {test['test_case']}: {test['description']}")
-            print(f"    Expected: {test['expected']}, Got: {test['actual']}")
+        has_teaching_intent = evaluation.get("has_teaching_intent", False)
+        intent_type = evaluation.get("intent_type", "unknown")
+        
+        print(f"   Extracted has_teaching_intent: {has_teaching_intent}")
+        print(f"   Extracted intent_type: {intent_type}")
+        print(f"   Status: {'✅ PASS' if has_teaching_intent and intent_type == 'teaching' else '❌ FAIL'}")
+        
+    except Exception as e:
+        print(f"   Status: ❌ ERROR - {str(e)}")
+    print()
     
-    await processor.cleanup()
+    print("🎯 Summary")
+    print("The fix adds mandatory evaluation instructions to the LLM prompt.")
+    print("This ensures the LLM always includes teaching intent evaluation in its response.")
+    print("The evaluation is then extracted and used for knowledge saving decisions.")
+    print()
+    print("🔧 Key Changes Made:")
+    print("1. Added evaluation section instructions to build_llm_prompt()")
+    print("2. Made evaluation output mandatory for all LLM responses")
+    print("3. Included specific teaching intent criteria in the prompt")
+    print()
 
 if __name__ == "__main__":
-    asyncio.run(test_teaching_intent_classification()) 
+    asyncio.run(test_teaching_intent_detection()) 

@@ -17,11 +17,11 @@ class LearningSupport:
     def __init__(self, learning_processor):
         self.learning_processor = learning_processor
     
-    def determine_response_strategy(self, flow_type: str, flow_confidence: float, message_characteristics: Dict, 
+    async def determine_response_strategy(self, flow_type: str, flow_confidence: float, message_characteristics: Dict, 
                                   knowledge_relevance: Dict, similarity_score: float, prior_knowledge: str,
                                   queries: List, query_results: List, knowledge_response_sections: List, 
                                   conversation_context: str = "", message_str: str = "") -> Dict[str, Any]:
-        """Determine the appropriate response strategy based on various factors."""
+        """Determine the response strategy based on conversation flow and message analysis."""
         
         # Get universal pronoun guidance for ALL strategies
         pronoun_guidance = self._get_universal_pronoun_guidance(conversation_context, message_str)
@@ -31,17 +31,18 @@ class LearningSupport:
         is_practice_request = flow_type == "PRACTICE_REQUEST"
         is_closing = flow_type == "CLOSING"
         
-        # Extract message characteristics
+        # Extract message characteristics (but don't use has_teaching_markers anymore)
         is_closing_message = message_characteristics["is_closing_message"] or is_closing
-        has_teaching_markers = message_characteristics["has_teaching_markers"]
         is_vn_greeting = message_characteristics["is_vn_greeting"]
         contains_vn_name = message_characteristics["contains_vn_name"]
         is_short_message = message_characteristics["is_short_message"]
-        is_long_without_question = message_characteristics["is_long_without_question"]
         
         # Extract knowledge relevance
         best_context_relevance = knowledge_relevance["best_context_relevance"]
         has_low_relevance_knowledge = knowledge_relevance["has_low_relevance_knowledge"]
+        
+        # Use LLM to detect teaching intent instead of primitive rule-based detection
+        has_teaching_intent_llm = await self.detect_teaching_intent_llm(message_str, conversation_context)
         
         if is_closing_message:
             return {
@@ -248,7 +249,7 @@ class LearningSupport:
                 "similarity_score": similarity_score
             }
         
-        elif has_teaching_markers or is_long_without_question:
+        elif has_teaching_intent_llm:
             return {
                 "strategy": "TEACHING_INTENT",
                 "instructions": (
@@ -360,6 +361,36 @@ class LearningSupport:
                     """
         else:
             prompt += self._get_confidence_instructions(similarity_score)
+        
+        # Add evaluation section instructions - CRITICAL for teaching intent detection
+        prompt += """
+        
+        **MANDATORY EVALUATION OUTPUT**:
+        After your response, you MUST include an evaluation section in this exact format:
+
+        <evaluation>
+        {
+            "has_teaching_intent": true/false,
+            "is_priority_topic": true/false,
+            "priority_topic_name": "topic name or empty string",
+            "should_save_knowledge": true/false,
+            "intent_type": "teaching/query/clarification/practice_request/closing",
+            "name_addressed": true/false,
+            "ai_referenced": true/false
+        }
+        </evaluation>
+
+        **EVALUATION CRITERIA**:
+        - **has_teaching_intent**: TRUE if user is INFORMING/DECLARING/ANNOUNCING (not asking questions)
+        - **is_priority_topic**: TRUE if the topic appears important for future reference
+        - **priority_topic_name**: Short descriptive name for the topic being taught
+        - **should_save_knowledge**: TRUE if this interaction contains valuable information to save
+        - **intent_type**: Primary intent category based on user's message
+        - **name_addressed**: TRUE if user mentioned your name or referenced you directly
+        - **ai_referenced**: TRUE if user explicitly mentioned AI, assistant, or similar terms
+
+        This evaluation is MANDATORY and must be included in every response.
+        """
         
         return prompt
     
@@ -2437,3 +2468,71 @@ class LearningSupport:
                 """
         
         return ""
+
+    async def detect_teaching_intent_llm(self, message: str, conversation_context: str = "") -> bool:
+        """Use LLM to detect teaching intent by analyzing message and conversation history."""
+        try:
+            teaching_detection_prompt = f"""
+            TASK: Analyze if the user has TEACHING INTENT in their current message.
+
+            **CORE PRINCIPLE**: Analyze INFORMATION FLOW DIRECTION and SPEECH ACT TYPE.
+
+            **TEACHING INTENT = TRUE when user is INFORMING/DECLARING:**
+            
+            **Information Flow Analysis:**
+            - User → AI: Information flows FROM user TO you = TEACHING INTENT = TRUE
+            - AI ← User: User requests information FROM you = TEACHING INTENT = FALSE
+            
+            **Speech Act Analysis:**
+            - DECLARATIVE: Stating facts, plans, roles, assignments, decisions = TRUE
+            - INTERROGATIVE: Asking questions, seeking information = FALSE  
+            - IMPERATIVE: Commanding you to provide info/help = FALSE
+            
+            **Semantic Intent Markers (TRUE):**
+            - Announcing future actions: "I will...", "Starting tomorrow...", "From now on..."
+            - Assigning roles/tasks: "You handle...", "Your job is...", "You are responsible for..."
+            - Sharing information: "Let me tell you...", "Here's what happened...", "The situation is..."
+            - Making declarations: "I am...", "This is...", "We decided..."
+            - Vietnamese temporal markers: "Từ mai...", "Từ hôm nay...", "Bắt đầu từ..."
+            
+            **Semantic Intent Markers (FALSE):**
+            - Seeking information: "What is...", "How do...", "Can you explain..."
+            - Requesting help: "Help me...", "Please...", "Could you..."
+            - Asking for capabilities: "Can you...", "Are you able to..."
+            - Vietnamese question patterns: "...như thế nào?", "...là gì?", "Anh có thể..."
+
+            **CONVERSATION CONTEXT (for additional context):**
+            {conversation_context}
+
+            **CURRENT MESSAGE TO ANALYZE:**
+            {message}
+
+            **Analysis Questions:**
+            1. Is the user GIVING me new information about plans, facts, or roles?
+            2. Is the user TELLING me what to do or what will happen?
+            3. Is the user ASKING me for information, help, or explanations?
+            4. Is the user REQUESTING me to perform an action or provide service?
+
+            **RESPONSE FORMAT**: Reply with only "TRUE" or "FALSE"
+            - TRUE = Teaching intent detected (user is informing/declaring)
+            - FALSE = No teaching intent (user is asking/requesting)
+
+            **FOCUS ON MEANING, not exact words or message length.**
+
+            ANSWER:"""
+
+            from langchain_openai import ChatOpenAI
+            detection_llm = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.0)
+            
+            response = await detection_llm.ainvoke(teaching_detection_prompt)
+            result = response.content.strip().upper()
+            
+            has_teaching_intent = result == "TRUE"
+            logger.info(f"LLM teaching intent detection: {has_teaching_intent} (response: {result})")
+            
+            return has_teaching_intent
+            
+        except Exception as e:
+            logger.error(f"Error in LLM teaching intent detection: {str(e)}")
+            # Fallback to False to avoid false positives
+            return False
