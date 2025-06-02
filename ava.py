@@ -433,7 +433,7 @@ class AVA:
                 if fallback_context:
                     knowledge_context = fallback_context
             
-            logger.info(f"Knowledge context: {knowledge_context}")
+            #logger.info(f"Knowledge context: {knowledge_context}")
             
             # Step 5: Build LLM prompt
             # This is the prompt that the LLM will use to generate the response. it should be a string.
@@ -451,12 +451,12 @@ class AVA:
             
             # Step 6: Stream LLM response and process it
             from langchain_openai import ChatOpenAI
-            StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True, temperature=0.01)
+            StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True, temperature=0.3)
             
             content_buffer = ""
             evaluation_started = False
             logger.info("Starting LLM streaming response")
-            
+            logger.info(f"LLM Prompt: {prompt}")
             async for chunk in StreamLLM.astream(prompt):
                 chunk_content = chunk.content if hasattr(chunk, 'content') else str(chunk)
                 if chunk_content:

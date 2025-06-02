@@ -1803,10 +1803,33 @@ class LearningSupport:
     def _get_strategy_instructions(self, response_strategy: str, strategy_instructions: str, 
                                   knowledge_context: str, core_prior_topic: str) -> str:
         """Get strategy-specific instructions based on response strategy."""
+        
+        # Improved knowledge context formatting with clear emphasis
+        if knowledge_context and knowledge_context.strip():
+            formatted_knowledge = f"""
+                        **🔍 RETRIEVED KNOWLEDGE DATABASE 🔍**
+                        **CRITICAL: The following knowledge entries were found and MUST be used in your response:**
+                        
+                        {knowledge_context}
+                        
+                        **⚠️ MANDATORY KNOWLEDGE USAGE REQUIREMENTS:**
+                        - You MUST reference and use information from the knowledge entries above
+                        - DO NOT ignore any of the provided knowledge items
+                        - Synthesize information from ALL relevant entries in your response
+                        - Show expertise by incorporating specific details from the knowledge
+                        - If knowledge contains communication techniques, APPLY them in your response style
+                        
+                        """
+        else:
+            formatted_knowledge = """
+                        **📝 KNOWLEDGE STATUS:** No specific knowledge entries found for this query.
+                        Use your general knowledge and conversation context to provide a helpful response.
+                        """
+        
         base_strategy = f"""
                         **Response Strategy**: {response_strategy}
                         **Strategy Instructions**: {strategy_instructions}
-                        **Existing Knowledge**: {knowledge_context}
+                        {formatted_knowledge}
                         **Prior Topic**: {core_prior_topic}
                         """
         
@@ -1839,6 +1862,41 @@ class LearningSupport:
                 - **TONE**: Show genuine interest and engagement, not formal politeness
                 - **APPROACH**: Respond as if excited to learn or take on the task, not as if receiving a formal lesson
                 
+                **📋 MANDATORY STRUCTURED FORMAT - MUST COMPLETE ALL THREE SECTIONS**:
+                
+                Your response MUST contain exactly these three sections in this order:
+                
+                1. <user_response>
+                   [Write what the user will see - conversational and engaging]
+                   - Acknowledge their teaching with enthusiasm 
+                   - Show understanding of what they shared
+                   - End with 1-2 open-ended questions
+                   - Use consistent pronouns throughout
+                </user_response>
+                
+                2. <knowledge_synthesis>
+                   [Write pure knowledge content for storage - NO conversational elements]
+                   - Extract only factual information from user's message
+                   - Organize clearly and logically
+                   - NO greetings, acknowledgments, or questions
+                   - NO conversational tone - just pure knowledge
+                   - Use consistent pronouns if any are needed
+                </knowledge_synthesis>
+                
+                3. <knowledge_summary>
+                   [Write a concise 2-3 sentence summary]
+                   - Capture the core teaching point
+                   - Be factual and descriptive
+                   - NOT conversational - just informational
+                   - Use consistent pronouns if any are needed
+                </knowledge_summary>
+                
+                **⚠️ COMPLETION REQUIREMENTS**:
+                - ALWAYS complete ALL THREE sections before ending your response
+                - NEVER stop mid-section or leave any section incomplete
+                - Each section MUST have proper opening and closing tags
+                - If you reach token limits, prioritize completing the structure over length
+                
                 **FOR ROLE ASSIGNMENTS** (any future-oriented task assignment):
                 - Respond with enthusiasm and commitment to the assigned role/task
                 - Ask specific questions about implementation details
@@ -1856,10 +1914,7 @@ class LearningSupport:
                 - Highlight key principles rather than just recording facts
                 - Verify your understanding by restating core concepts in different terms
                 - Expand abbreviations and domain-specific terminology
-                - CREATE A CONCISE SUMMARY (2-3 sentences) PREFIXED WITH 'SUMMARY: ' - THIS IS MANDATORY
-                - The summary should capture the core teaching point in simple language
                 - Ensure the response demonstrates how to apply this knowledge in future scenarios
-                - END WITH 1-2 OPEN-ENDED QUESTIONS that invite brainstorming and deeper exploration
                 - **CRITICAL**: Use consistent pronouns in summary and questions that match the established relationship
 
                 **UNIVERSAL TEACHING INTENT PRINCIPLES**:
@@ -1869,6 +1924,7 @@ class LearningSupport:
                 4. **Verification**: Show understanding by rephrasing key concepts
                 5. **Engagement**: End with questions that encourage continued exploration
                 6. **Pronoun Consistency**: Maintain the same pronoun throughout ALL parts of your response
+                7. **Structural Completeness**: Always complete all three required sections
 
                 **Knowledge Management**:
                 - Recommend saving knowledge (should_save_knowledge=true) when:
@@ -2438,8 +2494,17 @@ class LearningSupport:
         # Combine current message and context for analysis
         full_text = f"{conversation_context}\n{message_str}".lower()
         
-        # Check for established "anh/em" relationship
-        if any(pattern in full_text for pattern in ['em nói', 'em là', 'em có', 'em sẽ', 'em cần']):
+        # Enhanced detection for "anh/em" relationship - look for ANY "em" followed by a verb or action
+        # This covers: em nắm, em biết, em hiểu, em làm, em có, em nói, em là, em sẽ, em cần, etc.
+        em_patterns = [
+            'em nắm', 'em biết', 'em hiểu', 'em làm', 'em có thể', 'em đã', 'em sẽ', 
+            'em cần', 'em nói', 'em là', 'em nghĩ', 'em thấy', 'em cho', 'em giúp',
+            'em xem', 'em check', 'em kiểm tra', 'em tìm', 'em search', 'em tra',
+            # Also detect direct addressing patterns
+            'em ơi', 'em à', 'với em', 'cho em', 'em nhé'
+        ]
+        
+        if any(pattern in full_text for pattern in em_patterns):
             return """
                 **ESTABLISHED RELATIONSHIP**: User addresses you as "EM"
                 - YOU must respond as "EM" in all responses
@@ -2457,9 +2522,9 @@ class LearningSupport:
                 - Example: "Mình hiểu rồi", "Bạn có thể...", "Mình sẽ giúp bạn"
                 """
         
-        # Check current message for pronoun cues
+        # Check current message for pronoun cues - also more comprehensive
         current_lower = message_str.lower()
-        if 'em' in current_lower and any(word in current_lower for word in ['nói', 'là', 'có', 'sẽ']):
+        if 'em' in current_lower and any(word in current_lower for word in ['nắm', 'biết', 'hiểu', 'làm', 'có', 'nói', 'là', 'sẽ', 'cần', 'nghĩ', 'thấy', 'cho', 'giúp']):
             return """
                 **RELATIONSHIP DETECTED**: User is addressing you as "EM"
                 - YOU are "EM", USER is "ANH/CHỊ"
