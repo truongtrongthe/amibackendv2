@@ -22,6 +22,7 @@ from fastapi_routes import router as api_router
 from braingraph_routes import router as braingraph_router
 from contact_apis import router as contact_router
 from supabase import create_client, Client
+from ava import AVA
 
 from utilities import logger
 # Initialize FastAPI app
@@ -133,6 +134,20 @@ class LockManager:
 
 # Initialize lock manager
 lock_manager = LockManager()
+
+# AVA instance management - create a shared instance
+ava_instance = None
+ava_lock = asyncio.Lock()
+
+async def get_ava_instance() -> AVA:
+    """Get or create a shared AVA instance"""
+    global ava_instance
+    async with ava_lock:
+        if ava_instance is None:
+            ava_instance = AVA()
+            await ava_instance.initialize()
+            logger.info("Initialized shared AVA instance")
+        return ava_instance
 
 # SocketIO session management
 ws_sessions = {}
@@ -319,6 +334,10 @@ class QueryKnowledgeRequest(BaseModel):
 
 class ConversationGradingRequest(BaseModel):
     graph_version_id: str = ""
+
+class ToolExecuteRequest(BaseModel):
+    tool_name: str
+    parameters: Dict[str, Any]
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -712,6 +731,66 @@ async def query_knowledge_endpoint(request: QueryKnowledgeRequest):
 
 @app.options('/query-knowledge')
 async def query_knowledge_options():
+    return handle_options()
+
+# Tools Execute endpoint
+@app.post('/api/tools/execute')
+async def execute_tool_endpoint(request: ToolExecuteRequest):
+    """
+    Execute a tool via AVA instance. Used for handling update decisions and other tool calls.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN /api/tools/execute request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Tool: {request.tool_name}, Parameters: {request.parameters}")
+    
+    try:
+        # Get AVA instance
+        ava = await get_ava_instance()
+        
+        # Execute the tool
+        result = await ava.execute_tool(request.tool_name, request.parameters)
+        
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.info(f"[REQUEST:{request_id}] Tool execution completed - time: {elapsed:.2f}s")
+        logger.info(f"[REQUEST:{request_id}] Result status: {result.get('status', 'unknown')}")
+        
+        # Return the result with additional metadata
+        response = {
+            **result,
+            "request_id": request_id,
+            "elapsed_time": elapsed,
+            "tool_name": request.tool_name
+        }
+        
+        return JSONResponse(content=response)
+            
+    except Exception as e:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.error(f"[REQUEST:{request_id}] Error in /api/tools/execute endpoint: {str(e)} - time: {elapsed:.2f}s")
+        import traceback
+        logger.error(f"[REQUEST:{request_id}] Traceback: {traceback.format_exc()}")
+        
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "error": str(e),
+                "tool_name": request.tool_name,
+                "request_id": request_id,
+                "elapsed_time": elapsed
+            }
+        )
+    finally:
+        logger.info(f"[REQUEST:{request_id}] === END /api/tools/execute request - total time: {(datetime.now() - start_time).total_seconds():.2f}s ===")
+
+@app.options('/api/tools/execute')
+async def execute_tool_options():
     return handle_options()
 
 # Generate SSE stream for learning requests

@@ -130,6 +130,10 @@ def serialize_model(model: BaseModel) -> Dict[str, Any]:
 LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.01)
 
 class AVA:
+    # Class-level shared storage for pending decisions (shared across all instances)
+    _shared_pending_decisions: Dict[str, Any] = {}
+    _decisions_lock = asyncio.Lock()
+    
     def __init__(self):
         self.graph_version_id = ""
         # Set to keep track of pending background tasks
@@ -857,6 +861,30 @@ class AVA:
                 if not request_id or not action:
                     return {"status": "error", "message": "Missing required parameters: request_id and action"}
                 
+                # Get thread_id from parameters or extract from request_id or use default
+                thread_id_param = parameters.get("thread_id", None)
+                if thread_id_param:
+                    thread_id = thread_id_param
+                else:
+                    # Try to extract thread_id from request_id pattern
+                    # e.g. "update_decision_learning_thread_1748946579708_1748946621" -> "learning_thread"
+                    if "update_decision_" in request_id:
+                        try:
+                            # Extract the thread part from the request_id
+                            # Remove the "update_decision_" prefix
+                            after_prefix = request_id.replace("update_decision_", "")
+                            # Split by underscores and find the thread part
+                            parts = after_prefix.split("_")
+                            if len(parts) >= 2:
+                                # Reconstruct thread_id from first two parts
+                                thread_id = f"{parts[0]}_{parts[1]}"  # "learning_thread"
+                            else:
+                                thread_id = parts[0] if parts else "unknown_thread"
+                        except:
+                            thread_id = "unknown_thread"
+                    else:
+                        thread_id = "unknown_thread"
+                
                 user_decision = {"action": action}
                 if target_id:
                     user_decision["target_id"] = target_id
@@ -1451,10 +1479,9 @@ class AVA:
         request_id = f"update_decision_{thread_id}_{int(time())}"
         decision_request["request_id"] = request_id
         
-        # Store in a simple in-memory cache (in production, use Redis or database)
-        if not hasattr(self, '_pending_decisions'):
-            self._pending_decisions = {}
-        self._pending_decisions[request_id] = decision_request
+        # Store in shared class-level storage (accessible across all AVA instances)
+        async with AVA._decisions_lock:
+            AVA._shared_pending_decisions[request_id] = decision_request
         
         logger.info(f"Created UPDATE vs CREATE decision request {request_id} with {len(candidates)} candidates")
         return decision_request
@@ -1562,14 +1589,16 @@ class AVA:
     async def handle_update_decision(self, request_id: str, user_decision: Dict[str, Any], user_id: str, thread_id: str) -> Dict[str, Any]:
         """Handle the human decision for UPDATE vs CREATE."""
         try:
-            # Retrieve the pending decision
-            if not hasattr(self, '_pending_decisions') or request_id not in self._pending_decisions:
-                return {
-                    "success": False,
-                    "error": f"Decision request {request_id} not found or expired"
-                }
+            # Retrieve the pending decision from shared storage
+            async with AVA._decisions_lock:
+                if request_id not in AVA._shared_pending_decisions:
+                    return {
+                        "success": False,
+                        "error": f"Decision request {request_id} not found or expired"
+                    }
+                
+                decision_request = AVA._shared_pending_decisions[request_id]
             
-            decision_request = self._pending_decisions[request_id]
             action = user_decision.get("action")
             
             logger.info(f"Processing human decision for {request_id}: {action}")
@@ -1588,8 +1617,10 @@ class AVA:
                     ttl_days=365
                 )
                 
-                # Clean up pending decision
-                del self._pending_decisions[request_id]
+                # Clean up pending decision from shared storage
+                async with AVA._decisions_lock:
+                    if request_id in AVA._shared_pending_decisions:
+                        del AVA._shared_pending_decisions[request_id]
                 
                 return {
                     "success": True,
@@ -1637,8 +1668,10 @@ class AVA:
                     preserve_metadata=True
                 )
                 
-                # Clean up pending decision
-                del self._pending_decisions[request_id]
+                # Clean up pending decision from shared storage
+                async with AVA._decisions_lock:
+                    if request_id in AVA._shared_pending_decisions:
+                        del AVA._shared_pending_decisions[request_id]
                 
                 return {
                     "success": update_result.get("success", False),
@@ -1856,12 +1889,9 @@ class AVA:
 
     def get_pending_decisions(self) -> Dict[str, Any]:
         """Get all pending decisions for debugging/testing."""
-        if not hasattr(self, '_pending_decisions'):
-            return {}
-        return self._pending_decisions.copy()
+        return AVA._shared_pending_decisions.copy()
 
     def clear_pending_decisions(self) -> None:
         """Clear all pending decisions for testing."""
-        if hasattr(self, '_pending_decisions'):
-            self._pending_decisions.clear()
-            logger.info("Cleared all pending decisions")
+        AVA._shared_pending_decisions.clear()
+        logger.info("Cleared all pending decisions")
