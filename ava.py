@@ -314,11 +314,11 @@ class AVA:
                     # Get query results for candidate identification
                     query_results = analysis_knowledge.get("query_results", [])
                     
-                    # Identify update candidates
+                    # Identify update candidates (only for high similarity >70%)
                     candidates = await self.identify_update_candidates(message, similarity_score, query_results)
                     
-                    if candidates or (query_results and len(query_results) > 0):
-                        # We have candidates or fallback candidates - create decision request
+                    if candidates:
+                        # We have candidates - create decision request
                         logger.info(f"📝 Creating UPDATE vs CREATE decision request with {len(candidates)} candidates")
                         
                         # Extract response content for decision
@@ -328,26 +328,11 @@ class AVA:
                         # Create the new content that would be saved
                         new_content = f"User: {message}\n\nAI: {conversational_response}"
                         
-                        # Use fallback candidates if no strict candidates found
-                        decision_candidates = candidates
-                        if not candidates and query_results:
-                            logger.info(f"Using fallback candidates from {len(query_results)} query results")
-                            decision_candidates = []
-                            for result in query_results[:3]:
-                                decision_candidates.append({
-                                    "vector_id": result.get("id"),
-                                    "content": result.get("raw", ""),
-                                    "similarity": result.get("score", 0.0),
-                                    "categories": result.get("categories", {}),
-                                    "metadata": result.get("metadata", {}),
-                                    "query": result.get("query", "")
-                                })
-                        
                         # Present options to human
                         decision_request = await self.present_update_options(
                             message=message,
                             new_content=new_content,
-                            candidates=decision_candidates,
+                            candidates=candidates,
                             user_id=user_id,
                             thread_id=thread_id
                         )
@@ -356,36 +341,36 @@ class AVA:
                         final_response["metadata"]["update_decision_request"] = {
                             "request_id": decision_request["request_id"],
                             "decision_type": "UPDATE_OR_CREATE",
-                            "candidates_count": len(decision_candidates),
+                            "candidates_count": len(candidates),
                             "similarity_score": similarity_score,
-                            "requires_human_input": True,
-                            "is_fallback": not bool(candidates)
+                            "requires_human_input": True
                         }
                         
                         # Enhance the response message to ask for human decision
-                        decision_type = "potentially related" if not candidates else "similar"
                         human_decision_prompt = f"""
 
                         🤔 **Knowledge Decision Required**
 
-                        I found {len(decision_candidates)} {decision_type} knowledge entries (overall similarity: {similarity_score:.2f}). Would you like me to:
+                        I found {len(candidates)} similar knowledge entries (similarity: {similarity_score:.2f}). This new information is quite similar to existing knowledge. Would you like me to:
 
                         1. **Create New Knowledge** - Save this as a completely new entry
                         2. **Update Existing Knowledge** - Merge with existing knowledge below
 
-                        **{decision_type.title()} Knowledge Found:**
+                        **Similar Knowledge Found:**
                         """
                         
-                        for i, candidate in enumerate(decision_candidates, 1):
+                        for i, candidate in enumerate(candidates, 1):
                             preview = candidate["content"][:150] + "..." if len(candidate["content"]) > 150 else candidate["content"]
                             human_decision_prompt += f"\n**Option {i+1}:** Update existing knowledge (similarity: {candidate['similarity']:.2f})\n*Preview:* {preview}\n"
                         
-                        human_decision_prompt += f"\nPlease let me know your preference, or I can proceed with creating new knowledge."
+                        human_decision_prompt += f"\nPlease let me know your preference!"
                         
                         # Add the decision prompt to the response
                         final_response["message"] = conversational_response + human_decision_prompt
                         
                         logger.info(f"✅ Added UPDATE vs CREATE decision to response metadata: {decision_request['request_id']}")
+                    else:
+                        logger.info("No suitable candidates found for high similarity case - this is unexpected")
                 
                 # Update metadata based on similarity gating decision
                 if save_decision.get("should_save", False):
@@ -393,6 +378,22 @@ class AVA:
                     final_response["metadata"]["should_save_knowledge"] = True
                     final_response["metadata"]["similarity_gating_reason"] = save_decision.get("reason", "")
                     final_response["metadata"]["similarity_gating_confidence"] = save_decision.get("confidence", "")
+                    
+                    # Add auto-save notification for low-medium similarity
+                    if save_decision.get("auto_save", False):
+                        # Extract response content and add auto-save notification
+                        message_content = final_response["message"]
+                        conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                        
+                        auto_save_notification = f"""
+
+                            💾 **Knowledge Saved**
+
+                            I've automatically saved this information as new knowledge since it's sufficiently different from existing content (similarity: {similarity_score:.2f}).
+                        """
+                        
+                        final_response["message"] = conversational_response + auto_save_notification
+                        logger.info(f"✅ Added auto-save notification for low-medium similarity ({similarity_score:.2f})")
                     
                     # Only override teaching intent if LLM actually detected teaching intent
                     # Don't force teaching intent just because of high similarity
@@ -1293,13 +1294,16 @@ class AVA:
         """
         Determine if knowledge should be saved based on similarity score and conversation flow.
         CRITICAL: Teaching intent is REQUIRED for all knowledge saving to prevent pollution.
+        
+        UPDATED LOGIC:
+        - High Similarity (>70%) + Teaching Intent → Ask human UPDATE vs CREATE
+        - Low Similarity (≤70%) + Teaching Intent → Auto-save and inform human
         """
         has_teaching_intent = response.get("metadata", {}).get("has_teaching_intent", False)
         is_priority_topic = response.get("metadata", {}).get("is_priority_topic", False)
         
-        # High similarity threshold for automatic saving
-        HIGH_SIMILARITY_THRESHOLD = 0.65
-        MEDIUM_SIMILARITY_THRESHOLD = 0.35
+        # High similarity threshold for human decision
+        HIGH_SIMILARITY_THRESHOLD = 0.70
         
         logger.info(f"Evaluating knowledge saving: similarity={similarity_score}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}")
         
@@ -1310,44 +1314,36 @@ class AVA:
                 "should_save": False,
                 "reason": "no_teaching_intent",
                 "confidence": "high",
-                "encourage_context": similarity_score < MEDIUM_SIMILARITY_THRESHOLD
+                "encourage_context": True
             }
         
         # From here on, teaching intent is confirmed - evaluate based on similarity
         
-        # Case 1: High similarity + teaching intent - always save
-        if similarity_score >= HIGH_SIMILARITY_THRESHOLD:
-            logger.info(f"✅ High similarity ({similarity_score:.2f}) + teaching intent - saving knowledge")
-            return {
-                "should_save": True,
-                "reason": "high_similarity_teaching",
-                "confidence": "high"
-            }
-        
-        # Case 2: Medium similarity + teaching intent - UPDATE vs CREATE decision
-        if MEDIUM_SIMILARITY_THRESHOLD <= similarity_score < HIGH_SIMILARITY_THRESHOLD:
-            logger.info(f"🤔 Medium similarity ({similarity_score:.2f}) + teaching intent - UPDATE vs CREATE decision needed")
+        # Case 1: High similarity + teaching intent - ASK HUMAN (UPDATE vs CREATE decision)
+        if similarity_score > HIGH_SIMILARITY_THRESHOLD:
+            logger.info(f"🤔 High similarity ({similarity_score:.2f}) + teaching intent - asking human UPDATE vs CREATE")
             return {
                 "should_save": True,
                 "action_type": "UPDATE_OR_CREATE",
-                "reason": "medium_similarity_teaching",
-                "confidence": "medium",
+                "reason": "high_similarity_teaching_decision",
+                "confidence": "high",
                 "requires_human_decision": True,
                 "similarity_score": similarity_score
             }
         
-        # Case 3: Low similarity + teaching intent + substantial content - new knowledge
-        if similarity_score < MEDIUM_SIMILARITY_THRESHOLD and len(message.split()) > 10:
-            logger.info(f"✅ Low similarity ({similarity_score:.2f}) + teaching intent + substantial content - saving as new knowledge")
+        # Case 2: Low-medium similarity + teaching intent - AUTO-SAVE as new knowledge
+        if similarity_score <= HIGH_SIMILARITY_THRESHOLD and len(message.split()) > 5:
+            logger.info(f"✅ Low-medium similarity ({similarity_score:.2f}) + teaching intent - auto-saving as new knowledge")
             return {
                 "should_save": True,
-                "reason": "new_knowledge_teaching",
-                "confidence": "medium",
-                "is_new_knowledge": True
+                "reason": "low_medium_similarity_teaching",
+                "confidence": "high",
+                "is_new_knowledge": True,
+                "auto_save": True
             }
         
-        # Case 4: Low similarity + teaching intent but insufficient content
-        if similarity_score < MEDIUM_SIMILARITY_THRESHOLD:
+        # Case 3: Low similarity + teaching intent but insufficient content
+        if similarity_score <= HIGH_SIMILARITY_THRESHOLD and len(message.split()) <= 5:
             logger.info(f"❌ Low similarity ({similarity_score:.2f}) + teaching intent but insufficient content - encouraging more detail")
             return {
                 "should_save": False,
@@ -1368,16 +1364,15 @@ class AVA:
         """Identify existing knowledge that could be updated."""
         candidates = []
         
-        # If overall similarity is in medium range, be more flexible with individual result filtering
-        if 0.35 <= similarity_score <= 0.65:
-            logger.info(f"Medium overall similarity ({similarity_score:.3f}) - using flexible candidate selection")
+        # For high overall similarity (>70%), be more flexible with individual result filtering
+        if similarity_score > 0.70:
+            logger.info(f"High overall similarity ({similarity_score:.3f}) - using flexible candidate selection")
             
-            # For medium overall similarity, take top results regardless of individual scores
-            # but still prefer results closer to the overall similarity
+            # For high overall similarity, take top results with reasonable similarity
             for result in query_results:
                 result_similarity = result.get("score", 0.0)
-                # Accept any result with reasonable similarity (>0.25) for medium overall similarity cases
-                if result_similarity >= 0.25:
+                # Accept any result with similarity >0.3 for high overall similarity cases
+                if result_similarity >= 0.30:
                     candidates.append({
                         "vector_id": result.get("id"),
                         "content": result.get("raw", ""),
@@ -1387,19 +1382,9 @@ class AVA:
                         "query": result.get("query", "")
                     })
         else:
-            # Original strict filtering for non-medium overall similarity cases
-            logger.info(f"Non-medium overall similarity ({similarity_score:.3f}) - using strict candidate selection")
-            for result in query_results:
-                result_similarity = result.get("score", 0.0)
-                if 0.35 <= result_similarity <= 0.65:
-                    candidates.append({
-                        "vector_id": result.get("id"),
-                        "content": result.get("raw", ""),
-                        "similarity": result_similarity,
-                        "categories": result.get("categories", {}),
-                        "metadata": result.get("metadata", {}),
-                        "query": result.get("query", "")
-                    })
+            # For lower overall similarity, this method shouldn't be called, but handle gracefully
+            logger.info(f"Lower overall similarity ({similarity_score:.3f}) - this shouldn't trigger UPDATE vs CREATE")
+            return []
         
         # Sort by similarity (highest first) and take top 3 candidates
         sorted_candidates = sorted(candidates, key=lambda x: x["similarity"], reverse=True)[:3]
