@@ -343,7 +343,15 @@ class AVA:
                             "decision_type": "UPDATE_OR_CREATE",
                             "candidates_count": len(candidates),
                             "similarity_score": similarity_score,
-                            "requires_human_input": True
+                            "requires_human_input": True,
+                            "candidates": [
+                                {
+                                    "id": candidate["vector_id"],
+                                    "similarity": candidate["similarity"],
+                                    "preview": candidate["content"][:150] + "..." if len(candidate["content"]) > 150 else candidate["content"]
+                                }
+                                for candidate in candidates
+                            ]
                         }
                         
                         # Enhance the response message to ask for human decision
@@ -1694,7 +1702,15 @@ class AVA:
                     "decision_type": "UPDATE_OR_CREATE",
                     "candidates_count": len(candidates),
                     "similarity_score": similarity_score,
-                    "requires_human_input": True
+                    "requires_human_input": True,
+                    "candidates": [
+                        {
+                            "id": candidate["vector_id"],
+                            "similarity": candidate["similarity"],
+                            "preview": candidate["content"][:150] + "..." if len(candidate["content"]) > 150 else candidate["content"]
+                        }
+                        for candidate in candidates
+                    ]
                 }
                 
                 # Enhance the response to ask for human decision
@@ -1762,7 +1778,15 @@ class AVA:
                             "candidates_count": len(fallback_candidates),
                             "similarity_score": similarity_score,
                             "requires_human_input": True,
-                            "fallback_candidates": True
+                            "fallback_candidates": True,
+                            "candidates": [
+                                {
+                                    "id": candidate["vector_id"],
+                                    "similarity": candidate["similarity"],
+                                    "preview": candidate["content"][:150] + "..." if len(candidate["content"]) > 150 else candidate["content"]
+                                }
+                                for candidate in fallback_candidates
+                            ]
                         }
                         
                         # Enhance the response to ask for human decision
