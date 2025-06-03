@@ -307,6 +307,86 @@ class AVA:
                 logger.info(f"Knowledge saving decision: {save_decision}")
                 logger.info(f"LLM evaluation: intent={intent_type}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}, similarity={similarity_score:.2f}")
                 
+                # Check for UPDATE vs CREATE decision BEFORE yielding final response
+                if save_decision.get("action_type") == "UPDATE_OR_CREATE" and has_teaching_intent:
+                    logger.info("🔍 Checking for UPDATE vs CREATE decision before yielding response")
+                    
+                    # Get query results for candidate identification
+                    query_results = analysis_knowledge.get("query_results", [])
+                    
+                    # Identify update candidates
+                    candidates = await self.identify_update_candidates(message, similarity_score, query_results)
+                    
+                    if candidates or (query_results and len(query_results) > 0):
+                        # We have candidates or fallback candidates - create decision request
+                        logger.info(f"📝 Creating UPDATE vs CREATE decision request with {len(candidates)} candidates")
+                        
+                        # Extract response content for decision
+                        message_content = final_response["message"]
+                        conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                        
+                        # Create the new content that would be saved
+                        new_content = f"User: {message}\n\nAI: {conversational_response}"
+                        
+                        # Use fallback candidates if no strict candidates found
+                        decision_candidates = candidates
+                        if not candidates and query_results:
+                            logger.info(f"Using fallback candidates from {len(query_results)} query results")
+                            decision_candidates = []
+                            for result in query_results[:3]:
+                                decision_candidates.append({
+                                    "vector_id": result.get("id"),
+                                    "content": result.get("raw", ""),
+                                    "similarity": result.get("score", 0.0),
+                                    "categories": result.get("categories", {}),
+                                    "metadata": result.get("metadata", {}),
+                                    "query": result.get("query", "")
+                                })
+                        
+                        # Present options to human
+                        decision_request = await self.present_update_options(
+                            message=message,
+                            new_content=new_content,
+                            candidates=decision_candidates,
+                            user_id=user_id,
+                            thread_id=thread_id
+                        )
+                        
+                        # Add decision info to response metadata BEFORE yielding
+                        final_response["metadata"]["update_decision_request"] = {
+                            "request_id": decision_request["request_id"],
+                            "decision_type": "UPDATE_OR_CREATE",
+                            "candidates_count": len(decision_candidates),
+                            "similarity_score": similarity_score,
+                            "requires_human_input": True,
+                            "is_fallback": not bool(candidates)
+                        }
+                        
+                        # Enhance the response message to ask for human decision
+                        decision_type = "potentially related" if not candidates else "similar"
+                        human_decision_prompt = f"""
+
+                        🤔 **Knowledge Decision Required**
+
+                        I found {len(decision_candidates)} {decision_type} knowledge entries (overall similarity: {similarity_score:.2f}). Would you like me to:
+
+                        1. **Create New Knowledge** - Save this as a completely new entry
+                        2. **Update Existing Knowledge** - Merge with existing knowledge below
+
+                        **{decision_type.title()} Knowledge Found:**
+                        """
+                        
+                        for i, candidate in enumerate(decision_candidates, 1):
+                            preview = candidate["content"][:150] + "..." if len(candidate["content"]) > 150 else candidate["content"]
+                            human_decision_prompt += f"\n**Option {i+1}:** Update existing knowledge (similarity: {candidate['similarity']:.2f})\n*Preview:* {preview}\n"
+                        
+                        human_decision_prompt += f"\nPlease let me know your preference, or I can proceed with creating new knowledge."
+                        
+                        # Add the decision prompt to the response
+                        final_response["message"] = conversational_response + human_decision_prompt
+                        
+                        logger.info(f"✅ Added UPDATE vs CREATE decision to response metadata: {decision_request['request_id']}")
+                
                 # Update metadata based on similarity gating decision
                 if save_decision.get("should_save", False):
                     # Only update knowledge saving flags, NOT intent classification
@@ -323,17 +403,21 @@ class AVA:
                     else:
                         logger.info(f"High similarity ({similarity_score:.2f}) - saving knowledge but preserving original intent classification")
                     
-                    # Run knowledge saving in background to not block the response
-                    if original_teaching_intent:
-                        # Handle as teaching intent with UPDATE vs CREATE flow
-                        self._create_background_task(
-                            self.handle_teaching_intent_with_update_flow(message, final_response, user_id, thread_id, priority_topic_name, analysis_knowledge)
-                        )
+                    # Only run background knowledge saving if we DON'T have a pending decision
+                    if not final_response["metadata"].get("update_decision_request"):
+                        logger.info("💾 Running background knowledge saving (no pending decision)")
+                        if original_teaching_intent:
+                            # Handle as teaching intent with regular save (no UPDATE vs CREATE flow)
+                            self._create_background_task(
+                                self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name)
+                            )
+                        else:
+                            # Save as regular high-quality conversation without teaching intent processing
+                            self._create_background_task(
+                                self._save_high_quality_conversation(message, final_response, user_id, thread_id)
+                            )
                     else:
-                        # Save as regular high-quality conversation without teaching intent processing
-                        self._create_background_task(
-                            self._save_high_quality_conversation(message, final_response, user_id, thread_id)
-                        )
+                        logger.info("⏳ Skipping background save - waiting for human decision")
 
         except Exception as e:
             logger.error(f"Error processing streaming message: {str(e)}")
@@ -755,6 +839,33 @@ class AVA:
                     "status": "success",
                     "message": f"Save knowledge task initiated for '{input_text[:50]}...'"
                 }
+
+            elif tool_name == "handle_update_decision":
+                request_id = parameters.get("request_id", "")
+                action = parameters.get("action", "")
+                target_id = parameters.get("target_id", None)
+                
+                if not request_id or not action:
+                    return {"status": "error", "message": "Missing required parameters: request_id and action"}
+                
+                user_decision = {"action": action}
+                if target_id:
+                    user_decision["target_id"] = target_id
+                
+                result = await self.handle_update_decision(request_id, user_decision, user_id, thread_id)
+                
+                if result.get("success"):
+                    return {
+                        "status": "success", 
+                        "message": result.get("message", "Decision processed successfully"),
+                        "data": result
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "message": result.get("error", "Failed to process decision"),
+                        "data": result
+                    }
 
             return {"status": "error", "message": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -1257,23 +1368,44 @@ class AVA:
         """Identify existing knowledge that could be updated."""
         candidates = []
         
-        # Filter results in medium similarity range (35%-65%)
-        for result in query_results:
-            result_similarity = result.get("score", 0.0)
-            if 0.35 <= result_similarity <= 0.65:
-                candidates.append({
-                    "vector_id": result.get("id"),
-                    "content": result.get("raw", ""),
-                    "similarity": result_similarity,
-                    "categories": result.get("categories", {}),
-                    "metadata": result.get("metadata", {}),
-                    "query": result.get("query", "")
-                })
+        # If overall similarity is in medium range, be more flexible with individual result filtering
+        if 0.35 <= similarity_score <= 0.65:
+            logger.info(f"Medium overall similarity ({similarity_score:.3f}) - using flexible candidate selection")
+            
+            # For medium overall similarity, take top results regardless of individual scores
+            # but still prefer results closer to the overall similarity
+            for result in query_results:
+                result_similarity = result.get("score", 0.0)
+                # Accept any result with reasonable similarity (>0.25) for medium overall similarity cases
+                if result_similarity >= 0.25:
+                    candidates.append({
+                        "vector_id": result.get("id"),
+                        "content": result.get("raw", ""),
+                        "similarity": result_similarity,
+                        "categories": result.get("categories", {}),
+                        "metadata": result.get("metadata", {}),
+                        "query": result.get("query", "")
+                    })
+        else:
+            # Original strict filtering for non-medium overall similarity cases
+            logger.info(f"Non-medium overall similarity ({similarity_score:.3f}) - using strict candidate selection")
+            for result in query_results:
+                result_similarity = result.get("score", 0.0)
+                if 0.35 <= result_similarity <= 0.65:
+                    candidates.append({
+                        "vector_id": result.get("id"),
+                        "content": result.get("raw", ""),
+                        "similarity": result_similarity,
+                        "categories": result.get("categories", {}),
+                        "metadata": result.get("metadata", {}),
+                        "query": result.get("query", "")
+                    })
         
         # Sort by similarity (highest first) and take top 3 candidates
         sorted_candidates = sorted(candidates, key=lambda x: x["similarity"], reverse=True)[:3]
         
         logger.info(f"Identified {len(sorted_candidates)} update candidates from {len(query_results)} query results")
+        logger.info(f"Candidate similarities: {[c['similarity'] for c in sorted_candidates]}")
         return sorted_candidates
 
     async def present_update_options(self, message: str, new_content: str, candidates: List[Dict], user_id: str, thread_id: str) -> Dict[str, Any]:
@@ -1605,6 +1737,74 @@ class AVA:
                 logger.info(f"✅ Created UPDATE vs CREATE decision request: {decision_request['request_id']}")
                 return
             else:
+                # FALLBACK: Even with no candidates, still offer decision if we have medium similarity and results
+                if query_results and len(query_results) > 0:
+                    logger.info(f"💡 No strict candidates found but have {len(query_results)} results - offering simplified decision")
+                    
+                    # Take top 3 results regardless of similarity score as fallback candidates
+                    fallback_candidates = []
+                    for result in query_results[:3]:
+                        fallback_candidates.append({
+                            "vector_id": result.get("id"),
+                            "content": result.get("raw", ""),
+                            "similarity": result.get("score", 0.0),
+                            "categories": result.get("categories", {}),
+                            "metadata": result.get("metadata", {}),
+                            "query": result.get("query", "")
+                        })
+                    
+                    if fallback_candidates:
+                        # Extract response content for decision
+                        message_content = response["message"]
+                        conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                        
+                        # Create the new content that would be saved
+                        new_content = f"User: {message}\n\nAI: {conversational_response}"
+                        
+                        # Present options to human with fallback candidates
+                        decision_request = await self.present_update_options(
+                            message=message,
+                            new_content=new_content,
+                            candidates=fallback_candidates,
+                            user_id=user_id,
+                            thread_id=thread_id
+                        )
+                        
+                        # Store decision info in response metadata for frontend
+                        response["metadata"]["update_decision_request"] = {
+                            "request_id": decision_request["request_id"],
+                            "decision_type": "UPDATE_OR_CREATE",
+                            "candidates_count": len(fallback_candidates),
+                            "similarity_score": similarity_score,
+                            "requires_human_input": True,
+                            "fallback_candidates": True
+                        }
+                        
+                        # Enhance the response to ask for human decision
+                        human_decision_prompt = f"""
+
+                                    🤔 **Knowledge Decision Required**
+
+                                    I found some potentially related knowledge entries (overall similarity: {similarity_score:.2f}). Would you like me to:
+
+                                    1. **Create New Knowledge** - Save this as a completely new entry
+                                    2. **Update Existing Knowledge** - Merge with existing knowledge below
+
+                                    **Potentially Related Knowledge:**
+                                    """
+                        
+                        for i, candidate in enumerate(fallback_candidates, 1):
+                            preview = candidate["content"][:150] + "..." if len(candidate["content"]) > 150 else candidate["content"]
+                            human_decision_prompt += f"\n**Option {i+1}:** Update existing knowledge (similarity: {candidate['similarity']:.2f})\n*Preview:* {preview}\n"
+                        
+                        human_decision_prompt += f"\nPlease let me know your preference, or I can proceed with creating new knowledge."
+                        
+                        # Add the decision prompt to the response
+                        response["message"] = conversational_response + human_decision_prompt
+                        
+                        logger.info(f"✅ Created fallback UPDATE vs CREATE decision request: {decision_request['request_id']}")
+                        return
+                
                 logger.info("No suitable update candidates found, proceeding with regular save")
         
         # Fall back to regular teaching intent handling
