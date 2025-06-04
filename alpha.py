@@ -123,7 +123,7 @@ async def evaluate_knowledge_similarity_gate(response: Dict[str, Any], similarit
         }
     
     # Case 2: Low-medium similarity + teaching intent - AUTO-SAVE as new knowledge
-    if similarity_score <= HIGH_SIMILARITY_THRESHOLD and len(message.split()) > 5:
+    if similarity_score <= HIGH_SIMILARITY_THRESHOLD:
         logger.info(f"✅ Low-medium similarity ({similarity_score:.2f}) + teaching intent - auto-saving as new knowledge")
         return {
             "should_save": True,
@@ -131,16 +131,6 @@ async def evaluate_knowledge_similarity_gate(response: Dict[str, Any], similarit
             "confidence": "high",
             "is_new_knowledge": True,
             "auto_save": True
-        }
-    
-    # Case 3: Low similarity + teaching intent but insufficient content
-    if similarity_score <= HIGH_SIMILARITY_THRESHOLD and len(message.split()) <= 5:
-        logger.info(f"❌ Low similarity ({similarity_score:.2f}) + teaching intent but insufficient content - encouraging more detail")
-        return {
-            "should_save": False,
-            "reason": "teaching_intent_insufficient_content",
-            "confidence": "medium",
-            "encourage_context": True
         }
     
     # Default case - don't save
