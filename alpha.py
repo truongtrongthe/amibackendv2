@@ -257,26 +257,62 @@ def extract_user_facing_content(content: str, response_strategy: str, structured
     
     return user_facing_content
 
-async def regenerate_teaching_intent_response(message_str: str, content: str, response_strategy: str) -> tuple:
+async def regenerate_teaching_intent_response(message_str: str, original_content: str, response_strategy: str) -> tuple:
     """Handle regeneration of response when teaching intent is detected."""
     original_strategy = response_strategy
     response_strategy = "TEACHING_INTENT"
     logger.info(f"LLM detected teaching intent, changing response_strategy from {original_strategy} to TEACHING_INTENT")
     
-    teaching_prompt = f"""IMPORTANT: The user is TEACHING you something. Your job is to synthesize this knowledge.
+    # Step 1: Enhance the original content with smart follow-up questions
+    enhancement_prompt = f"""You have this excellent response to preserve:
+
+ORIGINAL RESPONSE:
+{original_content}
+
+TASK: Keep the original response EXACTLY as is, but add a natural transition and EXACTLY 1-2 thoughtful follow-up questions (no more than 2 questions total).
+
+Requirements:
+1. **Preserve original content**: Keep every word of the original response exactly as provided
+2. **Add natural bridge**: Add a smooth transition sentence that naturally leads to the questions
+3. **Add questions**: Include EXACTLY 1-2 thoughtful follow-up questions (MAXIMUM 2 questions) that:
+   - Are open-ended and insightful
+   - Directly relate to the specific topic being taught
+   - Encourage sharing of practical details, examples, or experiences
+   - Ask about challenges, edge cases, or advanced aspects
+   - Keep the same language and tone as the original response
+
+IMPORTANT: Generate NO MORE THAN 2 QUESTIONS TOTAL.
+
+Structure:
+[ORIGINAL RESPONSE EXACTLY AS PROVIDED]
+
+[One natural transition sentence that bridges to questions]
+
+[EXACTLY 1-2 follow-up questions - NO MORE THAN 2]
+
+Example transition phrases (adapt to context and language):
+- "Dựa trên những kinh nghiệm này..." / "Based on this approach..."
+- "Em muốn tìm hiểu sâu hơn về..." / "I'd like to understand more about..."
+- "Trong thực tế..." / "In practice..."
+
+Your enhanced response:"""
+
+    try:
+        enhancement_response = await LLM.ainvoke(enhancement_prompt)
+        enhanced_user_content = enhancement_response.content.strip()
+        logger.info("Successfully enhanced original response with follow-up questions")
+    except Exception as e:
+        logger.error(f"Failed to enhance original response: {str(e)}")
+        # Fallback: use original content
+        enhanced_user_content = original_content
+
+    # Step 2: Generate knowledge sections based on the original user message
+    teaching_prompt = f"""IMPORTANT: The user is TEACHING you something. Extract pure knowledge from their message.
     
-    Original message: {message_str}
+    Original user message: {message_str}
     
     Instructions:
-    Generate THREE separate outputs in your response:
-    
-    <user_response>
-       This is what the user will see - include:
-       - Acknowledgment of their teaching with appreciation
-       - Demonstration of your understanding
-       - End with 1-2 open-ended questions to deepen the conversation
-       - Make this conversational and engaging
-    </user_response>
+    Generate TWO separate outputs for knowledge storage:
     
     <knowledge_synthesis>
        This is for knowledge storage - include ONLY:
@@ -297,18 +333,32 @@ async def regenerate_teaching_intent_response(message_str: str, content: str, re
     - If the user wrote in English, respond entirely in English
     - Match the language exactly - do not mix languages
     
-    Your structured response:
+    Your knowledge extraction:
     """
     
     try:
-        teaching_response = await LLM.ainvoke(teaching_prompt)
-        content = teaching_response.content.strip()
-        logger.info("Successfully regenerated response with structured TEACHING_INTENT format")
+        knowledge_response = await LLM.ainvoke(teaching_prompt)
+        knowledge_content = knowledge_response.content.strip()
+        logger.info("Successfully generated knowledge sections")
     except Exception as e:
-        logger.error(f"Failed to regenerate teaching response: {str(e)}")
-        # Keep original content if regeneration fails
-    
-    return content, response_strategy
+        logger.error(f"Failed to generate knowledge sections: {str(e)}")
+        # Fallback: create basic sections
+        knowledge_content = f"""<knowledge_synthesis>
+        {message_str}
+        </knowledge_synthesis>
+
+        <knowledge_summary>
+        Knowledge shared by user about the topic.
+        </knowledge_summary>"""
+
+    # Step 3: Combine enhanced user response with knowledge sections
+    final_content = f"""<user_response>
+            {enhanced_user_content}
+            </user_response>
+
+            {knowledge_content}"""
+
+    return final_content, response_strategy
 
 # =============================================================================
 # TIER 3: Decision Management Functions
