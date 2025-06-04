@@ -759,6 +759,9 @@ class AVA:
                 # Format as a teaching entry for consistency with combined knowledge format
                 if not input_text.startswith("User:"):
                     input_text = f"AI: {input_text}"
+                    # Add ai_synthesis category since this is AI-only content
+                    if "ai_synthesis" not in categories:
+                        categories.append("ai_synthesis")
 
                 # Run save_knowledge in background task
                 self._create_background_task(self.support.background_save_knowledge(
@@ -1176,9 +1179,9 @@ class AVA:
                                priority_topic_name: str, categories: List[str], response: Dict[str, Any]) -> None:
         """Save AI synthesis and summary for improved future retrieval."""
         try:
-            # Create categories list
+            # Create categories list - do NOT add ai_synthesis here as this is for combined User+AI content
             synthesis_categories = list(categories)
-            synthesis_categories.append("ai_synthesis")
+            # Note: ai_synthesis should only be added to pure AI content, not combined User+AI content
             
             logger.info(f"Saving additional AI synthesis for improved future retrieval")
             
@@ -1187,19 +1190,18 @@ class AVA:
                 logger.info(f"Using structured sections for knowledge storage")
                 logger.info(f"knowledge_synthesis: {knowledge_synthesis[:100]}...")
                 logger.info(f"knowledge_summary (will be used as title): {knowledge_summary}")
-                # Format for storage with clear separation
+                # Format for storage with clear separation - this is combined User+AI content
                 final_synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
                 summary_title = knowledge_summary
-                synthesis_categories = list(categories)
             else:
-                # Use the synthesis_content that was already built
+                # Use the synthesis_content that was already built - this is combined User+AI content
                 logger.info(f"Using synthesis_content for knowledge storage")
                 logger.info(f"No structured synthesis/summary found - falling back to legacy summary: '{summary}'")
                 final_synthesis_content = f"User: {message}\n\nAI: {synthesis_content}"
                 summary_title = summary or ""
-                synthesis_categories = list(categories)
             
             logger.info(f"Final title that will be saved: '{summary_title}'")
+            logger.info(f"Categories for combined User+AI content: {synthesis_categories} (no ai_synthesis)")
             
             logger.info(f"Final synthesis content to save: {final_synthesis_content[:100]}...")
             synthesis_result = await self.support.background_save_knowledge(
@@ -1227,7 +1229,7 @@ class AVA:
             else:
                 logger.warning(f"Synthesis result is not dict, got: {type(synthesis_result)}")
             
-            # Save standalone summary if available
+            # Save standalone summary if available - this will be pure AI content with ai_synthesis
             await self._save_standalone_summary(
                 knowledge_synthesis, knowledge_summary, summary, conversational_response,
                 user_id, bank_name, thread_id, priority_topic_name, categories
@@ -1241,15 +1243,33 @@ class AVA:
                                      categories: List[str]) -> None:
         """Save standalone summary for quick retrieval."""
         if knowledge_summary:
-            # Define categories for summary - but DON'T add "summary" to avoid filtering
-            summary_categories = list(categories)
-            summary_categories.append("knowledge_summary")  # Use a different category name
-            summary_categories.append("ai_synthesis")  # Add ai_synthesis to summary instead
-            logger.info(f"Saving standalone summary for quick retrieval")
-            summary_success = await self.support.background_save_knowledge(
-                input_text=f"AI: {knowledge_synthesis}",
-                title=knowledge_summary,
+            # Define categories for summary - ensure ai_synthesis is included within first 5 categories
+            # Since pccontroller.py limits to 5 categories, we need to prioritize
+            summary_categories = []
+            
+            # Always include these core categories first
+            if "general" in categories:
+                summary_categories.append("general")
+            if "teaching_intent" in categories:
+                summary_categories.append("teaching_intent")
+            
+            # Add ai_synthesis early to ensure it's within the 5-category limit
+            summary_categories.append("ai_synthesis")
+            summary_categories.append("knowledge_summary")
+            
+            # Add one more category from the original list if space allows
+            for cat in categories:
+                if cat not in summary_categories and len(summary_categories) < 5:
+                    summary_categories.append(cat)
+                    break
+            
+            logger.info(f"Saving standalone summary with prioritized categories (max 5): {summary_categories}")
+            
+            # Call save_knowledge directly with correct parameter order
+            summary_success = await save_knowledge(
+                input=f"AI: {knowledge_synthesis}",
                 user_id=user_id,
+                title=knowledge_summary,
                 bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
@@ -1258,14 +1278,32 @@ class AVA:
             )
             logger.info(f"Save summary completed: {summary_success}")
         elif summary and len(summary) > 10:  # Only save non-empty summaries
-            summary_categories = list(categories)
-            summary_categories.append("knowledge_summary")  # Use a different category name
-            summary_categories.append("ai_synthesis")  # Add ai_synthesis to summary instead
-            logger.info(f"Saving standalone summary (legacy format) for quick retrieval")
-            summary_success = await self.support.background_save_knowledge(
-                input_text=f"AI: {conversational_response}",
-                title=summary,
+            # Define categories for summary - ensure ai_synthesis is included within first 5 categories
+            summary_categories = []
+            
+            # Always include these core categories first
+            if "general" in categories:
+                summary_categories.append("general")
+            if "teaching_intent" in categories:
+                summary_categories.append("teaching_intent")
+            
+            # Add ai_synthesis early to ensure it's within the 5-category limit
+            summary_categories.append("ai_synthesis")
+            summary_categories.append("knowledge_summary")
+            
+            # Add one more category from the original list if space allows
+            for cat in categories:
+                if cat not in summary_categories and len(summary_categories) < 5:
+                    summary_categories.append(cat)
+                    break
+            
+            logger.info(f"Saving standalone summary (legacy) with prioritized categories (max 5): {summary_categories}")
+            
+            # Call save_knowledge directly with correct parameter order
+            summary_success = await save_knowledge(
+                input=f"AI: {conversational_response}",
                 user_id=user_id,
+                title=summary,
                 bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
@@ -1603,15 +1641,18 @@ class AVA:
             response_content = response.get("message", "")
             similarity_score = response.get("metadata", {}).get("similarity_score", 0.0)
             
-            # Create combined knowledge entry
+            # Create combined knowledge entry - this is User+AI format, not pure AI
             combined_knowledge = f"User: {message}\n\nAI: {response_content}"
             
-            # Determine categories
+            # Determine categories - do NOT add ai_synthesis for combined User+AI content
             categories = ["general", "high_quality_conversation"]
             
             # Add similarity-based category
             if similarity_score >= 0.70:
                 categories.append("high_similarity")
+            
+            # Note: ai_synthesis should only be added to pure AI content, not combined User+AI content
+            logger.info(f"Categories for combined User+AI content: {categories} (no ai_synthesis)")
             
             # Save to knowledge base
             await self._save_combined_knowledge(

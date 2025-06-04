@@ -850,6 +850,9 @@ class LearningProcessor:
                 # Format as a teaching entry for consistency with combined knowledge format
                 if not input_text.startswith("User:"):
                     input_text = f"AI: {input_text}"
+                    # Add ai_synthesis category since this is AI-only content
+                    if "ai_synthesis" not in categories:
+                        categories.append("ai_synthesis")
 
                 # Run save_knowledge in background task
                 self._create_background_task(self.support.background_save_knowledge(
@@ -1168,20 +1171,17 @@ class LearningProcessor:
             
             logger.info(f"Saving additional AI synthesis for improved future retrieval")
             
-            # Use the synthesis_content that was already created earlier
             # Determine storage format and title
             if knowledge_synthesis and knowledge_summary:
                 logger.info(f"Using structured sections for knowledge storage")
                 # Format for storage with clear separation
                 final_synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
                 summary_title = knowledge_summary
-                synthesis_categories = list(categories)
             else:
                 # Use the synthesis_content that was already built
                 logger.info(f"Using synthesis_content for knowledge storage")
                 final_synthesis_content = f"User: {message}\n\nAI: {synthesis_content}"
                 summary_title = summary or ""
-                synthesis_categories = list(categories)
             
             logger.info(f"Final synthesis content to save: {final_synthesis_content[:100]}...")
             synthesis_result = await self.support.background_save_knowledge(
@@ -1736,6 +1736,10 @@ class LearningProcessor:
             # Add similarity-based category
             if similarity_score >= 0.70:
                 categories.append("high_similarity")
+            
+            # Add ai_synthesis category since this contains AI response content
+            if "ai_synthesis" not in categories:
+                categories.append("ai_synthesis")
             
             # Save to knowledge base
             await self._save_combined_knowledge(

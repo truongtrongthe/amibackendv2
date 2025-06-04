@@ -981,33 +981,32 @@ class LearningSupport:
     async def background_save_knowledge(self, input_text: str, title: str, user_id: str, bank_name: str, 
                                          thread_id: Optional[str] = None, topic: Optional[str] = None, 
                                          categories: List[str] = ["general"], ttl_days: Optional[int] = 365) -> Dict:
-        """Execute save_knowledge in a separate background task."""
+        """Background save knowledge with comprehensive error handling."""
         try:
-            logger.info(f"Starting background save_knowledge task for user {user_id}")
-            # Use a shorter timeout for saving knowledge to avoid hanging tasks
-            try:
-                result = await asyncio.wait_for(
-                    save_knowledge(
-                        input=input_text,
-                        title=title,
-                        user_id=user_id,
-                        bank_name=bank_name,
-                        thread_id=thread_id,
-                        topic=topic,
-                        categories=categories,
-                        ttl_days=ttl_days  # Add TTL for data expiration
-                    ),
-                    timeout=6.0  # Increased to 10-second timeout for database operations
-                )
-                logger.info(f"Background save_knowledge completed: {result}")
-                return result if isinstance(result, dict) else {"success": bool(result)}
-            except asyncio.TimeoutError:
-                logger.warning(f"Background save_knowledge timed out for user {user_id}")
-                return {"success": False, "error": "Save operation timed out"}
+            # Always create a copy to avoid modifying the original categories list
+            categories = list(categories)
+            
+            # Add ai_synthesis category if content is AI-only format (but not for combined User+AI format)
+            if input_text.strip().startswith("AI:") and "User:" not in input_text:
+                if "ai_synthesis" not in categories:
+                    categories.append("ai_synthesis")
+                    logger.info("Added 'ai_synthesis' category for AI-only content")
+            
+            # Call the save function
+            result = await save_knowledge(
+                input=input_text,
+                title=title,
+                user_id=user_id,
+                bank_name=bank_name,
+                thread_id=thread_id,
+                topic=topic,
+                categories=categories,
+                ttl_days=ttl_days
+            )
+            logger.info(f"Knowledge saved: {result}")
+            return result
         except Exception as e:
-            logger.error(f"Error in background save_knowledge: {str(e)}")
-            import traceback
-            logger.error(f"Stack trace: {traceback.format_exc()}")
+            logger.error(f"Error in background_save_knowledge: {str(e)}")
             return {"success": False, "error": str(e)}
 
     def detect_follow_up(self, message: str, prior_topic: str = "") -> Dict[str, bool]:
