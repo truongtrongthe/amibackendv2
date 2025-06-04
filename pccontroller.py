@@ -296,7 +296,7 @@ async def query_knowledge(
         logger.error(f"Query failed after retries: {e}")
         return []
 
-async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id: Optional[str] = None, thread_id: Optional[str] = None, topic: Optional[str] = None, top_k: int = 10, min_similarity: float = 0.3, ef_search: int = 100, exclude_categories: Optional[List[str]] = None) -> List[Dict]:
+async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id: Optional[str] = None, thread_id: Optional[str] = None, topic: Optional[str] = None, top_k: int = 10, min_similarity: float = 0.3, ef_search: int = 100, exclude_categories: Optional[List[str]] = None, include_categories: Optional[List[str]] = None) -> List[Dict]:
     """
     Query knowledge from Pinecone with optimized vector structure and recall tuning.
 
@@ -310,6 +310,7 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         min_similarity: Minimum similarity threshold.
         ef_search: Search exploration factor.
         exclude_categories: List of categories to exclude from results.
+        include_categories: List of categories to include (only these categories will be returned).
     """
     
     #brain_banks = await get_brain_banks(graph_version_id)
@@ -325,11 +326,20 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         if knowledge:
             all_knowledge.extend(knowledge)
 
-    # Post-process to filter out excluded categories
-    if exclude_categories:
+    # Post-process to filter categories
+    if include_categories:
+        # Only include entries that have at least one of the included categories
         filtered_knowledge = []
         for entry in all_knowledge:
-            # Check if this entry has any of the excluded categories
+            entry_categories = entry.get("categories", [])
+            if any(cat in entry_categories for cat in include_categories):
+                filtered_knowledge.append(entry)
+        logger.info(f"Filtered to include only {len(filtered_knowledge)} entries with included categories: {include_categories}")
+        all_knowledge = filtered_knowledge
+    elif exclude_categories:
+        # Exclude entries that have any of the excluded categories
+        filtered_knowledge = []
+        for entry in all_knowledge:
             entry_categories = entry.get("categories", [])
             if not any(cat in entry_categories for cat in exclude_categories):
                 filtered_knowledge.append(entry)

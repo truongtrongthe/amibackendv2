@@ -259,7 +259,7 @@ class KnowledgeExplorer:
                 topic=None,
                 top_k=20,
                 min_similarity=0.2,
-                exclude_categories=["ai_synthesis"]
+                include_categories=["ai_synthesis"]
             )
             
             if results:
@@ -494,7 +494,7 @@ class KnowledgeExplorer:
                 topic=None,
                 top_k=50,  # Reduced from 100 for efficiency
                 min_similarity=0.2,
-                exclude_categories=["ai_synthesis"]
+                include_categories=["ai_synthesis"]
             ) for query in queries),
             return_exceptions=True
         )

@@ -516,7 +516,7 @@ class LearningSupport:
                     topic=None,      # Remove topic restriction
                     top_k=100,
                     min_similarity=0.2,  # Lower threshold for better matching
-                    exclude_categories=["ai_synthesis"]  # Exclude AI synthesis content
+                    include_categories=["ai_synthesis"]  # Include ONLY AI synthesis content
                 ) for query in queries),
                 return_exceptions=True
             )

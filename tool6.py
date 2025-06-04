@@ -426,14 +426,14 @@ class CoTProcessor:
             return {"knowledge_context": "No knowledge available.", "metadata": {"error": str(e)}}
 
     def _extract_knowledge_content(self, knowledge_data, extract_user_part=True):
-        """Extract knowledge content from various data types, handling combined User/AI content.
+        """Extract knowledge content from various data types, handling AI synthesis content.
         
         Args:
             knowledge_data: The knowledge data (string, dict, list)
-            extract_user_part: Whether to extract the User part (True) or AI part (False)
+            extract_user_part: Whether to extract the User part (True) or AI part (False) - now only used for backwards compatibility
             
         Returns:
-            str: The extracted knowledge content
+            str: The extracted knowledge content with "AI:" prefix stripped
         """
         knowledge_content = ""
         #logger.info(f"KNOWLEDGE data: {knowledge_data}")
@@ -441,54 +441,26 @@ class CoTProcessor:
         # Handle string data
         if isinstance(knowledge_data, str):
             knowledge_content = knowledge_data
-            if extract_user_part and "AI:" in knowledge_content:
-                # Simple split approach: split by "AI:" and take first part
-                parts = knowledge_content.split("AI:", 1)
-                if len(parts) > 0:
-                    knowledge_content = parts[0].strip()
-                    # Remove "User:" prefix if it exists
-                    if knowledge_content.startswith("User:"):
-                        knowledge_content = knowledge_content[5:].strip()
-                    logger.info(f"Extracted User portion from string knowledge using split")
-                else:
-                    knowledge_content = ""
-            elif not extract_user_part and "AI:" in knowledge_content:
-                # Extract AI part: split by "AI:" and take the second part
-                parts = knowledge_content.split("AI:", 1)
-                if len(parts) > 1:
-                    knowledge_content = parts[1].strip()
-                    logger.info(f"Extracted AI portion from string knowledge using split")
-                else:
-                    knowledge_content = ""
+            # Strip "AI:" prefix if it exists
+            if knowledge_content.startswith("AI:"):
+                knowledge_content = knowledge_content[3:].strip()
+                logger.info(f"Stripped AI: prefix from string knowledge")
         
         # Handle dict data
         elif isinstance(knowledge_data, dict):
             if "raw" in knowledge_data:
                 raw_content = knowledge_data["raw"]
-                if extract_user_part and "AI:" in raw_content:
-                    # Simple split approach: split by "AI:" and take first part
-                    parts = raw_content.split("AI:", 1)
-                    if len(parts) > 0:
-                        knowledge_content = parts[0].strip()
-                        # Remove "User:" prefix if it exists
-                        if knowledge_content.startswith("User:"):
-                            knowledge_content = knowledge_content[5:].strip()
-                        logger.info(f"Extracted User portion from dict knowledge using split")
-                    else:
-                        knowledge_content = ""
-                elif not extract_user_part and "AI:" in raw_content:
-                    # Extract AI part: split by "AI:" and take the second part
-                    parts = raw_content.split("AI:", 1)
-                    if len(parts) > 1:
-                        knowledge_content = parts[1].strip()
-                        logger.info(f"Extracted AI portion from dict knowledge using split")
-                    else:
-                        knowledge_content = ""
+                # Strip "AI:" prefix if it exists
+                if raw_content.startswith("AI:"):
+                    knowledge_content = raw_content[3:].strip()
+                    logger.info(f"Stripped AI: prefix from dict knowledge")
                 else:
-                    # If no "AI:" delimiter found, use the raw content as is
                     knowledge_content = raw_content
             elif "content" in knowledge_data:
                 knowledge_content = knowledge_data["content"]
+                # Strip "AI:" prefix if it exists
+                if knowledge_content.startswith("AI:"):
+                    knowledge_content = knowledge_content[3:].strip()
             else:
                 # Serialize the dictionary as a fallback
                 knowledge_content = json.dumps(knowledge_data)
@@ -513,8 +485,11 @@ class CoTProcessor:
         # Handle other types
         else:
             knowledge_content = str(knowledge_data)
+            # Strip "AI:" prefix if it exists
+            if knowledge_content.startswith("AI:"):
+                knowledge_content = knowledge_content[3:].strip()
             
-        # Filter out content starting with "AI Synthesis:" directly
+        # Filter out content starting with "AI Synthesis:" directly (keep this as additional safety)
         if knowledge_content.startswith("AI Synthesis:"):
             logger.info(f"Filtered out AI Synthesis content")
             return ""
@@ -988,7 +963,7 @@ class CoTProcessor:
         for query in user_profile.analysis_queries:
             try:
                 # Use the query tool to fetch specific knowledge
-                knowledge = await query_knowledge_from_graph(query, self.graph_version_id, exclude_categories=["ai_synthesis"])
+                knowledge = await query_knowledge_from_graph(query, self.graph_version_id, include_categories=["ai_synthesis"])
                 if knowledge:
                     # Handle different types of knowledge data
                     if isinstance(knowledge, dict) and "status" in knowledge and knowledge["status"] == "error":
@@ -1422,7 +1397,7 @@ class CoTProcessor:
                         query = query_info.get('query', '') if isinstance(query_info, dict) else query_info
                         if query:
                             # Step 1: Fetch raw knowledge from graph
-                            knowledge = await query_knowledge_from_graph(query, self.graph_version_id, exclude_categories=["ai_synthesis"])
+                            knowledge = await query_knowledge_from_graph(query, self.graph_version_id, include_categories=["ai_synthesis"])
                             if knowledge:
                                 # Step 2: Extract knowledge content based on its type
                                 raw_knowledge_content = self._extract_knowledge_content(knowledge)
@@ -1696,7 +1671,7 @@ async def knowledge_query_helper(query: str, context: str, graph_version_id: str
         # Create temporary processor to use its _extract_knowledge_content method
         processor = CoTProcessor()
         
-        knowledge_data = await query_knowledge_from_graph(query, graph_version_id, exclude_categories=["ai_synthesis"])
+        knowledge_data = await query_knowledge_from_graph(query, graph_version_id, include_categories=["ai_synthesis"])
         
         # Handle different return types from fetch_knowledge
         if isinstance(knowledge_data, dict) and "status" in knowledge_data and knowledge_data["status"] == "error":
