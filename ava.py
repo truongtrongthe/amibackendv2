@@ -9,7 +9,7 @@ PLAN:
 
 ENHANCED PLAN (Smart Merge Strategy):
 5. Medium Similarity (35%-65%) → Brainstorming Session with Human
-6. Save Confirmation with UPDATE vs CREATE NEW options 
+6. Save Confirmation with UPDATE vs CREATE options 
 7. Smart Knowledge UPDATE Strategy:
    - High Similarity (≥50%) → Auto-suggest UPDATE existing knowledge
    - Medium Similarity (35%-65%) → Ask human: UPDATE existing vs CREATE new
@@ -98,7 +98,19 @@ from pccontroller import save_knowledge, query_knowledge, query_knowledge_from_g
 from utilities import logger, EMBEDDINGS
 from learning_support import LearningSupport
 from curiosity import KnowledgeExplorer
-from alpha import save_teaching_synthesis
+from alpha import (
+    save_teaching_synthesis, 
+    evaluate_knowledge_similarity_gate,
+    identify_knowledge_update_candidates,
+    merge_knowledge_content,
+    extract_user_facing_content,
+    regenerate_teaching_intent_response,
+    create_update_decision_request,
+    get_pending_knowledge_decisions,
+    clear_pending_knowledge_decisions,
+    get_pending_decision,
+    remove_pending_decision
+)
 from time import time
 
 # Import socketio manager for WebSocket support
@@ -130,10 +142,6 @@ def serialize_model(model: BaseModel) -> Dict[str, Any]:
 LLM = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.01)
 
 class AVA:
-    # Class-level shared storage for pending decisions (shared across all instances)
-    _shared_pending_decisions: Dict[str, Any] = {}
-    _decisions_lock = asyncio.Lock()
-    
     def __init__(self):
         self.graph_version_id = ""
         # Set to keep track of pending background tasks
@@ -305,8 +313,8 @@ class AVA:
                 # Get similarity score from analysis
                 similarity_score = analysis_knowledge.get("similarity", 0.0) if analysis_knowledge else 0.0
                 
-                # Use new similarity-based gating system
-                save_decision = await self.should_save_knowledge_with_similarity_gate(final_response, similarity_score, message)
+                # Use similarity-based gating system from alpha.py
+                save_decision = await evaluate_knowledge_similarity_gate(final_response, similarity_score, message)
                 
                 logger.info(f"Knowledge saving decision: {save_decision}")
                 logger.info(f"LLM evaluation: intent={intent_type}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}, similarity={similarity_score:.2f}")
@@ -318,8 +326,8 @@ class AVA:
                     # Get query results for candidate identification
                     query_results = analysis_knowledge.get("query_results", [])
                     
-                    # Identify update candidates (only for high similarity >70%)
-                    candidates = await self.identify_update_candidates(message, similarity_score, query_results)
+                    # Identify update candidates using alpha.py function
+                    candidates = await identify_knowledge_update_candidates(message, similarity_score, query_results)
                     
                     if candidates:
                         # We have candidates - create decision request
@@ -332,8 +340,8 @@ class AVA:
                         # Create the new content that would be saved
                         new_content = f"User: {message}\n\nAI: {conversational_response}"
                         
-                        # Present options to human
-                        decision_request = await self.present_update_options(
+                        # Present options to human using alpha.py function
+                        decision_request = await create_update_decision_request(
                             message=message,
                             new_content=new_content,
                             candidates=candidates,
@@ -438,9 +446,6 @@ class AVA:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             yield {"status": "error", "message": f"Error: {str(e)}", "complete": True}
 
-    
-                
-    #This is the main function that will be called to stream the response from the LLM.
     async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of active learning method that yields chunks as they come from LLM."""
         logger.info("Starting streaming active learning approach")
@@ -550,12 +555,10 @@ class AVA:
             from langchain_openai import ChatOpenAI
             StreamLLM = ChatOpenAI(model="gpt-4o", streaming=True, temperature=0.25)
             
-
-
             content_buffer = ""
             evaluation_started = False
             logger.info("Starting LLM streaming response")
-            logger.info(f"LLM Prompt: {prompt}")
+            #logger.info(f"LLM Prompt: {prompt}")
             async for chunk in StreamLLM.astream(prompt):
                 chunk_content = chunk.content if hasattr(chunk, 'content') else str(chunk)
                 if chunk_content:
@@ -602,14 +605,14 @@ class AVA:
             structured_sections = self.support.extract_structured_sections(content)
             content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
-            # Step 8: Handle teaching intent regeneration if needed
+            # Step 8: Handle teaching intent regeneration if needed using alpha.py function
             if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
-                content, response_strategy = await self._handle_teaching_intent_regeneration(
+                content, response_strategy = await regenerate_teaching_intent_response(
                     message_str, content, response_strategy
                 )
             
-            # Step 9: Extract user-facing content
-            user_facing_content = self._extract_user_facing_content(content, response_strategy, structured_sections)
+            # Step 9: Extract user-facing content using alpha.py function
+            user_facing_content = extract_user_facing_content(content, response_strategy, structured_sections)
             
             # Step 10: Handle empty response fallbacks
             user_facing_content = self.support.handle_empty_response_fallbacks(
@@ -649,86 +652,6 @@ class AVA:
                 "message": "Tôi xin lỗi, nhưng tôi gặp lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại.",
                 "complete": True
             }
-    
-    async def _handle_teaching_intent_regeneration(self, message_str: str, content: str, response_strategy: str) -> tuple:
-        """Handle regeneration of response when teaching intent is detected."""
-        original_strategy = response_strategy
-        response_strategy = "TEACHING_INTENT"
-        logger.info(f"LLM detected teaching intent, changing response_strategy from {original_strategy} to TEACHING_INTENT")
-        
-        teaching_prompt = f"""IMPORTANT: The user is TEACHING you something. Your job is to synthesize this knowledge.
-        
-        Original message: {message_str}
-        
-        Instructions:
-        Generate THREE separate outputs in your response:
-        
-        1. <user_response>
-           This is what the user will see - include:
-           - Acknowledgment of their teaching with appreciation
-           - Demonstration of your understanding
-           - End with 1-2 open-ended questions to deepen the conversation
-           - Make this conversational and engaging
-        </user_response>
-        
-        2. <knowledge_synthesis>
-           This is for knowledge storage - include ONLY:
-           - Factual information extracted from the user's message
-           - Structured, clear explanation of the concepts
-           - NO greeting phrases, acknowledgments, or questions
-           - NO conversational elements - pure knowledge only
-           - Organized in logical sections if appropriate
-        </knowledge_synthesis>
-        
-        3. <knowledge_summary>
-           A concise 2-3 sentence summary capturing the core teaching point
-           This should be factual and descriptive, not conversational
-        </knowledge_summary>
-        
-        CRITICAL: RESPOND IN THE SAME LANGUAGE AS THE USER'S MESSAGE.
-        - If the user wrote in Vietnamese, respond entirely in Vietnamese
-        - If the user wrote in English, respond entirely in English
-        - Match the language exactly - do not mix languages
-        
-        Your structured response:
-        """
-        
-        try:
-            teaching_response = await LLM.ainvoke(teaching_prompt)
-            content = teaching_response.content.strip()
-            logger.info("Successfully regenerated response with structured TEACHING_INTENT format")
-        except Exception as e:
-            logger.error(f"Failed to regenerate teaching response: {str(e)}")
-            # Keep original content if regeneration fails
-        
-        return content, response_strategy
-
-    def _extract_user_facing_content(self, content: str, response_strategy: str, structured_sections: Dict) -> str:
-        """Extract the user-facing content from the response."""
-        user_facing_content = content
-        
-        if response_strategy == "TEACHING_INTENT":
-            # Extract user response (this is what should be sent to the user)
-            if structured_sections.get("user_response"):
-                user_facing_content = structured_sections["user_response"]
-                logger.info(f"Extracted user-facing content from structured response")
-            else:
-                # Remove knowledge_synthesis and knowledge_summary sections if they exist
-                user_facing_content = re.sub(r'<knowledge_synthesis>.*?</knowledge_synthesis>', '', content, flags=re.DOTALL).strip()
-                user_facing_content = re.sub(r'<knowledge_summary>.*?</knowledge_summary>', '', user_facing_content, flags=re.DOTALL).strip()
-                logger.info(f"Cleaned non-user sections from response")
-        
-        # Handle JSON responses
-        if content.startswith('{') and '"message"' in content:
-            try:
-                parsed_json = json.loads(content)
-                if isinstance(parsed_json, dict) and "message" in parsed_json:
-                    user_facing_content = parsed_json["message"]
-                    logger.info("Extracted message from JSON response")
-            except Exception as json_error:
-                logger.warning(f"Failed to parse JSON response: {json_error}")
-        
-        return user_facing_content
 
     def _create_background_task(self, coro):
         """Create and track a background task."""
@@ -1049,8 +972,8 @@ class AVA:
 
     async def handle_teaching_intent(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str) -> None:
         """Handle teaching intent detection and knowledge saving."""
-        logger.info("Saving knowledge due to teaching intent")
-        
+        logger.info("Saving knowledge due to teaching intent.")
+        logger.info(f"Response: {response}")
         message_content = response["message"]
         conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
         query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', message_content, re.DOTALL)
@@ -1073,6 +996,7 @@ class AVA:
                 final_synthesis = synthesis_match.group(1).strip()
         
         # Call the new alpha.py function to save teaching synthesis
+        logger.info(f"Saving teaching synthesis with final_synthesis: {final_synthesis}")
         synthesis_result = await save_teaching_synthesis(
             conversation_turns=conversation_turns,
             final_synthesis=final_synthesis,
@@ -1113,18 +1037,40 @@ class AVA:
         knowledge_synthesis = ""
         knowledge_summary = ""
         
-        # Extract structured sections from message_content
-        user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
-        synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
-        summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
-        
-        # Try to extract from full response if available in metadata
-        if not user_response_match and "full_structured_response" in response.get("metadata", {}):
+        # Always extract from full_structured_response first if available
+        if "full_structured_response" in response.get("metadata", {}):
             full_response = response["metadata"]["full_structured_response"]
             user_response_match = re.search(r'<user_response>(.*?)</user_response>', full_response, re.DOTALL)
             synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', full_response, re.DOTALL)
             summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', full_response, re.DOTALL)
-            logger.info("Extracted structured sections from full_structured_response metadata")
+            
+            # Handle incomplete responses - try to extract even without closing tags
+            if not summary_match and '<knowledge_summary>' in full_response:
+                # Try to extract without requiring closing tag
+                incomplete_summary_match = re.search(r'<knowledge_summary>\s*(.*?)(?=\n\n|$)', full_response, re.DOTALL)
+                if incomplete_summary_match:
+                    summary_match = incomplete_summary_match
+                    logger.info("Extracted knowledge_summary from incomplete response (missing closing tag)")
+            
+            logger.info("Extracting structured sections from full_structured_response metadata")
+        else:
+            # Fallback to message_content if full_structured_response not available
+            user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
+            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
+            summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
+            
+            # Handle incomplete responses in message_content too
+            if not summary_match and '<knowledge_summary>' in message_content:
+                incomplete_summary_match = re.search(r'<knowledge_summary>\s*(.*?)(?=\n\n|$)', message_content, re.DOTALL)
+                if incomplete_summary_match:
+                    summary_match = incomplete_summary_match
+                    logger.info("Extracted knowledge_summary from incomplete message_content (missing closing tag)")
+            
+            logger.info("Extracting structured sections from message_content (fallback)")
+
+        logger.info(f"User response match: {user_response_match}")
+        logger.info(f"Synthesis match: {synthesis_match}")
+        logger.info(f"Summary match: {summary_match}")
         
         if user_response_match:
             user_response = user_response_match.group(1).strip()
@@ -1236,10 +1182,11 @@ class AVA:
             
             logger.info(f"Saving additional AI synthesis for improved future retrieval")
             
-            # Use the synthesis_content that was already created earlier
             # Determine storage format and title
             if knowledge_synthesis and knowledge_summary:
                 logger.info(f"Using structured sections for knowledge storage")
+                logger.info(f"knowledge_synthesis: {knowledge_synthesis[:100]}...")
+                logger.info(f"knowledge_summary (will be used as title): {knowledge_summary}")
                 # Format for storage with clear separation
                 final_synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
                 summary_title = knowledge_summary
@@ -1247,9 +1194,12 @@ class AVA:
             else:
                 # Use the synthesis_content that was already built
                 logger.info(f"Using synthesis_content for knowledge storage")
+                logger.info(f"No structured synthesis/summary found - falling back to legacy summary: '{summary}'")
                 final_synthesis_content = f"User: {message}\n\nAI: {synthesis_content}"
                 summary_title = summary or ""
                 synthesis_categories = list(categories)
+            
+            logger.info(f"Final title that will be saved: '{summary_title}'")
             
             logger.info(f"Final synthesis content to save: {final_synthesis_content[:100]}...")
             synthesis_result = await self.support.background_save_knowledge(
@@ -1326,208 +1276,6 @@ class AVA:
         else:
             logger.info("No valid summary available, skipping standalone summary save")
 
-    async def should_save_knowledge_with_similarity_gate(self, response: Dict[str, Any], similarity_score: float, message: str) -> Dict[str, Any]:
-        """
-        Determine if knowledge should be saved based on similarity score and conversation flow.
-        CRITICAL: Teaching intent is REQUIRED for all knowledge saving to prevent pollution.
-        
-        UPDATED LOGIC:
-        - High Similarity (>70%) + Teaching Intent → Ask human UPDATE vs CREATE
-        - Low Similarity (≤70%) + Teaching Intent → Auto-save and inform human
-        """
-        has_teaching_intent = response.get("metadata", {}).get("has_teaching_intent", False)
-        is_priority_topic = response.get("metadata", {}).get("is_priority_topic", False)
-        
-        # High similarity threshold for human decision
-        HIGH_SIMILARITY_THRESHOLD = 0.70
-        
-        logger.info(f"Evaluating knowledge saving: similarity={similarity_score}, teaching_intent={has_teaching_intent}, priority_topic={is_priority_topic}")
-        
-        # CRITICAL: No teaching intent = NO SAVING (prevents knowledge base pollution)
-        if not has_teaching_intent:
-            logger.info(f"❌ No teaching intent detected - not saving knowledge (similarity={similarity_score:.2f})")
-            return {
-                "should_save": False,
-                "reason": "no_teaching_intent",
-                "confidence": "high",
-                "encourage_context": True
-            }
-        
-        # From here on, teaching intent is confirmed - evaluate based on similarity
-        
-        # Case 1: High similarity + teaching intent - ASK HUMAN (UPDATE vs CREATE decision)
-        if similarity_score > HIGH_SIMILARITY_THRESHOLD:
-            logger.info(f"🤔 High similarity ({similarity_score:.2f}) + teaching intent - asking human UPDATE vs CREATE")
-            return {
-                "should_save": True,
-                "action_type": "UPDATE_OR_CREATE",
-                "reason": "high_similarity_teaching_decision",
-                "confidence": "high",
-                "requires_human_decision": True,
-                "similarity_score": similarity_score
-            }
-        
-        # Case 2: Low-medium similarity + teaching intent - AUTO-SAVE as new knowledge
-        if similarity_score <= HIGH_SIMILARITY_THRESHOLD and len(message.split()) > 5:
-            logger.info(f"✅ Low-medium similarity ({similarity_score:.2f}) + teaching intent - auto-saving as new knowledge")
-            return {
-                "should_save": True,
-                "reason": "low_medium_similarity_teaching",
-                "confidence": "high",
-                "is_new_knowledge": True,
-                "auto_save": True
-            }
-        
-        # Case 3: Low similarity + teaching intent but insufficient content
-        if similarity_score <= HIGH_SIMILARITY_THRESHOLD and len(message.split()) <= 5:
-            logger.info(f"❌ Low similarity ({similarity_score:.2f}) + teaching intent but insufficient content - encouraging more detail")
-            return {
-                "should_save": False,
-                "reason": "teaching_intent_insufficient_content",
-                "confidence": "medium",
-                "encourage_context": True
-            }
-        
-        # Default case - don't save
-        logger.info(f"❌ Default case - not saving knowledge (similarity={similarity_score:.2f})")
-        return {
-            "should_save": False,
-            "reason": "default_no_save",
-            "confidence": "low"
-        }
-
-    async def identify_update_candidates(self, message: str, similarity_score: float, query_results: List[Dict]) -> List[Dict]:
-        """Identify existing knowledge that could be updated."""
-        candidates = []
-        
-        # For high overall similarity (>70%), be more flexible with individual result filtering
-        if similarity_score > 0.70:
-            logger.info(f"High overall similarity ({similarity_score:.3f}) - using flexible candidate selection")
-            
-            # For high overall similarity, take top results with reasonable similarity
-            for result in query_results:
-                result_similarity = result.get("score", 0.0)
-                # Accept any result with similarity >0.3 for high overall similarity cases
-                if result_similarity >= 0.30:
-                    candidates.append({
-                        "vector_id": result.get("id"),
-                        "content": result.get("raw", ""),
-                        "similarity": result_similarity,
-                        "categories": result.get("categories", {}),
-                        "metadata": result.get("metadata", {}),
-                        "query": result.get("query", "")
-                    })
-        else:
-            # For lower overall similarity, this method shouldn't be called, but handle gracefully
-            logger.info(f"Lower overall similarity ({similarity_score:.3f}) - this shouldn't trigger UPDATE vs CREATE")
-            return []
-        
-        # Sort by similarity (highest first) and take top 3 candidates
-        sorted_candidates = sorted(candidates, key=lambda x: x["similarity"], reverse=True)[:3]
-        
-        logger.info(f"Identified {len(sorted_candidates)} update candidates from {len(query_results)} query results")
-        logger.info(f"Candidate similarities: {[c['similarity'] for c in sorted_candidates]}")
-        return sorted_candidates
-
-    async def present_update_options(self, message: str, new_content: str, candidates: List[Dict], user_id: str, thread_id: str) -> Dict[str, Any]:
-        """Present UPDATE vs CREATE options to human via tool call."""
-        
-        # Prepare the decision request
-        decision_request = {
-            "decision_type": "UPDATE_OR_CREATE",
-            "user_message": message,
-            "new_content": new_content,
-            "similarity_info": f"Found {len(candidates)} similar knowledge entries",
-            "options": [
-                {
-                    "action": "CREATE_NEW",
-                    "description": "Save as completely new knowledge",
-                    "reasoning": "This information is sufficiently different to warrant a new entry"
-                }
-            ],
-            "candidates": []
-        }
-        
-        # Add UPDATE options for each candidate
-        for i, candidate in enumerate(candidates, 1):
-            # Clean content preview
-            content_preview = candidate["content"]
-            if content_preview.startswith("User:") and "\n\nAI:" in content_preview:
-                ai_part = content_preview.split("\n\nAI:", 1)[1] if "\n\nAI:" in content_preview else content_preview
-                content_preview = ai_part.strip()
-            
-            # Truncate for preview
-            preview = content_preview[:200] + "..." if len(content_preview) > 200 else content_preview
-            
-            decision_request["options"].append({
-                "action": "UPDATE_EXISTING",
-                "target_id": candidate["vector_id"],
-                "description": f"Update existing knowledge #{i} (similarity: {candidate['similarity']:.2f})",
-                "preview": preview,
-                "reasoning": f"Enhance existing knowledge with new information (similarity: {candidate['similarity']:.2f})"
-            })
-            
-            # Add candidate details for reference
-            decision_request["candidates"].append({
-                "id": candidate["vector_id"],
-                "similarity": candidate["similarity"],
-                "preview": preview,
-                "full_content": candidate["content"]
-            })
-        
-        # Store the pending decision for later retrieval
-        request_id = f"update_decision_{thread_id}_{int(time())}"
-        decision_request["request_id"] = request_id
-        
-        # Store in shared class-level storage (accessible across all AVA instances)
-        async with AVA._decisions_lock:
-            AVA._shared_pending_decisions[request_id] = decision_request
-        
-        logger.info(f"Created UPDATE vs CREATE decision request {request_id} with {len(candidates)} candidates")
-        return decision_request
-
-    async def merge_knowledge(self, existing_content: str, new_content: str, merge_strategy: str = "enhance") -> str:
-        """Intelligently merge new knowledge with existing knowledge."""
-        
-        merge_prompt = f"""You are merging knowledge. Combine the EXISTING knowledge with NEW information intelligently.
-
-                    EXISTING KNOWLEDGE:
-                    {existing_content}
-
-                    NEW INFORMATION:
-                    {new_content}
-
-                    MERGE STRATEGY: {merge_strategy}
-
-                    Instructions:
-                    1. Preserve all valuable information from EXISTING knowledge
-                    2. Integrate NEW information where it adds value
-                    3. If there are contradictions, note both perspectives clearly
-                    4. Organize the merged content logically with clear structure
-                    5. Maintain the same language as the original content
-                    6. Remove any redundant information
-                    7. Enhance clarity and completeness
-
-                    Format the output as:
-                    User: [Combined user inputs if applicable]
-
-                    AI: [Merged and enhanced knowledge content]
-
-                    MERGED KNOWLEDGE:
-                    """
-        
-        try:
-            response = await LLM.ainvoke(merge_prompt)
-            merged_content = response.content.strip()
-            logger.info(f"Successfully merged knowledge using LLM (original: {len(existing_content)} chars, new: {len(new_content)} chars, merged: {len(merged_content)} chars)")
-            return merged_content
-        except Exception as e:
-            logger.error(f"Knowledge merge failed: {str(e)}")
-            # Fallback: structured concatenation
-            fallback_content = f"{existing_content}\n\n--- UPDATED WITH NEW INFORMATION ---\n\n{new_content}"
-            logger.info(f"Using fallback merge strategy")
-            return fallback_content
-
     async def update_existing_knowledge(self, vector_id: str, new_content: str, user_id: str, preserve_metadata: bool = True) -> Dict[str, Any]:
         """Update existing knowledge in the vector database by replacing the old vector."""
         try:
@@ -1589,15 +1337,13 @@ class AVA:
     async def handle_update_decision(self, request_id: str, user_decision: Dict[str, Any], user_id: str, thread_id: str) -> Dict[str, Any]:
         """Handle the human decision for UPDATE vs CREATE."""
         try:
-            # Retrieve the pending decision from shared storage
-            async with AVA._decisions_lock:
-                if request_id not in AVA._shared_pending_decisions:
-                    return {
-                        "success": False,
-                        "error": f"Decision request {request_id} not found or expired"
-                    }
-                
-                decision_request = AVA._shared_pending_decisions[request_id]
+            # Retrieve the pending decision from alpha.py shared storage
+            decision_request = await get_pending_decision(request_id)
+            if not decision_request:
+                return {
+                    "success": False,
+                    "error": f"Decision request {request_id} not found or expired"
+                }
             
             action = user_decision.get("action")
             
@@ -1617,10 +1363,8 @@ class AVA:
                     ttl_days=365
                 )
                 
-                # Clean up pending decision from shared storage
-                async with AVA._decisions_lock:
-                    if request_id in AVA._shared_pending_decisions:
-                        del AVA._shared_pending_decisions[request_id]
+                # Clean up pending decision using alpha.py function
+                await remove_pending_decision(request_id)
                 
                 return {
                     "success": True,
@@ -1650,11 +1394,11 @@ class AVA:
                         "error": f"Candidate {target_id} not found"
                     }
                 
-                # Merge the knowledge
+                # Merge the knowledge using alpha.py function
                 existing_content = candidate["full_content"]
                 new_content = decision_request["new_content"]
                 
-                merged_content = await self.merge_knowledge(
+                merged_content = await merge_knowledge_content(
                     existing_content=existing_content,
                     new_content=new_content,
                     merge_strategy="enhance"
@@ -1668,10 +1412,8 @@ class AVA:
                     preserve_metadata=True
                 )
                 
-                # Clean up pending decision from shared storage
-                async with AVA._decisions_lock:
-                    if request_id in AVA._shared_pending_decisions:
-                        del AVA._shared_pending_decisions[request_id]
+                # Clean up pending decision using alpha.py function
+                await remove_pending_decision(request_id)
                 
                 return {
                     "success": update_result.get("success", False),
@@ -1703,14 +1445,14 @@ class AVA:
         similarity_score = analysis_knowledge.get("similarity", 0.0)
         query_results = analysis_knowledge.get("query_results", [])
         
-        # Check if this is a medium similarity case requiring human decision
-        save_decision = await self.should_save_knowledge_with_similarity_gate(response, similarity_score, message)
+        # Check if this is a medium similarity case requiring human decision using alpha.py function
+        save_decision = await evaluate_knowledge_similarity_gate(response, similarity_score, message)
         
         if save_decision.get("action_type") == "UPDATE_OR_CREATE":
             logger.info("🤔 Medium similarity detected - initiating UPDATE vs CREATE flow")
             
-            # Identify update candidates
-            candidates = await self.identify_update_candidates(message, similarity_score, query_results)
+            # Identify update candidates using alpha.py function
+            candidates = await identify_knowledge_update_candidates(message, similarity_score, query_results)
             
             if candidates:
                 # Extract response content for decision
@@ -1720,8 +1462,8 @@ class AVA:
                 # Create the new content that would be saved
                 new_content = f"User: {message}\n\nAI: {conversational_response}"
                 
-                # Present options to human
-                decision_request = await self.present_update_options(
+                # Present options to human using alpha.py function
+                decision_request = await create_update_decision_request(
                     message=message,
                     new_content=new_content,
                     candidates=candidates,
@@ -1795,8 +1537,8 @@ class AVA:
                         # Create the new content that would be saved
                         new_content = f"User: {message}\n\nAI: {conversational_response}"
                         
-                        # Present options to human with fallback candidates
-                        decision_request = await self.present_update_options(
+                        # Present options to human with fallback candidates using alpha.py function
+                        decision_request = await create_update_decision_request(
                             message=message,
                             new_content=new_content,
                             candidates=fallback_candidates,
@@ -1889,9 +1631,8 @@ class AVA:
 
     def get_pending_decisions(self) -> Dict[str, Any]:
         """Get all pending decisions for debugging/testing."""
-        return AVA._shared_pending_decisions.copy()
+        return get_pending_knowledge_decisions()
 
     def clear_pending_decisions(self) -> None:
         """Clear all pending decisions for testing."""
-        AVA._shared_pending_decisions.clear()
-        logger.info("Cleared all pending decisions")
+        clear_pending_knowledge_decisions()

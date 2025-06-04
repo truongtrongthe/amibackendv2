@@ -259,7 +259,7 @@ class LearningSupport:
                     
                     "Generate THREE separate outputs in your response:\n\n"
                     
-                    "1. <user_response>\n"
+                    "<user_response>\n"
                     "   This is what the user will see - include:\n"
                     "   - Acknowledgment of their teaching with appreciation\n"
                     "   - Demonstration of your understanding\n"
@@ -267,7 +267,7 @@ class LearningSupport:
                     "   - Make this conversational and engaging\n"
                     "</user_response>\n\n"
                     
-                    "2. <knowledge_synthesis>\n"
+                    "<knowledge_synthesis>\n"
                     "   This is for knowledge storage - include ONLY:\n"
                     "   - Factual information extracted from the user's message\n"
                     "   - Structured, clear explanation of the concepts\n"
@@ -276,7 +276,7 @@ class LearningSupport:
                     "   - Organized in logical sections if appropriate\n"
                     "</knowledge_synthesis>\n\n"
                     
-                    "3. <knowledge_summary>\n"
+                    "<knowledge_summary>\n"
                     "   A concise 2-3 sentence summary capturing the core teaching point\n"
                     "   This should be factual and descriptive, not conversational\n"
                     "</knowledge_summary>\n\n"
@@ -1761,7 +1761,7 @@ class LearningSupport:
                 
                 Your response MUST contain exactly these three sections in this order:
                 
-                1. <user_response>
+                <user_response>
                    [Write what the user will see - conversational and engaging]
                    - Acknowledge their teaching with enthusiasm 
                    - Show understanding of what they shared
@@ -1769,7 +1769,7 @@ class LearningSupport:
                    - Use consistent pronouns throughout
                 </user_response>
                 
-                2. <knowledge_synthesis>
+                <knowledge_synthesis>
                    [Write pure knowledge content for storage - NO conversational elements]
                    - Extract only factual information from user's message
                    - Organize clearly and logically
@@ -1778,7 +1778,7 @@ class LearningSupport:
                    - Use consistent pronouns if any are needed
                 </knowledge_synthesis>
                 
-                3. <knowledge_summary>
+                <knowledge_summary>
                    [Write a concise 2-3 sentence summary]
                    - Capture the core teaching point
                    - Be factual and descriptive
@@ -1791,6 +1791,7 @@ class LearningSupport:
                 - NEVER stop mid-section or leave any section incomplete
                 - Each section MUST have proper opening and closing tags
                 - If you reach token limits, prioritize completing the structure over length
+                - **CRITICAL: You MUST include ALL closing tags like </user_response>, </knowledge_synthesis>, </knowledge_summary>**
                 
                 **FOR ROLE ASSIGNMENTS** (any future-oriented task assignment):
                 - Respond with enthusiasm and commitment to the assigned role/task

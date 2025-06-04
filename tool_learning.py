@@ -138,25 +138,39 @@ class LearningProcessor:
                     message_content = response.get("message", "")
                     teaching_prompt = f"""IMPORTANT: The user is TEACHING you something. Your job is to synthesize this knowledge.
                     
-                    Original message from user: {message}
-                    
-                    Your original response: {message_content}
+                    Original message: {message_content}
                     
                     Instructions:
-                    1. Acknowledge their teaching with appreciation
-                    2. Synthesize the knowledge into a clear, structured format
-                    3. Create a SUMMARY section (2-3 sentences) prefixed with "SUMMARY: "
-                    4. Ask 1-2 open-ended follow-up questions to deepen understanding
+                    Generate THREE separate outputs in your response:
+                    
+                    <user_response>
+                       This is what the user will see - include:
+                       - Acknowledgment of their teaching with appreciation
+                       - Demonstration of your understanding
+                       - End with 1-2 open-ended questions to deepen the conversation
+                       - Make this conversational and engaging
+                    </user_response>
+                    
+                    <knowledge_synthesis>
+                       This is for knowledge storage - include ONLY:
+                       - Factual information extracted from the user's message
+                       - Structured, clear explanation of the concepts
+                       - NO greeting phrases, acknowledgments, or questions
+                       - NO conversational elements - pure knowledge only
+                       - Organized in logical sections if appropriate
+                    </knowledge_synthesis>
+                    
+                    <knowledge_summary>
+                       A concise 2-3 sentence summary capturing the core teaching point
+                       This should be factual and descriptive, not conversational
+                    </knowledge_summary>
                     
                     CRITICAL: RESPOND IN THE SAME LANGUAGE AS THE USER'S MESSAGE.
-                    - If the user wrote in Vietnamese, respond in Vietnamese
-                    - If the user wrote in English, respond in English
+                    - If the user wrote in Vietnamese, respond entirely in Vietnamese
+                    - If the user wrote in English, respond entirely in English
                     - Match the language exactly - do not mix languages
                     
-                    DO NOT say this is a teaching message or make meta-references to teaching.
-                    DO include a "SUMMARY: " section with 2-3 concise sentences capturing the core point.
-                    
-                    Your revised synthesized response:
+                    Your structured response:
                     """
                     
                     try:
@@ -664,7 +678,7 @@ class LearningProcessor:
         Instructions:
         Generate THREE separate outputs in your response:
         
-        1. <user_response>
+        <user_response>
            This is what the user will see - include:
            - Acknowledgment of their teaching with appreciation
            - Demonstration of your understanding
@@ -672,7 +686,7 @@ class LearningProcessor:
            - Make this conversational and engaging
         </user_response>
         
-        2. <knowledge_synthesis>
+        <knowledge_synthesis>
            This is for knowledge storage - include ONLY:
            - Factual information extracted from the user's message
            - Structured, clear explanation of the concepts
@@ -681,7 +695,7 @@ class LearningProcessor:
            - Organized in logical sections if appropriate
         </knowledge_synthesis>
         
-        3. <knowledge_summary>
+        <knowledge_summary>
            A concise 2-3 sentence summary capturing the core teaching point
            This should be factual and descriptive, not conversational
         </knowledge_summary>
