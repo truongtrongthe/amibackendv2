@@ -712,9 +712,6 @@ class AVA:
                 topic = parameters.get("topic", None)
                 
                 # Determine if we should check health bank based on content
-                is_health_topic = any(term in query.lower() or term in context.lower() 
-                    for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", 
-                                "phân tích chân dung khách hàng", "chân dung khách hàng", "customer profile"])
                 
                 bank_name = "conversation"
                 
@@ -731,8 +728,7 @@ class AVA:
                 return {
                     "status": "success",
                     "message": f"Queried knowledge for '{query}' from {bank_name} bank" + 
-                              (", then checked health bank" if bank_name != "health" and is_health_topic else "") +
-                              (", then checked default bank" if bank_name == "health" and not results else ""),
+                              f" with results: {results}",
                     "data": results
                 }
 
@@ -834,144 +830,6 @@ class AVA:
         except Exception as e:
             logger.error(f"Error executing tool {tool_name}: {str(e)}")
             return {"status": "error", "message": f"Tool execution failed: {str(e)}"}
-
-    async def process_llm_with_tools(
-        self,
-        user_message: str,
-        conversation_history: List[Dict],
-        state: Union[Dict, str],
-        graph_version_id: str,
-        thread_id: Optional[str] = None
-    ) -> AsyncGenerator[Union[str, Dict], None]:
-        """Process user message with tools."""
-        if not user_message:
-            logger.error("Empty user_message")
-            yield {"status": "error", "message": "Empty message provided"}
-            return
-
-        if isinstance(state, str):
-            user_id = state
-            state = {"user_id": state}
-        else:
-            user_id = state.get('user_id', 'unknown')
-        if not user_id:
-            logger.warning("Empty user_id, defaulting to 'unknown'")
-            user_id = "unknown"
-        logger.info(f"Processing message for user {user_id}")
-
-        conversation_context = ""
-        if conversation_history:
-            recent_messages = []
-            message_count = 0
-            max_messages = 50
-            for msg in reversed(conversation_history):
-                try:
-                    role = msg.get("role", "").lower() if isinstance(msg, dict) else ""
-                    content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
-                    if role and content:
-                        if role in ["assistant", "ai"]:
-                            recent_messages.append(f"AI: {content.strip()}")
-                            message_count += 1
-                        elif role in ["user", "human"]:
-                            recent_messages.append(f"User: {content.strip()}")
-                            message_count += 1
-                    if message_count >= max_messages:
-                        if len(conversation_history) > max_messages:
-                            recent_messages.append(f"[Note: Conversation history truncated. Total messages: {len(conversation_history)}]")
-                        break
-                except Exception as e:
-                    logger.warning(f"Error processing message in conversation history: {e}")
-                    continue
-            if recent_messages:
-                header = "==== CONVERSATION HISTORY (CHRONOLOGICAL ORDER) ====\n"
-                conversation_history_text = "\n\n".join(reversed(recent_messages))
-                separator = "\n==== CURRENT INTERACTION ====\n"
-                conversation_context = f"{header}{conversation_history_text}{separator}\nUser: {user_message}\n"
-                logger.info(f"Added {len(recent_messages)} messages from conversation history")
-        
-        if 'learning_processor' not in state:
-            learning_processor = AVA()
-            await learning_processor.initialize()
-            state['learning_processor'] = learning_processor
-        else:
-            learning_processor = state['learning_processor']
-        
-        state['graph_version_id'] = graph_version_id
-        
-        try:
-            # Use streaming version for real-time response
-            final_response = None
-            tool_results = []
-            
-            async for chunk in learning_processor.read_human_input(
-                user_message, 
-                conversation_context, 
-                user_id,
-                thread_id
-            ):
-                if chunk.get("type") == "response_chunk":
-                    # Stream chunks immediately to frontend
-                    yield {"status": "streaming", "content": chunk["content"], "complete": False}
-                elif chunk.get("type") == "response_complete":
-                    # Store final response for post-processing
-                    final_response = chunk
-                    
-                    # Extract message content and clean it
-                    message_content = chunk["message"] if "message" in chunk else str(chunk)
-                    message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
-                    logger.info("Stripped knowledge_queries from message for frontend")
-                    
-                    # Execute any tool calls
-                    if "metadata" in chunk and "tool_calls" in chunk["metadata"]:
-                        for tool_call in chunk["metadata"]["tool_calls"]:
-                            if isinstance(tool_call, dict) and "name" in tool_call and "parameters" in tool_call:
-                                tool_result = await self.execute_tool(
-                                    tool_name=tool_call["name"],
-                                    parameters=tool_call["parameters"]
-                                )
-                                tool_results.append(tool_result)
-                                yield tool_result
-                                logger.info(f"Executed tool {tool_call['name']} with result: {tool_result}")
-                            else:
-                                logger.warning(f"Invalid tool call format: {tool_call}")
-                    
-                    # Yield final complete response with metadata
-                    final_response_data = {
-                        "status": "success", 
-                        "message": message_content, 
-                        "complete": True
-                    }
-                    
-                    # Include metadata if available
-                    if "metadata" in chunk:
-                        final_response_data["metadata"] = chunk["metadata"]
-                    
-                    yield final_response_data
-                    state.setdefault("messages", []).append({"role": "assistant", "content": message_content})
-                    
-                elif chunk.get("type") == "error":
-                    # Handle errors
-                    yield chunk
-                    return
-
-            # Force cleanup of tasks before returning final result
-            if 'learning_processor' in state:
-                await state['learning_processor'].cleanup()
-
-            if tool_results:
-                state["last_tool_results"] = tool_results
-        except Exception as e:
-            logger.error(f"Error in CoT processing: {str(e)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            error_response = {"status": "error", "message": f"Error: {str(e)}"}
-            yield error_response
-        finally:
-            # Make sure we clean up tasks even in case of exception
-            if 'learning_processor' in state:
-                await state['learning_processor'].cleanup()
-                
-        yield {"state": state}
 
     async def handle_teaching_intent(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str) -> None:
         """Handle teaching intent detection and knowledge saving."""
