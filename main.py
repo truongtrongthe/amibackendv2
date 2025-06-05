@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from fastapi_routes import router as api_router
 from braingraph_routes import router as braingraph_router
 from contact_apis import router as contact_router
+from waitlist import router as waitlist_router
 from supabase import create_client, Client
 from ava import AVA
 
@@ -58,6 +59,7 @@ recent_requests = deque(maxlen=1000)
 app.include_router(api_router)
 app.include_router(braingraph_router)
 app.include_router(contact_router)
+app.include_router(waitlist_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async

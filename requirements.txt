@@ -24,3 +24,4 @@ cachetools
 pytz
 nltk
 spacy
+email_validator
