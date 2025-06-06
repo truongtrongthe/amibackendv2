@@ -22,6 +22,7 @@ from fastapi_routes import router as api_router
 from braingraph_routes import router as braingraph_router
 from contact_apis import router as contact_router
 from waitlist import router as waitlist_router
+from aibrain import router as brain_router
 from supabase import create_client, Client
 from ava import AVA
 
@@ -60,6 +61,7 @@ app.include_router(api_router)
 app.include_router(braingraph_router)
 app.include_router(contact_router)
 app.include_router(waitlist_router)
+app.include_router(brain_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async
