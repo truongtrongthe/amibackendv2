@@ -228,12 +228,12 @@ def extract_user_facing_content(content: str, response_strategy: str, structured
         # Extract user response (this is what should be sent to the user)
         if structured_sections.get("user_response"):
             user_facing_content = structured_sections["user_response"]
-            logger.info(f"Extracted user-facing content from structured response")
+            logger.info(f"✅ Extracted user-facing content from structured response (length: {len(user_facing_content)})")
         else:
             # Remove knowledge_synthesis and knowledge_summary sections if they exist
             user_facing_content = re.sub(r'<knowledge_synthesis>.*?</knowledge_synthesis>', '', content, flags=re.DOTALL).strip()
             user_facing_content = re.sub(r'<knowledge_summary>.*?</knowledge_summary>', '', user_facing_content, flags=re.DOTALL).strip()
-            logger.info(f"Cleaned non-user sections from response")
+            logger.info(f"⚠️ No structured user_response found - cleaned non-user sections from response (length: {len(user_facing_content)})")
     
     # Handle JSON responses
     if content.startswith('{') and '"message"' in content:
@@ -271,9 +271,9 @@ Requirements:
    - Ask about challenges, edge cases, or advanced aspects
    - Keep the same language and tone as the original response
 
-IMPORTANT: Generate NO MORE THAN 2 QUESTIONS TOTAL.
+CRITICAL: You MUST provide the complete response. Do not truncate or cut off your output.
 
-Structure:
+Structure (COMPLETE THIS ENTIRE STRUCTURE):
 [ORIGINAL RESPONSE EXACTLY AS PROVIDED]
 
 [One natural transition sentence that bridges to questions]
@@ -281,16 +281,21 @@ Structure:
 [EXACTLY 1-2 follow-up questions - NO MORE THAN 2]
 
 Example transition phrases (adapt to context and language):
-- "Dựa trên những kinh nghiệm này..." / "Based on this approach..."
-- "Em muốn tìm hiểu sâu hơn về..." / "I'd like to understand more about..."
+- "Để hiểu rõ hơn về..." / "To understand more about..."
+- "Dựa trên những thông tin này..." / "Based on this information..."
 - "Trong thực tế..." / "In practice..."
 
-Your enhanced response:"""
+Your complete enhanced response:"""
 
     try:
-        enhancement_response = await LLM.ainvoke(enhancement_prompt)
+        # Use a dedicated LLM instance with higher token limit for enhancement
+        from langchain_openai import ChatOpenAI
+        enhancement_llm = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.1, max_tokens=1000)
+        enhancement_response = await enhancement_llm.ainvoke(enhancement_prompt)
         enhanced_user_content = enhancement_response.content.strip()
-        logger.info("Successfully enhanced original response with follow-up questions")
+        logger.info(f"Successfully enhanced original response with follow-up questions (length: {len(enhanced_user_content)})")
+        logger.info(f"Enhanced content preview: {enhanced_user_content[:200]}...")
+        logger.info(f"Enhanced content full: {enhanced_user_content}")
     except Exception as e:
         logger.error(f"Failed to enhance original response: {str(e)}")
         # Fallback: use original content
