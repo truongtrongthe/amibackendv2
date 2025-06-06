@@ -255,6 +255,248 @@ class AVA:
         except Exception as e:
             logger.error(f"Error emitting learning intent event: {str(e)}")
     
+    async def _emit_learning_knowledge_to_socket(self, thread_id_for_analysis, analysis_knowledge):
+        # WEBSOCKET EMISSION: learning knowledge event when knowledge is found
+        try:
+            # Extract additional context data for frontend
+            query_results = analysis_knowledge.get("query_results", [])
+            queries = analysis_knowledge.get("queries", [])
+            knowledge_context = analysis_knowledge.get("knowledge_context", "")
+            
+            # Prepare query summaries for frontend
+            query_summaries = []
+            for i, query in enumerate(queries):
+                query_summary = {
+                    "query": query,
+                    "results_count": len([r for r in query_results if r.get("query") == query]) if query_results else 0
+                }
+                query_summaries.append(query_summary)
+            
+            # Prepare top knowledge results for frontend preview
+            top_results = []
+            for result in query_results[:5]:  # Top 5 results for preview
+                # Handle categories safely - could be dict or list
+                categories_data = result.get("categories", [])
+                if isinstance(categories_data, dict):
+                    categories_list = list(categories_data.keys())
+                elif isinstance(categories_data, list):
+                    categories_list = categories_data
+                else:
+                    categories_list = []
+                
+                result_summary = {
+                    "id": result.get("id", ""),
+                    "score": result.get("score", 0.0),
+                    "preview": result.get("raw", "")[:100] + "..." if len(result.get("raw", "")) > 100 else result.get("raw", ""),
+                    "categories": categories_list,
+                    "query": result.get("query", "")
+                }
+                top_results.append(result_summary)
+            
+            learning_knowledge_event = {
+                "type": "learning_knowledge",
+                "thread_id": thread_id_for_analysis,
+                "timestamp": datetime.now().isoformat(),
+                "content": {
+                    "message": "Found relevant knowledge for learning",
+                    "similarity_score": analysis_knowledge.get("similarity", 0.0),
+                    "knowledge_count": len(query_results),
+                    "queries": queries,
+                    "query_summaries": query_summaries,
+                    "top_results": top_results,
+                    "has_knowledge_context": bool(knowledge_context),
+                    "knowledge_context_length": len(knowledge_context) if knowledge_context else 0,
+                    "complete": False
+                }
+            }
+            await emit_learning_knowledge_event(thread_id_for_analysis, learning_knowledge_event)
+            logger.info(f"Emitted enhanced learning knowledge event for thread {thread_id_for_analysis} with {len(query_results)} results")
+        except Exception as e:
+            logger.error(f"Error emitting learning knowledge event: {str(e)}")
+
+    async def _detect_early_intent_and_emit(self, thread_id_for_analysis, message: str, analysis_knowledge: Dict, conversation_context: str):
+        """Detect preliminary intent using LLM-based analysis and emit early acknowledgement to frontend."""
+        try:
+            # Use lightweight LLM for quick preliminary intent analysis
+            similarity_score = analysis_knowledge.get("similarity", 0.0)
+            query_results = analysis_knowledge.get("query_results", [])
+            
+            # Build context for LLM analysis
+            context_summary = ""
+            if conversation_context:
+                # Get last few exchanges for context
+                recent_context = conversation_context.split('\n\n')[-4:] if conversation_context else []
+                context_summary = "\n".join(recent_context)
+            
+            knowledge_summary = ""
+            if query_results:
+                knowledge_summary = f"Found {len(query_results)} relevant knowledge entries (similarity: {similarity_score:.2f})"
+            
+            # Quick LLM prompt for intent detection
+            intent_prompt = f"""Analyze this user message for preliminary intent classification. Be concise and quick.
+
+            User Message: "{message}"
+
+            Recent Context: {context_summary if context_summary else "No prior context"}
+
+            Knowledge Context: {knowledge_summary if knowledge_summary else "No relevant knowledge found"}
+
+            Classify the preliminary intent and provide confidence. Respond in JSON format:
+            {{
+                "preliminary_intent": "teaching|questioning|explaining|requesting|general_conversation",
+                "confidence": 0.0-1.0,
+                "reasoning": "brief explanation",
+                "has_teaching_signals": true/false,
+                "is_question": true/false,
+                "knowledge_relevance": "high|medium|low|none"
+            }}
+
+            Focus on the most likely intent based on message patterns and context."""
+
+            # Use a quick LLM call for preliminary analysis
+            from langchain_openai import ChatOpenAI
+            QuickLLM = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, max_tokens=200)
+            
+            logger.info("Performing LLM-based early intent detection...")
+            llm_response = await QuickLLM.ainvoke(intent_prompt)
+            llm_content = llm_response.content.strip() if llm_response and llm_response.content else ""
+            
+            logger.info(f"LLM intent response content: '{llm_content[:100]}...'")
+            
+            # Parse LLM response with better error handling
+            try:
+                import json
+                # Try to extract JSON if it's wrapped in markdown code blocks
+                if "```json" in llm_content:
+                    json_start = llm_content.find("```json") + 7
+                    json_end = llm_content.find("```", json_start)
+                    if json_end > json_start:
+                        json_content = llm_content[json_start:json_end].strip()
+                    else:
+                        json_content = llm_content[json_start:].strip()
+                elif "```" in llm_content:
+                    # Handle plain code blocks
+                    json_start = llm_content.find("```") + 3
+                    json_end = llm_content.find("```", json_start)
+                    if json_end > json_start:
+                        json_content = llm_content[json_start:json_end].strip()
+                    else:
+                        json_content = llm_content[json_start:].strip()
+                else:
+                    json_content = llm_content
+                
+                logger.info(f"Extracted JSON content: '{json_content[:100]}...'")
+                
+                if not json_content:
+                    raise ValueError("Empty JSON content")
+                
+                intent_analysis = json.loads(json_content)
+                
+                # Validate required fields
+                if not isinstance(intent_analysis, dict):
+                    raise ValueError("Response is not a JSON object")
+                
+                # Extract analysis results with validation
+                preliminary_intent = intent_analysis.get("preliminary_intent", "unknown")
+                confidence_score = float(intent_analysis.get("confidence", 0.5))
+                reasoning = intent_analysis.get("reasoning", "LLM analysis completed")
+                has_teaching_signals = bool(intent_analysis.get("has_teaching_signals", False))
+                is_question = bool(intent_analysis.get("is_question", False))
+                knowledge_relevance = intent_analysis.get("knowledge_relevance", "none")
+                
+                logger.info(f"Successfully parsed LLM intent: {preliminary_intent} (confidence: {confidence_score})")
+                
+            except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Failed to parse LLM intent analysis: {e}")
+                logger.warning(f"Raw LLM content was: '{llm_content}'")
+                
+                # Fallback to basic pattern analysis
+                message_lower = message.lower()
+                preliminary_intent = "general_conversation"
+                confidence_score = 0.3
+                reasoning = f"Fallback analysis due to parsing error: {str(e)}"
+                
+                # Simple pattern detection as fallback
+                if any(word in message_lower for word in ["teach", "explain", "show", "understand", "learn"]):
+                    preliminary_intent = "teaching" if "teach" in message_lower or "explain" in message_lower else "questioning"
+                    confidence_score = 0.5
+                elif "?" in message or any(word in message_lower for word in ["what", "how", "why", "when", "where"]):
+                    preliminary_intent = "questioning"
+                    confidence_score = 0.6
+                    
+                has_teaching_signals = "teach" in message_lower or "explain" in message_lower
+                is_question = "?" in message or any(word in message_lower for word in ["what", "how", "why", "when", "where"])
+                knowledge_relevance = "medium" if similarity_score > 0.3 else "low"
+                
+                logger.info(f"Fallback intent analysis: {preliminary_intent} (confidence: {confidence_score})")
+            
+            # Analyze knowledge context signals
+            knowledge_context_signals = {
+                "high_similarity": similarity_score >= 0.65,
+                "medium_similarity": 0.35 <= similarity_score < 0.65,
+                "has_knowledge_results": len(query_results) > 0,
+                "substantial_knowledge": len(query_results) >= 3,
+                "knowledge_relevance": knowledge_relevance
+            }
+            
+            # Emit early intent acknowledgement
+            learning_intent_acknowledgement = {
+                "type": "learning_intent_acknowledgement",
+                "thread_id": thread_id_for_analysis,
+                "timestamp": datetime.now().isoformat(),
+                "content": {
+                    "message": "Analyzing your intent and gathering context",
+                    "preliminary_intent": preliminary_intent,
+                    "confidence": confidence_score,
+                    "reasoning": reasoning,
+                    "signals": {
+                        "has_teaching_signals": has_teaching_signals,
+                        "is_question": is_question,
+                        "knowledge_context": knowledge_context_signals
+                    },
+                    "status": "preliminary_analysis",
+                    "complete": False
+                }
+            }
+            
+            await emit_learning_intent_event(thread_id_for_analysis, learning_intent_acknowledgement)
+            logger.info(f"Emitted LLM-based early intent acknowledgement for thread {thread_id_for_analysis}: {preliminary_intent} (confidence: {confidence_score:.2f}) - {reasoning}")
+            
+        except Exception as e:
+            logger.error(f"Error in LLM-based early intent detection: {str(e)}")
+            import traceback
+            logger.error(f"Early intent detection traceback: {traceback.format_exc()}")
+            
+            # Emit basic acknowledgement on failure
+            try:
+                fallback_acknowledgement = {
+                    "type": "learning_intent_acknowledgement",
+                    "thread_id": thread_id_for_analysis,
+                    "timestamp": datetime.now().isoformat(),
+                    "content": {
+                        "message": "Processing your message",
+                        "preliminary_intent": "processing",
+                        "confidence": 0.1,
+                        "reasoning": f"Fallback due to analysis error: {str(e)}",
+                        "signals": {
+                            "has_teaching_signals": False,
+                            "is_question": "?" in message,
+                            "knowledge_context": {
+                                "has_knowledge_results": len(analysis_knowledge.get("query_results", [])) > 0,
+                                "knowledge_relevance": "unknown"
+                            }
+                        },
+                        "status": "processing",
+                        "complete": False
+                    }
+                }
+                await emit_learning_intent_event(thread_id_for_analysis, fallback_acknowledgement)
+                logger.info(f"Emitted fallback acknowledgement for thread {thread_id_for_analysis}")
+            except Exception as fallback_error:
+                logger.error(f"Failed to emit fallback acknowledgement: {fallback_error}")
+                import traceback
+                logger.error(f"Fallback emission traceback: {traceback.format_exc()}")
+
     async def read_human_input(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of process_incoming_message that yields chunks as they come."""
         logger.info(f"Processing streaming message from user {user_id}")
@@ -284,25 +526,13 @@ class AVA:
             logger.info(f"Searching for knowledge based on message using iterative exploration...")
             analysis_knowledge = await self.knowledge_explorer.explore(message, conversation_context, user_id, thread_id)
             
-            # WEBSOCKET EMISSION POINT 2: Emit learning knowledge event when knowledge is found
+            # WEBSOCKET EMISSION POINT 2A: Emit early intent acknowledgement when analysis begins
             if use_websocket and thread_id_for_analysis and socket_imports_success and analysis_knowledge:
-                try:
-                    learning_knowledge_event = {
-                        "type": "learning_knowledge",
-                        "thread_id": thread_id_for_analysis,
-                        "timestamp": datetime.now().isoformat(),
-                        "content": {
-                            "message": "Found relevant knowledge for learning",
-                            "similarity_score": analysis_knowledge.get("similarity", 0.0),
-                            "knowledge_count": len(analysis_knowledge.get("query_results", [])),
-                            "queries": analysis_knowledge.get("queries", []),
-                            "complete": False
-                        }
-                    }
-                    await emit_learning_knowledge_event(thread_id_for_analysis, learning_knowledge_event)
-                    logger.info(f"Emitted learning knowledge event for thread {thread_id_for_analysis}")
-                except Exception as e:
-                    logger.error(f"Error emitting learning knowledge event: {str(e)}")
+                await self._detect_early_intent_and_emit(thread_id_for_analysis, message, analysis_knowledge, conversation_context)
+            
+            # WEBSOCKET EMISSION POINT 2B: Emit learning knowledge event when knowledge is found
+            if use_websocket and thread_id_for_analysis and socket_imports_success and analysis_knowledge:
+                await self._emit_learning_knowledge_to_socket(thread_id_for_analysis, analysis_knowledge)
             
             # Step 3: Enrich with suggested queries if we don't have sufficient results
             if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
@@ -365,25 +595,7 @@ class AVA:
                 
                 # WEBSOCKET EMISSION POINT 1: Emit learning intent event when intent is understood
                 if use_websocket and thread_id_for_analysis and socket_imports_success:
-                    try:
-                        learning_intent_event = {
-                            "type": "learning_intent",
-                            "thread_id": thread_id_for_analysis,
-                            "timestamp": datetime.now().isoformat(),
-                            "content": {
-                                "message": "Understanding human intent",
-                                "intent_type": intent_type,
-                                "has_teaching_intent": has_teaching_intent,
-                                "is_priority_topic": is_priority_topic,
-                                "priority_topic_name": priority_topic_name,
-                                "should_save_knowledge": should_save_knowledge,
-                                "complete": True
-                            }
-                        }
-                        await emit_learning_intent_event(thread_id_for_analysis, learning_intent_event)
-                        logger.info(f"Emitted learning intent event for thread {thread_id_for_analysis}: {intent_type}")
-                    except Exception as e:
-                        logger.error(f"Error emitting learning intent event: {str(e)}")
+                    await self._emit_to_socket(thread_id_for_analysis, intent_type, has_teaching_intent, is_priority_topic, priority_topic_name, should_save_knowledge)
                 
                 # Get similarity score from analysis
                 similarity_score = analysis_knowledge.get("similarity", 0.0) if analysis_knowledge else 0.0
