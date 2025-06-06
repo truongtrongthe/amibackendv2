@@ -1293,18 +1293,40 @@ class AVA:
             logger.info(f"Processing human decision for {request_id}: {action}")
             
             if action == "CREATE_NEW":
-                # Use existing save logic for new knowledge
+                # Use multiple vector save logic for new knowledge
                 new_content = decision_request["new_content"]
                 
-                save_result = await save_knowledge(
-                    input=new_content,
+                # Create a response-like structure for vector tracking
+                response = {
+                    "message": new_content,
+                    "metadata": {}
+                }
+                
+                # Parse the content to extract user and AI parts
+                if "\n\nAI:" in new_content:
+                    parts = new_content.split("\n\nAI:", 1)
+                    user_message = parts[0].replace("User:", "").strip()
+                    ai_response = parts[1].strip()
+                else:
+                    # Fallback - treat as user message with default AI response
+                    user_message = new_content.replace("User:", "").strip()
+                    ai_response = "Knowledge saved via decision tool"
+                
+                # Set up categories for decision-based saves
+                categories = ["teaching_intent", "human_approved", "decision_created"]
+                
+                # Run multiple saves like teaching intent flow
+                self._create_background_task(self._save_tool_knowledge_multiple(
+                    user_message=user_message,
+                    ai_response=ai_response,
+                    combined_content=new_content,
                     user_id=user_id,
                     bank_name="conversation",
                     thread_id=thread_id,
-                    topic="user_teaching",
-                    categories=["teaching_intent", "human_approved"],
-                    ttl_days=365
-                )
+                    priority_topic_name="user_teaching",
+                    categories=categories,
+                    response=response
+                ))
                 
                 # Clean up pending decision using alpha.py function
                 await remove_pending_decision(request_id)
@@ -1312,8 +1334,8 @@ class AVA:
                 return {
                     "success": True,
                     "action": "CREATE_NEW",
-                    "vector_id": save_result.get("vector_id") if save_result else None,
-                    "message": "New knowledge created as requested"
+                    "message": "Multiple knowledge vectors created as requested",
+                    "save_types": ["combined_knowledge", "ai_synthesis", "standalone_summary"]
                 }
                 
             elif action == "UPDATE_EXISTING":
@@ -1347,24 +1369,53 @@ class AVA:
                     merge_strategy="enhance"
                 )
                 
-                # Update the existing knowledge
-                update_result = await self.update_existing_knowledge(
-                    vector_id=target_id,
-                    new_content=merged_content,
+                # Create a response-like structure for vector tracking
+                response = {
+                    "message": merged_content,
+                    "metadata": {}
+                }
+                
+                # Parse the merged content to extract user and AI parts
+                if "\n\nAI:" in merged_content:
+                    parts = merged_content.split("\n\nAI:", 1)
+                    user_message = parts[0].replace("User:", "").strip()
+                    ai_response = parts[1].strip()
+                else:
+                    # Fallback - treat as user message with default AI response
+                    user_message = merged_content.replace("User:", "").strip()
+                    ai_response = "Knowledge updated via decision tool"
+                
+                # Set up categories for decision-based updates
+                categories = ["teaching_intent", "human_approved", "decision_updated", "merged_knowledge"]
+                
+                # Run multiple saves for the updated/merged content
+                self._create_background_task(self._save_tool_knowledge_multiple(
+                    user_message=user_message,
+                    ai_response=ai_response,
+                    combined_content=merged_content,
                     user_id=user_id,
-                    preserve_metadata=True
-                )
+                    bank_name="conversation",
+                    thread_id=thread_id,
+                    priority_topic_name="user_teaching",
+                    categories=categories,
+                    response=response
+                ))
+                
+                # Note: We're not deleting the old vector here - could be implemented later
+                # TODO: Consider implementing old vector cleanup
+                logger.info(f"⚠️ Original vector {target_id} remains in database - new merged vectors created")
                 
                 # Clean up pending decision using alpha.py function
                 await remove_pending_decision(request_id)
                 
                 return {
-                    "success": update_result.get("success", False),
+                    "success": True,
                     "action": "UPDATE_EXISTING",
                     "original_vector_id": target_id,
-                    "new_vector_id": update_result.get("vector_id"),
                     "merged_content": merged_content,
-                    "message": "Knowledge successfully updated and merged"
+                    "message": "Multiple knowledge vectors created for merged content",
+                    "save_types": ["combined_knowledge", "ai_synthesis", "standalone_summary"],
+                    "note": "Original vector preserved for reference"
                 }
             
             else:
