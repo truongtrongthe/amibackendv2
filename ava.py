@@ -892,21 +892,20 @@ class AVA:
             content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
             # Step 8: Handle teaching intent regeneration if needed using alpha.py function
+            
             if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
-                logger.info(f"Original content before enhancement (length: {len(content)}): {content[:200]}...")
+                logger.info(f"Content before regeneration: {content}")
                 content, response_strategy = await regenerate_teaching_intent_response(
                     message_str, content, response_strategy
                 )
-                logger.info(f"Enhanced content after regeneration (length: {len(content)}): {content[:200]}...")
+                logger.info(f"Content after regeneration: {content}")
             
             # Step 8.5: Extract structured sections AFTER content enhancement
             structured_sections = self.support.extract_structured_sections(content)
             logger.info(f"Extracted structured sections: {list(structured_sections.keys())}")
             
             # Step 9: Extract user-facing content using alpha.py function
-            logger.info(f"Content passed to extract_user_facing_content (length: {len(content)}): {content[:200]}...")
             user_facing_content = extract_user_facing_content(content, response_strategy, structured_sections)
-            logger.info(f"User-facing content extracted (length: {len(user_facing_content)}): {user_facing_content[:200]}...")
             
             # Step 10: Handle empty response fallbacks
             user_facing_content = self.support.handle_empty_response_fallbacks(
