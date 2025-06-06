@@ -426,9 +426,49 @@ class AIBrainAnalyzer:
                 "topics_count": len(topic_groups),
                 "content_sections": len(organized_content)
             },
-            "detected_language": self._detect_content_language(final_content)
+            "detected_language": self._detect_content_language_fallback(final_content)
         }
     
+
+    def _detect_content_language_fallback(self, content: str) -> Dict[str, Any]:
+        """Fallback language detection method."""
+        try:
+            # Simple language detection based on character patterns
+            # This is a basic fallback - could be enhanced with a proper language detection library
+            
+            # Check for common Vietnamese characters
+            vietnamese_chars = set('àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựýỳỷỹỵ')
+            content_lower = content.lower()
+            vietnamese_count = sum(1 for char in content_lower if char in vietnamese_chars)
+            vietnamese_ratio = vietnamese_count / len(content) if content else 0
+            
+            if vietnamese_ratio > 0.05:  # If more than 5% Vietnamese characters
+                return {
+                    "language": "vi",
+                    "language_name": "Vietnamese", 
+                    "confidence": min(0.9, vietnamese_ratio * 10),
+                    "mixed_languages": vietnamese_ratio < 0.5,
+                    "detected_by": "character_analysis"
+                }
+            else:
+                return {
+                    "language": "en",
+                    "language_name": "English",
+                    "confidence": 0.7,
+                    "mixed_languages": False,
+                    "detected_by": "fallback_default"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in fallback language detection: {str(e)}")
+            return {
+                "language": "en",
+                "language_name": "English", 
+                "confidence": 0.5,
+                "mixed_languages": False,
+                "detected_by": "error_fallback",
+                "error": str(e)
+            }
 
 
     async def _generate_llm_summary(self, content_summary: Dict[str, Any], summary_type: str) -> Dict[str, Any]:
