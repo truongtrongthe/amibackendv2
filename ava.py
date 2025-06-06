@@ -1,86 +1,161 @@
 """
 AVA (Active Learning Assistant) - Enhanced Knowledge Management System
 
-PLAN:
-1. When it detects teaching intent, it will find relevant knowledge.
-2. Synthesize and store in a list with structure: [list of input in multiturn] and a the final synthesis. Using alpha.py to save the synthesis.
-3. Ask human to adjust the input. If human elaborates, it will update the input and resynthesize.
-4. Ask human to save the synthesis. If human approves, it will save the synthesis.
+OVERVIEW:
+=========
+AVA is a sophisticated conversational AI system that provides streaming responses while intelligently managing knowledge through multiple saving strategies. It features teaching intent detection, similarity-based knowledge gating, and human-in-the-loop decision making for optimal knowledge organization.
 
-ENHANCED PLAN (Smart Merge Strategy):
-5. Medium Similarity (35%-65%) → Brainstorming Session with Human
-6. Save Confirmation with UPDATE vs CREATE options 
-7. Smart Knowledge UPDATE Strategy:
-   - High Similarity (≥50%) → Auto-suggest UPDATE existing knowledge
-   - Medium Similarity (35%-65%) → Ask human: UPDATE existing vs CREATE new
-   - Low Similarity (<35%) → CREATE new knowledge
-   - Intelligent merge of complementary information
-   - Preserve original knowledge while enhancing with new information
+CORE ARCHITECTURE:
+==================
+
+1. **Streaming Conversation Engine**
+   - Real-time streaming responses via AsyncGenerator
+   - Knowledge retrieval using KnowledgeExplorer with iterative search
+   - WebSocket integration for real-time frontend updates
+   - Conversation context awareness with multi-turn handling
+
+2. **Intelligent Knowledge Management**
+   - Multi-vector saving strategy (3 formats per knowledge entry)
+   - Teaching intent detection with LLM-based analysis
+   - Similarity-based knowledge gating system
+   - UPDATE vs CREATE decision workflow with human oversight
+
+3. **Tool Integration System**
+   - Direct tool execution via execute_tool method
+   - Support for knowledge_query, save_knowledge, handle_update_decision
+   - Background task management for non-blocking operations
+
+KNOWLEDGE SAVING STRATEGY:
+=========================
+
+**Multi-Vector Approach** (3 vectors per knowledge entry):
+1. **Combined Knowledge** - Full "User: X\n\nAI: Y" format for context
+2. **AI Synthesis** - Enhanced with metadata and synthesis markers
+3. **Standalone Summary** - Pure AI content with summary titles
+
+**Similarity-Based Gating:**
+- High Similarity (≥65%) → Auto-save as new knowledge (3 vectors)
+- Medium Similarity (35%-65%) → Human decision required (UPDATE vs CREATE)
+- Low Similarity (<35%) → Auto-save as new knowledge (3 vectors)
+
+**Categories Applied:**
+- Teaching Intent: ["teaching_intent", "human_approved"]
+- Tool Execution: ["teaching_intent", "tool_executed"]
+- Decision-based: ["human_approved", "decision_created/updated"]
+- High Quality: ["high_quality_conversation", "general"]
 
 UPDATE vs CREATE WORKFLOW:
 ==========================
 
 1. **Teaching Intent Detection**
    - User provides information with teaching intent
-   - System calculates similarity with existing knowledge
+   - System calculates similarity with existing knowledge using embeddings
+   - KnowledgeExplorer performs iterative search for relevant content
 
-2. **Similarity-Based Decision**
-   - High Similarity (≥65%) → Auto-save as new knowledge
-   - Medium Similarity (35%-65%) → Human decision required
-   - Low Similarity (<35%) → Auto-save as new knowledge
+2. **Similarity-Based Decision Gate**
+   - evaluate_knowledge_similarity_gate() determines action type
+   - identify_knowledge_update_candidates() finds similar entries
+   - Medium similarity triggers human decision requirement
 
 3. **Human-in-the-Loop for Medium Similarity**
-   - System identifies 1-3 similar knowledge candidates
-   - Presents options to human:
-     * CREATE NEW: Save as completely new knowledge
-     * UPDATE EXISTING: Merge with existing knowledge
-   - Human selects preferred action
+   - create_update_decision_request() generates decision prompt
+   - System presents 1-3 similar knowledge candidates
+   - Frontend displays options: CREATE NEW vs UPDATE EXISTING
+   - Human selects preferred action via handle_update_decision tool
 
-4. **Knowledge Merging (for UPDATE)**
-   - LLM intelligently merges existing + new content
-   - Preserves valuable information from both sources
-   - Creates enhanced, comprehensive knowledge entry
+4. **Knowledge Processing**
+   - **CREATE NEW**: Saves 3 new vectors with decision_created category
+   - **UPDATE EXISTING**: Merges content + saves 3 new vectors with decision_updated category
+   - Original vectors preserved for reference (no deletion)
 
 5. **Tool Integration**
-   - Frontend can call handle_update_decision tool
-   - Parameters: request_id, action, target_id (for UPDATE)
-   - System processes decision and executes chosen action
+   - handle_update_decision tool processes human decisions
+   - _save_tool_knowledge_multiple creates all vector formats
+   - Background task execution for non-blocking saves
+
+STREAMING RESPONSE FLOW:
+=======================
+
+1. **Input Processing**
+   - Receive user message and conversation context
+   - Extract suggested queries from previous AI responses
+   - Use KnowledgeExplorer for iterative knowledge search
+
+2. **Knowledge Retrieval**
+   - Primary search based on user message
+   - Enrichment with suggested queries if needed
+   - Similarity scoring and result aggregation
+
+3. **Streaming Response Generation**
+   - _active_learning_streaming yields chunks in real-time
+   - LLM generates response with teaching intent analysis
+   - WebSocket events emitted for frontend updates
+
+4. **Post-Stream Knowledge Management**
+   - Evaluate teaching intent and similarity scores
+   - Trigger appropriate saving strategy (auto-save vs decision)
+   - Handle UPDATE vs CREATE workflow if needed
+
+TOOL EXECUTION SYSTEM:
+=====================
+
+**Supported Tools:**
+- **knowledge_query**: Search knowledge base with enhanced parameters
+- **save_knowledge**: Direct knowledge save with multi-vector strategy
+- **handle_update_decision**: Process human UPDATE/CREATE decisions
+
+**Tool Features:**
+- Enhanced parameter validation and metadata enrichment
+- Background task execution for non-blocking operations
+- Multi-vector saving for all knowledge operations
+- Automatic category assignment based on operation type
+
+WEBSOCKET INTEGRATION:
+=====================
+
+**Real-time Events:**
+- learning_intent_event: Teaching intent detection results
+- learning_knowledge_event: Knowledge retrieval progress
+- Emitted to specific thread_id for targeted frontend updates
 
 EXAMPLE USAGE:
 ==============
 
-# User teaches something with medium similarity (40%)
+# User teaches something with medium similarity (42%)
 User: "Customer segmentation can also be done using behavioral patterns like purchase frequency."
 
-# AVA Response includes:
+# AVA Streaming Response includes decision request:
 {
-  "message": "I understand you're teaching about customer segmentation...\n\n🤔 **Knowledge Decision Required**\n\nI found 2 similar knowledge entries (similarity: 0.42). Would you like me to:\n\n1. **Create New Knowledge** - Save this as a completely new entry\n2. **Update Existing Knowledge** - Merge with similar existing knowledge\n\n**Similar Knowledge Found:**\n**Option 2:** Update existing knowledge (similarity: 0.42)\n*Preview:* Customer segmentation involves grouping customers based on demographics...",
-  "update_decision_request": {
-    "request_id": "update_decision_thread123_1234567890",
-    "decision_type": "UPDATE_OR_CREATE",
-    "candidates_count": 2,
-    "requires_human_input": true
+  "message": "I understand you're teaching about customer segmentation...\n\n🤔 **Knowledge Decision Required**\n\nI found 2 similar knowledge entries (similarity: 0.42). Would you like me to:\n\n1. **Create New Knowledge** - Save this as a completely new entry\n2. **Update Existing Knowledge** - Merge with similar existing knowledge\n\n**Similar Knowledge Found:**\n**Option 2:** Update existing knowledge (similarity: 0.42)\n*Preview:* Customer segmentation involves grouping customers...",
+  "metadata": {
+    "update_decision_request": {
+      "request_id": "update_decision_thread123_1234567890",
+      "decision_type": "UPDATE_OR_CREATE",
+      "candidates_count": 2,
+      "requires_human_input": true
+    }
   }
 }
 
-# Human decides to UPDATE existing knowledge
-# Frontend calls tool:
+# Human decides to UPDATE existing knowledge via tool:
 {
-  "name": "handle_update_decision",
+  "tool_name": "handle_update_decision",
   "parameters": {
-    "request_id": "update_decision_thread123_1234567890",
+    "request_id": "update_decision_thread123_1234567890", 
     "action": "UPDATE_EXISTING",
     "target_id": "vector_abc123"
   }
 }
 
-# System merges knowledge and returns:
+# System merges knowledge and saves 3 new vectors:
 {
   "success": true,
-  "action": "UPDATE_EXISTING",
+  "action": "UPDATE_EXISTING", 
   "original_vector_id": "vector_abc123",
-  "new_vector_id": "vector_def456",
-  "message": "Knowledge successfully updated and merged"
+  "merged_content": "Enhanced merged content...",
+  "message": "Multiple knowledge vectors created for merged content",
+  "save_types": ["combined_knowledge", "ai_synthesis", "standalone_summary"],
+  "note": "Original vector preserved for reference"
 }
 
 """

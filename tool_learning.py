@@ -147,7 +147,7 @@ class LearningProcessor:
                        This is what the user will see - include:
                        - Acknowledgment of their teaching with appreciation
                        - Demonstration of your understanding
-                       - End with 1-2 open-ended questions to deepen the conversation
+                       - End with 1-2 BRAINSTORM-STYLE questions that challenge them to explore potential difficulties, edge cases, implementation challenges, or alternative approaches related to the topic
                        - Make this conversational and engaging
                     </user_response>
                     
@@ -682,7 +682,7 @@ class LearningProcessor:
            This is what the user will see - include:
            - Acknowledgment of their teaching with appreciation
            - Demonstration of your understanding
-           - End with 1-2 open-ended questions to deepen the conversation
+           - End with 1-2 BRAINSTORM-STYLE questions that challenge them to explore potential difficulties, edge cases, implementation challenges, or alternative approaches related to the topic
            - Make this conversational and engaging
         </user_response>
         

@@ -48,7 +48,7 @@ class LearningSupport:
             return {
                 "strategy": "CLOSING",
                 "instructions": (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "Recognize this as a closing message where the user is ending the conversation. "
                     "Respond with a brief, polite farewell message. "
                     "Thank them for the conversation and express willingness to help in the future. "
@@ -63,7 +63,7 @@ class LearningSupport:
             return {
                 "strategy": "PRACTICE_REQUEST",
                 "instructions": (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "The user wants you to DEMONSTRATE or APPLY previously shared knowledge. "
                     "Create a practical example that follows these steps: "
                     
@@ -94,7 +94,7 @@ class LearningSupport:
             return {
                 "strategy": "LOW_RELEVANCE_KNOWLEDGE",
                 "instructions": (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "You have knowledge with low relevance to the current query. "
                     "PRIORITIZE the user's current message over the retrieved knowledge. "
                     "ONLY reference the knowledge if it genuinely helps answer the query. "
@@ -132,10 +132,10 @@ class LearningSupport:
             
             if is_confirmation:
                 instructions = (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "Recognize this is a direct confirmation to your question in your previous message. "
                     "Continue the conversation as if the user said 'yes' to your previous question. "
-                    "Provide a helpful response that builds on the previous question, offering relevant details or asking a follow-up question. "
+                    "Provide a helpful response that builds on the previous question, offering relevant details or asking a BRAINSTORM-STYLE follow-up question that challenges them to explore potential difficulties, edge cases, or deeper implementation aspects of what they just confirmed. "
                     "Don't ask for clarification when the confirmation is clear - proceed with the conversation flow naturally. "
                     "If your previous question offered to provide more information, now is the time to provide that information. "
                     "Keep the response substantive, helpful, and directly related to what the user just confirmed interest in."
@@ -143,7 +143,7 @@ class LearningSupport:
                 context_to_use = prior_knowledge if prior_knowledge else conversation_entities_context
             else:
                 instructions = (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "**FOLLOW-UP RESPONSE**: "
                     "This is a continuation of the previous conversation. The user is referring to, asking about, or building upon something from earlier messages. "
                     
@@ -157,7 +157,7 @@ class LearningSupport:
                     "- Answer their question directly based on what they're referring to "
                     "- Use any relevant knowledge from previous messages or your knowledge base "
                     "- Provide helpful, specific information about the referenced topic "
-                    "- Ask a natural follow-up question to continue the conversation "
+                    "- Ask a BRAINSTORM-STYLE follow-up question that naturally challenges them to explore deeper aspects, potential challenges, or alternative scenarios related to their reference "
                     
                     "**Be Natural**: Don't ask for clarification unless truly necessary - use context to understand what they mean."
                 )
@@ -175,7 +175,7 @@ class LearningSupport:
             return {
                 "strategy": "GREETING",
                 "instructions": (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "Recognize this as a Vietnamese greeting or someone addressing you by name. "
                     "Respond warmly and appropriately to the greeting. "
                     "If they used a Vietnamese name or greeting form, respond in Vietnamese. "
@@ -193,7 +193,7 @@ class LearningSupport:
                 return {
                     "strategy": "CONTEXTUAL_RESPONSE",
                     "instructions": (
-                        f"{pronoun_guidance}\n\n"
+                        f"{pronoun_guidance}\n"
                         "**CONTEXTUAL UNDERSTANDING RESPONSE**: "
                         "Even though I don't have specific stored knowledge about this topic, I can still help by: "
                         
@@ -216,7 +216,7 @@ class LearningSupport:
             
             if is_short_message:
                 instructions = (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "**SHORT MESSAGE CLARIFICATION**: "
                     "This seems like a short message that might need clarification. However, try to understand from context first: "
                     
@@ -230,7 +230,7 @@ class LearningSupport:
                 )
             else:
                 instructions = (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "**GENERAL KNOWLEDGE RESPONSE**: "
                     "While I don't have specific stored knowledge about this topic, I can still try to help: "
                     
@@ -253,19 +253,24 @@ class LearningSupport:
             return {
                 "strategy": "TEACHING_INTENT",
                 "instructions": (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "Recognize this message as TEACHING INTENT where the user is sharing knowledge with you. "
                     "Your goal is to synthesize this knowledge for future use and demonstrate understanding. "
                     
                     "Generate THREE separate outputs in your response:\n\n"
                     
-                    "<user_response>\n"
-                    "   This is what the user will see - include:\n"
-                    "   - Acknowledgment of their teaching with appreciation\n"
-                    "   - Demonstration of your understanding\n"
-                    "   - End with 1-2 open-ended questions to deepen the conversation\n"
-                    "   - Make this conversational and engaging\n"
-                    "</user_response>\n\n"
+                                    "<user_response>\n"
+                "   This is what the user will see - include:\n"
+                "   - Acknowledgment of their teaching with appreciation\n"
+                "   - Demonstration of your understanding\n"
+                "   - End with 1-2 BRAINSTORM-STYLE questions that:\n"
+                "     * Challenge them to explore potential difficulties, edge cases, or implementation challenges\n"
+                "     * Propose specific scenarios or situations to test their knowledge deeper\n"
+                "     * Suggest alternative approaches or 'what if' situations related to the topic\n"
+                "     * Naturally challenge their thinking with curious, exploratory questions\n"
+                "     * Focus on depth (diving deeper) rather than breadth (expanding wider)\n"
+                "   - Make this conversational and engaging\n"
+                "</user_response>\n\n"
                     
                     "<knowledge_synthesis>\n"
                     "   This is for knowledge storage - include ONLY:\n"
@@ -296,7 +301,7 @@ class LearningSupport:
             return {
                 "strategy": "RELEVANT_KNOWLEDGE",
                 "instructions": (
-                    f"{pronoun_guidance}\n\n"
+                    f"{pronoun_guidance}\n"
                     "I've found MULTIPLE knowledge entries relevant to your query. Let me provide a comprehensive response.\n\n"
                     "For each knowledge item found:\n"
                     "1. Review and synthesize the information from ALL available knowledge items\n"
@@ -321,38 +326,6 @@ class LearningSupport:
     def build_llm_prompt(self, message_str: str, conversation_context: str, temporal_context: str, 
                         knowledge_context: str, response_strategy: str, strategy_instructions: str,
                         core_prior_topic: str, user_id: str) -> str:
-        """
-        Build a dynamic, context-aware LLM prompt.
-        
-        🎯 OPTIMIZATION RESULTS (reduced from ~4000 to ~2600 tokens, -35% size):
-        ✅ Consolidated teaching intent detection (removed 50% redundancy, added critical examples)
-        ✅ Merged pronoun guidance into single section (removed 50% redundancy)  
-        ✅ Eliminated duplicate conversation history instructions (removed 40% redundancy)
-        ✅ Streamlined confidence instructions (removed 50% redundancy, strengthened knowledge usage)
-        ✅ Simplified language context detection (removed 30% redundancy)
-        
-        🔒 PRESERVED & ENHANCED FUNCTIONALITY:
-        ✅ All required evaluation outputs maintained
-        ✅ Teaching intent detection with critical examples and nuance
-        ✅ STRENGTHENED knowledge utilization requirements
-        ✅ Strategy-specific instructions preserved
-        ✅ Knowledge context formatting enhanced with mandatory usage rules
-        ✅ Tool availability and usage instructions kept
-        
-        🛠️ CRITICAL FIXES APPLIED:
-        ✅ Added specific examples for teaching intent detection accuracy
-        ✅ Emphasized MANDATORY knowledge usage to prevent generic responses
-        ✅ Strengthened instructions to use available knowledge instead of asking for more
-        ✅ Added organization requirements for comprehensive knowledge synthesis
-        
-        Token Distribution (optimized + fixed):
-        - Base Prompt: ~1200 tokens (was 1500, added critical examples)
-        - Strategy Instructions: ~600-800 tokens (was 800-1200, enhanced knowledge emphasis)  
-        - Confidence Instructions: ~250-350 tokens (was 400-600, strengthened knowledge usage)
-        - Evaluation Output: ~400 tokens (unchanged)
-        - Total: ~2450-2750 tokens (was 3500-4100, -35% reduction with enhanced functionality)
-        """
-        
         # Always include base prompt (~1000 tokens - reduced from 1500)
         prompt = self._get_optimized_base_prompt(message_str, conversation_context, temporal_context, user_id)
         
@@ -1760,7 +1733,18 @@ class LearningSupport:
                    [Write what the user will see - conversational and engaging]
                    - Acknowledge their teaching with enthusiasm 
                    - Show understanding of what they shared
-                   - End with 1-2 open-ended questions
+                   - End with 1-2 BRAINSTORM-STYLE questions that:
+                     * Challenge them to explore potential difficulties, edge cases, or implementation challenges
+                     * Propose specific scenarios or situations to test their knowledge deeper
+                     * Suggest alternative approaches or 'what if' situations related to the topic
+                     * Naturally challenge their thinking with curious, exploratory questions
+                     * Focus on depth (diving deeper) rather than breadth (expanding wider)
+                     * EXAMPLES of brainstorm-style questions:
+                       - "What challenges might arise when applying this in [specific scenario]?"
+                       - "How would this approach handle edge cases like [specific example]?"
+                       - "What if we encountered [challenging situation] - how would you adapt this?"
+                       - "I'm curious about potential obstacles - what's the trickiest part of implementing this?"
+                       - "What alternative approaches could work if this method fails in [scenario]?"
                    - Use consistent pronouns throughout
                 </user_response>
                 
@@ -1790,7 +1774,7 @@ class LearningSupport:
                 
                 **FOR ROLE ASSIGNMENTS** (any future-oriented task assignment):
                 - Respond with enthusiasm and commitment to the assigned role/task
-                - Ask specific questions about implementation details
+                - Ask BRAINSTORM-STYLE questions that challenge them to consider implementation obstacles, edge cases, or alternative approaches they might encounter
                 - Show excitement about the responsibility
                 - Examples: "Vâng anh! Em sẽ [task] ngay!" or "Got it! I'll start [task] right away!"
                 - **MAINTAIN PRONOUNS**: Use the same pronoun (em/mình) in your enthusiasm that matches conversation history
@@ -1813,7 +1797,7 @@ class LearningSupport:
                 2. **Future Application**: Structure information for practical use in similar scenarios
                 3. **Clarification**: Restate complex or domain-specific concepts in simpler terms
                 4. **Verification**: Show understanding by rephrasing key concepts
-                5. **Engagement**: End with questions that encourage continued exploration
+                5. **Brainstorm Engagement**: End with challenging questions that propose specific scenarios, edge cases, or alternative approaches to encourage deeper exploration rather than wider coverage
                 6. **Pronoun Consistency**: Maintain the same pronoun throughout ALL parts of your response
                 7. **Structural Completeness**: Always complete all three required sections
 
