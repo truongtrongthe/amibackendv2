@@ -750,29 +750,76 @@ class AVA:
                 if "teaching_intent" not in categories:
                     categories.append("teaching_intent")
                     
+                # Add tool_executed category to distinguish tool-based saves
+                if "tool_executed" not in categories:
+                    categories.append("tool_executed")
+                    
                 bank_name = "conversation"
+                priority_topic_name = topic or "tool_knowledge"
                 
-                # Format as a teaching entry for consistency with combined knowledge format
-                if not input_text.startswith("User:"):
-                    input_text = f"AI: {input_text}"
-                    # Add ai_synthesis category since this is AI-only content
+                # Create a response-like structure for vector tracking
+                response = {
+                    "message": input_text,
+                    "metadata": {}
+                }
+                
+                # Format content for different save types
+                if input_text.startswith("User:"):
+                    # Already in User+AI format - extract parts
+                    user_part = ""
+                    ai_part = ""
+                    if "\n\nAI:" in input_text:
+                        parts = input_text.split("\n\nAI:", 1)
+                        user_part = parts[0].replace("User:", "").strip()
+                        ai_part = parts[1].strip()
+                    else:
+                        # Fallback - treat whole thing as user input
+                        user_part = input_text.replace("User:", "").strip()
+                        ai_part = f"Knowledge saved via tool: {user_part}"
+                    
+                    # Run multiple saves like teaching intent flow
+                    self._create_background_task(self._save_tool_knowledge_multiple(
+                        user_message=user_part,
+                        ai_response=ai_part,
+                        combined_content=input_text,
+                        user_id=user_id,
+                        bank_name=bank_name,
+                        thread_id=thread_id,
+                        priority_topic_name=priority_topic_name,
+                        categories=categories,
+                        response=response
+                    ))
+                else:
+                    # AI-only or plain content - create User+AI format
+                    if input_text.startswith("AI:"):
+                        ai_content = input_text.replace("AI:", "").strip()
+                    else:
+                        ai_content = input_text
+                    
+                    # Create a synthetic user message for context
+                    user_message = f"[Tool Save] Knowledge entry"
+                    combined_content = f"User: {user_message}\n\nAI: {ai_content}"
+                    
+                    # Add ai_synthesis category since this contains AI content
                     if "ai_synthesis" not in categories:
                         categories.append("ai_synthesis")
-
-                # Run save_knowledge in background task
-                self._create_background_task(self.support.background_save_knowledge(
-                    input_text=input_text,
-                    user_id=user_id,
-                    bank_name=bank_name,
-                    thread_id=thread_id,
-                    topic=topic,
-                    categories=categories,
-                    ttl_days=365  # 365 days TTL for knowledge
-                ))
+                    
+                    # Run multiple saves like teaching intent flow
+                    self._create_background_task(self._save_tool_knowledge_multiple(
+                        user_message=user_message,
+                        ai_response=ai_content,
+                        combined_content=combined_content,
+                        user_id=user_id,
+                        bank_name=bank_name,
+                        thread_id=thread_id,
+                        priority_topic_name=priority_topic_name,
+                        categories=categories,
+                        response=response
+                    ))
                 
                 return {
                     "status": "success",
-                    "message": f"Save knowledge task initiated for '{input_text[:50]}...'"
+                    "message": f"Multiple knowledge vectors save initiated for '{input_text[:50]}...'"
                 }
 
             elif tool_name == "handle_update_decision":
@@ -1535,3 +1582,77 @@ class AVA:
     def clear_pending_decisions(self) -> None:
         """Clear all pending decisions for testing."""
         clear_pending_knowledge_decisions()
+
+    async def _save_tool_knowledge_multiple(self, user_message: str, ai_response: str, combined_content: str,
+                                          user_id: str, bank_name: str, thread_id: Optional[str],
+                                          priority_topic_name: str, categories: List[str], response: Dict[str, Any]) -> None:
+        """Save knowledge in multiple formats like teaching intent flow (for tool-executed saves)."""
+        try:
+            logger.info(f"Saving tool knowledge in multiple formats for improved retrieval")
+            logger.info(f"User message: {user_message[:100]}...")
+            logger.info(f"AI response: {ai_response[:100]}...")
+            
+            # 1. Save Combined Knowledge (User + AI format)
+            logger.info("Saving combined knowledge (User + AI format)")
+            await self._save_combined_knowledge(
+                combined_knowledge=combined_content,
+                user_id=user_id,
+                bank_name=bank_name,
+                thread_id=thread_id,
+                priority_topic_name=priority_topic_name,
+                categories=categories,
+                response=response
+            )
+            
+            # 2. Save AI Synthesis for enhanced retrieval
+            logger.info("Saving AI synthesis for enhanced retrieval")
+            
+            # Extract or create summary information
+            summary = ""
+            knowledge_synthesis = ai_response
+            knowledge_summary = ""
+            
+            # Try to extract summary if present in AI response
+            summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', ai_response, re.IGNORECASE)
+            if summary_match:
+                summary = summary_match.group(1).strip()
+                knowledge_summary = summary
+                logger.info(f"Extracted summary from AI response: {summary}")
+            else:
+                # Generate a basic summary from first sentence or first 100 chars
+                first_sentence = ai_response.split('.')[0] if '.' in ai_response else ai_response
+                if len(first_sentence) > 100:
+                    knowledge_summary = first_sentence[:97] + "..."
+                else:
+                    knowledge_summary = first_sentence
+                summary = knowledge_summary
+                logger.info(f"Generated summary: {knowledge_summary}")
+            
+            # Save AI synthesis (this will also call _save_standalone_summary)
+            await self._save_ai_synthesis(
+                message=user_message,
+                synthesis_content=ai_response,
+                knowledge_synthesis=knowledge_synthesis,
+                knowledge_summary=knowledge_summary,
+                summary=summary,
+                conversational_response=ai_response,
+                user_id=user_id,
+                bank_name=bank_name,
+                thread_id=thread_id,
+                priority_topic_name=priority_topic_name,
+                categories=categories,
+                response=response
+            )
+            
+            logger.info(f"✅ Successfully saved tool knowledge in multiple formats")
+            logger.info(f"Vectors saved: Combined Knowledge + AI Synthesis + Standalone Summary")
+            
+            # Update response metadata with save status
+            response["metadata"]["tool_multiple_save_completed"] = True
+            response["metadata"]["save_types"] = ["combined_knowledge", "ai_synthesis", "standalone_summary"]
+            
+        except Exception as e:
+            logger.error(f"Error saving tool knowledge in multiple formats: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            response["metadata"]["tool_multiple_save_error"] = str(e)
