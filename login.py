@@ -4,6 +4,9 @@ import os
 import jwt
 import hashlib
 import secrets
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, UTC
 from fastapi import APIRouter, HTTPException, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -31,6 +34,17 @@ REFRESH_TOKEN_EXPIRES_DELTA = timedelta(days=7)
 
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+
+# Email Configuration
+EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER", "smtp.gmail.com")
+EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "587"))
+EMAIL_USERNAME = os.getenv("EMAIL_USERNAME")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_FROM = os.getenv("EMAIL_FROM", EMAIL_USERNAME)
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+# Email verification configuration
+EMAIL_VERIFICATION_EXPIRES_DELTA = timedelta(hours=24)
 
 # Create router
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -76,6 +90,12 @@ class RefreshTokenRequest(BaseModel):
 class LogoutRequest(BaseModel):
     refreshToken: Optional[str] = None
 
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
 # Response Models
 class UserResponse(BaseModel):
     id: str
@@ -88,6 +108,7 @@ class UserResponse(BaseModel):
     avatar: Optional[str] = None
     provider: str = "email"
     googleId: Optional[str] = None
+    emailVerified: bool = False
 
 class AuthResponse(BaseModel):
     user: UserResponse
@@ -174,6 +195,83 @@ def generate_org_id() -> str:
     """Generate a unique organization ID"""
     return f"org_{secrets.token_urlsafe(16)}"
 
+def generate_verification_token() -> str:
+    """Generate a unique email verification token"""
+    return secrets.token_urlsafe(32)
+
+def send_verification_email(email: str, name: str, token: str) -> bool:
+    """Send email verification email"""
+    try:
+        if not EMAIL_USERNAME or not EMAIL_PASSWORD:
+            logger.error("Email credentials not configured")
+            return False
+        
+        verification_url = f"{BASE_URL}/auth/verify-email?token={token}"
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "Verify your email address"
+        msg['From'] = EMAIL_FROM
+        msg['To'] = email
+        
+        # Create HTML content
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background-color: #f8f9fa; padding: 30px; border-radius: 10px;">
+                <h2 style="color: #333; text-align: center;">Welcome to our platform!</h2>
+                <p style="font-size: 16px; color: #555;">Hi {name},</p>
+                <p style="font-size: 16px; color: #555;">
+                    Thank you for signing up! Please verify your email address by clicking the button below:
+                </p>
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="{verification_url}" 
+                       style="background-color: #007bff; color: white; padding: 12px 30px; 
+                              text-decoration: none; border-radius: 5px; font-weight: bold;">
+                        Verify Email Address
+                    </a>
+                </div>
+                <p style="font-size: 14px; color: #666;">
+                    If the button doesn't work, you can copy and paste this URL into your browser:<br>
+                    <a href="{verification_url}">{verification_url}</a>
+                </p>
+                <p style="font-size: 12px; color: #999; margin-top: 30px;">
+                    This link will expire in 24 hours. If you didn't create an account, please ignore this email.
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Create plain text content
+        text_content = f"""
+        Welcome to our platform!
+        
+        Hi {name},
+        
+        Thank you for signing up! Please verify your email address by clicking the link below:
+        {verification_url}
+        
+        This link will expire in 24 hours. If you didn't create an account, please ignore this email.
+        """
+        
+        msg.attach(MIMEText(text_content, 'plain'))
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        # Send email
+        with smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+            server.send_message(msg)
+        
+        logger.info(f"Verification email sent to {email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error sending verification email: {str(e)}")
+        return False
+
 # Database Functions
 def get_user_by_email(email: str) -> Optional[dict]:
     """Get user by email from database"""
@@ -221,7 +319,7 @@ def create_user(email: str, name: str, password: str = None, phone: str = None,
             "avatar": avatar,
             "provider": provider,
             "google_id": google_id,
-            "email_verified": True if provider == "google" else False,
+            "email_verified": False,  # All users require email verification
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat()
         }
@@ -307,6 +405,124 @@ def invalidate_user_refresh_tokens(user_id: str) -> bool:
         logger.error(f"Error invalidating user refresh tokens: {str(e)}")
         return False
 
+def create_verification_token(user_id: str, email: str) -> str:
+    """Create and store email verification token"""
+    try:
+        token = generate_verification_token()
+        token_id = f"evt_{secrets.token_urlsafe(16)}"
+        
+        token_data = {
+            "id": token_id,
+            "user_id": user_id,
+            "token": token,
+            "email": email,
+            "expires_at": (datetime.now(UTC) + EMAIL_VERIFICATION_EXPIRES_DELTA).isoformat(),
+            "created_at": datetime.now(UTC).isoformat()
+        }
+        
+        response = supabase.table("email_verification_tokens").insert(token_data).execute()
+        
+        if response.data:
+            return token
+        
+        raise Exception("Failed to create verification token")
+    
+    except Exception as e:
+        logger.error(f"Error creating verification token: {str(e)}")
+        raise
+
+def verify_email_token(token: str) -> Optional[dict]:
+    """Verify email verification token and return user"""
+    try:
+        logger.info(f"Attempting to verify token: {token}")
+        
+        # Get token from database
+        response = supabase.table("email_verification_tokens").select("*").eq("token", token).execute()
+        
+        if not response.data:
+            logger.error(f"Token not found in database: {token}")
+            return None
+        
+        token_data = response.data[0]
+        logger.info(f"Token data found: {token_data}")
+        
+        # Check if token is expired
+        expires_at = datetime.fromisoformat(token_data["expires_at"].replace("Z", "+00:00"))
+        current_time = datetime.now(UTC)
+        logger.info(f"Token expires at: {expires_at}, Current time: {current_time}")
+        
+        if current_time > expires_at:
+            logger.error(f"Token expired. Expires: {expires_at}, Now: {current_time}")
+            return None
+        
+        # Check if already verified
+        if token_data.get("verified_at"):
+            logger.info(f"Token was already used at: {token_data.get('verified_at')}")
+            # Check if the user is actually verified
+            user_id = token_data["user_id"]
+            user = get_user_by_id(user_id)
+            if user and user.get("email_verified"):
+                logger.info(f"User {user['email']} is already verified - returning user for seamless login")
+                return user  # Return the already-verified user
+            else:
+                logger.error(f"Token was used but user is not verified - data inconsistency")
+                return None
+        
+        # Get user
+        user_id = token_data["user_id"]
+        logger.info(f"Looking up user with ID: {user_id}")
+        user = get_user_by_id(user_id)
+        if not user:
+            logger.error(f"User not found with ID: {user_id}")
+            return None
+        
+        logger.info(f"User found: {user['email']} (ID: {user['id']})")
+        
+        # Mark user as verified
+        logger.info("Updating user as verified...")
+        user_update_response = supabase.table("users").update({
+            "email_verified": True,
+            "updated_at": datetime.now(UTC).isoformat()
+        }).eq("id", user["id"]).execute()
+        
+        logger.info(f"User update response: {user_update_response}")
+        
+        # Mark token as used
+        logger.info("Marking token as used...")
+        token_update_response = supabase.table("email_verification_tokens").update({
+            "verified_at": datetime.now(UTC).isoformat()
+        }).eq("token", token).execute()
+        
+        logger.info(f"Token update response: {token_update_response}")
+        
+        # Update user object
+        user["email_verified"] = True
+        
+        logger.info("Email verification successful!")
+        return user
+    
+    except Exception as e:
+        logger.error(f"Error verifying email token: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None
+
+def get_pending_verification_token(email: str) -> Optional[dict]:
+    """Get pending verification token for email"""
+    try:
+        response = supabase.table("email_verification_tokens").select("*").eq("email", email).is_("verified_at", "null").execute()
+        
+        if response.data:
+            # Return the most recent token
+            tokens = sorted(response.data, key=lambda x: x["created_at"], reverse=True)
+            return tokens[0]
+        
+        return None
+    
+    except Exception as e:
+        logger.error(f"Error getting pending verification token: {str(e)}")
+        return None
+
 def user_to_response(user: dict) -> UserResponse:
     """Convert database user to response model"""
     return UserResponse(
@@ -319,7 +535,8 @@ def user_to_response(user: dict) -> UserResponse:
         organization=user.get("organization"),
         avatar=user.get("avatar"),
         provider=user.get("provider", "email"),
-        googleId=user.get("google_id")
+        googleId=user.get("google_id"),
+        emailVerified=user.get("email_verified", False)
     )
 
 # Authentication Endpoints
@@ -340,6 +557,13 @@ async def login(request: LoginRequest):
         if not verify_password(request.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
+        # Check email verification for all users
+        if not user.get("email_verified"):
+            raise HTTPException(
+                status_code=403, 
+                detail="Email not verified. Please check your email and click the verification link."
+            )
+        
         # Create tokens
         access_token = create_access_token({"user_id": user["id"], "email": user["email"]})
         refresh_token = create_refresh_token(user["id"])
@@ -359,16 +583,16 @@ async def login(request: LoginRequest):
         logger.error(f"Error during login: {str(e)}")
         raise HTTPException(status_code=500, detail="Login failed")
 
-@router.post("/signup", response_model=AuthResponse)
+@router.post("/signup")
 async def signup(request: SignupRequest):
-    """User registration"""
+    """User registration with email verification"""
     try:
         # Check if user already exists
         existing_user = get_user_by_email(request.email)
         if existing_user:
             raise HTTPException(status_code=400, detail="Email already exists")
         
-        # Create new user
+        # Create new user (email_verified = False by default)
         user = create_user(
             email=request.email,
             name=request.name,
@@ -377,18 +601,21 @@ async def signup(request: SignupRequest):
             organization=request.organization
         )
         
-        # Create tokens
-        access_token = create_access_token({"user_id": user["id"], "email": user["email"]})
-        refresh_token = create_refresh_token(user["id"])
+        # Create verification token
+        verification_token = create_verification_token(user["id"], request.email)
         
-        # Store refresh token
-        store_refresh_token(user["id"], refresh_token)
+        # Send verification email
+        email_sent = send_verification_email(request.email, request.name, verification_token)
         
-        return AuthResponse(
-            user=user_to_response(user),
-            token=access_token,
-            refreshToken=refresh_token
-        )
+        if not email_sent:
+            logger.error("Failed to send verification email")
+            # Don't fail signup if email fails, just log it
+        
+        return {
+            "message": "Registration successful! Please check your email to verify your account.",
+            "email": request.email,
+            "emailSent": email_sent
+        }
     
     except HTTPException:
         raise
@@ -396,9 +623,9 @@ async def signup(request: SignupRequest):
         logger.error(f"Error during signup: {str(e)}")
         raise HTTPException(status_code=500, detail="Signup failed")
 
-@router.post("/google", response_model=AuthResponse)
+@router.post("/google")
 async def google_auth(request: GoogleAuthRequest):
-    """Google OAuth authentication"""
+    """Google OAuth authentication with email verification"""
     try:
         # Verify Google token
         google_user_info = verify_google_token(request.googleToken)
@@ -427,6 +654,11 @@ async def google_auth(request: GoogleAuthRequest):
                 user["google_id"] = google_id
                 user["provider"] = "google"
                 user["avatar"] = avatar
+                
+                # If user is not verified, send verification email
+                if not user.get("email_verified"):
+                    verification_token = create_verification_token(user["id"], email)
+                    send_verification_email(email, name, verification_token)
             else:
                 # Create new user
                 user = create_user(
@@ -437,7 +669,21 @@ async def google_auth(request: GoogleAuthRequest):
                     avatar=avatar
                 )
                 is_new_user = True
+                
+                # Send verification email for new Google user
+                verification_token = create_verification_token(user["id"], email)
+                email_sent = send_verification_email(email, name, verification_token)
         
+        # Check if user is verified
+        if not user.get("email_verified"):
+            return {
+                "message": "Registration successful! Please check your email to verify your account before logging in.",
+                "email": email,
+                "isNewUser": is_new_user,
+                "provider": "google"
+            }
+        
+        # User is verified, proceed with login
         # Create tokens
         access_token = create_access_token({"user_id": user["id"], "email": user["email"]})
         refresh_token = create_refresh_token(user["id"])
@@ -529,3 +775,115 @@ async def logout(request: LogoutRequest, current_user: dict = Depends(get_curren
 async def get_me(current_user: dict = Depends(get_current_user)):
     """Get current user information"""
     return user_to_response(current_user)
+
+@router.post("/verify-email", response_model=AuthResponse)
+async def verify_email(request: VerifyEmailRequest):
+    """Verify email address using token"""
+    try:
+        logger.info(f"Email verification endpoint called with token: {request.token}")
+        
+        # Verify the token
+        user = verify_email_token(request.token)
+        if not user:
+            logger.error(f"Token verification failed for token: {request.token}")
+            raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+        
+        logger.info(f"Token verification successful for user: {user['email']}")
+        
+        # Create tokens for the newly verified user
+        access_token = create_access_token({"user_id": user["id"], "email": user["email"]})
+        refresh_token = create_refresh_token(user["id"])
+        
+        # Store refresh token
+        store_refresh_token(user["id"], refresh_token)
+        
+        logger.info(f"Created new tokens for verified user: {user['email']}")
+        
+        return AuthResponse(
+            user=user_to_response(user),
+            token=access_token,
+            refreshToken=refresh_token
+        )
+    
+    except HTTPException as e:
+        logger.error(f"HTTP Exception during email verification: {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error during email verification: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Email verification failed")
+
+# Debug endpoint - remove in production
+@router.get("/debug/token/{token}")
+async def debug_token(token: str):
+    """Debug endpoint to check token status"""
+    try:
+        response = supabase.table("email_verification_tokens").select("*").eq("token", token).execute()
+        
+        if not response.data:
+            return {"error": "Token not found"}
+        
+        token_data = response.data[0]
+        
+        # Check expiration
+        expires_at = datetime.fromisoformat(token_data["expires_at"].replace("Z", "+00:00"))
+        current_time = datetime.now(UTC)
+        is_expired = current_time > expires_at
+        
+        # Check user
+        user = get_user_by_id(token_data["user_id"])
+        
+        return {
+            "token_found": True,
+            "token_data": token_data,
+            "is_expired": is_expired,
+            "expires_at": expires_at.isoformat(),
+            "current_time": current_time.isoformat(),
+            "user_exists": user is not None,
+            "user_email": user.get("email") if user else None,
+            "user_verified": user.get("email_verified") if user else None
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@router.post("/resend-verification")
+async def resend_verification(request: ResendVerificationRequest):
+    """Resend email verification"""
+    try:
+        # Check if user exists
+        user = get_user_by_email(request.email)
+        if not user:
+            # Don't reveal if email exists or not for security
+            return {"message": "If the email exists, a verification link has been sent."}
+        
+        # Check if already verified
+        if user.get("email_verified"):
+            raise HTTPException(status_code=400, detail="Email is already verified")
+        
+        # All users now require email verification, so remove provider check
+        
+        # Check for existing pending token (to prevent spam)
+        pending_token = get_pending_verification_token(request.email)
+        if pending_token:
+            # Check if token was created recently (less than 1 minute ago)
+            created_at = datetime.fromisoformat(pending_token["created_at"].replace("Z", "+00:00"))
+            if datetime.now(UTC) - created_at < timedelta(minutes=1):
+                raise HTTPException(status_code=429, detail="Verification email was sent recently. Please wait before requesting another.")
+        
+        # Create new verification token
+        verification_token = create_verification_token(user["id"], request.email)
+        
+        # Send verification email
+        email_sent = send_verification_email(request.email, user["name"], verification_token)
+        
+        return {
+            "message": "If the email exists, a verification link has been sent.",
+            "emailSent": email_sent
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resending verification: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to resend verification email")

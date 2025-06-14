@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Verification</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .success {
+            color: #28a745;
+        }
+        
+        .error {
+            color: #dc3545;
+        }
+        
+        .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 20px;
+            font-size: 16px;
+        }
+        
+        .btn:hover {
+            background: #0056b3;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="loading">
+            <h2>Verifying your email...</h2>
+            <div class="spinner"></div>
+            <p>Please wait while we verify your email address.</p>
+        </div>
+        
+        <div id="success" class="hidden">
+            <h2 class="success">✓ Email Verified Successfully!</h2>
+            <p>Your email has been verified. You can now access all features of your account.</p>
+            <a href="https://thefusionlab.ai/login" class="btn">Continue to Login</a>
+        </div>
+        
+        <div id="error" class="hidden">
+            <h2 class="error">✗ Verification Failed</h2>
+            <p id="error-message">The verification link is invalid or has expired.</p>
+            <a href="https://thefusionlab.ai/resend-verification" class="btn">Request New Link</a>
+        </div>
+    </div>
+
+    <script>
+        // Get token from URL params
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token');
+        
+        if (!token) {
+            showError('No verification token provided.');
+            return;
+        }
+        
+        // Verify the token
+        fetch('/auth/verify-email', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ token: token })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.user) {
+                // Success
+                showSuccess();
+                // Store tokens if needed
+                if (data.token) {
+                    localStorage.setItem('access_token', data.token);
+                }
+                if (data.refreshToken) {
+                    localStorage.setItem('refresh_token', data.refreshToken);
+                }
+            } else {
+                showError(data.detail || 'Verification failed.');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showError('An error occurred during verification.');
+        });
+        
+        function showSuccess() {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('error').classList.add('hidden');
+            document.getElementById('success').classList.remove('hidden');
+        }
+        
+        function showError(message) {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('success').classList.add('hidden');
+            document.getElementById('error').classList.remove('hidden');
+            document.getElementById('error-message').textContent = message;
+        }
+    </script>
+</body>
+</html> 
