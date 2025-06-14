@@ -38,6 +38,8 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 # Email Configuration
 EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER", "smtp.gmail.com")
 EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "587"))
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
 EMAIL_USERNAME = os.getenv("EMAIL_USERNAME")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_FROM = os.getenv("EMAIL_FROM", EMAIL_USERNAME)
@@ -259,11 +261,35 @@ def send_verification_email(email: str, name: str, token: str) -> bool:
         msg.attach(MIMEText(text_content, 'plain'))
         msg.attach(MIMEText(html_content, 'html'))
         
-        # Send email
-        with smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT) as server:
-            server.starttls()
+        # Send email with better error handling and port flexibility
+        try:
+            if EMAIL_USE_SSL:
+                # Use SSL (port 465)
+                server = smtplib.SMTP_SSL(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
+            else:
+                # Use regular SMTP with TLS (port 587)
+                server = smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
+                if EMAIL_USE_TLS:
+                    server.starttls()
+            
             server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
             server.send_message(msg)
+            server.quit()
+        except Exception as smtp_error:
+            logger.error(f"SMTP connection failed: {smtp_error}")
+            # Try alternative ports
+            if EMAIL_SMTP_PORT == 587:
+                logger.info("Trying port 465 with SSL...")
+                try:
+                    with smtplib.SMTP_SSL(EMAIL_SMTP_SERVER, 465) as server:
+                        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+                        server.send_message(msg)
+                        logger.info("Successfully sent email using port 465")
+                except Exception as ssl_error:
+                    logger.error(f"Port 465 also failed: {ssl_error}")
+                    raise smtp_error
+            else:
+                raise smtp_error
         
         logger.info(f"Verification email sent to {email}")
         return True
