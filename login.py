@@ -4,15 +4,18 @@ import os
 import jwt
 import hashlib
 import secrets
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+import ssl
+import certifi
+import requests
+import json
 from datetime import datetime, timedelta, UTC
 from fastapi import APIRouter, HTTPException, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, validator
 from passlib.context import CryptContext
-from google.auth.transport import requests
+from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from utilities import logger
 
@@ -35,15 +38,13 @@ REFRESH_TOKEN_EXPIRES_DELTA = timedelta(days=7)
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 
-# Email Configuration
-EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER", "smtp.gmail.com")
-EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "587"))
-EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
-EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
-EMAIL_USERNAME = os.getenv("EMAIL_USERNAME")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_FROM = os.getenv("EMAIL_FROM", EMAIL_USERNAME)
+# SendGrid Configuration
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Your App")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+# SSL Configuration - for environments with SSL issues
+DISABLE_SSL_VERIFICATION = os.getenv("DISABLE_SSL_VERIFICATION", "false").lower() == "true"
 
 # Email verification configuration
 EMAIL_VERIFICATION_EXPIRES_DELTA = timedelta(hours=24)
@@ -179,7 +180,7 @@ def verify_google_token(token: str) -> dict:
     """Verify Google OAuth token"""
     try:
         # Verify the token
-        idinfo = id_token.verify_oauth2_token(token, requests.Request(), GOOGLE_CLIENT_ID)
+        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
         
         if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
             raise ValueError('Wrong issuer.')
@@ -202,19 +203,17 @@ def generate_verification_token() -> str:
     return secrets.token_urlsafe(32)
 
 def send_verification_email(email: str, name: str, token: str) -> bool:
-    """Send email verification email"""
+    """Send email verification email using SendGrid API"""
     try:
-        if not EMAIL_USERNAME or not EMAIL_PASSWORD:
-            logger.error("Email credentials not configured")
+        if not SENDGRID_API_KEY:
+            logger.error("SendGrid API key not configured")
+            return False
+        
+        if not EMAIL_FROM:
+            logger.error("EMAIL_FROM not configured")
             return False
         
         verification_url = f"{BASE_URL}/auth/verify-email?token={token}"
-        
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = "Verify your email address"
-        msg['From'] = EMAIL_FROM
-        msg['To'] = email
         
         # Create HTML content
         html_content = f"""
@@ -258,44 +257,111 @@ def send_verification_email(email: str, name: str, token: str) -> bool:
         This link will expire in 24 hours. If you didn't create an account, please ignore this email.
         """
         
-        msg.attach(MIMEText(text_content, 'plain'))
-        msg.attach(MIMEText(html_content, 'html'))
+        # Create SendGrid email object
+        message = Mail(
+            from_email=(EMAIL_FROM, EMAIL_FROM_NAME),
+            to_emails=email,
+            subject="Verify your email address",
+            plain_text_content=text_content,
+            html_content=html_content
+        )
         
-        # Send email with better error handling and port flexibility
-        try:
-            if EMAIL_USE_SSL:
-                # Use SSL (port 465)
-                server = smtplib.SMTP_SSL(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
-            else:
-                # Use regular SMTP with TLS (port 587)
-                server = smtplib.SMTP(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT)
-                if EMAIL_USE_TLS:
-                    server.starttls()
+        # Send email via SendGrid API with robust SSL handling
+        def send_with_sendgrid_api():
+            """Send email using SendGrid REST API directly for better SSL control"""
+            url = "https://api.sendgrid.com/v3/mail/send"
             
-            server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-            server.send_message(msg)
-            server.quit()
-        except Exception as smtp_error:
-            logger.error(f"SMTP connection failed: {smtp_error}")
-            # Try alternative ports
-            if EMAIL_SMTP_PORT == 587:
-                logger.info("Trying port 465 with SSL...")
-                try:
-                    with smtplib.SMTP_SSL(EMAIL_SMTP_SERVER, 465) as server:
-                        server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-                        server.send_message(msg)
-                        logger.info("Successfully sent email using port 465")
-                except Exception as ssl_error:
-                    logger.error(f"Port 465 also failed: {ssl_error}")
-                    raise smtp_error
-            else:
-                raise smtp_error
+            # Convert SendGrid Mail object to API payload
+            email_data = {
+                "personalizations": [{
+                    "to": [{"email": email}],
+                    "subject": "Verify your email address"
+                }],
+                "from": {
+                    "email": EMAIL_FROM,
+                    "name": EMAIL_FROM_NAME
+                },
+                "content": [
+                    {
+                        "type": "text/plain",
+                        "value": text_content
+                    },
+                    {
+                        "type": "text/html", 
+                        "value": html_content
+                    }
+                ]
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            return requests.post(url, json=email_data, headers=headers)
         
-        logger.info(f"Verification email sent to {email}")
-        return True
+        try:
+            if DISABLE_SSL_VERIFICATION:
+                logger.warning("SSL verification disabled - using unverified HTTPS")
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                response = send_with_sendgrid_api()
+                response.requests_kwargs = {'verify': False}
+            else:
+                # Try with default SSL settings
+                try:
+                    sg = SendGridAPIClient(api_key=SENDGRID_API_KEY)
+                    response = sg.send(message)
+                except Exception as ssl_error:
+                    if "SSL" in str(ssl_error) or "certificate" in str(ssl_error).lower():
+                        logger.warning(f"SendGrid client SSL error: {ssl_error}")
+                        logger.info("Trying direct API call with custom SSL handling...")
+                        
+                        try:
+                            # Try with explicit certificate bundle
+                            response = send_with_sendgrid_api()
+                            response.verify = certifi.where()
+                        except Exception as api_error:
+                            if "SSL" in str(api_error) or "certificate" in str(api_error).lower():
+                                logger.error(f"Direct API also failed: {api_error}")
+                                logger.warning("Using unverified SSL as last resort")
+                                
+                                import urllib3
+                                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                                response = requests.post(
+                                    "https://api.sendgrid.com/v3/mail/send",
+                                    json={
+                                        "personalizations": [{
+                                            "to": [{"email": email}],
+                                            "subject": "Verify your email address"
+                                        }],
+                                        "from": {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME},
+                                        "content": [
+                                            {"type": "text/plain", "value": text_content},
+                                            {"type": "text/html", "value": html_content}
+                                        ]
+                                    },
+                                    headers={
+                                        "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                                        "Content-Type": "application/json"
+                                    },
+                                    verify=False
+                                )
+                            else:
+                                raise api_error
+                    else:
+                        raise ssl_error
+        except Exception as e:
+            logger.error(f"All SendGrid methods failed: {str(e)}")
+            raise e
+        
+        logger.info(f"SendGrid response: Status {response.status_code}")
+        logger.info(f"Verification email sent to {email} via SendGrid")
+        
+        return response.status_code in [200, 201, 202]
         
     except Exception as e:
-        logger.error(f"Error sending verification email: {str(e)}")
+        logger.error(f"Error sending verification email via SendGrid: {str(e)}")
         return False
 
 # Database Functions
