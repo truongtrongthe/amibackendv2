@@ -18,6 +18,15 @@ from passlib.context import CryptContext
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from utilities import logger
+from braindb import (
+    create_organization, 
+    find_organization_by_name, 
+    search_organizations,
+    add_user_to_organization,
+    get_user_organization,
+    get_user_role_in_organization,
+    Organization
+)
 
 # Initialize Supabase client
 spb_url = os.getenv("SUPABASE_URL")
@@ -154,7 +163,7 @@ def verify_token(token: str, secret: str) -> dict:
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.JWTError:
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -179,8 +188,13 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 def verify_google_token(token: str) -> dict:
     """Verify Google OAuth token"""
     try:
-        # Verify the token
-        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
+        # Verify the token with clock skew tolerance
+        idinfo = id_token.verify_oauth2_token(
+            token, 
+            google_requests.Request(), 
+            GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=60
+        )
         
         if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
             raise ValueError('Wrong issuer.')
@@ -194,9 +208,38 @@ def generate_user_id() -> str:
     """Generate a unique user ID"""
     return f"user_{secrets.token_urlsafe(16)}"
 
-def generate_org_id() -> str:
-    """Generate a unique organization ID"""
-    return f"org_{secrets.token_urlsafe(16)}"
+def handle_organization_signup(organization_name: str, user_id: str) -> Optional[str]:
+    """
+    Handle organization creation or joining during signup
+    Returns organization UUID if successful, None otherwise
+    """
+    try:
+        # Check if organization already exists
+        existing_org = find_organization_by_name(organization_name)
+        
+        if existing_org:
+            # Organization exists, add user as member
+            success = add_user_to_organization(user_id, existing_org.id, "member")
+            if success:
+                logger.info(f"User {user_id} joined existing organization: {organization_name}")
+                return existing_org.id
+            else:
+                logger.error(f"Failed to add user to existing organization: {organization_name}")
+                return None
+        else:
+            # Create new organization with user as owner
+            new_org = create_organization(name=organization_name)
+            success = add_user_to_organization(user_id, new_org.id, "owner")
+            if success:
+                logger.info(f"Created new organization '{organization_name}' with user {user_id} as owner")
+                return new_org.id
+            else:
+                logger.error(f"Failed to add user as owner of new organization: {organization_name}")
+                return None
+                
+    except Exception as e:
+        logger.error(f"Error handling organization signup: {str(e)}")
+        return None
 
 def generate_verification_token() -> str:
     """Generate a unique email verification token"""
@@ -398,15 +441,14 @@ def create_user(email: str, name: str, password: str = None, phone: str = None,
     """Create a new user in database"""
     try:
         user_id = generate_user_id()
-        org_id = generate_org_id() if organization else None
         
         user_data = {
             "id": user_id,
             "email": email,
             "name": name,
             "phone": phone,
-            "organization": organization,
-            "org_id": org_id,
+            "organization": organization,  # Keep as legacy field for now
+            "org_id": None,  # Remove broken org_id generation
             "role": "user",
             "avatar": avatar,
             "provider": provider,
@@ -422,7 +464,20 @@ def create_user(email: str, name: str, password: str = None, phone: str = None,
         response = supabase.table("users").insert(user_data).execute()
         
         if response.data:
-            return response.data[0]
+            user = response.data[0]
+            
+            # Handle organization creation/joining if provided
+            if organization:
+                org_id = handle_organization_signup(organization, user_id)
+                if org_id:
+                    # Update user with the real organization ID
+                    supabase.table("users").update({
+                        "org_id": org_id,
+                        "updated_at": datetime.now(UTC).isoformat()
+                    }).eq("id", user_id).execute()
+                    user["org_id"] = org_id
+            
+            return user
         
         raise Exception("Failed to create user")
     
@@ -617,14 +672,27 @@ def get_pending_verification_token(email: str) -> Optional[dict]:
 
 def user_to_response(user: dict) -> UserResponse:
     """Convert database user to response model"""
+    org_id = user.get("org_id")
+    organization_name = user.get("organization")  # Legacy field
+    
+    # If user has a real org_id, get the organization name from braindb
+    if org_id:
+        try:
+            from braindb import get_organization
+            org = get_organization(org_id)
+            if org:
+                organization_name = org.name
+        except Exception as e:
+            logger.warning(f"Failed to get organization details for user {user['id']}: {str(e)}")
+    
     return UserResponse(
         id=user["id"],
         email=user["email"],
         name=user["name"],
-        orgId=user.get("org_id"),
+        orgId=org_id,
         role=user.get("role", "user"),
         phone=user.get("phone"),
-        organization=user.get("organization"),
+        organization=organization_name,
         avatar=user.get("avatar"),
         provider=user.get("provider", "email"),
         googleId=user.get("google_id"),
@@ -979,3 +1047,186 @@ async def resend_verification(request: ResendVerificationRequest):
     except Exception as e:
         logger.error(f"Error resending verification: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to resend verification email")
+
+# Organization Management Endpoints
+
+class CreateOrganizationRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+
+class JoinOrganizationRequest(BaseModel):
+    organizationId: str
+
+class SearchOrganizationsRequest(BaseModel):
+    query: str
+    limit: Optional[int] = 10
+
+class OrganizationResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    userRole: Optional[str] = None
+    createdDate: datetime
+
+@router.post("/organizations", response_model=OrganizationResponse)
+async def create_organization_endpoint(request: CreateOrganizationRequest, current_user: dict = Depends(get_current_user)):
+    """Create a new organization"""
+    try:
+        # Create organization
+        org = create_organization(
+            name=request.name,
+            description=request.description,
+            email=request.email,
+            phone=request.phone,
+            address=request.address
+        )
+        
+        # Add user as owner
+        success = add_user_to_organization(current_user["id"], org.id, "owner")
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to add user as organization owner")
+        
+        # Update user's org_id
+        supabase.table("users").update({
+            "org_id": org.id,
+            "updated_at": datetime.now(UTC).isoformat()
+        }).eq("id", current_user["id"]).execute()
+        
+        return OrganizationResponse(
+            id=org.id,
+            name=org.name,
+            description=org.description,
+            email=org.email,
+            phone=org.phone,
+            address=org.address,
+            userRole="owner",
+            createdDate=org.created_date
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating organization: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create organization")
+
+@router.post("/organizations/search")
+async def search_organizations_endpoint(request: SearchOrganizationsRequest, current_user: dict = Depends(get_current_user)):
+    """Search for organizations"""
+    try:
+        organizations = search_organizations(request.query, request.limit)
+        
+        results = []
+        for org in organizations:
+            # Get user's role if they're a member
+            user_role = get_user_role_in_organization(current_user["id"], org.id)
+            
+            results.append(OrganizationResponse(
+                id=org.id,
+                name=org.name,
+                description=org.description,
+                email=org.email,
+                phone=org.phone,
+                address=org.address,
+                userRole=user_role,
+                createdDate=org.created_date
+            ))
+        
+        return {"organizations": results}
+    
+    except Exception as e:
+        logger.error(f"Error searching organizations: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to search organizations")
+
+@router.post("/organizations/join")
+async def join_organization_endpoint(request: JoinOrganizationRequest, current_user: dict = Depends(get_current_user)):
+    """Join an existing organization"""
+    try:
+        # Check if user is already in an organization
+        current_org = get_user_organization(current_user["id"])
+        if current_org:
+            raise HTTPException(status_code=400, detail="You are already a member of an organization")
+        
+        # Add user to organization
+        success = add_user_to_organization(current_user["id"], request.organizationId, "member")
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to join organization")
+        
+        # Update user's org_id
+        supabase.table("users").update({
+            "org_id": request.organizationId,
+            "updated_at": datetime.now(UTC).isoformat()
+        }).eq("id", current_user["id"]).execute()
+        
+        return {"message": "Successfully joined organization"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error joining organization: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to join organization")
+
+@router.get("/organizations/my", response_model=OrganizationResponse)
+async def get_my_organization(current_user: dict = Depends(get_current_user)):
+    """Get current user's organization"""
+    try:
+        org = get_user_organization(current_user["id"])
+        if not org:
+            raise HTTPException(status_code=404, detail="You are not a member of any organization")
+        
+        user_role = get_user_role_in_organization(current_user["id"], org.id)
+        
+        return OrganizationResponse(
+            id=org.id,
+            name=org.name,
+            description=org.description,
+            email=org.email,
+            phone=org.phone,
+            address=org.address,
+            userRole=user_role,
+            createdDate=org.created_date
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user organization: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get organization")
+
+@router.post("/organizations/leave")
+async def leave_organization_endpoint(current_user: dict = Depends(get_current_user)):
+    """Leave current organization"""
+    try:
+        org = get_user_organization(current_user["id"])
+        if not org:
+            raise HTTPException(status_code=404, detail="You are not a member of any organization")
+        
+        # Check if user is the owner
+        user_role = get_user_role_in_organization(current_user["id"], org.id)
+        if user_role == "owner":
+            raise HTTPException(status_code=400, detail="Organization owners cannot leave. Transfer ownership first.")
+        
+        # Remove user from organization
+        from braindb import remove_user_from_organization
+        success = remove_user_from_organization(current_user["id"], org.id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to leave organization")
+        
+        # Update user's org_id
+        supabase.table("users").update({
+            "org_id": None,
+            "updated_at": datetime.now(UTC).isoformat()
+        }).eq("id", current_user["id"]).execute()
+        
+        return {"message": "Successfully left organization"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error leaving organization: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to leave organization")

@@ -307,3 +307,189 @@ def update_brain(id: str, new_name: str, new_status: str) -> Brain:
             created_date=datetime.fromisoformat(brain_data["created_date"].replace("Z", "+00:00"))
         )
     raise Exception("Failed to update brain or brain not found")
+
+def find_organization_by_name(name: str) -> Optional[Organization]:
+    """
+    Find organization by name (case-insensitive)
+    
+    Args:
+        name: Organization name to search for
+    
+    Returns:
+        Organization object if found, None otherwise
+    """
+    try:
+        response = supabase.table("organization")\
+            .select("*")\
+            .ilike("name", name)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            org_data = response.data[0]
+            return Organization(
+                id=org_data["id"],
+                org_id=org_data["org_id"],
+                name=org_data["name"],
+                description=org_data["description"],
+                email=org_data.get("email"),
+                phone=org_data.get("phone"),
+                address=org_data.get("address"),
+                created_date=datetime.fromisoformat(org_data["created_date"].replace("Z", "+00:00"))
+            )
+        return None
+    except Exception as e:
+        logger.error(f"Error finding organization by name: {str(e)}")
+        return None
+
+def search_organizations(query: str, limit: int = 10) -> List[Organization]:
+    """
+    Search organizations by name (case-insensitive partial match)
+    
+    Args:
+        query: Search query
+        limit: Maximum number of results
+    
+    Returns:
+        List of matching Organization objects
+    """
+    try:
+        response = supabase.table("organization")\
+            .select("*")\
+            .ilike("name", f"%{query}%")\
+            .limit(limit)\
+            .execute()
+        
+        organizations = []
+        if response.data:
+            for org_data in response.data:
+                organizations.append(Organization(
+                    id=org_data["id"],
+                    org_id=org_data["org_id"],
+                    name=org_data["name"],
+                    description=org_data["description"],
+                    email=org_data.get("email"),
+                    phone=org_data.get("phone"),
+                    address=org_data.get("address"),
+                    created_date=datetime.fromisoformat(org_data["created_date"].replace("Z", "+00:00"))
+                ))
+        return organizations
+    except Exception as e:
+        logger.error(f"Error searching organizations: {str(e)}")
+        return []
+
+def add_user_to_organization(user_id: str, org_id: str, role: str = "member") -> bool:
+    """
+    Add user as member of organization
+    
+    Args:
+        user_id: User ID from users table
+        org_id: Organization UUID
+        role: User role in organization (owner, admin, member)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Validate organization exists
+        org = get_organization(org_id)
+        if not org:
+            raise ValueError(f"Organization with id {org_id} does not exist")
+        
+        # Check if user is already a member
+        existing = supabase.table("user_organizations")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .eq("org_id", org_id)\
+            .execute()
+        
+        if existing.data:
+            logger.info(f"User {user_id} is already a member of organization {org_id}")
+            return True
+        
+        # Add user to organization
+        data = {
+            "user_id": user_id,
+            "org_id": org_id,
+            "role": role,
+            "joined_at": datetime.now(UTC).isoformat()
+        }
+        
+        response = supabase.table("user_organizations").insert(data).execute()
+        return bool(response.data)
+    
+    except Exception as e:
+        logger.error(f"Error adding user to organization: {str(e)}")
+        return False
+
+def get_user_organization(user_id: str) -> Optional[Organization]:
+    """
+    Get the organization that a user belongs to
+    
+    Args:
+        user_id: User ID from users table
+    
+    Returns:
+        Organization object if user belongs to one, None otherwise
+    """
+    try:
+        response = supabase.table("user_organizations")\
+            .select("org_id, role")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            org_id = response.data[0]["org_id"]
+            return get_organization(org_id)
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error getting user organization: {str(e)}")
+        return None
+
+def get_user_role_in_organization(user_id: str, org_id: str) -> Optional[str]:
+    """
+    Get user's role in a specific organization
+    
+    Args:
+        user_id: User ID from users table
+        org_id: Organization UUID
+    
+    Returns:
+        Role string if user is member, None otherwise
+    """
+    try:
+        response = supabase.table("user_organizations")\
+            .select("role")\
+            .eq("user_id", user_id)\
+            .eq("org_id", org_id)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            return response.data[0]["role"]
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error getting user role in organization: {str(e)}")
+        return None
+
+def remove_user_from_organization(user_id: str, org_id: str) -> bool:
+    """
+    Remove user from organization
+    
+    Args:
+        user_id: User ID from users table
+        org_id: Organization UUID
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        response = supabase.table("user_organizations")\
+            .delete()\
+            .eq("user_id", user_id)\
+            .eq("org_id", org_id)\
+            .execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error removing user from organization: {str(e)}")
+        return False
