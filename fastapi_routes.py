@@ -80,6 +80,21 @@ class BrainGraphRequest(BaseModel):
     name: str
     description: Optional[str] = None
 
+class CreateOrganizationRequest(BaseModel):
+    name: str = Field(..., description="Organization name")
+    description: Optional[str] = Field(None, description="Organization description")
+    email: Optional[str] = Field(None, description="Contact email")
+    phone: Optional[str] = Field(None, description="Contact phone")
+    address: Optional[str] = Field(None, description="Physical address")
+
+class UpdateOrganizationRequest(BaseModel):
+    id: str = Field(..., description="Organization UUID")
+    name: str = Field(..., description="Organization name")
+    description: Optional[str] = Field(None, description="Organization description")
+    email: Optional[str] = Field(None, description="Contact email")
+    phone: Optional[str] = Field(None, description="Contact phone")
+    address: Optional[str] = Field(None, description="Physical address")
+
 class ChatwootWebhookData(BaseModel):
     event: str
     inbox: Optional[Dict[str, Any]] = None
@@ -269,6 +284,75 @@ async def get_org_detail(orgid: str):
 async def get_org_detail_options(orgid: str):
     return handle_options()
 
+@router.post('/create-organization')
+async def create_organization_endpoint(request_data: CreateOrganizationRequest):
+    """Create a new organization"""
+    try:
+        new_org = create_organization(
+            name=request_data.name,
+            description=request_data.description,
+            email=request_data.email,
+            phone=request_data.phone,
+            address=request_data.address
+        )
+        
+        org_data = {
+            "id": new_org.id,
+            "org_id": new_org.org_id,
+            "name": new_org.name,
+            "description": new_org.description,
+            "email": new_org.email,
+            "phone": new_org.phone,
+            "address": new_org.address,
+            "created_date": new_org.created_date.isoformat()
+        }
+        
+        return {
+            "message": "Organization created successfully",
+            "organization": org_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.options('/create-organization')
+async def create_organization_options():
+    return handle_options()
+
+@router.post('/update-organization')
+async def update_organization_endpoint(request_data: UpdateOrganizationRequest):
+    """Update an existing organization"""
+    try:
+        updated_org = update_organization(
+            id=request_data.id,
+            name=request_data.name,
+            description=request_data.description,
+            email=request_data.email,
+            phone=request_data.phone,
+            address=request_data.address
+        )
+        
+        org_data = {
+            "id": updated_org.id,
+            "org_id": updated_org.org_id,
+            "name": updated_org.name,
+            "description": updated_org.description,
+            "email": updated_org.email,
+            "phone": updated_org.phone,
+            "address": updated_org.address,
+            "created_date": updated_org.created_date.isoformat()
+        }
+        
+        return {
+            "message": "Organization updated successfully",
+            "organization": org_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.options('/update-organization')
+async def update_organization_options():
+    return handle_options()
+
 VERIFY_TOKEN = os.getenv("CALLBACK_V_TOKEN")
 
 @router.get("/webhook")
@@ -425,3 +509,4 @@ async def get_version_brains_options():
 def verify_webhook_token(token, org_id):
     # Implementation depends on your verification logic
     return token == VERIFY_TOKEN 
+
