@@ -20,6 +20,7 @@ from google.oauth2 import id_token
 from utilities import logger
 from braindb import (
     create_organization, 
+    update_organization,
     find_organization_by_name, 
     search_organizations,
     add_user_to_organization,
@@ -1060,6 +1061,14 @@ class CreateOrganizationRequest(BaseModel):
 class JoinOrganizationRequest(BaseModel):
     organizationId: str
 
+class UpdateOrganizationRequest(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+
 class SearchOrganizationsRequest(BaseModel):
     query: str
     limit: Optional[int] = 10
@@ -1114,6 +1123,47 @@ async def create_organization_endpoint(request: CreateOrganizationRequest, curre
     except Exception as e:
         logger.error(f"Error creating organization: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create organization")
+
+@router.post("/organizations/update", response_model=OrganizationResponse)
+async def update_organization_endpoint(request: UpdateOrganizationRequest, current_user: dict = Depends(get_current_user)):
+    """Update an existing organization's information"""
+    try:
+        # Check if user belongs to the organization they're trying to update
+        user_org = get_user_organization(current_user["id"])
+        if not user_org or user_org.id != request.id:
+            raise HTTPException(status_code=403, detail="You can only update your own organization")
+        
+        # Check if user has permission to update organization (owner or admin)
+        user_role = get_user_role_in_organization(current_user["id"], request.id)
+        if user_role not in ["owner", "admin"]:
+            raise HTTPException(status_code=403, detail="Only organization owners and admins can update organization information")
+        
+        # Update organization
+        updated_org = update_organization(
+            id=request.id,
+            name=request.name,
+            description=request.description,
+            email=request.email,
+            phone=request.phone,
+            address=request.address
+        )
+        
+        return OrganizationResponse(
+            id=updated_org.id,
+            name=updated_org.name,
+            description=updated_org.description,
+            email=updated_org.email,
+            phone=updated_org.phone,
+            address=updated_org.address,
+            userRole=user_role,
+            createdDate=updated_org.created_date
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating organization: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update organization")
 
 @router.post("/organizations/search")
 async def search_organizations_endpoint(request: SearchOrganizationsRequest, current_user: dict = Depends(get_current_user)):
