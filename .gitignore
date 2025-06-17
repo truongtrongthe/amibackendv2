@@ -52,3 +52,4 @@ faiss_index/
 *.pkl
 *.venv/
 myenv/
+credentials.json

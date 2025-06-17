@@ -80,7 +80,8 @@ class BrainGraphRequest(BaseModel):
     name: str
     description: Optional[str] = None
 
-
+class ActivateBrainRequest(BaseModel):
+    graph_version_id: str
 
 class ChatwootWebhookData(BaseModel):
     event: str
@@ -240,7 +241,88 @@ async def brain_details(brain_id: str):
 async def brain_details_options():
     return handle_options()
 
+async def activate_brain_with_version(graph_version_id):
+    """
+    Activate the brain by setting its status to published in the database.
+    
+    Args:
+        graph_version_id: The graph version ID to activate
+        
+    Returns:
+        dict: A dictionary with activation results
+    """
+    try:
+        # Update the brain_graph_version status to published
+        response = supabase.table("brain_graph_version")\
+            .update({"status": "published"})\
+            .eq("id", graph_version_id)\
+            .execute()
+        
+        if response.data:
+            logger.info(f"Successfully activated brain graph version: {graph_version_id}")
+            return {
+                "success": True,
+                "graph_version_id": graph_version_id,
+                "loaded": True,
+                "vector_count": 0  # Not applicable for simple activation
+            }
+        else:
+            logger.error(f"No brain graph version found with id: {graph_version_id}")
+            return {
+                "success": False,
+                "error": f"No brain graph version found with id: {graph_version_id}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error activating brain graph version {graph_version_id}: {str(e)}")
+        return {
+            "success": False,
+            "error": f"Database error: {str(e)}"
+        }
 
+@router.post('/activate-brain')
+async def activate_brain(request: ActivateBrainRequest):
+    """
+    Activate the brain with a specific graph version ID.
+    This endpoint will load vectors for the specified graph version.
+    """
+    start_time = datetime.now()
+    logger.info(f"[SESSION_TRACE] === BEGIN ACTIVATE BRAIN request at {start_time.isoformat()} ===")
+    
+    if not request.graph_version_id:
+        raise HTTPException(status_code=400, detail="graph_version_id is required")
+    
+    try:
+        # Call the centralized activate_brain_with_version function
+        result = await activate_brain_with_version(request.graph_version_id)
+        
+        # Log completion
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[SESSION_TRACE] === END ACTIVATE BRAIN request - total time: {elapsed:.2f}s ===")
+        
+        if result["success"]:
+            return {
+                "message": "Brain activated successfully", 
+                "graph_version_id": result["graph_version_id"],
+                "loaded": result["loaded"],
+                "elapsed_seconds": elapsed,
+                "worker_id": "",
+                "vector_count": result["vector_count"]
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["error"])
+            
+    except Exception as e:
+        # Handle any errors
+        error_msg = f"Error in activate_brain: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@router.options('/activate-brain')
+async def activate_brain_options():
+    return handle_options()
 
 VERIFY_TOKEN = os.getenv("CALLBACK_V_TOKEN")
 
@@ -309,7 +391,11 @@ async def get_org_brain_graph(org_id: str):
             .execute()
         
         if not response.data:
-            raise HTTPException(status_code=404, detail="No brain graph exists for this organization")
+            return {
+                "brain_graph": None,
+                "message": "No brain graph exists for this organization",
+                "org_id": org_id
+            }
         
         graph_id = response.data[0]["id"]
         brain_graph = get_brain_graph(graph_id)
