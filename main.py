@@ -69,8 +69,9 @@ app.include_router(brain_router)
 import socketio_manager_async
 
 # SocketIO setup
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-socket_app = socketio.ASGIApp(sio, app)
+import socketio
+sio_server = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+socket_app = socketio.ASGIApp(sio_server, app)
 
 # Load numpy and json imports (needed elsewhere)
 import numpy as np
@@ -168,7 +169,7 @@ socketio_manager_async.message_lock = message_lock
 socketio_manager_async.undelivered_messages = undelivered_messages
 
 # Initialize socketio with shared session storage
-socketio_manager_async.setup_socketio(sio)
+socketio_manager_async.setup_socketio(sio_server)
 
 # Helper function for OPTIONS requests
 def handle_options():
@@ -183,7 +184,7 @@ def handle_options():
         }
     )
 
-@sio.on('connect')
+@sio_server.on('connect')
 async def handle_connect(sid, environ):
     """Handle client connection"""
     # Log the connection for debugging session issues
@@ -198,13 +199,13 @@ async def handle_connect(sid, environ):
         logger.info(f"Connect: Socket module session count: {len(socketio_manager_async.main_ws_sessions) if socketio_manager_async.main_ws_sessions else 0}")
     logger.info(f"Connect: Main app session count: {len(ws_sessions)}")
 
-@sio.on('register_session')
+@sio_server.on('register_session')
 async def handle_register(sid, data):
     thread_id = data.get('thread_id')
     user_id = data.get('user_id', 'anonymous')
     
     if not thread_id:
-        await sio.emit('error', {'message': 'No thread_id provided'}, room=sid)
+        await sio_server.emit('error', {'message': 'No thread_id provided'}, room=sid)
         return
         
     async with session_lock:
@@ -219,8 +220,8 @@ async def handle_register(sid, data):
         socketio_manager_async.set_main_sessions(ws_sessions)
         logger.info(f"After registration: Main app session count: {len(ws_sessions)}")
         
-    await sio.enter_room(sid, thread_id)
-    await sio.emit('session_registered', {
+    await sio_server.enter_room(sid, thread_id)
+    await sio_server.emit('session_registered', {
         'status': 'ready',
         'thread_id': thread_id,
         'session_id': sid
@@ -232,11 +233,11 @@ async def handle_register(sid, data):
     async with message_lock:
         if thread_id in undelivered_messages:
             for msg in undelivered_messages[thread_id]:
-                await sio.emit(msg['event'], msg['data'], room=sid)
+                await sio_server.emit(msg['event'], msg['data'], room=sid)
             logger.info(f"Sent {len(undelivered_messages[thread_id])} undelivered messages to {sid}")
             undelivered_messages[thread_id] = []
 
-@sio.on('disconnect')
+@sio_server.on('disconnect')
 async def handle_disconnect(sid):
     async with session_lock:
         if sid in ws_sessions:
@@ -246,7 +247,7 @@ async def handle_disconnect(sid):
         else:
             logger.info(f"Client disconnected: {sid} (no session data)")
 
-@sio.on('ping')
+@sio_server.on('ping')
 async def handle_ping(sid, data=None):
     thread_id = None
     async with session_lock:
@@ -255,7 +256,7 @@ async def handle_ping(sid, data=None):
             ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
     
     if thread_id:
-        await sio.emit('pong', {'thread_id': thread_id, 'timestamp': datetime.now().isoformat()}, room=sid)
+        await sio_server.emit('pong', {'thread_id': thread_id, 'timestamp': datetime.now().isoformat()}, room=sid)
 
 # WebSocket emit functions
 async def emit_analysis_event(thread_id: str, data: Dict[str, Any]) -> bool:
@@ -313,6 +314,7 @@ class ConversationLearningRequest(BaseModel):
     thread_id: str = "learning_thread"
     graph_version_id: str = ""
     use_websocket: bool = False
+    org_id: str = "unknown"  # Add org_id field with default value
 
 class ProcessDocumentRequest(BaseModel):
     user_id: str
@@ -344,6 +346,7 @@ class ConversationGradingRequest(BaseModel):
 class ToolExecuteRequest(BaseModel):
     tool_name: str
     parameters: Dict[str, Any]
+    org_id: str = "unknown"  # Add org_id field with default value
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -411,9 +414,9 @@ async def generate_sse_stream(request: HaveFunRequest, thread_lock: asyncio.Lock
                     logger.info(f"[REQUEST:{request_id}] Updating socket {sid} with new thread_id: {thread_id}")
                     ws_sessions[sid]['thread_id'] = thread_id
                     # Make sure the socket is in the correct room
-                    await sio.enter_room(sid, thread_id)
+                    await sio_server.enter_room(sid, thread_id)
                     # Send registration confirmation
-                    await sio.emit('session_registered', {
+                    await sio_server.emit('session_registered', {
                         'status': 'ready',
                         'thread_id': thread_id,
                         'session_id': sid
@@ -755,6 +758,10 @@ async def execute_tool_endpoint(request: ToolExecuteRequest):
         # Get AVA instance
         ava = await get_ava_instance()
         
+        # Add org_id to parameters if not present
+        if "org_id" not in request.parameters:
+            request.parameters["org_id"] = request.org_id
+        
         # Execute the tool
         result = await ava.execute_tool(request.tool_name, request.parameters)
         
@@ -855,7 +862,7 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
                 
                 # Log request to convo_stream_learning
                 logger.info(f"[REQUEST:{request_id}] Calling convo_stream_learning for thread {thread_id}, use_websocket={request.use_websocket}")
-                
+                logger.info(f"[REQUEST:{request_id}] Org ID: {request.org_id}")
                 # Track response count
                 response_count = 0
                 
@@ -866,7 +873,8 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
                     user_id=request.user_id,
                     graph_version_id=request.graph_version_id,
                     use_websocket=request.use_websocket,
-                    thread_id_for_analysis=thread_id
+                    thread_id_for_analysis=thread_id,
+                    org_id=request.org_id  # Pass org_id to convo_stream_learning
                 ):
                     response_count += 1
                     # Format the response as SSE

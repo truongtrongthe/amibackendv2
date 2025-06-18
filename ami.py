@@ -22,36 +22,26 @@ except ImportError:
     logger.warning("Could not import socketio_manager_async in ami.py - WebSocket events may not be delivered")
 
 # Tool execution helper functions for AMI
-async def execute_save_knowledge_tool(parameters: dict, user_id: str, thread_id: str) -> dict:
+async def execute_save_knowledge_tool(parameters: dict, user_id: str, thread_id: str, org_id: str) -> dict:
     """Execute save_knowledge tool call with proper error handling and vector ID capture."""
     from pccontroller import save_knowledge
+    
     try:
-        # Get required parameters
-        input_text = parameters.get("query", "")
-        if not input_text and "content" in parameters:
-            input_text = parameters.get("content", "")
-        
-        # If we still don't have input text, try to use both query and content
-        if not input_text and "query" in parameters and "content" in parameters:
-            input_text = f"{parameters['query']} {parameters['content']}".strip()
-        
+        # Extract parameters
+        input_text = parameters.get("query") or parameters.get("content")
         if not input_text:
             logger.error("Missing required parameter for save_knowledge: query or content")
-            return {"success": False, "error": "Missing required content"}
+            return {"success": False, "error": "Missing required parameter"}
             
-        # Get optional parameters
-        user_id_param = parameters.get("user_id", user_id)
-        bank_name = parameters.get("bank_name", "default")
-        thread_id_param = parameters.get("thread_id", thread_id)
-        topic = parameters.get("topic", None)
-        categories = parameters.get("categories", ["general"])
+        # Extract optional parameters
+        title = parameters.get("title", "")
+        bank_name = parameters.get("bank_name", "")
+        topic = parameters.get("topic")
+        categories = parameters.get("categories")
+        ttl_days = parameters.get("ttl_days")
         
-        # Check if this is a health-related query and adjust bank_name
-        if not parameters.get("bank_name"):
-            if any(term in input_text.lower() for term in ["rối loạn cương dương", "xuất tinh sớm", "phân nhóm khách hàng", "phân tích chân dung khách hàng"]):
-                bank_name = "health"
-                if "health_segmentation" not in categories:
-                    categories.append("health_segmentation")
+        # Get user_id from parameters or use provided one
+        user_id_param = parameters.get("user_id", user_id)
         
         logger.info(f"Executing save_knowledge tool: '{input_text[:50]}...' for user {user_id_param}")
         
@@ -59,12 +49,15 @@ async def execute_save_knowledge_tool(parameters: dict, user_id: str, thread_id:
         result = await save_knowledge(
             input=input_text,
             user_id=user_id_param,
+            org_id=org_id,
+            title=title,
             bank_name=bank_name,
-            thread_id=thread_id_param,
+            thread_id=thread_id,
             topic=topic,
-            categories=categories
+            categories=categories,
+            ttl_days=ttl_days
         )
-        logger.info(f"Save knowledge tool result: {result}")
+        
         return result
         
     except Exception as e:
@@ -131,7 +124,7 @@ async def handle_save_approval_request(parameters: dict, user_id: str, thread_id
         logger.error(f"Error handling save approval request: {str(e)}")
         return {"success": False, "error": str(e)}
 
-async def handle_update_decision_tool(parameters: dict, user_id: str, thread_id: str) -> dict:
+async def handle_update_decision_tool(parameters: dict, user_id: str, thread_id: str, org_id: str = "unknown") -> dict:
     """Handle UPDATE vs CREATE decision from human."""
     try:
         request_id = parameters.get("request_id", "")
@@ -164,7 +157,8 @@ async def handle_update_decision_tool(parameters: dict, user_id: str, thread_id:
             request_id=request_id,
             user_decision=user_decision,
             user_id=user_id,
-            thread_id=thread_id
+            thread_id=thread_id,
+            org_id=org_id
         )
         
         logger.info(f"UPDATE vs CREATE decision result: {result}")
@@ -435,7 +429,8 @@ async def convo_stream(user_input: str = None, user_id: str = None, thread_id: s
 
 async def convo_stream_learning(user_input: str = None, user_id: str = None, thread_id: str = None, 
               graph_version_id: str = "", mode: str = "learning", 
-              use_websocket: bool = False, thread_id_for_analysis: str = None):
+              use_websocket: bool = False, thread_id_for_analysis: str = None,
+              org_id: str = "unknown"):
     """
     Process user input using the learning-based tools and stream the response.
     
@@ -451,6 +446,7 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
         mode: Processing mode ('learning')
         use_websocket: Whether to use WebSocket for analysis streaming
         thread_id_for_analysis: Thread ID to use for WebSocket analysis events
+        org_id: Organization identifier for knowledge management
     
     Returns:
         A generator yielding response chunks
@@ -482,7 +478,8 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
         "analysis": {},
         "stream_events": [],
         "use_websocket": use_websocket,
-        "thread_id_for_analysis": thread_id_for_analysis
+        "thread_id_for_analysis": thread_id_for_analysis,
+        "org_id": org_id  # Add org_id to state
     }
     state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
 
@@ -532,7 +529,8 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
             "user_id": user_id,
             "graph_version_id": graph_version_id,
             "use_websocket": use_websocket,
-            "thread_id_for_analysis": thread_id_for_analysis
+            "thread_id_for_analysis": thread_id_for_analysis,
+            "org_id": org_id  # Add org_id to config
         }
     }
     
@@ -554,7 +552,8 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
             user_id=user_id,
             thread_id=thread_id,
             use_websocket=use_websocket,
-            thread_id_for_analysis=thread_id_for_analysis
+            thread_id_for_analysis=thread_id_for_analysis,
+            org_id=org_id  # Pass org_id to read_human_input
         ):
             if chunk.get("type") == "response_chunk":
                 # Stream chunks immediately

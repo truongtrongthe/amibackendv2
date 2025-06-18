@@ -523,6 +523,7 @@ async def process_document(
                 task = save_knowledge(
                     input=chunk_data['content'],
                     user_id=user_id,
+                    org_id="unknown",
                     title=chunk_title,
                     bank_name=bank_name,
                     thread_id=thread_id,

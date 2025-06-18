@@ -22,90 +22,99 @@ supabase: Client = create_client(
     spb_url,
     spb_key
 )
+
 # Initialize Pinecone client
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", ""))
-ent_index_name = os.getenv("ENT", "ent-index")
 
 # Create or connect to index with serverless configuration
-def initialize_index():
+def get_org_index(org_id: str):
+    """
+    Get or create the Pinecone index for a specific organization.
+    
+    Args:
+        org_id: The organization ID
+        
+    Returns:
+        Pinecone index for the organization
+    """
     try:
-        if ent_index_name not in pc.list_indexes().names():
+        index_name = f"ent-{org_id}"
+        if index_name not in pc.list_indexes().names():
             pc.create_index(
-                name=ent_index_name,
+                name=index_name,
                 dimension=1536,  # Matches OpenAI embeddings
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-west-2")
             )
-            logger.info(f"Created Pinecone index: {ent_index_name}")
-        return pc.Index(ent_index_name)
+            logger.info(f"Created Pinecone index for organization {org_id}: {index_name}")
+        return pc.Index(index_name)
     except Exception as e:
-        logger.error(f"Failed to initialize Pinecone index: {e}")
+        logger.error(f"Failed to initialize Pinecone index for organization {org_id}: {e}")
         raise
 
-ent_index = initialize_index()
+async def get_brain_banks(graph_version_id: str, org_id: str) -> List[Dict[str, str]]:
+    """
+    Get the bank names for all brains in a version
 
+    Args:
+        version_id: UUID of the graph version
+        org_id: UUID of the organization
 
-async def get_brain_banks(graph_version_id: str) -> List[Dict[str, str]]:
-        """
-        Get the bank names for all brains in a version
+    Returns:
+        List of dicts containing brain_id and bank_name
+    """
+    try:
+        version_response = supabase.table("brain_graph_version")\
+            .select("brain_ids", "status")\
+            .eq("id", graph_version_id)\
+            .eq("org_id", org_id)\
+            .execute()
 
-        Args:
-            version_id: UUID of the graph version
-
-        Returns:
-            List of dicts containing brain_id and bank_name
-        """
-        try:
-            
-            version_response = supabase.table("brain_graph_version")\
-                .select("brain_ids", "status")\
-                .eq("id", graph_version_id)\
-                .execute()
-
-            if not version_response.data:
-                logger.error(f"Version {graph_version_id} not found")
-                return []
-
-            version_data = version_response.data[0]
-            if version_data["status"] != "published":
-                logger.warning(f"Version {graph_version_id} is not published")
-                return []
-
-            brain_ids = version_data["brain_ids"]
-            if not brain_ids:
-                logger.warning(f"No brain IDs found for version {graph_version_id}")
-                return []
-
-            
-            brain_response = supabase.table("brain")\
-                .select("id", "brain_id", "bank_name")\
-                .in_("id", brain_ids)\
-                .execute()
-
-            if not brain_response.data:
-                logger.warning(f"No brain data found for brain IDs: {brain_ids}")
-                return []
-
-            brain_banks = [
-                {
-                    "id": brain["id"],
-                    "brain_id": brain["brain_id"],
-                    "bank_name": brain["bank_name"]
-                }
-                for brain in brain_response.data
-            ]
-
-            logger.info(f"Retrieved brain structure for version {graph_version_id}, {len(brain_banks)} brains")
-            return brain_banks
-        except Exception as e:
-            logger.error(f"Error getting brain banks: {e}")
-            logger.error(traceback.format_exc())
+        if not version_response.data:
+            logger.error(f"Version {graph_version_id} not found for organization {org_id}")
             return []
+
+        version_data = version_response.data[0]
+        if version_data["status"] != "published":
+            logger.warning(f"Version {graph_version_id} is not published")
+            return []
+
+        brain_ids = version_data["brain_ids"]
+        if not brain_ids:
+            logger.warning(f"No brain IDs found for version {graph_version_id}")
+            return []
+
+        brain_response = supabase.table("brain")\
+            .select("id", "brain_id", "bank_name")\
+            .in_("id", brain_ids)\
+            .eq("org_id", org_id)\
+            .execute()
+
+        if not brain_response.data:
+            logger.warning(f"No brain data found for brain IDs: {brain_ids}")
+            return []
+
+        brain_banks = [
+            {
+                "id": brain["id"],
+                "brain_id": brain["brain_id"],
+                "bank_name": brain["bank_name"]
+            }
+            for brain in brain_response.data
+        ]
+
+        logger.info(f"Retrieved brain structure for version {graph_version_id}, {len(brain_banks)} brains")
+        return brain_banks
+    except Exception as e:
+        logger.error(f"Error getting brain banks: {e}")
+        logger.error(traceback.format_exc())
+        return []
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
 async def save_knowledge(
     input: str,
     user_id: str,
+    org_id: str,
     title: str="",
     bank_name: str = "",
     thread_id: Optional[str] = None,
@@ -115,26 +124,27 @@ async def save_knowledge(
     batch_size: int = 100
 ) -> Dict:
     """
-    Save knowledge to Pinecone vector database with optimized vector structure.
+    Save knowledge to organization-specific Pinecone vector database.
 
     Args:
         input: The knowledge content to save.
         user_id: Identifier for the user.
+        org_id: Organization ID.
         bank_name: Namespace for the knowledge (optional).
         thread_id: Conversation thread identifier (optional).
-        topic: Core topic of the knowledge (e.g., "phân nhóm khách hàng").
-        categories: List of categories (e.g., ["health_segmentation"]).
-        ttl_days: Time-to-live in days (optional, for data expiration).
+        topic: Core topic of the knowledge.
+        categories: List of categories.
+        ttl_days: Time-to-live in days (optional).
         batch_size: Number of vectors to upsert in one batch.
 
     Returns:
-        bool: True if saved successfully, False otherwise.
+        Dict containing success status and vector details.
     """
     try:
         ns = bank_name or "default"
-        target_index = ent_index
+        target_index = get_org_index(org_id)
 
-        logger.info(f"Saving to index={ent_index_name}, namespace={ns}, user_id={user_id}, thread_id={thread_id}")
+        logger.info(f"Saving to org={org_id}, namespace={ns}, user_id={user_id}, thread_id={thread_id}")
 
         # Generate embedding
         embedding = await EMBEDDINGS.aembed_query(input)
@@ -194,7 +204,6 @@ async def save_knowledge(
             namespace=ns,
             batch_size=batch_size
         )
-        # Return vector ID for future processing
         return {
             "success": True,
             "vector_id": convo_id,
@@ -211,6 +220,7 @@ async def save_knowledge(
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
 async def query_knowledge(
     query: str,
+    org_id: str,
     bank_name: str = "",
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
@@ -220,17 +230,18 @@ async def query_knowledge(
     ef_search: int = 100
 ) -> List[Dict]:
     """
-    Query knowledge from Pinecone with optimized vector structure and recall tuning.
+    Query knowledge from organization-specific Pinecone index.
 
     Args:
         query: The search query.
+        org_id: Organization ID.
         bank_name: Namespace to query (optional).
         user_id: Filter by user (optional).
         thread_id: Filter by conversation thread (optional).
-        topic: Filter by topic (e.g., "phân nhóm khách hàng").
+        topic: Filter by topic.
         top_k: Maximum number of results.
         min_similarity: Minimum similarity score for matches.
-        ef_search: Controls search-time exploration for better recall.
+        ef_search: Controls search-time exploration.
 
     Returns:
         List of knowledge entries sorted by score.
@@ -242,9 +253,10 @@ async def query_knowledge(
             return []
 
         ns = bank_name or "default"
+        target_index = get_org_index(org_id)
         knowledge = []
 
-        logger.info(f"Querying index={ent_index_name}, namespace={ns}, user_id={user_id}, thread_id={thread_id}, topic={topic}")
+        logger.info(f"Querying org={org_id}, namespace={ns}, user_id={user_id}, thread_id={thread_id}, topic={topic}")
 
         # Dynamic filter
         filter_dict = {}
@@ -254,9 +266,9 @@ async def query_knowledge(
             filter_dict["thread_id"] = thread_id
         if topic:
             filter_dict["topic"] = topic
-        
+
         results = await asyncio.to_thread(
-            ent_index.query,
+            target_index.query,
             vector=embedding,
             top_k=top_k * 2,
             include_metadata=True,
@@ -290,19 +302,31 @@ async def query_knowledge(
         # Sort and limit
         knowledge = sorted(knowledge, key=lambda x: x["score"], reverse=True)[:top_k]
         logger.info(f"Queried {len(knowledge)} knowledge entries for '{query[:50]}...', top score={knowledge[0]['score'] if knowledge else 0}")
-        #logger.info(f"Raw Knowledge vectors: {knowledge}")
         return knowledge
     except Exception as e:
         logger.error(f"Query failed after retries: {e}")
         return []
 
-async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id: Optional[str] = None, thread_id: Optional[str] = None, topic: Optional[str] = None, top_k: int = 10, min_similarity: float = 0.3, ef_search: int = 100, exclude_categories: Optional[List[str]] = None, include_categories: Optional[List[str]] = None) -> List[Dict]:
+async def query_knowledge_from_graph(
+    query: str,
+    graph_version_id: str,
+    org_id: str,
+    user_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    topic: Optional[str] = None,
+    top_k: int = 10,
+    min_similarity: float = 0.3,
+    ef_search: int = 100,
+    exclude_categories: Optional[List[str]] = None,
+    include_categories: Optional[List[str]] = None
+) -> List[Dict]:
     """
-    Query knowledge from Pinecone with optimized vector structure and recall tuning.
+    Query knowledge from organization-specific Pinecone index for a graph version.
 
     Args:
         query: The search query.
         graph_version_id: The graph version ID.
+        org_id: Organization ID.
         user_id: The user ID.
         thread_id: The thread ID.
         topic: The topic.
@@ -313,16 +337,15 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
         include_categories: List of categories to include (only these categories will be returned).
     """
     
-    #brain_banks = await get_brain_banks(graph_version_id)
-    #valid_namespaces = [brain["bank_name"] for brain in brain_banks]
+    brain_banks = await get_brain_banks(graph_version_id, org_id)
+    valid_namespaces = [brain["bank_name"] for brain in brain_banks]
     # Add conversation namespace to the list
     valid_namespaces = ["conversation"]
-    #logger.info(f"Valid namespaces for graph version {graph_version_id}: {valid_namespaces}")
 
     # Get all knowledge from all namespaces
     all_knowledge = []
     for namespace in valid_namespaces:
-        knowledge = await query_knowledge(query, namespace, user_id, thread_id, topic, top_k, min_similarity, ef_search)
+        knowledge = await query_knowledge(query, org_id, namespace, user_id, thread_id, topic, top_k, min_similarity, ef_search)
         if knowledge:
             all_knowledge.extend(knowledge)
 
@@ -349,12 +372,13 @@ async def query_knowledge_from_graph(query: str, graph_version_id: str, user_id:
     return all_knowledge
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
-async def fetch_vector(vector_id: str, bank_name: str = "conversation") -> Dict:
+async def fetch_vector(vector_id: str, org_id: str, bank_name: str = "conversation") -> Dict:
     """
-    Fetch a specific vector by its ID from Pinecone.
+    Fetch a specific vector by its ID from organization-specific Pinecone index.
 
     Args:
         vector_id: The unique vector ID to fetch.
+        org_id: Organization ID.
         bank_name: Namespace where the vector is stored (default: "conversation").
 
     Returns:
@@ -362,9 +386,9 @@ async def fetch_vector(vector_id: str, bank_name: str = "conversation") -> Dict:
     """
     try:
         ns = bank_name or "conversation"
-        target_index = ent_index
+        target_index = get_org_index(org_id)
 
-        logger.info(f"Fetching vector {vector_id} from index={ent_index_name}, namespace={ns}")
+        logger.info(f"Fetching vector {vector_id} from org={org_id}, namespace={ns}")
 
         # Fetch the specific vector
         result = await asyncio.to_thread(

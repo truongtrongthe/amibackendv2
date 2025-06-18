@@ -497,10 +497,21 @@ class AVA:
                 import traceback
                 logger.error(f"Fallback emission traceback: {traceback.format_exc()}")
 
-    async def read_human_input(self, message: str, conversation_context: str, user_id: str, thread_id: Optional[str] = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
-        """Streaming version of process_incoming_message that yields chunks as they come."""
-        logger.info(f"Processing streaming message from user {user_id}")
+    async def read_human_input(self, message: str, conversation_context: str = "", user_id: str = None, 
+                             thread_id: str = None, use_websocket: bool = False, 
+                             thread_id_for_analysis: str = None, org_id: str = "unknown"):
+        """
+        Process human input and generate a response using the learning-based approach.
         
+        Args:
+            user_input: The user's message
+            conversation_context: Previous conversation history
+            user_id: User identifier
+            thread_id: Conversation thread identifier
+            use_websocket: Whether to use WebSocket for analysis streaming
+            thread_id_for_analysis: Thread ID to use for WebSocket analysis events
+            org_id: Organization identifier for knowledge management
+        """
         try:
             if not message.strip():
                 logger.error("Empty message")
@@ -571,7 +582,7 @@ class AVA:
             
             # Stream the response as it comes from LLM
             final_response = None
-            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data, use_websocket, thread_id_for_analysis):
+            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data, use_websocket, thread_id_for_analysis, org_id):
                 if chunk.get("type") == "response_chunk":
                     # Yield streaming chunks immediately
                     yield chunk
@@ -716,13 +727,15 @@ class AVA:
                         logger.info("💾 Running background knowledge saving (no pending decision)")
                         if original_teaching_intent:
                             # Handle as teaching intent with regular save (no UPDATE vs CREATE flow)
+                            org_id = final_response["metadata"].get("org_id", org_id)  # Use org_id from response metadata or fallback to original
                             self._create_background_task(
-                                self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name)
+                                self.handle_teaching_intent(message, final_response, user_id, thread_id, priority_topic_name, org_id)
                             )
                         else:
                             # Save as regular high-quality conversation without teaching intent processing
+                            org_id = final_response["metadata"].get("org_id", org_id)  # Use org_id from response metadata or fallback to original
                             self._create_background_task(
-                                self._save_high_quality_conversation(message, final_response, user_id, thread_id)
+                                self._save_high_quality_conversation(message, final_response, user_id, thread_id, org_id)
                             )
                     else:
                         logger.info("⏳ Skipping background save - waiting for human decision")
@@ -733,7 +746,7 @@ class AVA:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             yield {"status": "error", "message": f"Error: {str(e)}", "complete": True}
 
-    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None) -> AsyncGenerator[Union[str, Dict], None]:
+    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None, org_id: str = "unknown") -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of active learning method that yields chunks as they come from LLM."""
         logger.info("Starting streaming active learning approach")
         
@@ -930,7 +943,8 @@ class AVA:
                     "is_priority_topic": evaluation.get("is_priority_topic", False),
                     "priority_topic_name": evaluation.get("priority_topic_name", ""),
                     "should_save_knowledge": evaluation.get("should_save_knowledge", False),
-                    "full_structured_response": content
+                    "full_structured_response": content,
+                    "org_id": org_id
                 }
             }
             
@@ -995,6 +1009,8 @@ class AVA:
             if not user_id:
                 logger.warning("Missing user_id in tool call, defaulting to 'unknown'")
                 user_id = "unknown"
+            
+            org_id = parameters.get("org_id", "unknown")  # Add org_id parameter
 
             if tool_name == "knowledge_query":
                 query = parameters.get("query", "")
@@ -1004,13 +1020,12 @@ class AVA:
                 thread_id = parameters.get("thread_id", None)
                 topic = parameters.get("topic", None)
                 
-                # Determine if we should check health bank based on content
-                
                 bank_name = "conversation"
                 
                 # Try querying the specified bank
                 results = await query_knowledge(
                     query=query,
+                    org_id=org_id,  # Add org_id
                     bank_name=bank_name,
                     user_id=user_id,
                     thread_id=None,  # Remove thread_id restriction to find more results
@@ -1076,6 +1091,7 @@ class AVA:
                         ai_response=ai_part,
                         combined_content=input_text,
                         user_id=user_id,
+                        org_id=org_id,  # Add org_id
                         bank_name=bank_name,
                         thread_id=thread_id,
                         priority_topic_name=priority_topic_name,
@@ -1103,6 +1119,7 @@ class AVA:
                         ai_response=ai_content,
                         combined_content=combined_content,
                         user_id=user_id,
+                        org_id=org_id,  # Add org_id
                         bank_name=bank_name,
                         thread_id=thread_id,
                         priority_topic_name=priority_topic_name,
@@ -1151,7 +1168,7 @@ class AVA:
                 if target_id:
                     user_decision["target_id"] = target_id
                 
-                result = await self.handle_update_decision(request_id, user_decision, user_id, thread_id)
+                result = await self.handle_update_decision(request_id, user_decision, user_id, thread_id, org_id)
                 
                 if result.get("success"):
                     return {
@@ -1171,7 +1188,7 @@ class AVA:
             logger.error(f"Error executing tool {tool_name}: {str(e)}")
             return {"status": "error", "message": f"Tool execution failed: {str(e)}"}
 
-    async def handle_teaching_intent(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str) -> None:
+    async def handle_teaching_intent(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str, org_id: str) -> None:
         """Handle teaching intent detection and knowledge saving."""
         logger.info("Saving knowledge due to teaching intent.")
         logger.info(f"Response: {response}")
@@ -1321,7 +1338,7 @@ class AVA:
         if not has_structured_format:
             await self._save_combined_knowledge(
                 combined_knowledge, user_id, bank_name, thread_id, 
-                priority_topic_name, categories, response
+                priority_topic_name, categories, response, org_id
             )
         else:
             logger.info(f"Skipping combined knowledge save since structured format is available")
@@ -1331,12 +1348,12 @@ class AVA:
             await self._save_ai_synthesis(
                 message, synthesis_content, knowledge_synthesis, knowledge_summary,
                 summary, conversational_response, user_id, bank_name, thread_id,
-                priority_topic_name, categories, response
+                priority_topic_name, categories, response, org_id
             )
 
     async def _save_combined_knowledge(self, combined_knowledge: str, user_id: str, bank_name: str, 
                                      thread_id: Optional[str], priority_topic_name: str, 
-                                     categories: List[str], response: Dict[str, Any]) -> None:
+                                     categories: List[str], response: Dict[str, Any], org_id: str) -> None:
         """Save combined knowledge to the knowledge base."""
         try:
             logger.info(f"Saving combined knowledge to {bank_name} bank: '{combined_knowledge[:100]}...'")
@@ -1344,6 +1361,7 @@ class AVA:
                 input_text=combined_knowledge,
                 title="", # Add empty title parameter 
                 user_id=user_id,
+                org_id=org_id,  # Add org_id
                 bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
@@ -1374,7 +1392,7 @@ class AVA:
     async def _save_ai_synthesis(self, message: str, synthesis_content: str, knowledge_synthesis: str,
                                knowledge_summary: str, summary: str, conversational_response: str,
                                user_id: str, bank_name: str, thread_id: Optional[str],
-                               priority_topic_name: str, categories: List[str], response: Dict[str, Any]) -> None:
+                               priority_topic_name: str, categories: List[str], response: Dict[str, Any], org_id: str) -> None:
         """Save AI synthesis and summary for improved future retrieval."""
         try:
             # Create categories list - do NOT add ai_synthesis here as this is for combined User+AI content
@@ -1406,6 +1424,7 @@ class AVA:
                 input_text=final_synthesis_content,
                 title=summary_title,
                 user_id=user_id,
+                org_id=org_id,  # Add org_id
                 bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
@@ -1430,7 +1449,7 @@ class AVA:
             # Save standalone summary if available - this will be pure AI content with ai_synthesis
             await self._save_standalone_summary(
                 knowledge_synthesis, knowledge_summary, summary, conversational_response,
-                user_id, bank_name, thread_id, priority_topic_name, categories
+                user_id, bank_name, thread_id, priority_topic_name, categories, org_id
             )
         except Exception as e:
             logger.error(f"Error saving AI synthesis: {str(e)}")
@@ -1438,7 +1457,7 @@ class AVA:
     async def _save_standalone_summary(self, knowledge_synthesis: str, knowledge_summary: str,
                                      summary: str, conversational_response: str, user_id: str,
                                      bank_name: str, thread_id: Optional[str], priority_topic_name: str,
-                                     categories: List[str]) -> None:
+                                     categories: List[str], org_id: str) -> None:
         """Save standalone summary for quick retrieval."""
         if knowledge_summary:
             # Define categories for summary - ensure ai_synthesis is included within first 5 categories
@@ -1467,6 +1486,7 @@ class AVA:
             summary_success = await save_knowledge(
                 input=f"AI: {knowledge_synthesis}",
                 user_id=user_id,
+                org_id=org_id,  # Add org_id
                 title=knowledge_summary,
                 bank_name=bank_name,
                 thread_id=thread_id,
@@ -1501,6 +1521,7 @@ class AVA:
             summary_success = await save_knowledge(
                 input=f"AI: {conversational_response}",
                 user_id=user_id,
+                org_id=org_id,  # Add org_id
                 title=summary,
                 bank_name=bank_name,
                 thread_id=thread_id,
@@ -1512,7 +1533,7 @@ class AVA:
         else:
             logger.info("No valid summary available, skipping standalone summary save")
 
-    async def update_existing_knowledge(self, vector_id: str, new_content: str, user_id: str, preserve_metadata: bool = True) -> Dict[str, Any]:
+    async def update_existing_knowledge(self, vector_id: str, new_content: str, user_id: str, org_id: str = "unknown", preserve_metadata: bool = True) -> Dict[str, Any]:
         """Update existing knowledge in the vector database by replacing the old vector."""
         try:
             logger.info(f"Updating existing knowledge vector {vector_id} with new content")
@@ -1521,6 +1542,7 @@ class AVA:
             update_result = await save_knowledge(
                 input=new_content,
                 user_id=user_id,
+                org_id=org_id,  # Use provided org_id
                 bank_name="conversation",
                 thread_id=None,
                 topic="updated_knowledge",
@@ -1570,7 +1592,7 @@ class AVA:
                 "original_vector_id": vector_id
             }
 
-    async def handle_update_decision(self, request_id: str, user_decision: Dict[str, Any], user_id: str, thread_id: str) -> Dict[str, Any]:
+    async def handle_update_decision(self, request_id: str, user_decision: Dict[str, Any], user_id: str, thread_id: str, org_id: str = "unknown") -> Dict[str, Any]:
         """Handle the human decision for UPDATE vs CREATE."""
         try:
             # Retrieve the pending decision from alpha.py shared storage
@@ -1618,7 +1640,8 @@ class AVA:
                     thread_id=thread_id,
                     priority_topic_name="user_teaching",
                     categories=categories,
-                    response=response
+                    response=response,
+                    org_id=org_id
                 ))
                 
                 # Clean up pending decision using alpha.py function
@@ -1691,7 +1714,8 @@ class AVA:
                     thread_id=thread_id,
                     priority_topic_name="user_teaching",
                     categories=categories,
-                    response=response
+                    response=response,
+                    org_id=org_id
                 ))
                 
                 # Note: We're not deleting the old vector here - could be implemented later
@@ -1724,7 +1748,7 @@ class AVA:
                 "error": str(e)
             }
 
-    async def handle_teaching_intent_with_update_flow(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str, analysis_knowledge: Dict) -> None:
+    async def handle_teaching_intent_with_update_flow(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str, analysis_knowledge: Dict, org_id: str) -> None:
         """Enhanced teaching intent handler with UPDATE vs CREATE flow."""
         logger.info("Processing teaching intent with UPDATE vs CREATE flow")
         
@@ -1879,9 +1903,9 @@ class AVA:
                 logger.info("No suitable update candidates found, proceeding with regular save")
         
         # Fall back to regular teaching intent handling
-        await self.handle_teaching_intent(message, response, user_id, thread_id, priority_topic_name)
+        await self.handle_teaching_intent(message, response, user_id, thread_id, priority_topic_name, org_id)
 
-    async def _save_high_quality_conversation(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str]) -> None:
+    async def _save_high_quality_conversation(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], org_id: str = "unknown") -> None:
         """Save high-quality conversation that doesn't have teaching intent but has high similarity."""
         try:
             logger.info("Saving high-quality conversation without teaching intent")
@@ -1911,7 +1935,8 @@ class AVA:
                 thread_id=thread_id,
                 priority_topic_name="general_conversation",
                 categories=categories,
-                response=response
+                response=response,
+                org_id=org_id  # <-- Ensure org_id is passed
             )
             
             logger.info(f"Successfully saved high-quality conversation (similarity: {similarity_score:.3f})")
@@ -1929,7 +1954,7 @@ class AVA:
 
     async def _save_tool_knowledge_multiple(self, user_message: str, ai_response: str, combined_content: str,
                                           user_id: str, bank_name: str, thread_id: Optional[str],
-                                          priority_topic_name: str, categories: List[str], response: Dict[str, Any]) -> None:
+                                          priority_topic_name: str, categories: List[str], response: Dict[str, Any], org_id: str) -> None:
         """Save knowledge in multiple formats like teaching intent flow (for tool-executed saves)."""
         try:
             logger.info(f"Saving tool knowledge in multiple formats for improved retrieval")
@@ -1945,7 +1970,8 @@ class AVA:
                 thread_id=thread_id,
                 priority_topic_name=priority_topic_name,
                 categories=categories,
-                response=response
+                response=response,
+                org_id=org_id
             )
             
             # 2. Save AI Synthesis for enhanced retrieval
@@ -1985,7 +2011,8 @@ class AVA:
                 thread_id=thread_id,
                 priority_topic_name=priority_topic_name,
                 categories=categories,
-                response=response
+                response=response,
+                org_id=org_id
             )
             
             logger.info(f"✅ Successfully saved tool knowledge in multiple formats")

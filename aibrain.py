@@ -23,7 +23,7 @@ import traceback
 from pinecone import Pinecone
 from langchain_openai import ChatOpenAI
 from utilities import logger, EMBEDDINGS
-from pccontroller import ent_index, ent_index_name
+from pccontroller import get_org_index
 import os
 import re
 
@@ -49,9 +49,9 @@ class BrainPreviewRequest(BaseModel):
 class AIBrainAnalyzer:
     """Analyzer for AI synthesis knowledge and comprehensive knowledge summarization."""
     
-    def __init__(self):
-        self.index = ent_index
-        self.index_name = ent_index_name
+    def __init__(self, org_id: str):
+        self.org_id = org_id
+        self.index = get_org_index(org_id)
         
     async def fetch_all_ai_synthesis_vectors(
         self, 
@@ -832,4 +832,40 @@ async def brain_preview_options():
             "Access-Control-Max-Age": "86400"
         }
     )
+
+@router.post("/brain/preview")
+async def preview_brain(request: BrainPreviewRequest, org_id: str):
+    """Preview brain contents with optional summarization."""
+    try:
+        analyzer = AIBrainAnalyzer(org_id)
+        return await analyzer.preview_brain(
+            namespace=request.namespace,
+            max_vectors=request.max_vectors,
+            summary_type=request.summary_type,
+            include_vectors=request.include_vectors,
+            max_content_length=request.max_content_length
+        )
+    except Exception as e:
+        logger.error(f"Error in brain preview: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/brain/summary/{namespace}")
+async def get_brain_summary(namespace: str, org_id: str):
+    """Get comprehensive summary of brain contents."""
+    try:
+        analyzer = AIBrainAnalyzer(org_id)
+        return await analyzer.get_brain_summary(namespace)
+    except Exception as e:
+        logger.error(f"Error getting brain summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/brain/stats/{namespace}")
+async def get_brain_stats(namespace: str, org_id: str):
+    """Get statistical analysis of brain contents."""
+    try:
+        analyzer = AIBrainAnalyzer(org_id)
+        return await analyzer.get_brain_stats(namespace)
+    except Exception as e:
+        logger.error(f"Error getting brain stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

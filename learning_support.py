@@ -950,7 +950,8 @@ class LearningSupport:
 
     async def background_save_knowledge(self, input_text: str, title: str, user_id: str, bank_name: str, 
                                          thread_id: Optional[str] = None, topic: Optional[str] = None, 
-                                         categories: List[str] = ["general"], ttl_days: Optional[int] = 365) -> Dict:
+                                         categories: List[str] = ["general"], ttl_days: Optional[int] = 365,
+                                         org_id: str = "unknown") -> Dict:
         """Background save knowledge with comprehensive error handling."""
         try:
             # Always create a copy to avoid modifying the original categories list
@@ -971,7 +972,8 @@ class LearningSupport:
                 thread_id=thread_id,
                 topic=topic,
                 categories=categories,
-                ttl_days=ttl_days
+                ttl_days=ttl_days,
+                org_id=org_id
             )
             logger.info(f"Knowledge saved: {result}")
             return result
