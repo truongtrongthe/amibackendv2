@@ -99,7 +99,7 @@ class KnowledgeExplorer:
         self.support = support_module
     
     async def explore(self, message: str, conversation_context: str, user_id: str, 
-                     thread_id: Optional[str] = None, max_rounds: int = 3) -> Dict[str, Any]:
+                     thread_id: Optional[str] = None, max_rounds: int = 3, org_id: str = "unknown") -> Dict[str, Any]:
         """
         Perform iterative knowledge exploration to achieve higher similarity scores.
         
@@ -115,6 +115,7 @@ class KnowledgeExplorer:
             user_id: User identifier
             thread_id: Thread identifier
             max_rounds: Maximum exploration rounds (default: 3)
+            org_id: Organization identifier
             
         Returns:
             Dict containing best knowledge found across all rounds
@@ -133,10 +134,10 @@ class KnowledgeExplorer:
         logger.info("🔍 Round 1: Initial knowledge search")
         if self.support:
             # Use support module if available
-            round1_result = await self.support.search_knowledge(message, conversation_context, user_id, thread_id)
+            round1_result = await self.support.search_knowledge(message, conversation_context, user_id, thread_id, org_id=org_id)
         else:
             # Fallback to basic search
-            round1_result = await self._basic_search(message, user_id, thread_id)
+            round1_result = await self._basic_search(message, user_id, thread_id, org_id)
         
         round1_similarity = round1_result.get("similarity", 0.0)
         round1_context = round1_result.get("knowledge_context", "")
@@ -172,7 +173,7 @@ class KnowledgeExplorer:
             round2_queries = await self._generate_refined_queries(message, round1_results, round1_queries)
             
             if round2_queries:
-                round2_result = await self._execute_query_batch(round2_queries, user_id, thread_id)
+                round2_result = await self._execute_query_batch(round2_queries, user_id, thread_id, org_id)
                 round2_similarity = round2_result.get("similarity", 0.0)
                 round2_context = round2_result.get("knowledge_context", "")
                 round2_results = round2_result.get("query_results", [])
@@ -206,7 +207,7 @@ class KnowledgeExplorer:
             round3_queries = await self._generate_semantic_queries(message, cumulative_knowledge_items, best_queries)
             
             if round3_queries:
-                round3_result = await self._execute_query_batch(round3_queries, user_id, thread_id)
+                round3_result = await self._execute_query_batch(round3_queries, user_id, thread_id, org_id)
                 round3_similarity = round3_result.get("similarity", 0.0)
                 round3_context = round3_result.get("knowledge_context", "")
                 round3_results = round3_result.get("query_results", [])
@@ -248,12 +249,13 @@ class KnowledgeExplorer:
         logger.info(f"🎯 Iterative exploration complete: best_similarity={best_similarity:.3f} across {len(all_rounds_data)} rounds")
         return self._build_exploration_result(best_similarity, best_knowledge_context, best_query_results, best_queries, all_rounds_data, cumulative_knowledge_items)
 
-    async def _basic_search(self, message: str, user_id: str, thread_id: Optional[str]) -> Dict[str, Any]:
+    async def _basic_search(self, message: str, user_id: str, thread_id: Optional[str], org_id: str) -> Dict[str, Any]:
         """Basic search fallback when no support module is provided."""
         try:
             results = await query_knowledge_from_graph(
                 query=message,
                 graph_version_id=self.graph_version_id,
+                org_id=org_id,
                 user_id=user_id,
                 thread_id=thread_id,
                 topic=None,
@@ -477,7 +479,7 @@ class KnowledgeExplorer:
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return []
 
-    async def _execute_query_batch(self, queries: List[str], user_id: str, thread_id: Optional[str]) -> Dict[str, Any]:
+    async def _execute_query_batch(self, queries: List[str], user_id: str, thread_id: Optional[str], org_id: str) -> Dict[str, Any]:
         """Execute a batch of queries and return consolidated results."""
         if not queries:
             return {"similarity": 0.0, "knowledge_context": "", "query_results": []}
@@ -489,6 +491,7 @@ class KnowledgeExplorer:
             *(query_knowledge_from_graph(
                 query=query,
                 graph_version_id=self.graph_version_id,
+                org_id=org_id,
                 user_id=user_id,
                 thread_id=None,
                 topic=None,

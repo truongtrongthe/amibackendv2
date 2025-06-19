@@ -535,7 +535,7 @@ class AVA:
 
             # Step 2: Search for relevant knowledge using iterative exploration
             logger.info(f"Searching for knowledge based on message using iterative exploration...")
-            analysis_knowledge = await self.knowledge_explorer.explore(message, conversation_context, user_id, thread_id)
+            analysis_knowledge = await self.knowledge_explorer.explore(message, conversation_context, user_id, thread_id, org_id=org_id)
             
             # WEBSOCKET EMISSION POINT 2A: Emit early intent acknowledgement when analysis begins
             if use_websocket and thread_id_for_analysis and socket_imports_success and analysis_knowledge:
@@ -555,7 +555,7 @@ class AVA:
                 
                 for query in suggested_queries:
                     if query not in primary_queries:  # Avoid duplicate queries
-                        query_knowledge = await self.support.search_knowledge(query, conversation_context, user_id, thread_id)
+                        query_knowledge = await self.support.search_knowledge(query, conversation_context, user_id, thread_id, org_id=org_id)
                         query_similarity = query_knowledge.get("similarity", 0.0)
                         query_results = query_knowledge.get("query_results", [])
                         

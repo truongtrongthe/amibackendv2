@@ -370,7 +370,7 @@ class LearningSupport:
         
         return prompt
     
-    async def search_knowledge(self, message: Union[str, List], conversation_context: str = "", user_id: str = "unknown", thread_id: Optional[str] = None) -> Dict[str, Any]:
+    async def search_knowledge(self, message: Union[str, List], conversation_context: str = "", user_id: str = "unknown", thread_id: Optional[str] = None, org_id: str = "unknown") -> Dict[str, Any]:
         """Search for relevant knowledge based on message and context."""
         logger.info(f"Searching for analysis knowledge based on message: {str(message)[:100]}...")
         try:
@@ -481,6 +481,7 @@ class LearningSupport:
                 *(query_knowledge_from_graph(
                     query=query,
                     graph_version_id=self.learning_processor.graph_version_id,
+                    org_id=org_id,
                     user_id=user_id,
                     thread_id=None,  # Remove thread_id restriction to find more results
                     topic=None,      # Remove topic restriction

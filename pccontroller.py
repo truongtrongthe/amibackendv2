@@ -54,27 +54,32 @@ def get_org_index(org_id: str):
 
 async def get_brain_banks(graph_version_id: str, org_id: str) -> List[Dict[str, str]]:
     """
-    Get the bank names for all brains in a version
+    Get the bank names for all brains in a version, ensuring the version belongs to the given org_id.
 
     Args:
-        version_id: UUID of the graph version
+        graph_version_id: UUID of the graph version
         org_id: UUID of the organization
 
     Returns:
         List of dicts containing brain_id and bank_name
     """
     try:
+        # Join brain_graph_version with brain_graph to get org_id
         version_response = supabase.table("brain_graph_version")\
-            .select("brain_ids", "status")\
+            .select("brain_ids,status,brain_graph:graph_id(org_id)")\
             .eq("id", graph_version_id)\
-            .eq("org_id", org_id)\
             .execute()
 
         if not version_response.data:
-            logger.error(f"Version {graph_version_id} not found for organization {org_id}")
+            logger.error(f"Version {graph_version_id} not found")
             return []
 
         version_data = version_response.data[0]
+        # Check if the linked brain_graph has the correct org_id
+        if not version_data.get("brain_graph") or version_data["brain_graph"].get("org_id") != org_id:
+            logger.error(f"Version {graph_version_id} does not belong to organization {org_id}")
+            return []
+
         if version_data["status"] != "published":
             logger.warning(f"Version {graph_version_id} is not published")
             return []
@@ -83,7 +88,7 @@ async def get_brain_banks(graph_version_id: str, org_id: str) -> List[Dict[str, 
         if not brain_ids:
             logger.warning(f"No brain IDs found for version {graph_version_id}")
             return []
-
+        
         brain_response = supabase.table("brain")\
             .select("id", "brain_id", "bank_name")\
             .in_("id", brain_ids)\
@@ -337,8 +342,8 @@ async def query_knowledge_from_graph(
         include_categories: List of categories to include (only these categories will be returned).
     """
     
-    brain_banks = await get_brain_banks(graph_version_id, org_id)
-    valid_namespaces = [brain["bank_name"] for brain in brain_banks]
+    #brain_banks = await get_brain_banks(graph_version_id, org_id)
+    #valid_namespaces = [brain["bank_name"] for brain in brain_banks]
     # Add conversation namespace to the list
     valid_namespaces = ["conversation"]
 
