@@ -348,6 +348,11 @@ class ToolExecuteRequest(BaseModel):
     parameters: Dict[str, Any]
     org_id: str = "unknown"  # Add org_id field with default value
 
+class UpdateBrainGraphRequest(BaseModel):
+    graph_id: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+
 # Main havefun endpoint
 @app.post('/havefun')
 async def havefun(request: HaveFunRequest, background_tasks: BackgroundTasks):
@@ -921,6 +926,33 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
 # Make sure we explicitly define the OPTIONS endpoint for chatwoot webhook
 @app.options('/webhook/chatwoot')
 async def chatwoot_webhook_options():
+    return handle_options()
+
+@app.post('/update-brain-graph')
+async def update_brain_graph_endpoint(request: UpdateBrainGraphRequest):
+    """Update the name and/or description of a brain graph"""
+    from braingraph import update_brain_graph
+    try:
+        updated_graph = update_brain_graph(
+            request.graph_id,
+            name=request.name,
+            description=request.description
+        )
+        return {
+            "message": "Brain graph updated successfully",
+            "brain_graph": {
+                "id": updated_graph.id,
+                "org_id": updated_graph.org_id,
+                "name": updated_graph.name,
+                "description": updated_graph.description,
+                "created_date": updated_graph.created_date.isoformat()
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/update-brain-graph')
+async def update_brain_graph_options():
     return handle_options()
 
 # Run the application

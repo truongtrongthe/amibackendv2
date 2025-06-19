@@ -315,4 +315,33 @@ def validate_brain_ids(brain_ids: List[str]) -> bool:
     if response.data:
         found_ids = {brain["id"] for brain in response.data}
         return len(found_ids) == len(brain_ids)
-    return False 
+    return False
+
+def update_brain_graph(graph_id: str, name: Optional[str] = None, description: Optional[str] = None) -> BrainGraph:
+    """
+    Update the name and/or description of a brain graph.
+    Args:
+        graph_id: UUID of the brain graph
+        name: New name (optional)
+        description: New description (optional)
+    Returns:
+        Updated BrainGraph object
+    """
+    update_data = {}
+    if name is not None:
+        update_data["name"] = name
+    if description is not None:
+        update_data["description"] = description
+    if not update_data:
+        raise ValueError("No update fields provided")
+    response = supabase.table("brain_graph").update(update_data).eq("id", graph_id).execute()
+    if response.data and len(response.data) > 0:
+        graph_data = response.data[0]
+        return BrainGraph(
+            id=graph_data["id"],
+            org_id=graph_data["org_id"],
+            name=graph_data["name"],
+            description=graph_data["description"],
+            created_date=datetime.fromisoformat(graph_data["created_date"].replace("Z", "+00:00"))
+        )
+    raise Exception("Failed to update brain graph or brain graph not found") 
