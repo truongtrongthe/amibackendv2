@@ -165,8 +165,8 @@ import asyncio
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator, Set
 from datetime import datetime
 from uuid import uuid4
-import re
 import pytz
+import re
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from pccontroller import save_knowledge, query_knowledge, query_knowledge_from_graph
@@ -632,11 +632,16 @@ class AVA:
                         logger.info(f"📝 Creating UPDATE vs CREATE decision request with {len(candidates)} candidates")
                         
                         # Extract response content for decision
-                        message_content = final_response["message"]
-                        conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
-                        
+                        structured_source = final_response.get("metadata", {}).get("full_structured_response", final_response["message"])
+                        logger.info(f"Structured source for extraction: {structured_source}")
+                        structured_sections = self.support.extract_structured_sections(structured_source)
+                        knowledge_synthesis = structured_sections.get("knowledge_synthesis", "").strip()
+                        conversational_response = re.split(r'<knowledge_queries>', final_response["message"])[0].strip()
                         # Create the new content that would be saved
-                        new_content = f"User: {message}\n\nAI: {conversational_response}"
+                        if knowledge_synthesis:
+                            new_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
+                        else:
+                            new_content = f"User: {message}\n\nAI: {conversational_response}"
                         
                         # Present options to human using alpha.py function
                         decision_request = await create_update_decision_request(
@@ -700,8 +705,16 @@ class AVA:
                     # Add auto-save notification for low-medium similarity
                     if save_decision.get("auto_save", False):
                         # Extract response content and add auto-save notification
-                        message_content = final_response["message"]
-                        conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+                        structured_source = final_response.get("metadata", {}).get("full_structured_response", final_response["message"])
+                        logger.info(f"Structured source for extraction (fallback): {structured_source}")
+                        structured_sections = self.support.extract_structured_sections(structured_source)
+                        knowledge_synthesis = structured_sections.get("knowledge_synthesis", "").strip()
+                        conversational_response = re.split(r'<knowledge_queries>', final_response["message"])[0].strip()
+                        # Create the new content that would be saved
+                        if knowledge_synthesis:
+                            new_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
+                        else:
+                            new_content = f"User: {message}\n\nAI: {conversational_response}"
                         
                         auto_save_notification = f"""
 
@@ -1406,14 +1419,14 @@ class AVA:
                 logger.info(f"Using structured sections for knowledge storage")
                 logger.info(f"knowledge_synthesis: {knowledge_synthesis[:100]}...")
                 logger.info(f"knowledge_summary (will be used as title): {knowledge_summary}")
-                # Format for storage with clear separation - this is combined User+AI content
-                final_synthesis_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
+                # Format for storage: AI-only content for ai_synthesis vector
+                final_synthesis_content = f"AI: {knowledge_synthesis}"
                 summary_title = knowledge_summary
             else:
-                # Use the synthesis_content that was already built - this is combined User+AI content
+                # Use the synthesis_content that was already built - AI-only content for ai_synthesis vector
                 logger.info(f"Using synthesis_content for knowledge storage")
                 logger.info(f"No structured synthesis/summary found - falling back to legacy summary: '{summary}'")
-                final_synthesis_content = f"User: {message}\n\nAI: {synthesis_content}"
+                final_synthesis_content = f"AI: {synthesis_content}"
                 summary_title = summary or ""
             
             logger.info(f"Final title that will be saved: '{summary_title}'")
@@ -1610,6 +1623,7 @@ class AVA:
             if action == "CREATE_NEW":
                 # Use multiple vector save logic for new knowledge
                 new_content = decision_request["new_content"]
+                logger.info(f"New content at CREATE NEW: {new_content}")
                 
                 # Create a response-like structure for vector tracking
                 response = {
@@ -1627,14 +1641,8 @@ class AVA:
                     user_message = new_content.replace("User:", "").strip()
                     ai_response = "Knowledge saved via decision tool"
                 
-                # --- NEW LOGIC: Extract <knowledge_synthesis> if present ---
-                import re
-                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', ai_response, re.DOTALL)
-                if synthesis_match:
-                    ai_synthesis_content = synthesis_match.group(1).strip()
-                else:
-                    ai_synthesis_content = ai_response.strip()
-                    logger.warning("No <knowledge_synthesis> section found; saving full AI response as ai_synthesis.")
+                logger.info(f"AI response part at CREATE NEW=: {ai_response}")
+                
                 # Try to extract <knowledge_summary> if present
                 summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', ai_response, re.DOTALL)
                 if summary_match:
@@ -1644,6 +1652,7 @@ class AVA:
                 
                 # Set up categories for decision-based saves
                 categories = ["teaching_intent", "human_approved", "decision_created"]
+                categories_withAI = ["teaching_intent", "human_approved", "decision_created","ai_synthesis"]
                 
                 # Run multiple saves like teaching intent flow
                 self._create_background_task(self._save_combined_knowledge(
@@ -1656,6 +1665,18 @@ class AVA:
                     response=response,
                     org_id=org_id
                 ))
+                # --- Extract <knowledge_synthesis> if present ---
+                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', ai_response, re.DOTALL)
+                if synthesis_match:
+                    ai_synthesis_content = synthesis_match.group(1).strip()
+                else:
+                    ai_synthesis_content = ai_response.strip()
+                    logger.warning("No <knowledge_synthesis> section found; saving full AI response as ai_synthesis.")
+                # Try to extract <knowledge_summary> if present
+                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', ai_response, re.DOTALL)
+                knowledge_summary = summary_match.group(1).strip() if summary_match else ""
+
+                logger.info(f"ai_synthesis_content before saving ai synthesis: {ai_synthesis_content}")
                 self._create_background_task(self._save_ai_synthesis(
                     message=user_message,
                     synthesis_content=ai_synthesis_content,
@@ -1667,8 +1688,8 @@ class AVA:
                     bank_name="conversation",
                     thread_id=thread_id,
                     priority_topic_name="user_teaching",
-                    categories=categories,
-                    response=response,
+                    categories=categories_withAI,
+                    response=ai_response,
                     org_id=org_id
                 ))
                 
@@ -1706,13 +1727,15 @@ class AVA:
                 # Merge the knowledge using alpha.py function
                 existing_content = candidate["full_content"]
                 new_content = decision_request["new_content"]
+                logger.info(f"Existing content: {existing_content}")
+                logger.info(f"new_content: {new_content}")
                 
                 merged_content = await merge_knowledge_content(
                     existing_content=existing_content,
                     new_content=new_content,
                     merge_strategy="enhance"
                 )
-                
+                logger.info(f"Merged content: {merged_content}")
                 # Create a response-like structure for vector tracking
                 response = {
                     "message": merged_content,
@@ -1729,22 +1752,22 @@ class AVA:
                     user_message = merged_content.replace("User:", "").strip()
                     ai_response = "Knowledge updated via decision tool"
                 
+                logger.info(f"AI response part of Merge command=: {ai_response}")
                 # --- NEW LOGIC: Extract <knowledge_synthesis> if present ---
-                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', ai_response, re.DOTALL)
-                if synthesis_match:
-                    ai_synthesis_content = synthesis_match.group(1).strip()
-                else:
-                    ai_synthesis_content = ai_response.strip()
-                    logger.warning("No <knowledge_synthesis> section found; saving full AI response as ai_synthesis.")
+                ai_synthesis_content = ai_response.strip()
                 # Try to extract <knowledge_summary> if present
                 summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', ai_response, re.DOTALL)
                 if summary_match:
                     knowledge_summary = summary_match.group(1).strip()
                 else:
                     knowledge_summary = ""
+
+                logger.info(f"AI synthesis content: {ai_synthesis_content}")
                 
                 # Set up categories for decision-based updates
                 categories = ["teaching_intent", "human_approved", "decision_updated", "merged_knowledge"]
+                                # Set up categories for decision-based updates
+                categories_withAI = ["teaching_intent", "human_approved", "decision_updated", "merged_knowledge","ai_synthesis"]
                 
                 # Run multiple saves for the updated/merged content
                 self._create_background_task(self._save_combined_knowledge(
@@ -1757,6 +1780,8 @@ class AVA:
                     response=response,
                     org_id=org_id
                 ))
+
+                logger.info(f"AI synthesis at merging before saving=: {ai_synthesis_content}")
                 self._create_background_task(self._save_ai_synthesis(
                     message=user_message,
                     synthesis_content=ai_synthesis_content,
@@ -1768,7 +1793,7 @@ class AVA:
                     bank_name="conversation",
                     thread_id=thread_id,
                     priority_topic_name="user_teaching",
-                    categories=categories,
+                    categories=categories_withAI,
                     response=response,
                     org_id=org_id
                 ))
@@ -1823,10 +1848,15 @@ class AVA:
             if candidates:
                 # Extract response content for decision
                 message_content = response["message"]
+                logger.info(f"message_content before getting synthesis: {message_content}")
+                structured_sections = self.support.extract_structured_sections(message_content)
+                knowledge_synthesis = structured_sections.get("knowledge_synthesis", "").strip()
                 conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
-                
                 # Create the new content that would be saved
-                new_content = f"User: {message}\n\nAI: {conversational_response}"
+                if knowledge_synthesis:
+                    new_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
+                else:
+                    new_content = f"User: {message}\n\nAI: {conversational_response}"
                 
                 # Present options to human using alpha.py function
                 decision_request = await create_update_decision_request(
@@ -1898,10 +1928,15 @@ class AVA:
                     if fallback_candidates:
                         # Extract response content for decision
                         message_content = response["message"]
+                        logger.info(f"Fallback messasge content: {message_content}")
+                        structured_sections = self.support.extract_structured_sections(message_content)
+                        knowledge_synthesis = structured_sections.get("knowledge_synthesis", "").strip()
                         conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
-                        
                         # Create the new content that would be saved
-                        new_content = f"User: {message}\n\nAI: {conversational_response}"
+                        if knowledge_synthesis:
+                            new_content = f"User: {message}\n\nAI: {knowledge_synthesis}"
+                        else:
+                            new_content = f"User: {message}\n\nAI: {conversational_response}"
                         
                         # Present options to human with fallback candidates using alpha.py function
                         decision_request = await create_update_decision_request(

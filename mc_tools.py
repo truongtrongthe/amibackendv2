@@ -13,7 +13,7 @@ import json
 #from tools import process_llm_with_tools, tool_registry
 #from tools_new import process_llm_with_tools
 from tool6 import process_llm_with_tools
-from personality import PersonalityManager
+#from personality import PersonalityManager
 from response_optimization import ResponseFilter, ResponseProcessor
 
 # Use the same LLM instances as mc.py
@@ -55,7 +55,7 @@ class MCWithTools:
         self.convo_id = convo_id or "default_thread"
         self.similarity_threshold = similarity_threshold
         self.max_active_requests = max_active_requests
-        self.personality_manager = PersonalityManager()
+        self.personality_manager = ""
         self.response_filter = ResponseFilter()
         self.response_processor = ResponseProcessor()
         self.state = {

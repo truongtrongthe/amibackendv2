@@ -398,12 +398,14 @@ async def create_update_decision_request(message: str, new_content: str, candida
         })
         
         # Add candidate details for reference
+        logger.info(f"ADDING candidates: {candidate["content"]}")
         decision_request["candidates"].append({
             "id": candidate["vector_id"],
             "similarity": candidate["similarity"],
             "preview": preview,
             "full_content": candidate["content"]
         })
+
     
     # Store the pending decision for later retrieval
     request_id = f"update_decision_{thread_id}_{int(time())}"
