@@ -1627,14 +1627,42 @@ class AVA:
                     user_message = new_content.replace("User:", "").strip()
                     ai_response = "Knowledge saved via decision tool"
                 
+                # --- NEW LOGIC: Extract <knowledge_synthesis> if present ---
+                import re
+                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', ai_response, re.DOTALL)
+                if synthesis_match:
+                    ai_synthesis_content = synthesis_match.group(1).strip()
+                else:
+                    ai_synthesis_content = ai_response.strip()
+                    logger.warning("No <knowledge_synthesis> section found; saving full AI response as ai_synthesis.")
+                # Try to extract <knowledge_summary> if present
+                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', ai_response, re.DOTALL)
+                if summary_match:
+                    knowledge_summary = summary_match.group(1).strip()
+                else:
+                    knowledge_summary = ""
+                
                 # Set up categories for decision-based saves
                 categories = ["teaching_intent", "human_approved", "decision_created"]
                 
                 # Run multiple saves like teaching intent flow
-                self._create_background_task(self._save_tool_knowledge_multiple(
-                    user_message=user_message,
-                    ai_response=ai_response,
-                    combined_content=new_content,
+                self._create_background_task(self._save_combined_knowledge(
+                    combined_knowledge=new_content,
+                    user_id=user_id,
+                    bank_name="conversation",
+                    thread_id=thread_id,
+                    priority_topic_name="user_teaching",
+                    categories=categories,
+                    response=response,
+                    org_id=org_id
+                ))
+                self._create_background_task(self._save_ai_synthesis(
+                    message=user_message,
+                    synthesis_content=ai_synthesis_content,
+                    knowledge_synthesis=ai_synthesis_content,
+                    knowledge_summary=knowledge_summary,
+                    summary=knowledge_summary,
+                    conversational_response=ai_response,
                     user_id=user_id,
                     bank_name="conversation",
                     thread_id=thread_id,
@@ -1701,14 +1729,41 @@ class AVA:
                     user_message = merged_content.replace("User:", "").strip()
                     ai_response = "Knowledge updated via decision tool"
                 
+                # --- NEW LOGIC: Extract <knowledge_synthesis> if present ---
+                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', ai_response, re.DOTALL)
+                if synthesis_match:
+                    ai_synthesis_content = synthesis_match.group(1).strip()
+                else:
+                    ai_synthesis_content = ai_response.strip()
+                    logger.warning("No <knowledge_synthesis> section found; saving full AI response as ai_synthesis.")
+                # Try to extract <knowledge_summary> if present
+                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', ai_response, re.DOTALL)
+                if summary_match:
+                    knowledge_summary = summary_match.group(1).strip()
+                else:
+                    knowledge_summary = ""
+                
                 # Set up categories for decision-based updates
                 categories = ["teaching_intent", "human_approved", "decision_updated", "merged_knowledge"]
                 
                 # Run multiple saves for the updated/merged content
-                self._create_background_task(self._save_tool_knowledge_multiple(
-                    user_message=user_message,
-                    ai_response=ai_response,
-                    combined_content=merged_content,
+                self._create_background_task(self._save_combined_knowledge(
+                    combined_knowledge=merged_content,
+                    user_id=user_id,
+                    bank_name="conversation",
+                    thread_id=thread_id,
+                    priority_topic_name="user_teaching",
+                    categories=categories,
+                    response=response,
+                    org_id=org_id
+                ))
+                self._create_background_task(self._save_ai_synthesis(
+                    message=user_message,
+                    synthesis_content=ai_synthesis_content,
+                    knowledge_synthesis=ai_synthesis_content,
+                    knowledge_summary=knowledge_summary,
+                    summary=knowledge_summary,
+                    conversational_response=ai_response,
                     user_id=user_id,
                     bank_name="conversation",
                     thread_id=thread_id,

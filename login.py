@@ -109,6 +109,14 @@ class ResendVerificationRequest(BaseModel):
 class VerifyEmailRequest(BaseModel):
     token: str
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class SetPasswordRequest(BaseModel):
+    user_id: str
+    new_password: str
+
 # Response Models
 class UserResponse(BaseModel):
     id: str
@@ -1280,3 +1288,50 @@ async def leave_organization_endpoint(current_user: dict = Depends(get_current_u
     except Exception as e:
         logger.error(f"Error leaving organization: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to leave organization")
+
+def change_password(user_id: str, current_password: str, new_password: str) -> bool:
+    """
+    Change a user's password after verifying the current password.
+    Returns True if successful, False otherwise.
+    """
+    user = get_user_by_id(user_id)
+    if not user or not user.get("password_hash"):
+        return False
+    if not verify_password(current_password, user["password_hash"]):
+        return False
+    new_hash = hash_password(new_password)
+    response = supabase.table("users").update({
+        "password_hash": new_hash,
+        "updated_at": datetime.now(UTC).isoformat()
+    }).eq("id", user_id).execute()
+    return bool(response.data)
+
+def set_password(user_id: str, new_password: str) -> bool:
+    """
+    Set a user's password without checking the current password (e.g., for password reset).
+    Returns True if successful, False otherwise.
+    """
+    new_hash = hash_password(new_password)
+    response = supabase.table("users").update({
+        "password_hash": new_hash,
+        "updated_at": datetime.now(UTC).isoformat()
+    }).eq("id", user_id).execute()
+    return bool(response.data)
+
+@router.post("/change-password")
+async def change_password_endpoint(request: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
+    """Change the current user's password after verifying the current password."""
+    success = change_password(current_user["id"], request.current_password, request.new_password)
+    if success:
+        return {"message": "Password changed successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Current password is incorrect or update failed.")
+
+@router.post("/set-password")
+async def set_password_endpoint(request: SetPasswordRequest):
+    """Set a user's password directly (for password reset scenarios)."""
+    success = set_password(request.user_id, request.new_password)
+    if success:
+        return {"message": "Password set successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to set password.")
