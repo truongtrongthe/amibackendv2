@@ -373,7 +373,7 @@ async def query_knowledge_from_graph(
                 filtered_knowledge.append(entry)
         logger.info(f"Filtered out {len(all_knowledge) - len(filtered_knowledge)} entries with excluded categories: {exclude_categories}")
         all_knowledge = filtered_knowledge
-
+    logger.info(f"ALL KNOWLEDGE=: {all_knowledge}")
     return all_knowledge
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
