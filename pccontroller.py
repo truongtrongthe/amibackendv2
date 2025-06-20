@@ -265,12 +265,12 @@ async def query_knowledge(
 
         # Dynamic filter
         filter_dict = {}
-        if user_id:
-            filter_dict["user_id"] = user_id
-        if thread_id:
-            filter_dict["thread_id"] = thread_id
-        if topic:
-            filter_dict["topic"] = topic
+        #if user_id:
+        #    filter_dict["user_id"] = user_id
+        #if thread_id:
+        #    filter_dict["thread_id"] = thread_id
+        #if topic:
+        #    filter_dict["topic"] = topic
 
         results = await asyncio.to_thread(
             target_index.query,
