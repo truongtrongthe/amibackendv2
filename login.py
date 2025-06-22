@@ -1216,7 +1216,13 @@ async def join_organization_endpoint(request: JoinOrganizationRequest, current_u
         # Check if user is already a member of this specific organization
         existing_role = get_user_role_in_organization(current_user["id"], request.organizationId)
         if existing_role:
-            raise HTTPException(status_code=400, detail=f"You are already a {existing_role} of this organization")
+            # User is already a member - return success response instead of error
+            return {
+                "message": f"You are already a {existing_role} of this organization",
+                "status": "already_member",
+                "role": existing_role,
+                "organization_id": request.organizationId
+            }
         
         # Add user to organization as member
         success = add_user_to_organization(current_user["id"], request.organizationId, "member")
@@ -1232,7 +1238,12 @@ async def join_organization_endpoint(request: JoinOrganizationRequest, current_u
                 "updated_at": datetime.now(UTC).isoformat()
             }).eq("id", current_user["id"]).execute()
         
-        return {"message": "Successfully joined organization as member"}
+        return {
+            "message": "Successfully joined organization as member",
+            "status": "joined",
+            "role": "member",
+            "organization_id": request.organizationId
+        }
     
     except HTTPException:
         raise
