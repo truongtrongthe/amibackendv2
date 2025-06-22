@@ -26,6 +26,9 @@ from braindb import (
     add_user_to_organization,
     get_user_organization,
     get_user_role_in_organization,
+    get_user_owned_organizations,
+    get_user_organizations,
+    get_organization_members,
     Organization
 )
 
@@ -1095,6 +1098,11 @@ class OrganizationResponse(BaseModel):
 async def create_organization_endpoint(request: CreateOrganizationRequest, current_user: dict = Depends(get_current_user)):
     """Create a new organization"""
     try:
+        # Check if user is already an owner of any organization
+        owned_orgs = get_user_owned_organizations(current_user["id"])
+        if owned_orgs:
+            raise HTTPException(status_code=400, detail="You can only be owner of one organization. You already own an organization.")
+        
         # Create organization
         org = create_organization(
             name=request.name,
@@ -1109,7 +1117,7 @@ async def create_organization_endpoint(request: CreateOrganizationRequest, curre
         if not success:
             raise HTTPException(status_code=500, detail="Failed to add user as organization owner")
         
-        # Update user's org_id
+        # Update user's org_id (set as primary organization)
         supabase.table("users").update({
             "org_id": org.id,
             "updated_at": datetime.now(UTC).isoformat()
@@ -1203,25 +1211,28 @@ async def search_organizations_endpoint(request: SearchOrganizationsRequest, cur
 
 @router.post("/organizations/join")
 async def join_organization_endpoint(request: JoinOrganizationRequest, current_user: dict = Depends(get_current_user)):
-    """Join an existing organization"""
+    """Join an existing organization as a member"""
     try:
-        # Check if user is already in an organization
-        current_org = get_user_organization(current_user["id"])
-        if current_org:
-            raise HTTPException(status_code=400, detail="You are already a member of an organization")
+        # Check if user is already a member of this specific organization
+        existing_role = get_user_role_in_organization(current_user["id"], request.organizationId)
+        if existing_role:
+            raise HTTPException(status_code=400, detail=f"You are already a {existing_role} of this organization")
         
-        # Add user to organization
+        # Add user to organization as member
         success = add_user_to_organization(current_user["id"], request.organizationId, "member")
         if not success:
             raise HTTPException(status_code=500, detail="Failed to join organization")
         
-        # Update user's org_id
-        supabase.table("users").update({
-            "org_id": request.organizationId,
-            "updated_at": datetime.now(UTC).isoformat()
-        }).eq("id", current_user["id"]).execute()
+        # Update user's org_id only if they don't have one (for backwards compatibility)
+        # This maintains the primary organization concept for legacy features
+        user = get_user_by_id(current_user["id"])
+        if not user.get("org_id"):
+            supabase.table("users").update({
+                "org_id": request.organizationId,
+                "updated_at": datetime.now(UTC).isoformat()
+            }).eq("id", current_user["id"]).execute()
         
-        return {"message": "Successfully joined organization"}
+        return {"message": "Successfully joined organization as member"}
     
     except HTTPException:
         raise
@@ -1231,7 +1242,7 @@ async def join_organization_endpoint(request: JoinOrganizationRequest, current_u
 
 @router.get("/organizations/my", response_model=OrganizationResponse)
 async def get_my_organization(current_user: dict = Depends(get_current_user)):
-    """Get current user's organization"""
+    """Get current user's primary organization (for backwards compatibility)"""
     try:
         org = get_user_organization(current_user["id"])
         if not org:
@@ -1256,30 +1267,88 @@ async def get_my_organization(current_user: dict = Depends(get_current_user)):
         logger.error(f"Error getting user organization: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get organization")
 
-@router.post("/organizations/leave")
-async def leave_organization_endpoint(current_user: dict = Depends(get_current_user)):
-    """Leave current organization"""
+@router.get("/organizations/all")
+async def get_all_my_organizations(current_user: dict = Depends(get_current_user)):
+    """Get all organizations the user belongs to"""
     try:
-        org = get_user_organization(current_user["id"])
-        if not org:
-            raise HTTPException(status_code=404, detail="You are not a member of any organization")
+        user_orgs = get_user_organizations(current_user["id"])
+        
+        if not user_orgs:
+            return {"organizations": [], "message": "You are not a member of any organizations"}
+        
+        organizations = []
+        for org, role in user_orgs:
+            organizations.append(OrganizationResponse(
+                id=org.id,
+                name=org.name,
+                description=org.description,
+                email=org.email,
+                phone=org.phone,
+                address=org.address,
+                userRole=role,
+                createdDate=org.created_date
+            ))
+        
+        return {"organizations": organizations}
+    
+    except Exception as e:
+        logger.error(f"Error getting user organizations: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get organizations")
+
+class LeaveOrganizationRequest(BaseModel):
+    organizationId: str
+
+class OrganizationMemberResponse(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    phone: Optional[str] = None
+    avatar: Optional[str] = None
+    provider: str = "email"
+    email_verified: bool = False
+    role: str
+    joined_at: str
+
+@router.post("/organizations/leave")
+async def leave_organization_endpoint(request: LeaveOrganizationRequest, current_user: dict = Depends(get_current_user)):
+    """Leave a specific organization"""
+    try:
+        # Check if user is a member of this organization
+        user_role = get_user_role_in_organization(current_user["id"], request.organizationId)
+        if not user_role:
+            raise HTTPException(status_code=404, detail="You are not a member of this organization")
         
         # Check if user is the owner
-        user_role = get_user_role_in_organization(current_user["id"], org.id)
         if user_role == "owner":
             raise HTTPException(status_code=400, detail="Organization owners cannot leave. Transfer ownership first.")
         
         # Remove user from organization
         from braindb import remove_user_from_organization
-        success = remove_user_from_organization(current_user["id"], org.id)
+        success = remove_user_from_organization(current_user["id"], request.organizationId)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to leave organization")
         
-        # Update user's org_id
-        supabase.table("users").update({
-            "org_id": None,
-            "updated_at": datetime.now(UTC).isoformat()
-        }).eq("id", current_user["id"]).execute()
+        # Update user's org_id if this was their primary organization
+        user = get_user_by_id(current_user["id"])
+        if user.get("org_id") == request.organizationId:
+            # Find another organization to set as primary, or set to None
+            remaining_orgs = get_user_organizations(current_user["id"])
+            new_primary_org_id = None
+            
+            # Prefer an owned organization as the new primary
+            for org, role in remaining_orgs:
+                if role == "owner":
+                    new_primary_org_id = org.id
+                    break
+            
+            # If no owned organization, use the first available
+            if not new_primary_org_id and remaining_orgs:
+                new_primary_org_id = remaining_orgs[0][0].id
+            
+            supabase.table("users").update({
+                "org_id": new_primary_org_id,
+                "updated_at": datetime.now(UTC).isoformat()
+            }).eq("id", current_user["id"]).execute()
         
         return {"message": "Successfully left organization"}
     
@@ -1288,6 +1357,98 @@ async def leave_organization_endpoint(current_user: dict = Depends(get_current_u
     except Exception as e:
         logger.error(f"Error leaving organization: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to leave organization")
+
+@router.get("/organizations/{org_id}/members")
+async def get_organization_members_endpoint(org_id: str, current_user: dict = Depends(get_current_user)):
+    """Get all members and their roles for a specific organization"""
+    try:
+        # Check if user has permission to view organization members
+        user_role = get_user_role_in_organization(current_user["id"], org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You are not a member of this organization")
+        
+        # Only owners and admins can view all members
+        if user_role not in ["owner", "admin"]:
+            raise HTTPException(status_code=403, detail="Only organization owners and admins can view member list")
+        
+        # Get organization members
+        members = get_organization_members(org_id)
+        
+        # Convert to response models
+        member_responses = []
+        for member in members:
+            member_responses.append(OrganizationMemberResponse(
+                user_id=member["user_id"],
+                email=member["email"],
+                name=member["name"],
+                phone=member.get("phone"),
+                avatar=member.get("avatar"),
+                provider=member.get("provider", "email"),
+                email_verified=member.get("email_verified", False),
+                role=member["role"],
+                joined_at=member["joined_at"]
+            ))
+        
+        return {
+            "organization_id": org_id,
+            "members": member_responses,
+            "total_members": len(member_responses)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting organization members: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get organization members")
+
+@router.get("/organizations/members/by-name/{org_name}")
+async def get_organization_members_by_name_endpoint(org_name: str, current_user: dict = Depends(get_current_user)):
+    """Get all members and their roles for an organization by name"""
+    try:
+        # Find organization by name
+        org = find_organization_by_name(org_name)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        
+        # Check if user has permission to view organization members
+        user_role = get_user_role_in_organization(current_user["id"], org.id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You are not a member of this organization")
+        
+        # Only owners and admins can view all members
+        if user_role not in ["owner", "admin"]:
+            raise HTTPException(status_code=403, detail="Only organization owners and admins can view member list")
+        
+        # Get organization members
+        members = get_organization_members(org.id)
+        
+        # Convert to response models
+        member_responses = []
+        for member in members:
+            member_responses.append(OrganizationMemberResponse(
+                user_id=member["user_id"],
+                email=member["email"],
+                name=member["name"],
+                phone=member.get("phone"),
+                avatar=member.get("avatar"),
+                provider=member.get("provider", "email"),
+                email_verified=member.get("email_verified", False),
+                role=member["role"],
+                joined_at=member["joined_at"]
+            ))
+        
+        return {
+            "organization_id": org.id,
+            "organization_name": org.name,
+            "members": member_responses,
+            "total_members": len(member_responses)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting organization members by name: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get organization members")
 
 def change_password(user_id: str, current_password: str, new_password: str) -> bool:
     """

@@ -493,3 +493,113 @@ def remove_user_from_organization(user_id: str, org_id: str) -> bool:
     except Exception as e:
         logger.error(f"Error removing user from organization: {str(e)}")
         return False
+
+def get_user_owned_organizations(user_id: str) -> List[Organization]:
+    """
+    Get all organizations where the user is an owner
+    
+    Args:
+        user_id: User ID from users table
+    
+    Returns:
+        List of Organization objects where user is owner
+    """
+    try:
+        response = supabase.table("user_organizations")\
+            .select("org_id")\
+            .eq("user_id", user_id)\
+            .eq("role", "owner")\
+            .execute()
+        
+        organizations = []
+        if response.data:
+            for user_org in response.data:
+                org = get_organization(user_org["org_id"])
+                if org:
+                    organizations.append(org)
+        
+        return organizations
+    except Exception as e:
+        logger.error(f"Error getting user owned organizations: {str(e)}")
+        return []
+
+def get_user_organizations(user_id: str) -> List[tuple]:
+    """
+    Get all organizations a user belongs to with their roles
+    
+    Args:
+        user_id: User ID from users table
+    
+    Returns:
+        List of tuples (Organization, role)
+    """
+    try:
+        response = supabase.table("user_organizations")\
+            .select("org_id, role")\
+            .eq("user_id", user_id)\
+            .execute()
+        
+        organizations = []
+        if response.data:
+            for user_org in response.data:
+                org = get_organization(user_org["org_id"])
+                if org:
+                    organizations.append((org, user_org["role"]))
+        
+        return organizations
+    except Exception as e:
+        logger.error(f"Error getting user organizations: {str(e)}")
+        return []
+
+def get_organization_members(org_id: str) -> List[Dict]:
+    """
+    Get all users and their roles for a specific organization
+    
+    Args:
+        org_id: Organization UUID
+    
+    Returns:
+        List of dictionaries containing user info and role
+    """
+    try:
+        # Get all user-organization relationships for this org
+        response = supabase.table("user_organizations")\
+            .select("user_id, role, joined_at")\
+            .eq("org_id", org_id)\
+            .execute()
+        
+        members = []
+        if response.data:
+            # Get user details for each member
+            user_ids = [member["user_id"] for member in response.data]
+            
+            # Fetch user details in batch
+            users_response = supabase.table("users")\
+                .select("id, email, name, phone, avatar, provider, email_verified")\
+                .in_("id", user_ids)\
+                .execute()
+            
+            # Create a lookup dict for users
+            users_dict = {user["id"]: user for user in users_response.data} if users_response.data else {}
+            
+            # Combine user details with role information
+            for member in response.data:
+                user_id = member["user_id"]
+                if user_id in users_dict:
+                    user = users_dict[user_id]
+                    members.append({
+                        "user_id": user["id"],
+                        "email": user["email"],
+                        "name": user["name"],
+                        "phone": user.get("phone"),
+                        "avatar": user.get("avatar"),
+                        "provider": user.get("provider", "email"),
+                        "email_verified": user.get("email_verified", False),
+                        "role": member["role"],
+                        "joined_at": member["joined_at"]
+                    })
+        
+        return members
+    except Exception as e:
+        logger.error(f"Error getting organization members: {str(e)}")
+        return []
