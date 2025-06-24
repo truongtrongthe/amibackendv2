@@ -832,7 +832,7 @@ def extract_search_terms(analysis_text: str) -> List[str]:
         """
         
         # Use the LLM to generate search terms
-        response = inferLLM.invoke(llm_prompt,temperature=0.1,max_tokens=1000)
+        response = inferLLM.invoke(llm_prompt,temperature=0.1)
         content = response.content
         logger.info(f"LLM response for search term generation: {content}")
         # Extract JSON array from response
@@ -1002,7 +1002,7 @@ def extract_search_terms_from_next_actions(
     
     # Use the LLM to generate search terms
     try:
-        response = inferLLM.invoke(llm_prompt, temperature=0.1, max_tokens=1000)
+        response = inferLLM.invoke(llm_prompt, temperature=0.1)
         content = response.content
         logger.info(f"LLM response for NEXT ACTION search term generation: {content}")
         

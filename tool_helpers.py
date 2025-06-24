@@ -389,7 +389,7 @@ def prepare_knowledge(knowledge_entries: List[Dict], user_query: str, max_chars:
         for entry in knowledge_entries[:2]:  # Limit to 2 entries for brevity
             raw_text = entry.get("raw", "")
             if raw_text:
-                fallback_content += f"--- KNOWLEDGE ---\n{raw_text[:1000]}\n\n"
+                fallback_content += f"--- KNOWLEDGE ---\n{raw_text}\n\n"  # Remove truncation - let it flow!
         
         if len(fallback_content) > max_chars:
             fallback_content = fallback_content[:max_chars-3] + "..."

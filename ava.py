@@ -355,7 +355,7 @@ class AVA:
 
             # Use a quick LLM call for preliminary analysis
             from langchain_openai import ChatOpenAI
-            QuickLLM = ChatOpenAI(model="gpt-4o-mini", temperature=0.1, max_tokens=200)
+            QuickLLM = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)  # Remove max_tokens - let it flow!
             
             logger.info("Performing LLM-based early intent detection...")
             llm_response = await QuickLLM.ainvoke(intent_prompt)

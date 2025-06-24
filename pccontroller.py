@@ -169,7 +169,7 @@ async def save_knowledge(
             namespace=ns,
             filter={
                 "user_id": user_id,
-                "raw": {"$eq": input[:2000]}
+                "raw": {"$eq": input}  # Remove truncation - let it flow!
             }
         )
         if existing.get("matches", []) and existing["matches"][0]["score"] > 0.95:
@@ -187,13 +187,13 @@ async def save_knowledge(
         metadata = {
             "created_at": datetime.now().isoformat(),
             "title": title,
-            "raw": input[:2000],  # Truncate to save space
+            "raw": input,  # Remove truncation - let it flow!
             "confidence": float(confidence),
             "source": "conversation",
             "user_id": user_id,
             "thread_id": thread_id or "",
             "topic": topic or "unknown",
-            "categories": categories[:5] if categories else ["general"]
+            "categories": categories if categories else ["general"]  # Remove category limit - let it flow!
         }
         if ttl_days:
             metadata["expires_at"] = (datetime.now() + timedelta(days=ttl_days)).isoformat()

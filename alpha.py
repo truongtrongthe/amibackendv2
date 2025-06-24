@@ -290,7 +290,7 @@ Your complete enhanced response:"""
     try:
         # Use a dedicated LLM instance with higher token limit for enhancement
         from langchain_openai import ChatOpenAI
-        enhancement_llm = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.1, max_tokens=1000)
+        enhancement_llm = ChatOpenAI(model="gpt-4o", streaming=False, temperature=0.1)
         enhancement_response = await enhancement_llm.ainvoke(enhancement_prompt)
         enhanced_user_content = enhancement_response.content.strip()
         logger.info(f"Successfully enhanced original response with follow-up questions (length: {len(enhanced_user_content)})")
