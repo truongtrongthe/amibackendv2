@@ -499,7 +499,7 @@ class AVA:
 
     async def read_human_input(self, message: str, conversation_context: str = "", user_id: str = None, 
                              thread_id: str = None, use_websocket: bool = False, 
-                             thread_id_for_analysis: str = None, org_id: str = "unknown"):
+                             thread_id_for_analysis: str = None, org_id: str = "unknown", pilot_mode: bool = False):
         """
         Process human input and generate a response using the learning-based approach.
         
@@ -511,6 +511,7 @@ class AVA:
             use_websocket: Whether to use WebSocket for analysis streaming
             thread_id_for_analysis: Thread ID to use for WebSocket analysis events
             org_id: Organization identifier for knowledge management
+            pilot_mode: If True, skip teaching intent flow and knowledge saving
         """
         try:
             if not message.strip():
@@ -545,8 +546,8 @@ class AVA:
             if use_websocket and thread_id_for_analysis and socket_imports_success and analysis_knowledge:
                 await self._emit_learning_knowledge_to_socket(thread_id_for_analysis, analysis_knowledge)
             
-            # Step 3: Enrich with suggested queries if we don't have sufficient results
-            if suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
+            # Step 3: Enrich with suggested queries if we don't have sufficient results (skip in pilot mode)
+            if not pilot_mode and suggested_queries and len(analysis_knowledge.get("query_results", [])) < 3:
                 logger.info(f"Searching for additional knowledge using {len(suggested_queries)} suggested queries")
                 primary_similarity = analysis_knowledge.get("similarity", 0.0)
                 primary_knowledge = analysis_knowledge.get("knowledge_context", "")
@@ -582,7 +583,7 @@ class AVA:
             
             # Stream the response as it comes from LLM
             final_response = None
-            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data, use_websocket, thread_id_for_analysis, org_id):
+            async for chunk in self._active_learning_streaming(message, conversation_context, analysis_knowledge, user_id, prior_data, use_websocket, thread_id_for_analysis, org_id, pilot_mode):
                 if chunk.get("type") == "response_chunk":
                     # Yield streaming chunks immediately
                     yield chunk
@@ -594,8 +595,8 @@ class AVA:
                     yield chunk
                     return
             
-            # Step 6: Enhanced knowledge saving with similarity gating (after streaming is complete)
-            if final_response and final_response.get("status") == "success":
+            # Step 6: Enhanced knowledge saving with similarity gating (after streaming is complete) - SKIP in pilot mode
+            if not pilot_mode and final_response and final_response.get("status") == "success":
                 # Get teaching intent and priority topic info from LLM evaluation
                 metadata = final_response.get("metadata", {})
                 has_teaching_intent = metadata.get("has_teaching_intent", False)
@@ -759,9 +760,12 @@ class AVA:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             yield {"status": "error", "message": f"Error: {str(e)}", "complete": True}
 
-    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None, org_id: str = "unknown") -> AsyncGenerator[Union[str, Dict], None]:
+    async def _active_learning_streaming(self, message: Union[str, List], conversation_context: str = "", analysis_knowledge: Dict = None, user_id: str = "unknown", prior_data: Dict = None, use_websocket: bool = False, thread_id_for_analysis: Optional[str] = None, org_id: str = "unknown", pilot_mode: bool = False) -> AsyncGenerator[Union[str, Dict], None]:
         """Streaming version of active learning method that yields chunks as they come from LLM."""
-        logger.info("Starting streaming active learning approach")
+        if pilot_mode:
+            logger.info("Starting streaming active learning approach - PILOT MODE (no knowledge saving)")
+        else:
+            logger.info("Starting streaming active learning approach")
         
         try:
             # Step 1: Setup and validation
@@ -917,14 +921,15 @@ class AVA:
             # Extract tool calls and evaluation first
             content, tool_calls, evaluation = self.support.extract_tool_calls_and_evaluation(content, message_str)
             
-            # Step 8: Handle teaching intent regeneration if needed using alpha.py function
-            
-            if evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
+            # Step 8: Handle teaching intent regeneration if needed using alpha.py function (skip in pilot mode)
+            if not pilot_mode and evaluation.get("has_teaching_intent", False) and response_strategy != "TEACHING_INTENT":
                 logger.info(f"Content before regeneration: {content}")
                 content, response_strategy = await regenerate_teaching_intent_response(
                     message_str, content, response_strategy
                 )
                 logger.info(f"Content after regeneration: {content}")
+            elif pilot_mode and evaluation.get("has_teaching_intent", False):
+                logger.info("PILOT MODE: Skipping teaching intent regeneration")
             
             # Step 8.5: Extract structured sections AFTER content enhancement
             structured_sections = self.support.extract_structured_sections(content)
@@ -952,12 +957,14 @@ class AVA:
                     "response_strategy": response_strategy,
                     "core_prior_topic": prior_topic,
                     "tool_calls": tool_calls,
-                    "has_teaching_intent": evaluation.get("has_teaching_intent", False),
-                    "is_priority_topic": evaluation.get("is_priority_topic", False),
-                    "priority_topic_name": evaluation.get("priority_topic_name", ""),
-                    "should_save_knowledge": evaluation.get("should_save_knowledge", False),
+                    "has_teaching_intent": evaluation.get("has_teaching_intent", False) if not pilot_mode else False,
+                    "is_priority_topic": evaluation.get("is_priority_topic", False) if not pilot_mode else False,
+                    "priority_topic_name": evaluation.get("priority_topic_name", "") if not pilot_mode else "",
+                    "should_save_knowledge": evaluation.get("should_save_knowledge", False) if not pilot_mode else False,
                     "full_structured_response": content,
-                    "org_id": org_id
+                    "org_id": org_id,
+                    "pilot_mode": pilot_mode,
+                    "knowledge_saving": not pilot_mode
                 }
             }
             

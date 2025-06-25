@@ -602,3 +602,154 @@ async def convo_stream_learning(user_input: str = None, user_id: str = None, thr
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
     
     logger.debug(f"convo_stream_learning took {time.time() - start_time:.2f}s")
+
+async def convo_stream_pilot(user_input: str = None, user_id: str = None, thread_id: str = None, 
+              graph_version_id: str = "", mode: str = "pilot", 
+              use_websocket: bool = False, thread_id_for_analysis: str = None,
+              org_id: str = "unknown"):
+    """
+    Process user input using AVA (Active Learning Assistant) in pilot mode.
+    Uses the full AVA system but skips all knowledge management, teaching intent detection,
+    and knowledge saving features. Provides advanced conversational capabilities without persistence.
+    
+    Args:
+        user_input: The user's message
+        user_id: User identifier
+        thread_id: Conversation thread identifier
+        graph_version_id: Graph version identifier (used for context only)
+        mode: Processing mode ('pilot')
+        use_websocket: Whether to use WebSocket for events
+        thread_id_for_analysis: Thread ID to use for WebSocket events
+        org_id: Organization identifier
+    
+    Returns:
+        A generator yielding AVA response chunks with pilot_mode=True
+    """
+    start_time = time.time()
+    thread_id = thread_id or f"pilot_thread_{int(time.time())}"
+    user_id = user_id or "pilot_user"
+
+    # Validate user_input
+    if not isinstance(user_input, str):
+        logger.error(f"Invalid user_input type: {type(user_input)}, value: {user_input}")
+        user_input = str(user_input) if user_input else ""
+    if not user_input.strip():
+        logger.error("Empty user_input")
+        yield f"data: {json.dumps({'error': 'Empty message provided'})}\n\n"
+        return
+    
+    # Load or init state following the same pattern as convo_stream but simpler
+    checkpoint = checkpointer.get({"configurable": {"thread_id": thread_id}})
+    default_state = {
+        "messages": [],
+        "prompt_str": "",
+        "convo_id": thread_id,
+        "last_response": "",
+        "user_id": user_id,
+        "preset_memory": "Be friendly and helpful",
+        "instinct": "",
+        "graph_version_id": graph_version_id,
+        "analysis": {},
+        "stream_events": [],
+        "use_websocket": use_websocket,
+        "thread_id_for_analysis": thread_id_for_analysis,
+        "org_id": org_id,
+        "mode": "pilot"  # Add mode to distinguish from learning
+    }
+    state = {**default_state, **(checkpoint.get("channel_values", {}) if checkpoint else {})}
+
+    # Add user input to state messages
+    if user_input:
+        state["messages"] = add_messages(state["messages"], [HumanMessage(content=user_input)])
+
+    logger.info(f"convo_stream_pilot - User: {user_id}, Input: '{user_input}', Thread: {thread_id}")
+    logger.info(f"DEBUG AMI PILOT: Loaded state with {len(state['messages'])} messages from checkpoint")
+    
+    # Convert messages to conversation_context for LLM
+    conversation_context = ""
+    if state["messages"]:
+        recent_messages = []
+        message_count = 0
+        max_messages = 20  # Reduced from 50 for simpler pilot mode
+        
+        for msg in reversed(state["messages"]):
+            try:
+                if hasattr(msg, 'content'):
+                    content = msg.content
+                    if isinstance(msg, HumanMessage):
+                        recent_messages.append(f"User: {content.strip()}")
+                        message_count += 1
+                    elif isinstance(msg, AIMessage):
+                        recent_messages.append(f"AI: {content.strip()}")
+                        message_count += 1
+                    
+                    if message_count >= max_messages:
+                        break
+            except Exception as e:
+                logger.warning(f"Error processing message in pilot conversation history: {e}")
+                continue
+        
+        if recent_messages:
+            conversation_history_text = "\n\n".join(reversed(recent_messages))
+            conversation_context = f"{conversation_history_text}"
+            logger.info(f"DEBUG AMI PILOT: Built conversation_context with {len(recent_messages)} messages")
+
+    # Use AVA like learning endpoint but with pilot mode (no knowledge saving)
+    try:
+        from ava import AVA
+        
+        # Create AVA instance for this request
+        ava = AVA()
+        await ava.initialize()
+        
+        # Process the message using AVA but with pilot mode flag
+        final_response = None
+        logger.info(f"DEBUG AMI PILOT: About to call ava.read_human_input with conversation_context length: {len(conversation_context)}")
+        
+        async for chunk in ava.read_human_input(
+            user_input,
+            conversation_context,
+            user_id=user_id,
+            thread_id=thread_id,
+            use_websocket=use_websocket,
+            thread_id_for_analysis=thread_id_for_analysis,
+            org_id=org_id,
+            pilot_mode=True  # Add pilot mode flag to disable knowledge saving
+        ):
+            if chunk.get("type") == "response_chunk":
+                # Stream chunks immediately
+                yield f"data: {json.dumps({'status': 'streaming', 'content': chunk['content'], 'complete': False})}\n\n"
+            elif chunk.get("type") == "response_complete":
+                # Store final response for post-processing
+                final_response = chunk
+            elif chunk.get("type") == "error":
+                yield f"data: {json.dumps(chunk)}\n\n"
+                return
+
+        # Add AI response to state messages
+        if final_response and isinstance(final_response, dict) and "message" in final_response:
+            message_content = final_response["message"]
+            # Strip knowledge queries from saved message
+            message_content = re.split(r'<knowledge_queries>', message_content)[0].strip()
+            state["messages"] = add_messages(state["messages"], [AIMessage(content=message_content)])
+            state["prompt_str"] = message_content
+            
+            # Update the checkpoint with new state (this maintains conversation history)
+            await convo_graph.aupdate_state({"configurable": {"thread_id": thread_id}}, state, as_node="mc")
+            logger.info(f"DEBUG AMI PILOT: Updated state with new messages, total count: {len(state['messages'])}")
+
+        # Yield final response with pilot mode metadata
+        if final_response:
+            # Override metadata to indicate pilot mode and no knowledge saving
+            final_response["metadata"]["mode"] = "pilot"
+            final_response["metadata"]["knowledge_saving"] = False
+            final_response["metadata"]["teaching_intent_disabled"] = True
+            yield f"data: {json.dumps(final_response)}\n\n"
+        
+    except Exception as e:
+        logger.error(f"Error in convo_stream_pilot: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        yield f"data: {json.dumps({'error': str(e), 'mode': 'pilot'})}\n\n"
+    
+    logger.debug(f"convo_stream_pilot took {time.time() - start_time:.2f}s")

@@ -316,6 +316,14 @@ class ConversationLearningRequest(BaseModel):
     use_websocket: bool = False
     org_id: str = "unknown"  # Add org_id field with default value
 
+class ConversationPilotRequest(BaseModel):
+    user_input: str
+    user_id: str = "pilot_user"
+    thread_id: str = "pilot_thread"
+    graph_version_id: str = ""
+    use_websocket: bool = False
+    org_id: str = "unknown"  # Add org_id field with default value
+
 class ProcessDocumentRequest(BaseModel):
     user_id: str
     bank_name: str
@@ -572,6 +580,46 @@ async def conversation_learning(request: ConversationLearningRequest, background
 
 @app.options('/conversation/learning')
 async def conversation_learning_options():
+    return handle_options()
+
+# Conversation Pilot endpoint - similar to learning but without knowledge saving
+@app.post('/conversation/pilot')
+async def conversation_pilot(request: ConversationPilotRequest, background_tasks: BackgroundTasks):
+    """
+    Handle conversation requests using a pilot conversation system.
+    This endpoint is similar to /conversation/learning but does NOT save any knowledge.
+    It only communicates with the user without any knowledge management.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]  # Generate a short request ID for tracing
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN PILOT CONVERSATION request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Request params: user_id={request.user_id}, thread_id={request.thread_id}, use_websocket={request.use_websocket}")
+    
+    # Get a lock for this thread_id
+    thread_id = request.thread_id
+    logger.info(f"[REQUEST:{request_id}] Getting lock for thread {thread_id}")
+    thread_lock = await lock_manager.get_lock(thread_id)
+    logger.info(f"[REQUEST:{request_id}] Got lock manager lock for thread {thread_id}")
+    
+    # Always use StreamingResponse, regardless of WebSocket flag
+    # The WebSocket flag is only used to determine whether to emit events via WebSocket
+    # in addition to the HTTP stream
+    logger.info(f"[REQUEST:{request_id}] Creating StreamingResponse with generate_pilot_sse_stream")
+    response = StreamingResponse(
+        generate_pilot_sse_stream(request, thread_lock, start_time, request_id),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
+    logger.info(f"[REQUEST:{request_id}] Returning StreamingResponse to client")
+    return response
+
+@app.options('/conversation/pilot')
+async def conversation_pilot_options():
     return handle_options()
 
 # COT Processor Grading endpoint
@@ -922,6 +970,118 @@ async def generate_learning_sse_stream(request: ConversationLearningRequest, thr
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[REQUEST:{request_id}] === END learning SSE request for thread {thread_id} - total time: {elapsed:.2f}s ===")
+
+# Generate SSE stream for pilot requests
+async def generate_pilot_sse_stream(request: ConversationPilotRequest, thread_lock: asyncio.Lock, start_time: datetime, request_id: str):
+    """Generate an SSE stream with the pilot conversation response - NO knowledge saving"""
+    thread_id = request.thread_id
+    
+    # Update WebSocket sessions if request.use_websocket is true
+    if request.use_websocket:
+        # Check if there are active WebSocket sessions for this thread
+        active_session_exists = False
+        
+        async with session_lock:
+            thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+            active_session_exists = len(thread_sessions) > 0            
+            if active_session_exists:
+                logger.info(f"[REQUEST:{request_id}] Found {len(thread_sessions)} WebSocket sessions for thread {thread_id}: {thread_sessions}")
+                for sid in thread_sessions:
+                    ws_sessions[sid]['last_activity'] = datetime.now().isoformat()
+                    ws_sessions[sid]['api_request_time'] = datetime.now().isoformat()
+                    ws_sessions[sid]['has_pending_request'] = True
+                    logger.info(f"[REQUEST:{request_id}] Updated session {sid} for thread {thread_id}")
+            else:
+                logger.warning(f"[REQUEST:{request_id}] No active WebSocket sessions found for thread {thread_id} before processing")
+                
+        # If using WebSockets, immediately return a processing status and continue in background
+        if request.use_websocket:
+            # Send initial response indicating processing via WebSocket
+            process_id = str(uuid4())
+            processing_message = {
+                "status": "processing",
+                "message": "Request is being processed and results will be sent via WebSocket",
+                "thread_id": thread_id,
+                "process_id": process_id
+            }
+            logger.info(f"[REQUEST:{request_id}] Sending WebSocket processing message for thread {thread_id}")
+            
+            # Yield the processing message as the HTTP response
+            logger.info(f"[REQUEST:{request_id}] Yielding initial processing message")
+            yield f"data: {json.dumps(processing_message)}\n\n"
+    
+    try:
+        # Try to acquire the lock with timeout
+        async with asyncio.timeout(180):  # 180-second timeout (increased from 60 seconds)
+            async with thread_lock:
+                logger.info(f"[REQUEST:{request_id}] Acquired lock for thread {thread_id}")
+                
+                # Check active sessions again after acquiring lock
+                if request.use_websocket:
+                    async with session_lock:
+                        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                        logger.info(f"[REQUEST:{request_id}] After lock: {len(thread_sessions)} WebSocket sessions for thread {thread_id}")
+        
+                # Import here to avoid circular imports
+                from ami import convo_stream_pilot
+                
+                # Log request to convo_stream_pilot
+                logger.info(f"[REQUEST:{request_id}] Calling convo_stream_pilot for thread {thread_id}, use_websocket={request.use_websocket}")
+                logger.info(f"[REQUEST:{request_id}] Org ID: {request.org_id}")
+                # Track response count
+                response_count = 0
+                
+                # Process the conversation and yield results
+                async for result in convo_stream_pilot(
+                    user_input=request.user_input,
+                    thread_id=thread_id,
+                    user_id=request.user_id,
+                    graph_version_id=request.graph_version_id,
+                    use_websocket=request.use_websocket,
+                    thread_id_for_analysis=thread_id,
+                    org_id=request.org_id  # Pass org_id to convo_stream_pilot
+                ):
+                    response_count += 1
+                    # Format the response as SSE
+                    if isinstance(result, str) and result.startswith("data: "):
+                        # Already formatted for SSE
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding string SSE response for thread {thread_id}")
+                        yield result + "\n"
+                    elif isinstance(result, dict):
+                        # Format JSON for SSE
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding dict response for thread {thread_id}: {str(result)[:100]}...")
+                        yield f"data: {json.dumps(result)}\n\n"
+                    else:
+                        # For string responses without SSE format
+                        #logger.info(f"[REQUEST:{request_id}] #{response_count} Yielding message response for thread {thread_id}: {str(result)[:100]}...")
+                        yield f"data: {json.dumps({'message': result})}\n\n"
+                
+                logger.info(f"[REQUEST:{request_id}] Completed yielding {response_count} responses for thread {thread_id}")
+                
+                # Update WebSocket sessions to indicate request is complete if using WebSocket
+                if request.use_websocket:
+                    async with session_lock:
+                        thread_sessions = [sid for sid, data in ws_sessions.items() if data.get('thread_id') == thread_id]
+                        logger.info(f"[REQUEST:{request_id}] After processing: {len(thread_sessions)} WebSocket sessions for thread {thread_id}")
+                        for sid in thread_sessions:
+                            if 'has_pending_request' in ws_sessions[sid]:
+                                ws_sessions[sid]['has_pending_request'] = False
+                                logger.info(f"[REQUEST:{request_id}] Updated session {sid} - set has_pending_request=False")
+                
+                logger.info(f"[REQUEST:{request_id}] Released lock for thread {thread_id}")
+    except asyncio.TimeoutError:
+        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for thread {thread_id} after 180 seconds")
+        logger.info(f"[REQUEST:{request_id}] Yielding timeout error for thread {thread_id}")
+        yield f"data: {json.dumps({'error': 'Server busy. Please try again.'})}\n\n"
+    except Exception as e:
+        logger.error(f"[REQUEST:{request_id}] Error generating pilot SSE stream: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.info(f"[REQUEST:{request_id}] Yielding error for thread {thread_id}: {str(e)}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    finally:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[REQUEST:{request_id}] === END pilot SSE request for thread {thread_id} - total time: {elapsed:.2f}s ===")
 
 # Make sure we explicitly define the OPTIONS endpoint for chatwoot webhook
 @app.options('/webhook/chatwoot')
