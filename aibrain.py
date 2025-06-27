@@ -45,6 +45,7 @@ class BrainPreviewRequest(BaseModel):
     summary_type: Literal["comprehensive", "topics_only", "categories_only"] = "comprehensive"
     include_vectors: bool = False
     max_content_length: int = 50000
+    org_id: str = "unknown"  # Add org_id field with default value
 
 class AIBrainAnalyzer:
     """Analyzer for AI synthesis knowledge and comprehensive knowledge summarization."""
@@ -642,7 +643,7 @@ async def brain_preview_endpoint(request: BrainPreviewRequest):
     This endpoint fetches all AI synthesis vectors and generates insights about the knowledge base.
     
     Args:
-        request: BrainPreviewRequest containing preview parameters
+        request: BrainPreviewRequest containing preview parameters including org_id
         
     Returns:
         Comprehensive brain analysis including statistics, insights, and optional vectors
@@ -651,11 +652,11 @@ async def brain_preview_endpoint(request: BrainPreviewRequest):
     request_id = f"brain_{start_time.strftime('%Y%m%d_%H%M%S')}"
     
     logger.info(f"[{request_id}] === BEGIN brain-preview request ===")
-    logger.info(f"[{request_id}] Parameters: namespace={request.namespace}, max_vectors={request.max_vectors}, summary_type={request.summary_type}")
+    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, namespace={request.namespace}, max_vectors={request.max_vectors}, summary_type={request.summary_type}")
     
     try:
         # Initialize the analyzer
-        analyzer = AIBrainAnalyzer()
+        analyzer = AIBrainAnalyzer(request.org_id)
         
         # Fetch AI synthesis vectors
         logger.info(f"[{request_id}] Fetching AI synthesis vectors...")
