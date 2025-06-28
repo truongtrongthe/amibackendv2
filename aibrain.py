@@ -47,6 +47,14 @@ class BrainPreviewRequest(BaseModel):
     max_content_length: int = 50000
     org_id: str = "unknown"  # Add org_id field with default value
 
+class PickupLineRequest(BaseModel):
+    namespace: str = "conversation"
+    max_vectors: Optional[int] = 500
+    summary_type: Literal["comprehensive", "topics_only", "categories_only"] = "comprehensive"
+    max_content_length: int = 30000
+    pickup_style: Literal["witty", "charming", "nerdy", "confident", "humorous"] = "charming"
+    org_id: str = "unknown"  # Add org_id field with default value
+
 class AIBrainAnalyzer:
     """Analyzer for AI synthesis knowledge and comprehensive knowledge summarization."""
     
@@ -823,6 +831,328 @@ def _generate_recommendations(stats: Dict[str, Any], total_count: int) -> List[s
 @router.options('/brain-preview')
 async def brain_preview_options():
     """Handle OPTIONS requests for brain-preview endpoint."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "86400"
+        }
+    )
+
+@router.post('/pickup-line')
+async def pickup_line_endpoint(request: PickupLineRequest):
+    """
+    Generate a personalized pickup line based on AI knowledge base recommendations.
+    
+    This endpoint analyzes the knowledge base, extracts recommendations, and creates
+    a creative pickup line based on the user's knowledge patterns and preferences.
+    
+    Args:
+        request: PickupLineRequest containing parameters for pickup line generation
+        
+    Returns:
+        A response containing the generated pickup line and context
+    """
+    start_time = datetime.now()
+    request_id = f"pickup_{start_time.strftime('%Y%m%d_%H%M%S')}"
+    
+    logger.info(f"[{request_id}] === BEGIN pickup-line request ===")
+    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, namespace={request.namespace}, pickup_style={request.pickup_style}")
+    
+    try:
+        # Initialize the analyzer
+        analyzer = AIBrainAnalyzer(request.org_id)
+        
+        # Fetch AI synthesis vectors (smaller set for faster processing)
+        logger.info(f"[{request_id}] Fetching AI synthesis vectors for pickup line generation...")
+        vectors_result = await analyzer.fetch_all_ai_synthesis_vectors(
+            namespace=request.namespace,
+            max_vectors=request.max_vectors
+        )
+        
+        if not vectors_result.get("success"):
+            logger.error(f"[{request_id}] Failed to fetch vectors: {vectors_result.get('error')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch AI synthesis vectors: {vectors_result.get('error')}"
+            )
+        
+        vectors = vectors_result.get("vectors", [])
+        total_count = vectors_result.get("total_count", 0)
+        
+        logger.info(f"[{request_id}] Found {total_count} AI synthesis vectors")
+        
+        if not vectors:
+            # No knowledge base content, generate a generic pickup line
+            logger.info(f"[{request_id}] No vectors found, generating generic pickup line")
+            pickup_line = await _generate_generic_pickup_line(request.pickup_style)
+            
+            return {
+                "success": True,
+                "request_id": request_id,
+                "pickup_line": pickup_line,
+                "style": request.pickup_style,
+                "based_on": "generic_template",
+                "knowledge_base_analyzed": "a fresh learning journey",
+                "generated_at": datetime.now().isoformat(),
+                "processing_time_seconds": (datetime.now() - start_time).total_seconds()
+            }
+        
+        # Generate comprehensive LLM summary to extract recommendations
+        logger.info(f"[{request_id}] Generating comprehensive LLM summary...")
+        content_organization = analyzer._organize_content_for_llm(vectors, request.max_content_length)
+        
+        # Generate the comprehensive LLM summary
+        llm_summary_result = await analyzer._generate_llm_summary(content_organization, "comprehensive")
+        
+        if not llm_summary_result.get("success"):
+            logger.warning(f"[{request_id}] Failed to generate LLM summary, using fallback")
+            # Fallback to generic pickup line
+            pickup_line = await _generate_generic_pickup_line(request.pickup_style)
+            return {
+                "success": True,
+                "request_id": request_id,
+                "pickup_line": pickup_line,
+                "style": request.pickup_style,
+                "based_on": "generic_fallback",
+                "knowledge_base_analyzed": _get_friendly_knowledge_description(total_count),
+                "generated_at": datetime.now().isoformat(),
+                "processing_time_seconds": (datetime.now() - start_time).total_seconds()
+            }
+        
+        # Extract the full comprehensive analysis for better insights
+        llm_analysis = llm_summary_result.get("analysis", "")
+        language_info = content_organization.get("detected_language", {})
+        
+        logger.info(f"[{request_id}] Analyzing comprehensive summary for exploratory pickup line...")
+        logger.info(f"[{request_id}] Detected language: {language_info.get('language_name', 'English')} (confidence: {language_info.get('confidence', 0.7):.2f})")
+        
+        # Generate exploratory pickup line with thought-provoking questions
+        pickup_line_result = await _generate_focused_pickup_line(
+            comprehensive_analysis=llm_analysis,
+            language_info=language_info,
+            pickup_style=request.pickup_style,
+            total_vectors=total_count
+        )
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"[{request_id}] Successfully generated pickup line in {elapsed:.2f}s")
+        
+        return {
+            "success": True,
+            "request_id": request_id,
+            "pickup_line": pickup_line_result["pickup_line"],
+            "explanation": pickup_line_result["explanation"],
+            "style": request.pickup_style,
+            "based_on": "comprehensive_knowledge_analysis",
+            "analysis_summary": {
+                "knowledge_base_analyzed": _get_friendly_knowledge_description(total_count),
+                "comprehensive_analysis_generated": True,
+                "language_detected": language_info.get('language_name', 'English'),
+                "detection_confidence": language_info.get('confidence', 0.7),
+                "approach": "multi_domain_exploratory_questions"
+            },
+            "generated_at": datetime.now().isoformat(),
+            "processing_time_seconds": elapsed
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Error in pickup-line endpoint: {error_msg}")
+        logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {error_msg}"
+        )
+    finally:
+        logger.info(f"[{request_id}] === END pickup-line request ===")
+
+async def _generate_generic_pickup_line(style: str) -> str:
+    """Generate a generic pickup line when no knowledge base is available."""
+    generic_lines = {
+        "witty": "Are you a neural network? Because you've got my parameters all optimized.",
+        "charming": "I must be drawn to your intellectual energy, because I'm feeling a strong connection.",
+        "nerdy": "If you were a function, you'd be f(x) = beautiful, and I'd want to solve for x.",
+        "confident": "I don't need an AI to tell me you're worth getting to know.",
+        "humorous": "Are you machine learning? Because you're making me smarter just by being here."
+    }
+    return generic_lines.get(style, generic_lines["charming"])
+
+def _get_friendly_knowledge_description(total_vectors: int) -> str:
+    """Convert technical vector count to user-friendly description."""
+    if total_vectors == 0:
+        return "a fresh learning journey"
+    elif total_vectors < 50:
+        return f"{total_vectors} learning moments"
+    elif total_vectors < 100:
+        return f"{total_vectors} knowledge insights"
+    elif total_vectors < 200:
+        return f"{total_vectors} intellectual discoveries"
+    elif total_vectors < 500:
+        return f"{total_vectors} wisdom pieces"
+    else:
+        return f"{total_vectors} knowledge gems"
+
+def _extract_recommendations_section(llm_analysis: str) -> str:
+    """Extract the complete RECOMMENDATIONS section from LLM comprehensive analysis."""
+    recommendations_section = ""
+    
+    # Look for the recommendations section (section 8)
+    lines = llm_analysis.split('\n')
+    in_recommendations = False
+    
+    for line in lines:
+        line_stripped = line.strip()
+        
+        # Check if we're entering recommendations section
+        if ("8." in line or "**RECOMMENDATIONS**" in line.upper() or 
+            (line_stripped.startswith("**") and "RECOMMENDATION" in line.upper())):
+            in_recommendations = True
+            recommendations_section += line + "\n"
+            continue
+        
+        # Check if we're leaving recommendations section (next numbered section or end)
+        if in_recommendations:
+            # Stop if we hit another numbered section or conclusion
+            if (line_stripped.startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "9.", "10.")) or
+                "**" in line and any(keyword in line.upper() for keyword in ["CONCLUSION", "SUMMARY", "ANALYSIS"])):
+                break
+            
+            # Add the line to recommendations section
+            if line_stripped:  # Only add non-empty lines
+                recommendations_section += line + "\n"
+    
+    # If no structured section found, look for any recommendations content
+    if not recommendations_section:
+        for line in lines:
+            if "recommend" in line.lower() or "suggest" in line.lower():
+                recommendations_section += line + "\n"
+    
+    return recommendations_section.strip()
+
+def _extract_knowledge_context(vectors: List[Dict], stats: Dict[str, Any], summary_result: Optional[Dict]) -> Dict[str, Any]:
+    """Extract key context from knowledge base for pickup line generation."""
+    context = {
+        "dominant_topics": list(stats.get("topics", {}).get("top_10", {}).keys())[:3],
+        "knowledge_depth": "deep" if stats.get("content", {}).get("average_length", 0) > 1000 else "broad",
+        "confidence_level": "high" if stats.get("confidence", {}).get("average", 0) > 0.8 else "moderate",
+        "conversation_style": "analytical" if "analysis" in str(stats.get("categories", {})) else "conversational"
+    }
+    
+    # Add enhanced insights from LLM summary if available
+    if summary_result and summary_result.get("success"):
+        llm_analysis = summary_result.get("llm_analysis", {}).get("analysis", "")
+        
+        # Extract key domains and themes
+        if "domain" in llm_analysis.lower():
+            context["has_domain_expertise"] = True
+        if "creative" in llm_analysis.lower():
+            context["conversation_style"] = "creative"
+        elif "technical" in llm_analysis.lower():
+            context["conversation_style"] = "technical"
+        elif "practical" in llm_analysis.lower():
+            context["conversation_style"] = "practical"
+            
+        # Extract learning patterns
+        if "learning" in llm_analysis.lower():
+            context["shows_learning_growth"] = True
+        if "diverse" in llm_analysis.lower() or "variety" in llm_analysis.lower():
+            context["knowledge_diversity"] = "high"
+    
+    return context
+
+async def _generate_focused_pickup_line(
+    comprehensive_analysis: str,
+    language_info: Dict[str, Any],
+    pickup_style: str,
+    total_vectors: int
+) -> Dict[str, Any]:
+    """Generate a comprehensive pickup line that shows understanding of their full knowledge profile and asks thought-provoking questions."""
+    
+    # Convert technical count to user-friendly terms
+    knowledge_description = _get_friendly_knowledge_description(total_vectors)
+    
+    # Get the primary language from language_info
+    primary_language = language_info.get('language_name', 'English')
+    
+    pickup_line_prompt = f"""
+    You are analyzing someone's comprehensive knowledge summary to create a {pickup_style} pickup line that shows deep understanding of their FULL knowledge profile.
+    
+    📊 USER'S COMPREHENSIVE KNOWLEDGE ANALYSIS:
+    {comprehensive_analysis}
+    
+    🚨 LANGUAGE REQUIREMENT: Write the pickup line in {primary_language} (user's primary language)! 🚨
+    
+    YOUR MISSION:
+    1. Show understanding of their BROAD knowledge areas (mention 2-3 main domains they know about)
+    2. Demonstrate you've analyzed their {knowledge_description} comprehensively 
+    3. Connect their knowledge areas together to show the full picture
+    4. Ask a THOUGHTFUL, OPEN-ENDED QUESTION that sparks curiosity and guides exploration
+    5. Make it sound like you're impressed by their overall intellectual profile and want to explore ideas together
+    
+    GUIDELINES:
+    - Reference multiple knowledge domains they have (e.g., "your expertise spans animal behavior, travel insights, and conservation")
+    - Show you understand the connections between their interests
+    - Ask an open-ended question that encourages brainstorming and exploration
+    - Create curiosity about knowledge gaps or unexplored connections
+    - Guide them to think about ambiguities or interesting possibilities
+    - Write in {pickup_style} tone but show intellectual depth
+    - Write in {primary_language} language!
+    - Use friendly terms for their knowledge base ({knowledge_description})
+    
+    EXAMPLES of curious, exploratory approach:
+    ❌ PRESCRIPTIVE: "You should explore eco-tourism research opportunities!"
+    ✅ CURIOUS: "I've been analyzing your knowledge spanning animal behavior, travel insights, and conservation - what do you think would happen if we could design tourism experiences that actually helped wildlife instead of harming them?"
+    ✅ EXPLORATORY: "Your understanding covers everything from primate behavior to local food culture - I'm curious, how do you think traditional food practices might be connected to wildlife conservation efforts?"
+    ✅ BRAINSTORMING: "Looking at your insights on wolves, travel pricing, and environmental impact - what if there was a way to make conservation profitable for local communities? What would that look like?"
+    
+    The pickup line should feel like:
+    "I've analyzed your {knowledge_description} covering [area 1], [area 2], and [area 3] - [thoughtful open-ended question that sparks curiosity and exploration]?"
+    
+    🔥 CRITICAL: Write the pickup line in {primary_language}, not English! 🔥
+    
+    Respond in JSON format:
+    {{
+        "pickup_line": "Your comprehensive pickup line in {primary_language}",
+        "explanation": "Explain which knowledge areas you highlighted and what thoughtful question you asked to spark curiosity and exploration (this can be in English)"
+    }}
+    """
+    
+    try:
+        response = await SUMMARIZATION_LLM.ainvoke(pickup_line_prompt)
+        response_text = response.content.strip()
+        
+        # Try to parse JSON response
+        import json
+        try:
+            result = json.loads(response_text)
+            return result
+        except json.JSONDecodeError:
+            # Fallback if JSON parsing fails
+            return {
+                "pickup_line": response_text,
+                "explanation": f"Generated based on {pickup_style} style and comprehensive analysis"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error generating exploratory pickup line: {e}")
+        # Fallback to generic line
+        generic_line = await _generate_generic_pickup_line(pickup_style)
+        return {
+            "pickup_line": generic_line,
+            "explanation": "Generated using fallback method due to processing error"
+        }
+
+@router.options('/pickup-line')
+async def pickup_line_options():
+    """Handle OPTIONS requests for pickup-line endpoint."""
     from fastapi.responses import JSONResponse
     return JSONResponse(
         content={},
