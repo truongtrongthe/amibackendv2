@@ -27,6 +27,9 @@ from aibrain import router as brain_router
 from supabase import create_client, Client
 from ava import AVA
 
+# Import exec_tool module for LLM tool execution
+from exec_tool import execute_tool_sync, ToolExecutionRequest, ToolExecutionResponse
+
 from utilities import logger
 # Initialize FastAPI app
 app = FastAPI(title="AMI Backend")
@@ -360,6 +363,15 @@ class UpdateBrainGraphRequest(BaseModel):
     graph_id: str
     name: Optional[str] = None
     description: Optional[str] = None
+
+class LLMToolExecuteRequest(BaseModel):
+    """Request model for LLM tool execution with dynamic parameters"""
+    llm_provider: str  # 'anthropic' or 'openai'
+    user_query: str
+    system_prompt: Optional[str] = None
+    model_params: Optional[Dict[str, Any]] = None
+    org_id: str = "default"
+    user_id: str = "anonymous"
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -1113,6 +1125,94 @@ async def update_brain_graph_endpoint(request: UpdateBrainGraphRequest):
 
 @app.options('/update-brain-graph')
 async def update_brain_graph_options():
+    return handle_options()
+
+@app.post('/api/llm/execute')
+async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
+    """
+    Execute LLM tool calling with dynamic system prompts and parameters.
+    Supports both Anthropic Claude and OpenAI GPT-4 with customizable settings.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN /api/llm/execute request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Provider: {request.llm_provider}, Query: {request.user_query[:100]}...")
+    logger.info(f"[REQUEST:{request_id}] System prompt: {request.system_prompt[:100] if request.system_prompt else 'None'}...")
+    logger.info(f"[REQUEST:{request_id}] Model params: {request.model_params}")
+    
+    try:
+        # Create tool execution request
+        tool_request = ToolExecutionRequest(
+            llm_provider=request.llm_provider,
+            user_query=request.user_query,
+            system_prompt=request.system_prompt,
+            model_params=request.model_params,
+            org_id=request.org_id,
+            user_id=request.user_id
+        )
+        
+        # Execute the tool synchronously
+        response: ToolExecutionResponse = execute_tool_sync(
+            llm_provider=request.llm_provider,
+            user_query=request.user_query,
+            system_prompt=request.system_prompt,
+            model_params=request.model_params,
+            org_id=request.org_id,
+            user_id=request.user_id
+        )
+        
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.info(f"[REQUEST:{request_id}] LLM tool execution completed - time: {elapsed:.2f}s")
+        logger.info(f"[REQUEST:{request_id}] Success: {response.success}, Provider: {response.provider}")
+        
+        # Return the structured response
+        result = {
+            "success": response.success,
+            "result": response.result,
+            "provider": response.provider,
+            "model_used": response.model_used,
+            "execution_time": response.execution_time,
+            "request_id": request_id,
+            "total_elapsed_time": elapsed,
+            "metadata": response.metadata,
+            "error": response.error
+        }
+        
+        if response.success:
+            return JSONResponse(content=result)
+        else:
+            return JSONResponse(status_code=400, content=result)
+            
+    except Exception as e:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.error(f"[REQUEST:{request_id}] Error in /api/llm/execute endpoint: {str(e)} - time: {elapsed:.2f}s")
+        import traceback
+        logger.error(f"[REQUEST:{request_id}] Traceback: {traceback.format_exc()}")
+        
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "result": "",
+                "provider": request.llm_provider,
+                "model_used": "unknown",
+                "execution_time": 0,
+                "request_id": request_id,
+                "total_elapsed_time": elapsed,
+                "error": str(e),
+                "metadata": None
+            }
+        )
+    finally:
+        logger.info(f"[REQUEST:{request_id}] === END /api/llm/execute request - total time: {(datetime.now() - start_time).total_seconds():.2f}s ===")
+
+@app.options('/api/llm/execute')
+async def execute_llm_tool_options():
     return handle_options()
 
 # Run the application

@@ -1,5 +1,6 @@
 langchain
 openai
+anthropic
 python-dotenv
 langchain-openai
 langchain-community
@@ -38,3 +39,5 @@ certifi
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+serpapi
+anthropic
