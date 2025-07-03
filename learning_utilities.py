@@ -192,9 +192,51 @@ def extract_tool_calls_and_evaluation(content: str, message_str: str = "") -> tu
         eval_section = re.search(r'<evaluation>(.*?)</evaluation>', content, re.DOTALL)
         if eval_section:
             try:
-                evaluation = json.loads(eval_section.group(1).strip())
+                extracted_evaluation = json.loads(eval_section.group(1).strip())
+                evaluation.update(extracted_evaluation)
                 content = re.sub(r'<evaluation>.*?</evaluation>', '', content, flags=re.DOTALL).strip()
                 logger.info(f"Extracted LLM evaluation: {evaluation}")
+                
+                # Fix "unknown" intent_type based on has_teaching_intent
+                if evaluation.get("intent_type") == "unknown" or not evaluation.get("intent_type"):
+                    if evaluation.get("has_teaching_intent", False):
+                        evaluation["intent_type"] = "teaching"
+                        logger.info("Fixed unknown intent_type to 'teaching' based on has_teaching_intent=True")
+                    else:
+                        # Determine intent_type based on message patterns even when LLM says no teaching intent
+                        message_lower = message_str.lower()
+                        
+                        # Check for stronger teaching signals that LLM might have missed
+                        teaching_signals = [
+                            "let me tell you", "here's what", "you should know", "i'll explain",
+                            "the way it works", "what happens is", "the process is", "here's how",
+                            "từ hôm nay", "từ mai", "em sẽ", "em phải", "bắt đầu từ",
+                            "cho em biết", "em cần hiểu", "như thế này"
+                        ]
+                        
+                        declarative_signals = [
+                            "i am", "i will", "starting tomorrow", "from now on", "my role is",
+                            "i have", "i've decided", "the plan is", "we decided", "the rule is"
+                        ]
+                        
+                        question_signals = [
+                            "what", "how", "why", "when", "where", "can you", "could you", 
+                            "do you", "are you", "will you", "có thể", "làm thế nào", "là gì"
+                        ]
+                        
+                        # Check for teaching/declarative patterns first
+                        if any(signal in message_lower for signal in teaching_signals + declarative_signals):
+                            evaluation["intent_type"] = "teaching"
+                            evaluation["has_teaching_intent"] = True  # Override LLM decision
+                            logger.info(f"Fixed unknown intent_type to 'teaching' based on message patterns (overriding LLM)")
+                        elif "?" in message_str or any(signal in message_lower for signal in question_signals):
+                            evaluation["intent_type"] = "query"
+                        else:
+                            evaluation["intent_type"] = "general_conversation"
+                        
+                        if evaluation["intent_type"] != "teaching":
+                            logger.info(f"Fixed unknown intent_type to '{evaluation['intent_type']}' based on message patterns")
+                
             except json.JSONDecodeError:
                 logger.warning("Failed to parse evaluation")
     

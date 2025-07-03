@@ -236,6 +236,15 @@ class AVA:
     async def _emit_to_socket(self, thread_id_for_analysis, intent_type, has_teaching_intent, is_priority_topic, priority_topic_name, should_save_knowledge):
         # WEBSOCKET EMISSION: learning intent event when intent is understood
         try:
+            # Fix unknown intent_type before emitting to WebSocket
+            if intent_type == "unknown" or not intent_type:
+                if has_teaching_intent:
+                    intent_type = "teaching"
+                    logger.info("Fixed unknown intent_type to 'teaching' before WebSocket emission")
+                else:
+                    intent_type = "general_conversation"
+                    logger.info("Fixed unknown intent_type to 'general_conversation' before WebSocket emission")
+            
             learning_intent_event = {
                             "type": "learning_intent",
                             "thread_id": thread_id_for_analysis,
@@ -416,19 +425,45 @@ class AVA:
                 confidence_score = 0.3
                 reasoning = f"Fallback analysis due to parsing error: {str(e)}"
                 
-                # Simple pattern detection as fallback
-                if any(word in message_lower for word in ["teach", "explain", "show", "understand", "learn"]):
-                    preliminary_intent = "teaching" if "teach" in message_lower or "explain" in message_lower else "questioning"
-                    confidence_score = 0.5
-                elif "?" in message or any(word in message_lower for word in ["what", "how", "why", "when", "where"]):
+                # Enhanced pattern detection as fallback - consistent with learning_support.py
+                teaching_signals = [
+                    "let me tell you", "here's what", "you should know", "i'll explain",
+                    "the way it works", "what happens is", "the process is", "here's how",
+                    "từ hôm nay", "từ mai", "em sẽ", "em phải", "bắt đầu từ",
+                    "cho em biết", "em cần hiểu", "như thế này"
+                ]
+                
+                declarative_signals = [
+                    "i am", "i will", "starting tomorrow", "from now on", "my role is",
+                    "i have", "i've decided", "the plan is", "we decided", "the rule is"
+                ]
+                
+                question_signals = [
+                    "what", "how", "why", "when", "where", "can you", "could you", 
+                    "do you", "are you", "will you", "có thể", "làm thế nào", "là gì"
+                ]
+                
+                # Check for teaching/declarative patterns first
+                if any(signal in message_lower for signal in teaching_signals + declarative_signals):
+                    preliminary_intent = "teaching"
+                    confidence_score = 0.7
+                    has_teaching_signals = True
+                    reasoning = "Detected teaching intent from declarative/informational language patterns"
+                elif "?" in message or any(signal in message_lower for signal in question_signals):
                     preliminary_intent = "questioning"
                     confidence_score = 0.6
+                    has_teaching_signals = False
+                    reasoning = "Detected questioning intent from interrogative patterns"
+                else:
+                    preliminary_intent = "general_conversation"
+                    confidence_score = 0.4
+                    has_teaching_signals = False
+                    reasoning = "General conversational content detected"
                     
-                has_teaching_signals = "teach" in message_lower or "explain" in message_lower
-                is_question = "?" in message or any(word in message_lower for word in ["what", "how", "why", "when", "where"])
+                is_question = "?" in message or any(signal in message_lower for signal in question_signals)
                 knowledge_relevance = "medium" if similarity_score > 0.3 else "low"
                 
-                logger.info(f"Fallback intent analysis: {preliminary_intent} (confidence: {confidence_score})")
+                logger.info(f"Enhanced fallback intent analysis: {preliminary_intent} (confidence: {confidence_score})")
             
             # Analyze knowledge context signals
             knowledge_context_signals = {
