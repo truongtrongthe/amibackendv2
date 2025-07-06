@@ -2116,12 +2116,13 @@ def get_organization_integrations():
     
     org_id = request.args.get('org_id', '')
     active_only = request.args.get('active_only', 'false').lower() == 'true'
+    integration_type = request.args.get('integration_type', '')
     
     if not org_id:
         return jsonify({"error": "org_id parameter is required"}), 400
     
     try:
-        integrations = get_org_integrations(org_id, active_only)
+        integrations = get_org_integrations(org_id, active_only, integration_type if integration_type else None)
         
         # Convert to serializable format
         integrations_data = []

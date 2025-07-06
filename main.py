@@ -24,6 +24,7 @@ from contact_apis import router as contact_router
 from waitlist import router as waitlist_router
 from login import router as login_router
 from aibrain import router as brain_router
+from google_drive_routes import router as google_drive_router
 from supabase import create_client, Client
 from ava import AVA
 
@@ -31,6 +32,7 @@ from ava import AVA
 from exec_tool import execute_tool_sync, ToolExecutionRequest, ToolExecutionResponse
 
 from utilities import logger
+from org_integrations import get_org_integrations, get_integration_by_id, create_integration, update_integration, delete_integration, toggle_integration
 # Initialize FastAPI app
 app = FastAPI(title="AMI Backend")
 
@@ -67,6 +69,7 @@ app.include_router(contact_router)
 app.include_router(waitlist_router)
 app.include_router(login_router)
 app.include_router(brain_router)
+app.include_router(google_drive_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async
@@ -1213,6 +1216,317 @@ async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
 
 @app.options('/api/llm/execute')
 async def execute_llm_tool_options():
+    return handle_options()
+
+# Organization Integration endpoints
+class OrganizationIntegrationRequest(BaseModel):
+    org_id: str
+    integration_type: str
+    name: str
+    api_base_url: Optional[str] = None
+    webhook_url: Optional[str] = None
+    webhook_verify_token: Optional[str] = None
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_expires_at: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    is_active: bool = False
+
+class UpdateOrganizationIntegrationRequest(BaseModel):
+    id: str
+    name: Optional[str] = None
+    api_base_url: Optional[str] = None
+    webhook_url: Optional[str] = None
+    webhook_verify_token: Optional[str] = None
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_expires_at: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    is_active: Optional[bool] = None
+
+class DeleteOrganizationIntegrationRequest(BaseModel):
+    id: str
+
+class ToggleOrganizationIntegrationRequest(BaseModel):
+    id: str
+    active: bool
+
+@app.get('/organization-integrations')
+async def get_organization_integrations(
+    org_id: str,
+    active_only: bool = False,
+    integration_type: Optional[str] = None
+):
+    """Get all integrations for an organization"""
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id parameter is required")
+    
+    try:
+        integrations = get_org_integrations(org_id, active_only, integration_type)
+        
+        # Convert to serializable format
+        integrations_data = []
+        for integration in integrations:
+            integration_dict = {
+                "id": str(integration.id),
+                "org_id": str(integration.org_id),
+                "integration_type": integration.integration_type,
+                "name": integration.name,
+                "is_active": integration.is_active,
+                "api_base_url": integration.api_base_url,
+                "webhook_url": integration.webhook_url,
+                # Do not include sensitive information in the list endpoint
+                "created_at": integration.created_at.isoformat() if integration.created_at else None,
+                "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+            }
+            integrations_data.append(integration_dict)
+        
+        return {"integrations": integrations_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/organization-integrations')
+async def get_organization_integrations_options():
+    return handle_options()
+
+@app.get('/organization-integration/{integration_id}')
+async def get_organization_integration(integration_id: str):
+    """Get a specific integration by ID"""
+    try:
+        integration = get_integration_by_id(integration_id)
+        
+        if not integration:
+            raise HTTPException(status_code=404, detail=f"Integration with ID {integration_id} not found")
+        
+        # Convert to serializable format, including sensitive information for admin view
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "api_base_url": integration.api_base_url,
+            "webhook_url": integration.webhook_url,
+            "api_key": integration.api_key,
+            "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
+            "access_token": "••••••" if integration.access_token else None,  # Mask token
+            "refresh_token": "••••••" if integration.refresh_token else None,  # Mask refresh token
+            "token_expires_at": integration.token_expires_at.isoformat() if integration.token_expires_at else None,
+            "config": integration.config,
+            "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        return {"integration": integration_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/organization-integration/{integration_id}')
+async def get_organization_integration_options():
+    return handle_options()
+
+@app.post('/create-organization-integration')
+async def create_organization_integration(request: OrganizationIntegrationRequest):
+    """Create a new organization integration"""
+    if not request.org_id or not request.integration_type or not request.name:
+        raise HTTPException(status_code=400, detail="org_id, integration_type, and name are required")
+    
+    try:
+        # Parse dates if provided
+        token_expires_at = None
+        if request.token_expires_at:
+            try:
+                token_expires_at = datetime.fromisoformat(request.token_expires_at.replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid token_expires_at format. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.sssZ)")
+        
+        # Get the base domain for webhook URL generation
+        base_domain = os.getenv("API_BASE_URL", "https://api.yourdomain.com")
+        
+        integration = create_integration(
+            org_id=request.org_id,
+            integration_type=request.integration_type,
+            name=request.name,
+            api_base_url=request.api_base_url,
+            webhook_url=request.webhook_url,
+            webhook_verify_token=request.webhook_verify_token,
+            api_key=request.api_key,
+            api_secret=request.api_secret,
+            access_token=request.access_token,
+            refresh_token=request.refresh_token,
+            token_expires_at=token_expires_at,
+            config=request.config,
+            is_active=request.is_active,
+            base_domain=base_domain
+        )
+        
+        # Convert to serializable format
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "api_base_url": integration.api_base_url,
+            "webhook_url": integration.webhook_url,
+            "webhook_verify_token": integration.webhook_verify_token,  # Include verify token for setup
+            "api_key": integration.api_key,
+            "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
+            "access_token": "••••••" if integration.access_token else None,  # Mask token
+            "refresh_token": "••••••" if integration.refresh_token else None,  # Mask refresh token
+            "token_expires_at": integration.token_expires_at.isoformat() if integration.token_expires_at else None,
+            "config": integration.config,
+            "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        return {
+            "message": "Integration created successfully",
+            "integration": integration_data
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/create-organization-integration')
+async def create_organization_integration_options():
+    return handle_options()
+
+@app.post('/update-organization-integration')
+async def update_organization_integration(request: UpdateOrganizationIntegrationRequest):
+    """Update an existing organization integration"""
+    if not request.id:
+        raise HTTPException(status_code=400, detail="id is required")
+    
+    # Fields that can be updated
+    update_fields = {}
+    if request.name is not None:
+        update_fields["name"] = request.name
+    if request.api_base_url is not None:
+        update_fields["api_base_url"] = request.api_base_url
+    if request.webhook_url is not None:
+        update_fields["webhook_url"] = request.webhook_url
+    if request.webhook_verify_token is not None:
+        update_fields["webhook_verify_token"] = request.webhook_verify_token
+    if request.api_key is not None:
+        update_fields["api_key"] = request.api_key
+    if request.api_secret is not None:
+        update_fields["api_secret"] = request.api_secret
+    if request.access_token is not None:
+        update_fields["access_token"] = request.access_token
+    if request.refresh_token is not None:
+        update_fields["refresh_token"] = request.refresh_token
+    if request.config is not None:
+        update_fields["config"] = request.config
+    if request.is_active is not None:
+        update_fields["is_active"] = request.is_active
+    
+    # Parse token_expires_at if provided
+    if request.token_expires_at is not None:
+        try:
+            update_fields["token_expires_at"] = datetime.fromisoformat(request.token_expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid token_expires_at format. Use ISO 8601 format (YYYY-MM-DDTHH:MM:SS.sssZ)")
+    
+    try:
+        integration = update_integration(request.id, **update_fields)
+        
+        if not integration:
+            raise HTTPException(status_code=404, detail=f"Integration with ID {request.id} not found or update failed")
+        
+        # Convert to serializable format
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "api_base_url": integration.api_base_url,
+            "webhook_url": integration.webhook_url,
+            "api_key": integration.api_key,
+            "api_secret": "••••••" if integration.api_secret else None,  # Mask secret
+            "access_token": "••••••" if integration.access_token else None,  # Mask token
+            "refresh_token": "••••••" if integration.refresh_token else None,  # Mask refresh token
+            "token_expires_at": integration.token_expires_at.isoformat() if integration.token_expires_at else None,
+            "config": integration.config,
+            "created_at": integration.created_at.isoformat() if integration.created_at else None,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        return {
+            "message": "Integration updated successfully",
+            "integration": integration_data
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/update-organization-integration')
+async def update_organization_integration_options():
+    return handle_options()
+
+@app.post('/delete-organization-integration')
+async def delete_organization_integration(request: DeleteOrganizationIntegrationRequest):
+    """Delete an organization integration"""
+    if not request.id:
+        raise HTTPException(status_code=400, detail="id is required")
+    
+    try:
+        success = delete_integration(request.id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Integration with ID {request.id} not found or delete failed")
+        
+        return {"message": "Integration deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/delete-organization-integration')
+async def delete_organization_integration_options():
+    return handle_options()
+
+@app.post('/toggle-organization-integration')
+async def toggle_organization_integration(request: ToggleOrganizationIntegrationRequest):
+    """Toggle an organization integration active status"""
+    if not request.id:
+        raise HTTPException(status_code=400, detail="id is required")
+    
+    try:
+        integration = toggle_integration(request.id, request.active)
+        
+        if not integration:
+            raise HTTPException(status_code=404, detail=f"Integration with ID {request.id} not found or update failed")
+        
+        # Convert to serializable format
+        integration_data = {
+            "id": str(integration.id),
+            "org_id": str(integration.org_id),
+            "integration_type": integration.integration_type,
+            "name": integration.name,
+            "is_active": integration.is_active,
+            "updated_at": integration.updated_at.isoformat() if integration.updated_at else None
+        }
+        
+        status = "activated" if request.active else "deactivated"
+        return {
+            "message": f"Integration {status} successfully",
+            "integration": integration_data
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.options('/toggle-organization-integration')
+async def toggle_organization_integration_options():
     return handle_options()
 
 # Run the application

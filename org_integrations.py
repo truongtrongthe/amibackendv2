@@ -78,7 +78,7 @@ def create_integration(
         raise ValueError("org_id, integration_type, and name are required")
     
     # Validate integration_type
-    valid_types = ["odoo_crm", "hubspot", "salesforce", "facebook", "other"]
+    valid_types = ["odoo_crm", "hubspot", "salesforce", "facebook", "google_drive", "other"]
     if integration_type not in valid_types:
         raise ValueError(f"integration_type must be one of {', '.join(valid_types)}")
     
@@ -175,13 +175,14 @@ def create_integration(
     except Exception as e:
         raise ValueError(f"Failed to create integration: {str(e)}")
 
-def get_org_integrations(org_id: str, active_only: bool = False) -> List[OrganizationIntegration]:
+def get_org_integrations(org_id: str, active_only: bool = False, integration_type: str = None) -> List[OrganizationIntegration]:
     """
     Get all integrations for an organization
     
     Args:
         org_id: Organization UUID
         active_only: If True, return only active integrations
+        integration_type: If provided, filter by integration type
         
     Returns:
         List of OrganizationIntegration objects
@@ -191,6 +192,9 @@ def get_org_integrations(org_id: str, active_only: bool = False) -> List[Organiz
         
         if active_only:
             query = query.eq("is_active", True)
+            
+        if integration_type:
+            query = query.eq("integration_type", integration_type)
             
         response = query.execute()
         

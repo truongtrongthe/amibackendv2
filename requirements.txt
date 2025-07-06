@@ -41,3 +41,6 @@ google-auth-httplib2
 google-auth-oauthlib
 serpapi
 anthropic
+
+# Google Drive API dependencies
+PyPDF2==3.0.1
