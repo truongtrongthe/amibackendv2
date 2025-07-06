@@ -31,16 +31,17 @@ email_validator
 PyJWT
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
-google-auth
 sendgrid
 certifi
 
-# Google Calendar API dependencies
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
+# Google API dependencies (Calendar & Drive)
+google-api-python-client==2.108.0
+google-auth-httplib2==0.1.1
+google-auth-oauthlib==1.1.0
+google-auth==2.23.4
 serpapi
 anthropic
 
-# Google Drive API dependencies
+# Google Drive content extraction dependencies
 PyPDF2==3.0.1
+python-docx==0.8.11
