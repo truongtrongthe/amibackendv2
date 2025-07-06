@@ -14,6 +14,7 @@ import asyncio
 import json
 import uuid
 import os
+import requests
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from uuid import UUID
@@ -110,11 +111,25 @@ def convert_drive_file_to_response(drive_file) -> DriveFileResponse:
         thumbnailLink=drive_file.thumbnailLink
     )
 
+# Helper function to convert DriveFolder to DriveSubfolderResponse
+def convert_drive_folder_to_subfolder_response(drive_folder) -> DriveSubfolderResponse:
+    """Convert DriveFolder dataclass to DriveSubfolderResponse"""
+    files = [convert_drive_file_to_response(file) for file in drive_folder.files]
+    subfolders = [convert_drive_folder_to_subfolder_response(subfolder) for subfolder in drive_folder.subfolders]
+    
+    return DriveSubfolderResponse(
+        id=drive_folder.id,
+        name=drive_folder.name,
+        webViewLink=drive_folder.webViewLink,
+        files=files,
+        subfolders=subfolders
+    )
+
 # Helper function to convert DriveFolder to DriveFolderResponse
 def convert_drive_folder_to_response(drive_folder) -> DriveFolderResponse:
     """Convert DriveFolder dataclass to DriveFolderResponse"""
     files = [convert_drive_file_to_response(file) for file in drive_folder.files]
-    subfolders = [convert_drive_folder_to_response(subfolder) for subfolder in drive_folder.subfolders]
+    subfolders = [convert_drive_folder_to_subfolder_response(subfolder) for subfolder in drive_folder.subfolders]
     
     return DriveFolderResponse(
         id=drive_folder.id,
@@ -167,22 +182,18 @@ def handle_options():
     )
 
 @router.post('/google-drive/list-folder')
-async def list_folder(
-    request: ListFolderRequest,
-    current_user: dict = Depends(get_current_user)
-):
+async def list_folder(request: ListFolderRequest):
     """
     List contents of a Google Drive folder using user's OAuth tokens
     
     Args:
         request: ListFolderRequest with access tokens and folder_id
-        current_user: Authenticated user from JWT token
         
     Returns:
         ListFolderResponse with folder contents
     """
     try:
-        logger.info(f"User {current_user['email']} listing Google Drive folder: {request.folder_id}")
+        logger.info(f"Listing Google Drive folder: {request.folder_id}")
         
         # Initialize Google Drive service with user's tokens
         drive_service = create_drive_service_from_tokens(
@@ -201,7 +212,7 @@ async def list_folder(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error listing folder contents for user {current_user['email']}: {e}")
+        logger.error(f"Error listing folder contents: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.options('/google-drive/list-folder')
@@ -209,22 +220,18 @@ async def list_folder_options():
     return handle_options()
 
 @router.post('/google-drive/search-folders')
-async def search_folders(
-    request: SearchFoldersRequest,
-    current_user: dict = Depends(get_current_user)
-):
+async def search_folders(request: SearchFoldersRequest):
     """
     Search for folders in Google Drive using user's OAuth tokens
     
     Args:
         request: SearchFoldersRequest with access tokens and query
-        current_user: Authenticated user from JWT token
         
     Returns:
         SearchFoldersResponse with matching folders
     """
     try:
-        logger.info(f"User {current_user['email']} searching Google Drive folders: {request.query}")
+        logger.info(f"Searching Google Drive folders: {request.query}")
         
         # Initialize Google Drive service with user's tokens
         drive_service = create_drive_service_from_tokens(
@@ -243,7 +250,7 @@ async def search_folders(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error searching folders for user {current_user['email']}: {e}")
+        logger.error(f"Error searching folders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.options('/google-drive/search-folders')
@@ -253,8 +260,7 @@ async def search_folders_options():
 @router.post('/google-drive/ingest-folder')
 async def ingest_folder(
     request: IngestFolderRequest, 
-    background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user)
+    background_tasks: BackgroundTasks
 ):
     """
     Ingest Google Drive folder contents for knowledge management using user's OAuth tokens
@@ -262,13 +268,12 @@ async def ingest_folder(
     Args:
         request: IngestFolderRequest with folder details and access tokens
         background_tasks: FastAPI background tasks
-        current_user: Authenticated user from JWT token
         
     Returns:
         IngestFolderResponse with job details
     """
     try:
-        logger.info(f"User {current_user['email']} starting Google Drive folder ingestion: {request.folderName}")
+        logger.info(f"Starting Google Drive folder ingestion: {request.folderName}")
         
         # Initialize Google Drive service with user's tokens
         drive_service = create_drive_service_from_tokens(
@@ -287,7 +292,7 @@ async def ingest_folder(
             drive_service=drive_service,
             content_extractor=content_extractor,
             request=request,
-            user_id=current_user['id']
+            user_id="anonymous"  # Since we removed user authentication
         )
         
         return IngestFolderResponse(
@@ -300,7 +305,7 @@ async def ingest_folder(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error starting folder ingestion for user {current_user['email']}: {e}")
+        logger.error(f"Error starting folder ingestion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.options('/google-drive/ingest-folder')
@@ -370,22 +375,18 @@ async def process_folder_ingestion(
 
 # Additional helper endpoints
 @router.post('/google-drive/test-connection')
-async def test_connection(
-    request: GoogleDriveAuthRequest,
-    current_user: dict = Depends(get_current_user)
-):
+async def test_connection(request: GoogleDriveAuthRequest):
     """
     Test Google Drive connection with user's OAuth tokens
     
     Args:
         request: GoogleDriveAuthRequest with access tokens
-        current_user: Authenticated user from JWT token
         
     Returns:
         Connection status and user info
     """
     try:
-        logger.info(f"User {current_user['email']} testing Google Drive connection")
+        logger.info("Testing Google Drive connection")
         
         # Initialize Google Drive service with user's tokens
         drive_service = create_drive_service_from_tokens(
@@ -405,7 +406,7 @@ async def test_connection(
         }
         
     except Exception as e:
-        logger.error(f"Error testing Google Drive connection for user {current_user['email']}: {e}")
+        logger.error(f"Error testing Google Drive connection: {e}")
         return {
             "connected": False,
             "error": str(e),
@@ -442,7 +443,7 @@ async def get_auth_config():
         return {
             "client_id": client_id,
             "scopes": scopes,
-            "redirect_uri": f"{os.getenv('BASE_URL', 'http://localhost:8000')}/auth/google/callback",
+            "redirect_uri": os.getenv('GOOGLE_OAUTH_REDIRECT_URI', 'http://localhost:5173/google-oauth-callback.html'),
             "response_type": "code",
             "access_type": "offline",
             "prompt": "consent"
@@ -454,6 +455,81 @@ async def get_auth_config():
 
 @router.options('/google-drive/auth-config')
 async def get_auth_config_options():
+    return handle_options()
+
+@router.post('/google-drive/exchange-code')
+async def exchange_code_for_tokens(request: dict):
+    """
+    Exchange authorization code for Google Drive tokens
+    
+    Request body:
+    {
+        "code": "authorization_code_from_google",
+        "state": "optional_state_parameter"
+    }
+    
+    Response:
+    {
+        "access_token": "...",
+        "refresh_token": "...",
+        "expires_in": 3600,
+        "token_type": "Bearer"
+    }
+    """
+    try:
+        code = request.get("code")
+        if not code:
+            raise HTTPException(status_code=400, detail="Authorization code is required")
+        
+        # Get client credentials from environment
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        redirect_uri = os.getenv('GOOGLE_OAUTH_REDIRECT_URI', 'http://localhost:5173/google-oauth-callback.html')
+        
+        if not client_id or not client_secret:
+            raise HTTPException(
+                status_code=500,
+                detail="Google OAuth client credentials not configured"
+            )
+        
+        # Exchange code for tokens
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri
+        }
+        
+        response = requests.post(token_url, data=token_data)
+        
+        if response.status_code == 200:
+            tokens = response.json()
+            logger.info("Successfully exchanged authorization code for tokens")
+            return {
+                "access_token": tokens.get("access_token"),
+                "refresh_token": tokens.get("refresh_token"),
+                "expires_in": tokens.get("expires_in", 3600),
+                "token_type": tokens.get("token_type", "Bearer"),
+                "scope": tokens.get("scope")
+            }
+        else:
+            error_data = response.json()
+            logger.error(f"Token exchange failed: {error_data}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Token exchange failed: {error_data.get('error_description', 'Unknown error')}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exchanging authorization code: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.options('/google-drive/exchange-code')
+async def exchange_code_options():
     return handle_options()
 
 # Update the DriveSubfolderResponse model to handle recursive references

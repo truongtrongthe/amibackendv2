@@ -23,7 +23,6 @@ This guide explains the new user-based Google Drive integration approach that us
 ### 1. Get Auth Configuration
 ```
 GET /google-drive/auth-config
-Authorization: Bearer <jwt_token>
 ```
 
 **Response:**
@@ -35,17 +34,38 @@ Authorization: Bearer <jwt_token>
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile"
   ],
-  "redirect_uri": "http://localhost:8000/auth/google/callback",
+  "redirect_uri": "http://localhost:5173/google-oauth-callback.html",
   "response_type": "code",
   "access_type": "offline",
   "prompt": "consent"
 }
 ```
 
-### 2. Test Connection
+### 2. Exchange Authorization Code for Tokens
+```
+POST /google-drive/exchange-code
+Content-Type: application/json
+
+{
+  "code": "authorization_code_from_google",
+  "state": "optional_state_parameter"
+}
+```
+
+**Response:**
+```json
+{
+  "access_token": "ya29.a0AfH6SMC...",
+  "refresh_token": "1//04-rK5...",
+  "expires_in": 3600,
+  "token_type": "Bearer",
+  "scope": "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email"
+}
+```
+
+### 3. Test Connection
 ```
 POST /google-drive/test-connection
-Authorization: Bearer <jwt_token>
 Content-Type: application/json
 
 {
@@ -68,10 +88,9 @@ Content-Type: application/json
 }
 ```
 
-### 3. List Folder Contents
+### 4. List Folder Contents
 ```
 POST /google-drive/list-folder
-Authorization: Bearer <jwt_token>
 Content-Type: application/json
 
 {
@@ -114,10 +133,9 @@ Content-Type: application/json
 }
 ```
 
-### 4. Search Folders
+### 5. Search Folders
 ```
 POST /google-drive/search-folders
-Authorization: Bearer <jwt_token>
 Content-Type: application/json
 
 {
@@ -127,10 +145,9 @@ Content-Type: application/json
 }
 ```
 
-### 5. Ingest Folder (Background Processing)
+### 6. Ingest Folder (Background Processing)
 ```
 POST /google-drive/ingest-folder
-Authorization: Bearer <jwt_token>
 Content-Type: application/json
 
 {
@@ -184,17 +201,14 @@ const initiateGoogleAuth = async () => {
 ```javascript
 // Handle the OAuth callback to exchange code for tokens
 const handleGoogleCallback = async (code) => {
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+  const tokenResponse = await fetch('/google-drive/exchange-code', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Type': 'application/json',
     },
-    body: new URLSearchParams({
-      client_id: config.client_id,
-      client_secret: config.client_secret, // Should be handled by backend
+    body: JSON.stringify({
       code: code,
-      grant_type: 'authorization_code',
-      redirect_uri: config.redirect_uri,
+      state: 'optional_state_parameter'
     }),
   });
   
@@ -216,7 +230,6 @@ const testConnection = async () => {
   const response = await fetch('/google-drive/test-connection', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${userToken}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -233,7 +246,6 @@ const listFolder = async (folderId = 'root') => {
   const response = await fetch('/google-drive/list-folder', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${userToken}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -274,6 +286,7 @@ JWT_SECRET=your-jwt-secret
 3. **Real-time Access**: Direct access to user's current Google Drive state
 4. **Reduced Complexity**: Fewer database tables and management overhead
 5. **Better UX**: Users can immediately access their own files without admin setup
+6. **No JWT Required**: Google Drive endpoints authenticate using OAuth tokens only
 
 ## Migration Guide
 

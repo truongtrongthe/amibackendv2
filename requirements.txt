@@ -26,6 +26,7 @@ pytz
 nltk
 spacy
 email_validator
+requests
 
 # Authentication dependencies
 PyJWT
