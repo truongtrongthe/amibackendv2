@@ -55,6 +55,15 @@ class PickupLineRequest(BaseModel):
     pickup_style: Literal["witty", "charming", "nerdy", "confident", "humorous"] = "charming"
     org_id: str = "unknown"  # Add org_id field with default value
 
+class BrainVectorsRequest(BaseModel):
+    namespace: str = "conversation"
+    max_vectors: Optional[int] = 1000
+    batch_size: int = 100
+    include_metadata: bool = True
+    include_content: bool = True
+    content_preview_length: int = 300
+    org_id: str = "unknown"  # Add org_id field with default value
+
 class AIBrainAnalyzer:
     """Analyzer for AI synthesis knowledge and comprehensive knowledge summarization."""
     
@@ -831,6 +840,142 @@ def _generate_recommendations(stats: Dict[str, Any], total_count: int) -> List[s
 @router.options('/brain-preview')
 async def brain_preview_options():
     """Handle OPTIONS requests for brain-preview endpoint."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "86400"
+        }
+    )
+
+# FastAPI endpoint for fetching brain vectors
+@router.post('/brain-vectors')
+async def brain_vectors_endpoint(request: BrainVectorsRequest):
+    """
+    Fetch all AI synthesis vectors from the knowledge base.
+    
+    This endpoint returns all vectors with ai_synthesis category from the specified namespace,
+    with optional content and metadata filtering for frontend display.
+    
+    Args:
+        request: BrainVectorsRequest containing fetch parameters including org_id
+        
+    Returns:
+        List of AI synthesis vectors with statistics and metadata
+    """
+    start_time = datetime.now()
+    request_id = f"vectors_{start_time.strftime('%Y%m%d_%H%M%S')}"
+    
+    logger.info(f"[{request_id}] === BEGIN brain-vectors request ===")
+    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, namespace={request.namespace}, max_vectors={request.max_vectors}")
+    
+    try:
+        # Initialize the analyzer
+        analyzer = AIBrainAnalyzer(request.org_id)
+        
+        # Fetch AI synthesis vectors
+        logger.info(f"[{request_id}] Fetching AI synthesis vectors...")
+        vectors_result = await analyzer.fetch_all_ai_synthesis_vectors(
+            namespace=request.namespace,
+            batch_size=request.batch_size,
+            max_vectors=request.max_vectors
+        )
+        
+        if not vectors_result.get("success"):
+            logger.error(f"[{request_id}] Failed to fetch vectors: {vectors_result.get('error')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch AI synthesis vectors: {vectors_result.get('error')}"
+            )
+        
+        vectors = vectors_result.get("vectors", [])
+        total_count = vectors_result.get("total_count", 0)
+        
+        logger.info(f"[{request_id}] Found {total_count} AI synthesis vectors")
+        
+        # Format vectors for frontend consumption
+        formatted_vectors = []
+        for vector in vectors:
+            formatted_vector = {
+                "id": vector["id"],
+                "title": vector.get("title", ""),
+                "created_at": vector.get("created_at", ""),
+                "confidence": vector.get("confidence", 0.0),
+                "source": vector.get("source", ""),
+                "user_id": vector.get("user_id", ""),
+                "thread_id": vector.get("thread_id", ""),
+                "topic": vector.get("topic", "unknown"),
+                "categories": vector.get("categories", []),
+                "score": vector.get("score", 0.0)
+            }
+            
+            # Add content preview if requested
+            if request.include_content:
+                raw_content = vector.get("raw", "")
+                if request.content_preview_length > 0 and len(raw_content) > request.content_preview_length:
+                    formatted_vector["content_preview"] = raw_content[:request.content_preview_length] + "..."
+                    formatted_vector["content_truncated"] = True
+                else:
+                    formatted_vector["content_preview"] = raw_content
+                    formatted_vector["content_truncated"] = False
+                formatted_vector["content_length"] = len(raw_content)
+            
+            # Add full metadata if requested
+            if request.include_metadata:
+                formatted_vector["metadata"] = vector.get("metadata", {})
+            
+            formatted_vectors.append(formatted_vector)
+        
+        # Prepare response data
+        response_data = {
+            "success": True,
+            "request_id": request_id,
+            "namespace": request.namespace,
+            "generated_at": datetime.now().isoformat(),
+            "processing_time_seconds": (datetime.now() - start_time).total_seconds(),
+            "vectors": {
+                "total_count": total_count,
+                "returned_count": len(formatted_vectors),
+                "data": formatted_vectors
+            },
+            "statistics": vectors_result.get("statistics", {}),
+            "query_params": {
+                "namespace": request.namespace,
+                "max_vectors": request.max_vectors,
+                "batch_size": request.batch_size,
+                "include_metadata": request.include_metadata,
+                "include_content": request.include_content,
+                "content_preview_length": request.content_preview_length
+            }
+        }
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"[{request_id}] Successfully fetched {len(formatted_vectors)} brain vectors in {elapsed:.2f}s")
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Error in brain-vectors endpoint: {error_msg}")
+        logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {error_msg}"
+        )
+    finally:
+        logger.info(f"[{request_id}] === END brain-vectors request ===")
+
+
+@router.options('/brain-vectors')
+async def brain_vectors_options():
+    """Handle OPTIONS requests for brain-vectors endpoint."""
     from fastapi.responses import JSONResponse
     return JSONResponse(
         content={},
