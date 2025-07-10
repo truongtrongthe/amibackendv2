@@ -6,7 +6,7 @@ Provides dynamic parameter support and customizable system prompts for API endpo
 import os
 import json
 import traceback
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -25,6 +25,10 @@ class ToolExecutionRequest:
     tools_config: Optional[Dict[str, Any]] = None
     org_id: Optional[str] = "default"
     user_id: Optional[str] = "anonymous"
+    # New parameters to control tool usage
+    enable_tools: Optional[bool] = True  # Whether to enable tools at all
+    force_tools: Optional[bool] = False  # Force tool usage (tool_choice="required")
+    tools_whitelist: Optional[List[str]] = None  # Only allow specific tools
 
 
 @dataclass
@@ -46,8 +50,10 @@ class ExecutiveTool:
         """Initialize the executive tool handler"""
         self.available_tools = self._initialize_tools()
         self.default_system_prompts = {
-            "anthropic": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
-            "openai": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses."
+            "anthropic": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
+            "openai": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
+            "anthropic_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
+            "openai_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses."
         }
     
     def _initialize_tools(self) -> Dict[str, Any]:
@@ -163,6 +169,75 @@ class ExecutiveTool:
                 error=error_msg
             )
     
+    async def execute_tool_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream tool execution with the specified LLM provider using SSE format
+        
+        Args:
+            request: ToolExecutionRequest containing execution parameters
+            
+        Yields:
+            Dict containing streaming response data
+        """
+        start_time = datetime.now()
+        
+        try:
+            # Validate provider
+            if request.llm_provider.lower() not in ["anthropic", "openai"]:
+                yield {
+                    "type": "error",
+                    "content": f"Unsupported LLM provider: {request.llm_provider}",
+                    "provider": request.llm_provider,
+                    "success": False
+                }
+                return
+            
+            # Yield initial processing status
+            yield {
+                "type": "status",
+                "content": "Starting LLM tool execution...",
+                "provider": request.llm_provider,
+                "status": "processing"
+            }
+            
+            # Execute tool with streaming
+            if request.llm_provider.lower() == "anthropic":
+                async for chunk in self._execute_anthropic_stream(request):
+                    yield chunk
+            else:
+                async for chunk in self._execute_openai_stream(request):
+                    yield chunk
+            
+            # Yield completion status
+            execution_time = (datetime.now() - start_time).total_seconds()
+            yield {
+                "type": "complete",
+                "content": "Tool execution completed successfully",
+                "provider": request.llm_provider,
+                "model_used": self._get_model_name(request.llm_provider),
+                "execution_time": execution_time,
+                "success": True,
+                "metadata": {
+                    "org_id": request.org_id,
+                    "user_id": request.user_id,
+                    "tools_used": list(self.available_tools.keys())
+                }
+            }
+            
+        except Exception as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            error_msg = f"Tool execution failed: {str(e)}"
+            traceback.print_exc()
+            
+            yield {
+                "type": "error",
+                "content": error_msg,
+                "provider": request.llm_provider,
+                "model_used": self._get_model_name(request.llm_provider),
+                "execution_time": execution_time,
+                "success": False
+            }
+    
     async def _execute_anthropic(self, request: ToolExecutionRequest) -> str:
         """Execute using Anthropic Claude with custom parameters"""
         anthropic_tool = AnthropicTool()
@@ -235,6 +310,82 @@ class ExecutiveTool:
             system_prompt,
             request.model_params
         )
+    
+    async def _execute_anthropic_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """Execute using Anthropic Claude with streaming"""
+        anthropic_tool = AnthropicTool()
+        
+        # Get available tools for execution based on configuration
+        tools_to_use = []
+        if request.enable_tools and "search" in self.available_tools:
+            # Check whitelist if provided
+            if request.tools_whitelist is None or "search" in request.tools_whitelist:
+                tools_to_use.append(self.available_tools["search"])
+        
+        # Set custom system prompt if provided, otherwise use appropriate default
+        if request.system_prompt:
+            system_prompt = request.system_prompt
+        else:
+            # Use tool-aware prompt if tools are enabled, otherwise use regular prompt
+            if tools_to_use:
+                system_prompt = self.default_system_prompts["anthropic_with_tools"]
+            else:
+                system_prompt = self.default_system_prompts["anthropic"]
+        
+        try:
+            # Use the new streaming method from AnthropicTool with system prompt and tool config
+            async for chunk in anthropic_tool.process_with_tools_stream(
+                request.user_query, 
+                tools_to_use, 
+                system_prompt,
+                force_tools=request.force_tools
+            ):
+                yield chunk
+            
+        except Exception as e:
+            yield {
+                "type": "error",
+                "content": f"Anthropic execution error: {str(e)}",
+                "complete": True
+            }
+    
+    async def _execute_openai_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """Execute using OpenAI with streaming"""
+        openai_tool = OpenAITool()
+        
+        # Get available tools for execution based on configuration
+        tools_to_use = []
+        if request.enable_tools and "search" in self.available_tools:
+            # Check whitelist if provided
+            if request.tools_whitelist is None or "search" in request.tools_whitelist:
+                tools_to_use.append(self.available_tools["search"])
+        
+        # Set custom system prompt if provided, otherwise use appropriate default
+        if request.system_prompt:
+            system_prompt = request.system_prompt
+        else:
+            # Use tool-aware prompt if tools are enabled, otherwise use regular prompt
+            if tools_to_use:
+                system_prompt = self.default_system_prompts["openai_with_tools"]
+            else:
+                system_prompt = self.default_system_prompts["openai"]
+        
+        try:
+            # Use the new streaming method from OpenAITool with system prompt and tool config
+            async for chunk in openai_tool.process_with_tools_stream(
+                request.user_query, 
+                tools_to_use, 
+                system_prompt,
+                force_tools=request.force_tools
+            ):
+                yield chunk
+            
+        except Exception as e:
+            yield {
+                "type": "error",
+                "content": f"OpenAI execution error: {str(e)}",
+                "complete": True
+            }
     
     def _get_model_name(self, provider: str) -> str:
         """Get the model name for the specified provider"""
@@ -398,7 +549,10 @@ def create_tool_request(
     system_prompt: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
-    user_id: str = "anonymous"
+    user_id: str = "anonymous",
+    enable_tools: bool = True,
+    force_tools: bool = False,
+    tools_whitelist: Optional[List[str]] = None
 ) -> ToolExecutionRequest:
     """
     Create a tool execution request
@@ -410,6 +564,9 @@ def create_tool_request(
         model_params: Optional model parameters (temperature, max_tokens, etc.)
         org_id: Organization ID
         user_id: User ID
+        enable_tools: Whether to enable tools at all
+        force_tools: Force tool usage (tool_choice="required")
+        tools_whitelist: Only allow specific tools
         
     Returns:
         ToolExecutionRequest object
@@ -420,7 +577,10 @@ def create_tool_request(
         system_prompt=system_prompt,
         model_params=model_params,
         org_id=org_id,
-        user_id=user_id
+        user_id=user_id,
+        enable_tools=enable_tools,
+        force_tools=force_tools,
+        tools_whitelist=tools_whitelist
     )
 
 
@@ -430,7 +590,10 @@ async def execute_tool_async(
     system_prompt: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
-    user_id: str = "anonymous"
+    user_id: str = "anonymous",
+    enable_tools: bool = True,
+    force_tools: bool = False,
+    tools_whitelist: Optional[List[str]] = None
 ) -> ToolExecutionResponse:
     """
     Asynchronously execute tool with specified parameters
@@ -442,13 +605,17 @@ async def execute_tool_async(
         model_params: Optional model parameters
         org_id: Organization ID
         user_id: User ID
+        enable_tools: Whether to enable tools at all
+        force_tools: Force tool usage (tool_choice="required")
+        tools_whitelist: Only allow specific tools
         
     Returns:
         ToolExecutionResponse with results
     """
     executive_tool = ExecutiveTool()
     request = create_tool_request(
-        llm_provider, user_query, system_prompt, model_params, org_id, user_id
+        llm_provider, user_query, system_prompt, model_params, org_id, user_id,
+        enable_tools, force_tools, tools_whitelist
     )
     return await executive_tool.execute_tool_async(request)
 
@@ -459,7 +626,10 @@ def execute_tool_sync(
     system_prompt: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
-    user_id: str = "anonymous"
+    user_id: str = "anonymous",
+    enable_tools: bool = True,
+    force_tools: bool = False,
+    tools_whitelist: Optional[List[str]] = None
 ) -> ToolExecutionResponse:
     """
     Synchronously execute tool with specified parameters
@@ -471,12 +641,60 @@ def execute_tool_sync(
         model_params: Optional model parameters
         org_id: Organization ID
         user_id: User ID
+        enable_tools: Whether to enable tools at all
+        force_tools: Force tool usage (tool_choice="required")
+        tools_whitelist: Only allow specific tools
         
     Returns:
         ToolExecutionResponse with results
     """
     executive_tool = ExecutiveTool()
     request = create_tool_request(
-        llm_provider, user_query, system_prompt, model_params, org_id, user_id
+        llm_provider, user_query, system_prompt, model_params, org_id, user_id, 
+        enable_tools, force_tools, tools_whitelist
     )
     return executive_tool.execute_tool_sync(request) 
+
+# Add convenience function for streaming
+async def execute_tool_stream(
+    llm_provider: str,
+    user_query: str,
+    system_prompt: Optional[str] = None,
+    model_params: Optional[Dict[str, Any]] = None,
+    org_id: str = "default",
+    user_id: str = "anonymous",
+    enable_tools: bool = True,
+    force_tools: bool = False,
+    tools_whitelist: Optional[List[str]] = None
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Stream tool execution with specified parameters
+    
+    Args:
+        llm_provider: 'anthropic' or 'openai'
+        user_query: User's input query
+        system_prompt: Optional custom system prompt
+        model_params: Optional model parameters
+        org_id: Organization ID
+        user_id: User ID
+        enable_tools: Whether to enable tools at all
+        force_tools: Force tool usage (tool_choice="required")
+        tools_whitelist: Only allow specific tools
+        
+    Yields:
+        Dict containing streaming response data
+    """
+    executive_tool = ExecutiveTool()
+    request = ToolExecutionRequest(
+        llm_provider=llm_provider,
+        user_query=user_query,
+        system_prompt=system_prompt,
+        model_params=model_params,
+        org_id=org_id,
+        user_id=user_id,
+        enable_tools=enable_tools,
+        force_tools=force_tools,
+        tools_whitelist=tools_whitelist
+    )
+    async for chunk in executive_tool.execute_tool_stream(request):
+        yield chunk 

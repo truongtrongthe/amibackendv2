@@ -25,11 +25,12 @@ from waitlist import router as waitlist_router
 from login import router as login_router
 from aibrain import router as brain_router
 from google_drive_routes import router as google_drive_router
+from chat_routes import router as chat_router
 from supabase import create_client, Client
 from ava import AVA
 
 # Import exec_tool module for LLM tool execution
-from exec_tool import execute_tool_sync, ToolExecutionRequest, ToolExecutionResponse
+from exec_tool import execute_tool_sync, execute_tool_stream, ToolExecutionRequest, ToolExecutionResponse
 
 from utilities import logger
 from org_integrations import get_org_integrations, get_integration_by_id, create_integration, update_integration, delete_integration, toggle_integration
@@ -70,6 +71,7 @@ app.include_router(waitlist_router)
 app.include_router(login_router)
 app.include_router(brain_router)
 app.include_router(google_drive_router)
+app.include_router(chat_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async
@@ -375,6 +377,12 @@ class LLMToolExecuteRequest(BaseModel):
     model_params: Optional[Dict[str, Any]] = None
     org_id: str = "default"
     user_id: str = "anonymous"
+    # New parameters to control tool usage
+    enable_tools: Optional[bool] = True  # Whether to enable tools at all
+    force_tools: Optional[bool] = False  # Force tool usage (tool_choice="required")
+    tools_whitelist: Optional[List[str]] = None  # Only allow specific tools
+    # Backward compatibility for frontend
+    enable_search: Optional[bool] = None  # Deprecated: use enable_tools instead
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -1155,14 +1163,24 @@ async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
             user_id=request.user_id
         )
         
-        # Execute the tool synchronously
+        # Handle backward compatibility for enable_search parameter
+        enable_tools = request.enable_tools
+        if request.enable_search is not None:
+            # Frontend sent enable_search, use it instead of enable_tools
+            enable_tools = request.enable_search
+            logger.info(f"[REQUEST:{request_id}] Using enable_search={request.enable_search} for backward compatibility")
+        
+        # Execute the tool synchronously with tool control parameters
         response: ToolExecutionResponse = execute_tool_sync(
             llm_provider=request.llm_provider,
             user_query=request.user_query,
             system_prompt=request.system_prompt,
             model_params=request.model_params,
             org_id=request.org_id,
-            user_id=request.user_id
+            user_id=request.user_id,
+            enable_tools=enable_tools,
+            force_tools=request.force_tools,
+            tools_whitelist=request.tools_whitelist
         )
         
         end_time = datetime.now()
@@ -1217,6 +1235,109 @@ async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
 @app.options('/api/llm/execute')
 async def execute_llm_tool_options():
     return handle_options()
+
+# New streaming LLM tool endpoint
+@app.post('/tool/llm')
+async def execute_llm_tool_stream_endpoint(request: LLMToolExecuteRequest, background_tasks: BackgroundTasks):
+    """
+    Stream LLM tool execution with dynamic system prompts and parameters.
+    Supports both Anthropic Claude and OpenAI GPT-4 with real-time streaming.
+    Similar to /api/llm/execute but with SSE streaming for better frontend UX.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN /tool/llm stream request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Provider: {request.llm_provider}, Query: {request.user_query[:100]}...")
+    logger.info(f"[REQUEST:{request_id}] System prompt: {request.system_prompt[:100] if request.system_prompt else 'None'}...")
+    logger.info(f"[REQUEST:{request_id}] Model params: {request.model_params}")
+    
+    # Get a lock for this request (using user_id as thread identifier)
+    thread_id = f"llm_tool_{request.user_id}_{request_id}"
+    logger.info(f"[REQUEST:{request_id}] Getting lock for thread {thread_id}")
+    thread_lock = await lock_manager.get_lock(thread_id)
+    logger.info(f"[REQUEST:{request_id}] Got lock manager lock for thread {thread_id}")
+    
+    # Always use StreamingResponse for better UX
+    logger.info(f"[REQUEST:{request_id}] Creating StreamingResponse with generate_llm_tool_sse_stream")
+    response = StreamingResponse(
+        generate_llm_tool_sse_stream(request, thread_lock, start_time, request_id),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
+    logger.info(f"[REQUEST:{request_id}] Returning StreamingResponse to client")
+    return response
+
+@app.options('/tool/llm')
+async def execute_llm_tool_stream_options():
+    return handle_options()
+
+# SSE stream generator for LLM tool execution
+async def generate_llm_tool_sse_stream(request: LLMToolExecuteRequest, thread_lock: asyncio.Lock, start_time: datetime, request_id: str):
+    """Generate an SSE stream with LLM tool execution response"""
+    
+    try:
+        # Try to acquire the lock with timeout
+        async with asyncio.timeout(180):  # 180-second timeout
+            async with thread_lock:
+                logger.info(f"[REQUEST:{request_id}] Acquired lock for LLM tool execution")
+                
+                # Import here to avoid circular imports
+                from exec_tool import execute_tool_stream
+                
+                # Log request to streaming tool execution
+                logger.info(f"[REQUEST:{request_id}] Calling execute_tool_stream with provider: {request.llm_provider}")
+                
+                # Handle backward compatibility for enable_search parameter
+                enable_tools = request.enable_tools
+                if request.enable_search is not None:
+                    # Frontend sent enable_search, use it instead of enable_tools
+                    enable_tools = request.enable_search
+                    logger.info(f"[REQUEST:{request_id}] Using enable_search={request.enable_search} for backward compatibility")
+                
+                # Track response count
+                response_count = 0
+                
+                # Process the LLM tool execution and yield results
+                async for result in execute_tool_stream(
+                    llm_provider=request.llm_provider,
+                    user_query=request.user_query,
+                    system_prompt=request.system_prompt,
+                    model_params=request.model_params,
+                    org_id=request.org_id,
+                    user_id=request.user_id,
+                    enable_tools=enable_tools,
+                    force_tools=request.force_tools,
+                    tools_whitelist=request.tools_whitelist
+                ):
+                    response_count += 1
+                    
+                    # Format the response as SSE
+                    if isinstance(result, dict):
+                        # Format JSON for SSE
+                        yield f"data: {json.dumps(result)}\n\n"
+                    else:
+                        # For string responses without SSE format
+                        yield f"data: {json.dumps({'message': str(result)})}\n\n"
+                
+                logger.info(f"[REQUEST:{request_id}] Completed yielding {response_count} responses")
+                logger.info(f"[REQUEST:{request_id}] Released lock for LLM tool execution")
+                
+    except asyncio.TimeoutError:
+        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for LLM tool execution after 180 seconds")
+        yield f"data: {json.dumps({'error': 'Server busy. Please try again.'})}\n\n"
+    except Exception as e:
+        logger.error(f"[REQUEST:{request_id}] Error generating LLM tool SSE stream: {str(e)}")
+        logger.error(traceback.format_exc())
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    finally:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[REQUEST:{request_id}] === END LLM tool stream request - total time: {elapsed:.2f}s ===")
 
 # Organization Integration endpoints
 class OrganizationIntegrationRequest(BaseModel):
