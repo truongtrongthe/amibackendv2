@@ -85,7 +85,7 @@ class OpenAITool:
         
         Args:
             user_query: The user's input query
-            available_tools: List of available tool instances
+            available_tools: List of available tool instances (search, context, etc.)
             system_prompt: Optional custom system prompt
             force_tools: Whether to force tool usage (tool_choice="required")
             conversation_history: Previous conversation messages
@@ -98,40 +98,189 @@ class OpenAITool:
         
         # Use custom system prompt or default
         if system_prompt is None:
-            system_prompt = "You are a helpful assistant that can search for information when needed."
+            system_prompt = "You are a helpful assistant that can search for information and retrieve relevant context when needed."
         
         # Define functions for OpenAI only if tools are available
         functions = []
-        tool_choice = "auto"
         
         if available_tools:
             for tool in available_tools:
-                functions.append({
-                    "type": "function",
-                    "function": {
-                        "name": "search_google",
-                        "description": "Search Google for information on any topic",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "The search query to look up"
-                                }
-                            },
-                            "required": ["query"]
+                # Check if tool has get_tool_description method (dynamic tool definitions)
+                if hasattr(tool, 'get_tool_description'):
+                    try:
+                        tool_def = tool.get_tool_description()
+                        functions.append({
+                            "type": "function",
+                            "function": tool_def
+                        })
+                    except Exception as e:
+                        print(f"Warning: Could not get tool description for {tool}: {e}")
+                        continue
+                # Legacy hardcoded tool definitions for backward compatibility
+                elif hasattr(tool, 'search'):  # Search tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "search_google",
+                            "description": "Search Google for information on any topic",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The search query to look up"
+                                    }
+                                },
+                                "required": ["query"]
+                            }
                         }
-                    }
-                })
-            
-            # Set tool choice based on force_tools parameter
-            if force_tools:
-                tool_choice = "required"
-            else:
-                tool_choice = "auto"
+                    })
+                elif hasattr(tool, 'get_context'):  # Context tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "get_context",
+                            "description": "Retrieve relevant context including user profile, system status, organization info, and knowledge base information",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The topic or question to get context for"
+                                    },
+                                    "source_types": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Specific context sources to query: user_profile, system_status, organization_info, knowledge_base, recent_activity",
+                                        "default": None
+                                    }
+                                },
+                                "required": ["query"]
+                            }
+                        }
+                    })
+                elif hasattr(tool, 'search_learning_context'):  # Learning search tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "search_learning_context",
+                            "description": "Search existing knowledge base for similar content to avoid duplicates",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "The search query to find existing knowledge"
+                                    },
+                                    "depth": {
+                                        "type": "string",
+                                        "description": "Search depth: 'basic' for simple search, 'comprehensive' for detailed search",
+                                        "enum": ["basic", "comprehensive"]
+                                    }
+                                },
+                                "required": ["query"]
+                            }
+                        }
+                    })
+                elif hasattr(tool, 'analyze_learning_opportunity'):  # Learning analysis tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "analyze_learning_opportunity",
+                            "description": "Analyze if a message contains valuable information that should be learned",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "user_message": {
+                                        "type": "string",
+                                        "description": "The user message to analyze for learning opportunities"
+                                    }
+                                },
+                                "required": ["user_message"]
+                            }
+                        }
+                    })
+                elif hasattr(tool, 'request_learning_decision'):  # Human learning decision tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "request_learning_decision",
+                            "description": "Request human decision on whether to learn specific information",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "information": {
+                                        "type": "string",
+                                        "description": "The information to potentially learn"
+                                    },
+                                    "reason": {
+                                        "type": "string",
+                                        "description": "Why this information should be learned"
+                                    },
+                                    "category": {
+                                        "type": "string",
+                                        "description": "Category of information (e.g., 'company_info', 'procedure', 'personal_data')"
+                                    }
+                                },
+                                "required": ["information", "reason"]
+                            }
+                        }
+                    })
+                elif hasattr(tool, 'preview_knowledge_save'):  # Knowledge preview tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "preview_knowledge_save",
+                            "description": "Preview what knowledge would be saved before actual saving",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {
+                                        "type": "string",
+                                        "description": "The content to preview for saving"
+                                    },
+                                    "title": {
+                                        "type": "string",
+                                        "description": "Title for the knowledge item"
+                                    }
+                                },
+                                "required": ["content"]
+                            }
+                        }
+                    })
+                elif hasattr(tool, 'save_knowledge'):  # Knowledge save tool
+                    functions.append({
+                        "type": "function",
+                        "function": {
+                            "name": "save_knowledge",
+                            "description": "Save approved knowledge to the knowledge base",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {
+                                        "type": "string",
+                                        "description": "The content to save"
+                                    },
+                                    "title": {
+                                        "type": "string",
+                                        "description": "Title for the knowledge item"
+                                    },
+                                    "category": {
+                                        "type": "string",
+                                        "description": "Category of knowledge"
+                                    }
+                                },
+                                "required": ["content"]
+                            }
+                        }
+                    })
+        
+        # Set tool choice based on force_tools parameter
+        tool_choice = "auto"
+        if force_tools:
+            tool_choice = "required"
         else:
-            # No tools available, set to none
-            tool_choice = "none"
+            tool_choice = "auto"
 
         # Build messages with conversation history
         messages = [
@@ -198,6 +347,7 @@ class OpenAITool:
             api_params["tools"] = functions
             api_params["tool_choice"] = tool_choice
 
+
         try:
             # First API call to GPT-4 with streaming
             response_stream = self.client.chat.completions.create(**api_params)
@@ -247,7 +397,7 @@ class OpenAITool:
                             "complete": False
                         }
                         
-                        # Stream the tool execution and final response
+                        # Stream the tool execution and final response using the simple approach
                         async for final_chunk in self._stream_tool_execution(
                             user_query, available_tools, system_prompt,
                             conversation_history, max_history_messages, max_history_tokens
@@ -275,20 +425,56 @@ class OpenAITool:
         Execute tools and stream the final response like Cursor does
         """
         try:
-            # Step 1: Execute the tool search (non-streaming but fast)
-            search_result = ""
+            # Step 1: Execute all tools (non-streaming but fast)
+            tool_results = []
+            
+
             if available_tools:
-                search_tool = available_tools[0]
-                # Extract search query from the user query (simplified approach)
-                search_result = search_tool.search(user_query)
+                # Execute search tool if available
+                search_tool = next((tool for tool in available_tools if hasattr(tool, 'search')), None)
+                if search_tool:
+                    search_result = search_tool.search(user_query)
+                    tool_results.append(f"Search Results:\n{search_result}")
+                
+                # Execute learning tools if available
+                learning_search_tool = next((tool for tool in available_tools if hasattr(tool, 'search_learning_context')), None)
+                if learning_search_tool:
+                    # Extract key terms from user query for learning search
+                    learning_search_result = learning_search_tool.search_learning_context(query=user_query)
+                    tool_results.append(f"Learning Context Search:\n{learning_search_result}")
+                
+                learning_analysis_tool = next((tool for tool in available_tools if hasattr(tool, 'analyze_learning_opportunity')), None)
+                if learning_analysis_tool:
+                    learning_analysis_result = learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
+                    tool_results.append(f"Learning Analysis:\n{learning_analysis_result}")
+                    
+                    # Check if learning decision should be created
+                    if "MAYBE_LEARN" in learning_analysis_result or "SHOULD_LEARN" in learning_analysis_result:
+                        human_learning_tool = next((tool for tool in available_tools if hasattr(tool, 'request_learning_decision')), None)
+                        if human_learning_tool:
+                            try:
+                                # Extract key information for learning decision
+                                decision_result = human_learning_tool.request_learning_decision(
+                                    decision_type="save_new",
+                                    context=f"Teaching content detected: {user_query}",
+                                    options=["Save as new knowledge", "Skip learning", "Need more context"],
+                                    additional_info="AI analysis detected teaching intent with factual content"
+                                )
+                                tool_results.append(f"Learning Decision Created:\n{decision_result}")
+                            except Exception as e:
+                                tool_results.append(f"Learning Decision Error:\n{str(e)}")
                 
                 yield {
                     "type": "response_chunk",
-                    "content": "\n[Search completed, generating response...]",
+                    "content": "\n[Tools executed, generating response...]",
                     "complete": False
                 }
             
             # Step 2: Build conversation with tool results and history
+            # Enhance system prompt with context if provided and priority is high
+            if system_prompt and "IMPORTANT CONTEXT:" in system_prompt:
+                system_prompt += "\n\nPlease consider this context when answering questions."
+            
             messages = [
                 {
                     "role": "system",
@@ -336,18 +522,23 @@ class OpenAITool:
                 messages.extend(reversed(history_messages))
             
             # Add current interaction with tool results
+            user_message_content = user_query
+            
+            # Combine all tool results
+            combined_tool_results = "\n\n".join(tool_results) if tool_results else "No additional information found."
+            
             messages.extend([
                 {
                     "role": "user", 
-                    "content": user_query
+                    "content": user_message_content
                 },
                 {
                     "role": "assistant",
-                    "content": f"I'll search for information about this. Let me analyze the search results:\n\n{search_result}"
+                    "content": f"I'll analyze the available information about this. Let me process the tool results:\n\n{combined_tool_results}"
                 },
                 {
                     "role": "user",
-                    "content": "Based on the search results above, please provide a comprehensive answer to my original question."
+                    "content": "Based on the tool results above, please provide a comprehensive answer to my original question."
                 }
             ])
             
@@ -421,17 +612,63 @@ class OpenAITool:
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
             
-            # Execute the tool
-            if function_name == "search_google" and available_tools:
-                search_tool = available_tools[0]  # First tool is search tool
-                result = search_tool.search(function_args.get("query", ""))
-                
-                messages.append({
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": result
-                })
+            # Find the appropriate tool and execute it
+            tool_executed = False
+            
+            for tool in available_tools:
+                # Check if this tool has the requested method
+                if hasattr(tool, function_name):
+                    try:
+                        method = getattr(tool, function_name)
+                        # Call the method with the provided arguments
+                        if callable(method):
+                            result = method(**function_args)
+                            messages.append({
+                                "tool_call_id": tool_call.id,
+                                "role": "tool",
+                                "name": function_name,
+                                "content": result
+                            })
+                            tool_executed = True
+                            break
+                    except Exception as e:
+                        print(f"Error executing tool {function_name}: {e}")
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": f"Error: {str(e)}"
+                        })
+                        tool_executed = True
+                        break
+            
+            # Legacy hardcoded tool handling for backward compatibility
+            if not tool_executed:
+                if function_name == "search_google":
+                    # Find the search tool
+                    search_tool = next((tool for tool in available_tools if hasattr(tool, 'search')), None)
+                    if search_tool:
+                        result = search_tool.search(function_args.get("query", ""))
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": result
+                        })
+                elif function_name == "get_context":
+                    # Find the context tool
+                    context_tool = next((tool for tool in available_tools if hasattr(tool, 'get_context')), None)
+                    if context_tool:
+                        query = function_args.get("query", "")
+                        source_types = function_args.get("source_types", None)
+                        # Pass user info if available from the conversation
+                        result = context_tool.get_context(query, source_types, user_id="unknown", org_id="unknown")
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool", 
+                            "name": function_name,
+                            "content": result
+                        })
         print("Tool result:", messages)
         # Send tool results back to GPT-4
         try:
@@ -443,4 +680,131 @@ class OpenAITool:
             return final_response.choices[0].message.content
             
         except Exception as e:
-            return f"Error processing tool results: {str(e)}" 
+            return f"Error processing tool results: {str(e)}"
+    
+    async def _handle_tool_calls_streaming(self, message: Any, available_tools: List[Any], original_query: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Handle tool calls from GPT-4 with streaming response
+        
+        Args:
+            message: GPT-4's message containing tool calls
+            available_tools: List of available tool instances
+            original_query: The original user query
+            
+        Yields:
+            Dict containing streaming response data
+        """
+        
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that can search for information when needed."
+            },
+            {
+                "role": "user",
+                "content": original_query
+            },
+            message
+        ]
+        
+        # Execute each tool call
+        for tool_call in message.tool_calls:
+            function_name = tool_call.function.name
+            function_args = json.loads(tool_call.function.arguments)
+            
+            # Find the appropriate tool and execute it
+            tool_executed = False
+            
+            for tool in available_tools:
+                # Check if this tool has the requested method
+                if hasattr(tool, function_name):
+                    try:
+                        method = getattr(tool, function_name)
+                        # Call the method with the provided arguments
+                        if callable(method):
+                            result = method(**function_args)
+                            messages.append({
+                                "tool_call_id": tool_call.id,
+                                "role": "tool",
+                                "name": function_name,
+                                "content": result
+                            })
+                            tool_executed = True
+                            break
+                    except Exception as e:
+                        print(f"Error executing tool {function_name}: {e}")
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": f"Error: {str(e)}"
+                        })
+                        tool_executed = True
+                        break
+            
+            # Legacy hardcoded tool handling for backward compatibility
+            if not tool_executed:
+                if function_name == "search_google":
+                    # Find the search tool
+                    search_tool = next((tool for tool in available_tools if hasattr(tool, 'search')), None)
+                    if search_tool:
+                        result = search_tool.search(function_args.get("query", ""))
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": function_name,
+                            "content": result
+                        })
+                elif function_name == "get_context":
+                    # Find the context tool
+                    context_tool = next((tool for tool in available_tools if hasattr(tool, 'get_context')), None)
+                    if context_tool:
+                        query = function_args.get("query", "")
+                        source_types = function_args.get("source_types", None)
+                        # Pass user info if available from the conversation
+                        result = context_tool.get_context(query, source_types, user_id="unknown", org_id="unknown")
+                        messages.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool", 
+                            "name": function_name,
+                            "content": result
+                        })
+        
+        print("Tool result:", messages)
+        
+        # Send tool results back to GPT-4 with streaming
+        try:
+            response_stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True
+            )
+            
+            content_buffer = ""
+            for chunk in response_stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    
+                    if delta.content:
+                        content_buffer += delta.content
+                        yield {
+                            "type": "response_chunk",
+                            "content": delta.content,
+                            "complete": False
+                        }
+                    
+                    if choice.finish_reason == "stop":
+                        yield {
+                            "type": "response_complete",
+                            "content": content_buffer,
+                            "complete": True
+                        }
+                        break
+                        
+        except Exception as e:
+            yield {
+                "type": "error",
+                "content": f"Error processing tool results: {str(e)}",
+                "complete": True
+            } 

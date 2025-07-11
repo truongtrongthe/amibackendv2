@@ -6,6 +6,7 @@ Provides dynamic parameter support and customizable system prompts for API endpo
 import os
 import json
 import traceback
+import logging
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from datetime import datetime
 from dataclasses import dataclass
@@ -13,6 +14,9 @@ from dataclasses import dataclass
 from anthropic_tool import AnthropicTool
 from openai_tool import OpenAITool
 from search_tool import SearchTool
+from learning_tools import LearningToolsFactory
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,16 +62,91 @@ class ExecutiveTool:
             "anthropic": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
             "openai": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
             "anthropic_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
-            "openai_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses."
+            "openai_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
+            "anthropic_with_learning": """You are a helpful assistant with interactive learning capabilities. 
+
+CRITICAL: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+
+1. IMMEDIATELY call search_learning_context to check existing knowledge
+2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
+3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
+
+Available tools:
+- search_google: Search for information when needed
+- get_context: Access user/organization context
+- search_learning_context: Search existing knowledge (CALL FOR ALL TEACHING)
+- analyze_learning_opportunity: Analyze if content should be learned (CALL FOR ALL TEACHING)
+- request_learning_decision: Request human decision (CALL WHEN ANALYSIS SUGGESTS LEARNING)
+- preview_knowledge_save: Preview what would be saved
+- save_knowledge: Save knowledge with human approval
+
+LEARNING TRIGGERS (always use learning tools):
+- User shares company information
+- User provides factual information
+- User gives instructions or procedures
+- User teaches concepts or explains things
+- User shares personal/organizational data
+
+Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context AND analyze_learning_opportunity
+
+Be proactive about learning - don't wait for permission!""",
+            "openai_with_learning": """You are a helpful assistant with interactive learning capabilities. 
+
+CRITICAL: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+
+1. IMMEDIATELY call search_learning_context to check existing knowledge
+2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
+3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
+
+Available tools:
+- search_google: Search for information when needed
+- get_context: Access user/organization context
+- search_learning_context: Search existing knowledge (CALL FOR ALL TEACHING)
+- analyze_learning_opportunity: Analyze if content should be learned (CALL FOR ALL TEACHING)
+- request_learning_decision: Request human decision (CALL WHEN ANALYSIS SUGGESTS LEARNING)
+- preview_knowledge_save: Preview what would be saved
+- save_knowledge: Save knowledge with human approval
+
+LEARNING TRIGGERS (always use learning tools):
+- User shares company information
+- User provides factual information
+- User gives instructions or procedures
+- User teaches concepts or explains things
+- User shares personal/organizational data
+
+Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context AND analyze_learning_opportunity
+
+Be proactive about learning - don't wait for permission!"""
         }
     
     def _initialize_tools(self) -> Dict[str, Any]:
         """Initialize available tools"""
         tools = {}
+        
+        # Initialize search tool
         try:
+            from search_tool import SearchTool
             tools["search"] = SearchTool()
+            logger.info("Search tool initialized successfully")
         except Exception as e:
-            print(f"Warning: Could not initialize SearchTool: {e}")
+            logger.error(f"Failed to initialize search tool: {e}")
+        
+        # Initialize context tool
+        try:
+            from context_tool import ContextTool
+            tools["context"] = ContextTool()
+            logger.info("Context tool initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize context tool: {e}")
+        
+        # Initialize learning tools factory (user-specific tools created on demand)
+        try:
+            from learning_tools import LearningToolsFactory
+            tools["learning_factory"] = LearningToolsFactory
+            logger.info("Learning tools factory initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize learning tools factory: {e}")
+        
         return tools
     
     async def execute_tool_async(self, request: ToolExecutionRequest) -> ToolExecutionResponse:
@@ -332,20 +411,95 @@ class ExecutiveTool:
         
         # Get available tools for execution based on configuration
         tools_to_use = []
-        if request.enable_tools and "search" in self.available_tools:
-            # Check whitelist if provided
-            if request.tools_whitelist is None or "search" in request.tools_whitelist:
-                tools_to_use.append(self.available_tools["search"])
+        has_learning_tools = False
         
-        # Set custom system prompt if provided, otherwise use appropriate default
-        if request.system_prompt:
-            system_prompt = request.system_prompt
-        else:
-            # Use tool-aware prompt if tools are enabled, otherwise use regular prompt
-            if tools_to_use:
-                system_prompt = self.default_system_prompts["anthropic_with_tools"]
+        if request.enable_tools:
+            # Add search tool if available and whitelisted
+            if "search" in self.available_tools:
+                if request.tools_whitelist is None or "search" in request.tools_whitelist:
+                    tools_to_use.append(self.available_tools["search"])
+            
+            # Add context tool if available and whitelisted  
+            if "context" in self.available_tools:
+                if request.tools_whitelist is None or "context" in request.tools_whitelist:
+                    tools_to_use.append(self.available_tools["context"])
+            
+            # Add learning tools if available and whitelisted (create on demand with user context)
+            if "learning_factory" in self.available_tools:
+                # Check if any learning tools are whitelisted
+                learning_tool_names = [
+                    "learning_search", "learning_analysis", "human_learning", 
+                    "knowledge_preview", "knowledge_save",
+                    "search_learning_context", "analyze_learning_opportunity",
+                    "request_learning_decision", "preview_knowledge_save", "save_knowledge"
+                ]
+                
+                should_add_learning_tools = (
+                    request.tools_whitelist is None or 
+                    any(name in request.tools_whitelist for name in learning_tool_names)
+                )
+                
+                if should_add_learning_tools:
+                    # Create learning tools once with user context
+                    learning_tools = self.available_tools["learning_factory"].create_learning_tools(
+                        user_id=request.user_id, 
+                        org_id=request.org_id
+                    )
+                    # Add all learning tools to available tools
+                    tools_to_use.extend(learning_tools)
+                    has_learning_tools = True
+                    print(f"DEBUG: Added {len(learning_tools)} learning tools")
+        
+                    # Set custom system prompt if provided, otherwise use appropriate default
+            if request.system_prompt:
+                system_prompt = request.system_prompt
+                # If learning tools are available, append learning instructions to custom prompt
+                if has_learning_tools:
+                    learning_instructions = """
+
+CRITICAL LEARNING CAPABILITY: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+
+1. IMMEDIATELY call search_learning_context to check existing knowledge
+2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
+3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
+
+MANDATORY TOOL USAGE: For ANY message that contains:
+- Company information or facts
+- Instructions or tasks
+- Teaching content
+- Personal/organizational data
+- Procedures or guidelines
+
+YOU MUST CALL THESE TOOLS IMMEDIATELY - NO EXCEPTIONS:
+✓ search_learning_context - Search existing knowledge (CALL FOR ALL TEACHING)
+✓ analyze_learning_opportunity - Analyze if content should be learned (CALL FOR ALL TEACHING)
+✓ request_learning_decision - Request human decision (CALL WHEN ANALYSIS SUGGESTS LEARNING)
+✓ preview_knowledge_save - Preview what would be saved
+✓ save_knowledge - Save knowledge with human approval
+
+LEARNING TRIGGERS (MANDATORY tool usage):
+- User shares company information → CALL search_learning_context + analyze_learning_opportunity
+- User provides factual information → CALL search_learning_context + analyze_learning_opportunity
+- User gives instructions or procedures → CALL search_learning_context + analyze_learning_opportunity
+- User teaches concepts or explains things → CALL search_learning_context + analyze_learning_opportunity
+- User shares personal/organizational data → CALL search_learning_context + analyze_learning_opportunity
+
+Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context("company employee count") AND analyze_learning_opportunity("Our company has 50 employees")
+Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
+
+BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
+                    system_prompt += learning_instructions
+                    
+                    # Force tool usage for learning content
+                    request.force_tools = True
             else:
-                system_prompt = self.default_system_prompts["anthropic"]
+                # Use learning-aware prompt if learning tools are available
+                if has_learning_tools:
+                    system_prompt = self.default_system_prompts["anthropic_with_learning"]
+                elif tools_to_use:
+                    system_prompt = self.default_system_prompts["anthropic_with_tools"]
+                else:
+                    system_prompt = self.default_system_prompts["anthropic"]
         
         try:
             # Use the new streaming method from AnthropicTool with system prompt and tool config
@@ -353,7 +507,10 @@ class ExecutiveTool:
                 request.user_query, 
                 tools_to_use, 
                 system_prompt,
-                force_tools=request.force_tools
+                force_tools=request.force_tools,
+                conversation_history=request.conversation_history,
+                max_history_messages=request.max_history_messages,
+                max_history_tokens=request.max_history_tokens
             ):
                 yield chunk
             
@@ -370,19 +527,94 @@ class ExecutiveTool:
         model = request.model or self._get_default_model("openai")
         openai_tool = OpenAITool(model=model)
         
-        # Get available tools for execution based on configuration
+                # Get available tools for execution based on configuration
         tools_to_use = []
-        if request.enable_tools and "search" in self.available_tools:
-            # Check whitelist if provided
-            if request.tools_whitelist is None or "search" in request.tools_whitelist:
-                tools_to_use.append(self.available_tools["search"])
+        has_learning_tools = False
+        
+        if request.enable_tools:
+            # Add search tool if available and whitelisted
+            if "search" in self.available_tools:
+                if request.tools_whitelist is None or "search" in request.tools_whitelist:
+                    tools_to_use.append(self.available_tools["search"])
+            
+            # Add context tool if available and whitelisted  
+            if "context" in self.available_tools:
+                if request.tools_whitelist is None or "context" in request.tools_whitelist:
+                    tools_to_use.append(self.available_tools["context"])
+            
+            # Add learning tools if available and whitelisted (create on demand with user context)
+            if "learning_factory" in self.available_tools:
+                # Check if any learning tools are whitelisted
+                learning_tool_names = [
+                    "learning_search", "learning_analysis", "human_learning", 
+                    "knowledge_preview", "knowledge_save",
+                    "search_learning_context", "analyze_learning_opportunity",
+                    "request_learning_decision", "preview_knowledge_save", "save_knowledge"
+                ]
+                
+                should_add_learning_tools = (
+                    request.tools_whitelist is None or 
+                    any(name in request.tools_whitelist for name in learning_tool_names)
+                )
+                
+                if should_add_learning_tools:
+                    # Create learning tools once with user context
+                    learning_tools = self.available_tools["learning_factory"].create_learning_tools(
+                        user_id=request.user_id, 
+                        org_id=request.org_id
+                    )
+                    # Add all learning tools to available tools
+                    tools_to_use.extend(learning_tools)
+                    has_learning_tools = True
+                    print(f"DEBUG: Added {len(learning_tools)} learning tools")
         
         # Set custom system prompt if provided, otherwise use appropriate default
         if request.system_prompt:
             system_prompt = request.system_prompt
+            # If learning tools are available, append learning instructions to custom prompt
+            if has_learning_tools:
+                learning_instructions = """
+
+CRITICAL LEARNING CAPABILITY: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+
+1. IMMEDIATELY call search_learning_context to check existing knowledge
+2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
+3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
+
+MANDATORY TOOL USAGE: For ANY message that contains:
+- Company information or facts
+- Instructions or tasks
+- Teaching content
+- Personal/organizational data
+- Procedures or guidelines
+
+YOU MUST CALL THESE TOOLS IMMEDIATELY - NO EXCEPTIONS:
+✓ search_learning_context - Search existing knowledge (CALL FOR ALL TEACHING)
+✓ analyze_learning_opportunity - Analyze if content should be learned (CALL FOR ALL TEACHING)
+✓ request_learning_decision - Request human decision (CALL WHEN ANALYSIS SUGGESTS LEARNING)
+✓ preview_knowledge_save - Preview what would be saved
+✓ save_knowledge - Save knowledge with human approval
+
+LEARNING TRIGGERS (MANDATORY tool usage):
+- User shares company information → CALL search_learning_context + analyze_learning_opportunity
+- User provides factual information → CALL search_learning_context + analyze_learning_opportunity
+- User gives instructions or procedures → CALL search_learning_context + analyze_learning_opportunity
+- User teaches concepts or explains things → CALL search_learning_context + analyze_learning_opportunity
+- User shares personal/organizational data → CALL search_learning_context + analyze_learning_opportunity
+
+Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context("company employee count") AND analyze_learning_opportunity("Our company has 50 employees")
+Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
+
+BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
+                system_prompt += learning_instructions
+                
+                # Force tool usage for learning content
+                request.force_tools = True
         else:
-            # Use tool-aware prompt if tools are enabled, otherwise use regular prompt
-            if tools_to_use:
+            # Use learning-aware prompt if learning tools are available
+            if has_learning_tools:
+                system_prompt = self.default_system_prompts["openai_with_learning"]
+            elif tools_to_use:
                 system_prompt = self.default_system_prompts["openai_with_tools"]
             else:
                 system_prompt = self.default_system_prompts["openai"]
@@ -590,14 +822,14 @@ def create_tool_request(
     max_history_tokens: Optional[int] = 6000
 ) -> ToolExecutionRequest:
     """
-    Create a tool execution request
+    Create a tool execution request with the specified parameters
     
     Args:
         llm_provider: 'anthropic' or 'openai'
         user_query: User's input query
         system_prompt: Optional custom system prompt
         model: Optional custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
-        model_params: Optional model parameters (temperature, max_tokens, etc.)
+        model_params: Optional model parameters
         org_id: Organization ID
         user_id: User ID
         enable_tools: Whether to enable tools at all
@@ -731,7 +963,7 @@ async def execute_tool_stream(
         user_id: User ID
         enable_tools: Whether to enable tools at all
         force_tools: Force tool usage (tool_choice="required")
-        tools_whitelist: Only allow specific tools
+        tools_whitelist: Only allow specific tools (e.g., ["search", "context"])
         conversation_history: Previous conversation messages
         max_history_messages: Maximum number of history messages to include
         max_history_tokens: Maximum token count for history

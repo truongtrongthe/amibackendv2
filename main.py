@@ -26,6 +26,7 @@ from login import router as login_router
 from aibrain import router as brain_router
 from google_drive_routes import router as google_drive_router
 from chat_routes import router as chat_router
+from learning_api_routes import router as learning_router
 from supabase import create_client, Client
 from ava import AVA
 
@@ -72,6 +73,7 @@ app.include_router(login_router)
 app.include_router(brain_router)
 app.include_router(google_drive_router)
 app.include_router(chat_router)
+app.include_router(learning_router)
 
 # Initialize socketio manager (import only)
 import socketio_manager_async
