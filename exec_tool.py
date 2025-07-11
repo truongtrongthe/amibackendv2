@@ -21,6 +21,7 @@ class ToolExecutionRequest:
     llm_provider: str  # 'anthropic' or 'openai'
     user_query: str
     system_prompt: Optional[str] = None
+    model: Optional[str] = None  # Custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
     model_params: Optional[Dict[str, Any]] = None
     tools_config: Optional[Dict[str, Any]] = None
     org_id: Optional[str] = "default"
@@ -29,6 +30,10 @@ class ToolExecutionRequest:
     enable_tools: Optional[bool] = True  # Whether to enable tools at all
     force_tools: Optional[bool] = False  # Force tool usage (tool_choice="required")
     tools_whitelist: Optional[List[str]] = None  # Only allow specific tools
+    # Conversation history support
+    conversation_history: Optional[List[Dict[str, Any]]] = None  # Previous messages
+    max_history_messages: Optional[int] = 25  # Maximum number of history messages to include
+    max_history_tokens: Optional[int] = 6000  # Maximum token count for history
 
 
 @dataclass
@@ -94,7 +99,7 @@ class ExecutiveTool:
                 success=True,
                 result=result,
                 provider=request.llm_provider,
-                model_used=self._get_model_name(request.llm_provider),
+                model_used=self._get_model_name(request.llm_provider, request.model),
                 execution_time=execution_time,
                 metadata={
                     "org_id": request.org_id,
@@ -112,7 +117,7 @@ class ExecutiveTool:
                 success=False,
                 result="",
                 provider=request.llm_provider,
-                model_used=self._get_model_name(request.llm_provider),
+                model_used=self._get_model_name(request.llm_provider, request.model),
                 execution_time=execution_time,
                 error=error_msg
             )
@@ -146,7 +151,7 @@ class ExecutiveTool:
                 success=True,
                 result=result,
                 provider=request.llm_provider,
-                model_used=self._get_model_name(request.llm_provider),
+                model_used=self._get_model_name(request.llm_provider, request.model),
                 execution_time=execution_time,
                 metadata={
                     "org_id": request.org_id,
@@ -164,7 +169,7 @@ class ExecutiveTool:
                 success=False,
                 result="",
                 provider=request.llm_provider,
-                model_used=self._get_model_name(request.llm_provider),
+                model_used=self._get_model_name(request.llm_provider, request.model),
                 execution_time=execution_time,
                 error=error_msg
             )
@@ -214,7 +219,7 @@ class ExecutiveTool:
                 "type": "complete",
                 "content": "Tool execution completed successfully",
                 "provider": request.llm_provider,
-                "model_used": self._get_model_name(request.llm_provider),
+                "model_used": self._get_model_name(request.llm_provider, request.model),
                 "execution_time": execution_time,
                 "success": True,
                 "metadata": {
@@ -233,14 +238,16 @@ class ExecutiveTool:
                 "type": "error",
                 "content": error_msg,
                 "provider": request.llm_provider,
-                "model_used": self._get_model_name(request.llm_provider),
+                "model_used": self._get_model_name(request.llm_provider, request.model),
                 "execution_time": execution_time,
                 "success": False
             }
     
     async def _execute_anthropic(self, request: ToolExecutionRequest) -> str:
         """Execute using Anthropic Claude with custom parameters"""
-        anthropic_tool = AnthropicTool()
+        # Use custom model if provided, otherwise use default
+        model = request.model or self._get_default_model("anthropic")
+        anthropic_tool = AnthropicTool(model=model)
         
         # Override system prompt if provided (Anthropic handles system prompts differently)
         if request.system_prompt:
@@ -258,7 +265,9 @@ class ExecutiveTool:
     
     def _execute_anthropic_sync(self, request: ToolExecutionRequest) -> str:
         """Synchronously execute using Anthropic Claude"""
-        anthropic_tool = AnthropicTool()
+        # Use custom model if provided, otherwise use default
+        model = request.model or self._get_default_model("anthropic")
+        anthropic_tool = AnthropicTool(model=model)
         
         # Override system prompt if provided
         if request.system_prompt:
@@ -275,7 +284,9 @@ class ExecutiveTool:
     
     async def _execute_openai(self, request: ToolExecutionRequest) -> str:
         """Execute using OpenAI with custom system prompt"""
-        openai_tool = OpenAIToolWithCustomPrompt()
+        # Use custom model if provided, otherwise use default
+        model = request.model or self._get_default_model("openai")
+        openai_tool = OpenAIToolWithCustomPrompt(model=model)
         
         # Set custom system prompt if provided
         system_prompt = request.system_prompt or self.default_system_prompts["openai"]
@@ -294,7 +305,9 @@ class ExecutiveTool:
     
     def _execute_openai_sync(self, request: ToolExecutionRequest) -> str:
         """Synchronously execute using OpenAI with custom system prompt"""
-        openai_tool = OpenAIToolWithCustomPrompt()
+        # Use custom model if provided, otherwise use default
+        model = request.model or self._get_default_model("openai")
+        openai_tool = OpenAIToolWithCustomPrompt(model=model)
         
         # Set custom system prompt if provided
         system_prompt = request.system_prompt or self.default_system_prompts["openai"]
@@ -313,7 +326,9 @@ class ExecutiveTool:
     
     async def _execute_anthropic_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute using Anthropic Claude with streaming"""
-        anthropic_tool = AnthropicTool()
+        # Use custom model if provided, otherwise use default
+        model = request.model or self._get_default_model("anthropic")
+        anthropic_tool = AnthropicTool(model=model)
         
         # Get available tools for execution based on configuration
         tools_to_use = []
@@ -351,7 +366,9 @@ class ExecutiveTool:
     
     async def _execute_openai_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute using OpenAI with streaming"""
-        openai_tool = OpenAITool()
+        # Use custom model if provided, otherwise use default
+        model = request.model or self._get_default_model("openai")
+        openai_tool = OpenAITool(model=model)
         
         # Get available tools for execution based on configuration
         tools_to_use = []
@@ -376,7 +393,10 @@ class ExecutiveTool:
                 request.user_query, 
                 tools_to_use, 
                 system_prompt,
-                force_tools=request.force_tools
+                force_tools=request.force_tools,
+                conversation_history=request.conversation_history,
+                max_history_messages=request.max_history_messages,
+                max_history_tokens=request.max_history_tokens
             ):
                 yield chunk
             
@@ -387,8 +407,19 @@ class ExecutiveTool:
                 "complete": True
             }
     
-    def _get_model_name(self, provider: str) -> str:
+    def _get_model_name(self, provider: str, custom_model: str = None) -> str:
         """Get the model name for the specified provider"""
+        if custom_model:
+            return custom_model
+        
+        if provider.lower() == "anthropic":
+            return "claude-3-5-sonnet-20241022"
+        elif provider.lower() == "openai":
+            return "gpt-4-1106-preview"
+        return "unknown"
+    
+    def _get_default_model(self, provider: str) -> str:
+        """Get the default model for the specified provider"""
         if provider.lower() == "anthropic":
             return "claude-3-5-sonnet-20241022"
         elif provider.lower() == "openai":
@@ -547,12 +578,16 @@ def create_tool_request(
     llm_provider: str,
     user_query: str,
     system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
     enable_tools: bool = True,
     force_tools: bool = False,
-    tools_whitelist: Optional[List[str]] = None
+    tools_whitelist: Optional[List[str]] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    max_history_messages: Optional[int] = 25,
+    max_history_tokens: Optional[int] = 6000
 ) -> ToolExecutionRequest:
     """
     Create a tool execution request
@@ -561,12 +596,16 @@ def create_tool_request(
         llm_provider: 'anthropic' or 'openai'
         user_query: User's input query
         system_prompt: Optional custom system prompt
+        model: Optional custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
         model_params: Optional model parameters (temperature, max_tokens, etc.)
         org_id: Organization ID
         user_id: User ID
         enable_tools: Whether to enable tools at all
         force_tools: Force tool usage (tool_choice="required")
         tools_whitelist: Only allow specific tools
+        conversation_history: Previous conversation messages
+        max_history_messages: Maximum number of history messages to include
+        max_history_tokens: Maximum token count for history
         
     Returns:
         ToolExecutionRequest object
@@ -575,12 +614,16 @@ def create_tool_request(
         llm_provider=llm_provider,
         user_query=user_query,
         system_prompt=system_prompt,
+        model=model,
         model_params=model_params,
         org_id=org_id,
         user_id=user_id,
         enable_tools=enable_tools,
         force_tools=force_tools,
-        tools_whitelist=tools_whitelist
+        tools_whitelist=tools_whitelist,
+        conversation_history=conversation_history,
+        max_history_messages=max_history_messages,
+        max_history_tokens=max_history_tokens
     )
 
 
@@ -588,6 +631,7 @@ async def execute_tool_async(
     llm_provider: str,
     user_query: str,
     system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
@@ -602,6 +646,7 @@ async def execute_tool_async(
         llm_provider: 'anthropic' or 'openai'
         user_query: User's input query
         system_prompt: Optional custom system prompt
+        model: Optional custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
         model_params: Optional model parameters
         org_id: Organization ID
         user_id: User ID
@@ -614,7 +659,7 @@ async def execute_tool_async(
     """
     executive_tool = ExecutiveTool()
     request = create_tool_request(
-        llm_provider, user_query, system_prompt, model_params, org_id, user_id,
+        llm_provider, user_query, system_prompt, model, model_params, org_id, user_id,
         enable_tools, force_tools, tools_whitelist
     )
     return await executive_tool.execute_tool_async(request)
@@ -624,6 +669,7 @@ def execute_tool_sync(
     llm_provider: str,
     user_query: str,
     system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
@@ -638,6 +684,7 @@ def execute_tool_sync(
         llm_provider: 'anthropic' or 'openai'
         user_query: User's input query
         system_prompt: Optional custom system prompt
+        model: Optional custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
         model_params: Optional model parameters
         org_id: Organization ID
         user_id: User ID
@@ -650,7 +697,7 @@ def execute_tool_sync(
     """
     executive_tool = ExecutiveTool()
     request = create_tool_request(
-        llm_provider, user_query, system_prompt, model_params, org_id, user_id, 
+        llm_provider, user_query, system_prompt, model, model_params, org_id, user_id, 
         enable_tools, force_tools, tools_whitelist
     )
     return executive_tool.execute_tool_sync(request) 
@@ -660,12 +707,16 @@ async def execute_tool_stream(
     llm_provider: str,
     user_query: str,
     system_prompt: Optional[str] = None,
+    model: Optional[str] = None,
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
     enable_tools: bool = True,
     force_tools: bool = False,
-    tools_whitelist: Optional[List[str]] = None
+    tools_whitelist: Optional[List[str]] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    max_history_messages: Optional[int] = 25,
+    max_history_tokens: Optional[int] = 6000
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream tool execution with specified parameters
@@ -674,12 +725,16 @@ async def execute_tool_stream(
         llm_provider: 'anthropic' or 'openai'
         user_query: User's input query
         system_prompt: Optional custom system prompt
+        model: Optional custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
         model_params: Optional model parameters
         org_id: Organization ID
         user_id: User ID
         enable_tools: Whether to enable tools at all
         force_tools: Force tool usage (tool_choice="required")
         tools_whitelist: Only allow specific tools
+        conversation_history: Previous conversation messages
+        max_history_messages: Maximum number of history messages to include
+        max_history_tokens: Maximum token count for history
         
     Yields:
         Dict containing streaming response data
@@ -689,12 +744,16 @@ async def execute_tool_stream(
         llm_provider=llm_provider,
         user_query=user_query,
         system_prompt=system_prompt,
+        model=model,
         model_params=model_params,
         org_id=org_id,
         user_id=user_id,
         enable_tools=enable_tools,
         force_tools=force_tools,
-        tools_whitelist=tools_whitelist
+        tools_whitelist=tools_whitelist,
+        conversation_history=conversation_history,
+        max_history_messages=max_history_messages,
+        max_history_tokens=max_history_tokens
     )
     async for chunk in executive_tool.execute_tool_stream(request):
         yield chunk 

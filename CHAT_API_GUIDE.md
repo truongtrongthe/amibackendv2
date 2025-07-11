@@ -760,53 +760,82 @@ async function loadConversation(chatId, userId) {
 }
 ```
 
-### Integration with Existing AMI Endpoints
+### Integration with Dynamic AMI Endpoints
 
-You can integrate the chat system with existing AMI conversation endpoints:
+The chat system provides flexible integration with any AMI conversation endpoint. You can configure different endpoints based on your needs:
 
 ```javascript
-// Function to handle AMI conversation and store results
-async function handleAMIConversation(chatId, userId, userInput, threadId) {
+// Configuration for different AMI endpoints
+const AMI_ENDPOINTS = {
+  conversation: '/havefun',
+  pilot: '/pilot',
+  learning: '/learning',
+  custom: '/custom-endpoint'
+};
+
+// Dynamic AMI conversation handler
+async function handleAMIConversation(chatId, userId, userInput, threadId, endpointType = 'conversation', customConfig = {}) {
   try {
     // 1. Store user message
     await chatManager.sendMessage(chatId, userId, userInput, threadId);
     
-    // 2. Call existing AMI endpoint
-    const amiResponse = await fetch('http://localhost:5001/havefun', {
+    // 2. Get endpoint configuration
+    const endpoint = AMI_ENDPOINTS[endpointType] || endpointType;
+    
+    // 3. Prepare request configuration
+    const requestConfig = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...customConfig.headers
       },
       body: JSON.stringify({
         user_input: userInput,
         user_id: userId,
         thread_id: threadId,
-        use_websocket: false
+        use_websocket: false,
+        ...customConfig.body
       })
-    });
+    };
     
-    // 3. Process AMI response (streaming)
-    const reader = amiResponse.body.getReader();
+    // 4. Call dynamic AMI endpoint
+    const amiResponse = await fetch(`http://localhost:5001${endpoint}`, requestConfig);
+    
+    // 5. Process AMI response (handles both streaming and non-streaming)
     let amiReply = '';
     
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    if (amiResponse.headers.get('content-type')?.includes('text/event-stream')) {
+      // Handle streaming response
+      const reader = amiResponse.body.getReader();
       
-      const chunk = new TextDecoder().decode(value);
-      // Process SSE data
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = JSON.parse(line.substring(6));
-          if (data.message) {
-            amiReply += data.message;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = new TextDecoder().decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.substring(6));
+              if (data.message) {
+                amiReply += data.message;
+              }
+            } catch (e) {
+              // Handle non-JSON data
+              amiReply += line.substring(6);
+            }
           }
         }
       }
+    } else {
+      // Handle regular JSON response
+      const data = await amiResponse.json();
+      amiReply = data.response || data.message || JSON.stringify(data);
     }
     
-    // 4. Store AMI response
+    // 6. Store AMI response
     if (amiReply) {
       await chatManager.sendMessage(chatId, userId, amiReply, threadId, 'assistant');
     }
@@ -814,6 +843,172 @@ async function handleAMIConversation(chatId, userId, userInput, threadId) {
     return amiReply;
   } catch (error) {
     console.error('Error in AMI conversation:', error);
+    throw error;
+  }
+}
+
+// Usage examples with different endpoints
+async function startConversation(chatId, userId, userInput, threadId) {
+  return await handleAMIConversation(chatId, userId, userInput, threadId, 'conversation');
+}
+
+async function startPilotSession(chatId, userId, userInput, threadId) {
+  return await handleAMIConversation(chatId, userId, userInput, threadId, 'pilot');
+}
+
+async function startLearningSession(chatId, userId, userInput, threadId) {
+  return await handleAMIConversation(chatId, userId, userInput, threadId, 'learning');
+}
+
+async function useCustomEndpoint(chatId, userId, userInput, threadId, customEndpoint, customConfig) {
+  return await handleAMIConversation(chatId, userId, userInput, threadId, customEndpoint, customConfig);
+}
+```
+
+### Advanced Integration Patterns
+
+For more complex scenarios, you can create endpoint-specific handlers:
+
+```javascript
+class AMIIntegration {
+  constructor(baseUrl = 'http://localhost:5001') {
+    this.baseUrl = baseUrl;
+    this.endpoints = {
+      conversation: {
+        path: '/havefun',
+        method: 'POST',
+        streaming: true
+      },
+      pilot: {
+        path: '/pilot',
+        method: 'POST',
+        streaming: true
+      },
+      learning: {
+        path: '/learning',
+        method: 'POST',
+        streaming: false
+      },
+      analysis: {
+        path: '/analyze',
+        method: 'POST',
+        streaming: false
+      }
+    };
+  }
+
+  // Register a new endpoint configuration
+  registerEndpoint(name, config) {
+    this.endpoints[name] = config;
+  }
+
+  // Dynamic endpoint handler
+  async processWithEndpoint(chatId, userId, userInput, threadId, endpointName, additionalParams = {}) {
+    const endpointConfig = this.endpoints[endpointName];
+    if (!endpointConfig) {
+      throw new Error(`Unknown endpoint: ${endpointName}`);
+    }
+
+    try {
+      // Store user message
+      await chatManager.sendMessage(chatId, userId, userInput, threadId);
+
+      // Prepare request
+      const requestBody = {
+        user_input: userInput,
+        user_id: userId,
+        thread_id: threadId,
+        ...additionalParams
+      };
+
+      const response = await fetch(`${this.baseUrl}${endpointConfig.path}`, {
+        method: endpointConfig.method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...endpointConfig.headers
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      // Process response based on endpoint configuration
+      let amiReply = '';
+      
+      if (endpointConfig.streaming) {
+        amiReply = await this.handleStreamingResponse(response);
+      } else {
+        amiReply = await this.handleRegularResponse(response);
+      }
+
+      // Store AMI response
+      if (amiReply) {
+        await chatManager.sendMessage(chatId, userId, amiReply, threadId, 'assistant');
+      }
+
+      return amiReply;
+    } catch (error) {
+      console.error(`Error with ${endpointName} endpoint:`, error);
+      throw error;
+    }
+  }
+
+  async handleStreamingResponse(response) {
+    const reader = response.body.getReader();
+    let content = '';
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      const chunk = new TextDecoder().decode(value);
+      const lines = chunk.split('\n');
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.substring(6));
+            if (data.message) {
+              content += data.message;
+            }
+          } catch (e) {
+            content += line.substring(6);
+          }
+        }
+      }
+    }
+    
+    return content;
+  }
+
+  async handleRegularResponse(response) {
+    const data = await response.json();
+    return data.response || data.message || JSON.stringify(data);
+  }
+}
+
+// Usage with the advanced integration
+const amiIntegration = new AMIIntegration();
+
+// Register a custom endpoint
+amiIntegration.registerEndpoint('custom-ai', {
+  path: '/custom-ai-endpoint',
+  method: 'POST',
+  streaming: true,
+  headers: { 'X-Custom-Header': 'value' }
+});
+
+// Use different endpoints dynamically
+async function handleUserMessage(chatId, userId, message, threadId, processingType) {
+  try {
+    const response = await amiIntegration.processWithEndpoint(
+      chatId, 
+      userId, 
+      message, 
+      threadId, 
+      processingType
+    );
+    return response;
+  } catch (error) {
+    console.error('Failed to process message:', error);
     throw error;
   }
 }
@@ -870,4 +1065,75 @@ Common HTTP status codes:
 4. **Lazy Loading**: Load messages on-demand for better performance
 5. **Debouncing**: Debounce update operations to avoid excessive API calls
 
-This guide provides everything you need to integrate the chat system into your frontend application. The system is designed to be flexible and scalable while maintaining compatibility with your existing AMI conversation endpoints. 
+This guide provides everything you need to integrate the chat system into your frontend application. The system is designed to be flexible and scalable while maintaining compatibility with your existing AMI conversation endpoints.
+
+## Dynamic Integration Architecture
+
+The Chat API uses a **dynamic endpoint architecture** that allows you to:
+
+### 🔄 **Flexible Endpoint Routing**
+- **No hardcoded endpoints**: Switch between different AMI processing endpoints dynamically
+- **Runtime configuration**: Configure endpoints based on chat type, user preferences, or business logic
+- **Easy extensibility**: Add new endpoints without changing frontend code
+
+### 🎯 **Endpoint Selection Strategies**
+```javascript
+// Strategy 1: Based on chat type
+function selectEndpoint(chatType) {
+  const endpointMap = {
+    'conversation': '/havefun',
+    'pilot': '/pilot',
+    'learning': '/learning',
+    'analysis': '/analyze'
+  };
+  return endpointMap[chatType] || '/havefun';
+}
+
+// Strategy 2: Based on user capabilities
+function selectEndpoint(userLevel) {
+  if (userLevel === 'advanced') return '/pilot';
+  if (userLevel === 'learning') return '/learning';
+  return '/havefun';
+}
+
+// Strategy 3: Based on message content
+function selectEndpoint(messageContent) {
+  if (messageContent.includes('analyze')) return '/analyze';
+  if (messageContent.includes('learn')) return '/learning';
+  return '/havefun';
+}
+```
+
+### 🛠️ **Configuration-Driven Approach**
+Rather than hardcoding endpoints, use configuration:
+
+```javascript
+// config.js
+export const AMI_CONFIG = {
+  endpoints: {
+    default: '/havefun',
+    conversation: '/havefun',
+    pilot: '/pilot',
+    learning: '/learning',
+    analysis: '/analyze'
+  },
+  defaultEndpoint: 'conversation'
+};
+
+// usage
+import { AMI_CONFIG } from './config';
+
+async function processMessage(chatId, userId, message, processingType) {
+  const endpoint = AMI_CONFIG.endpoints[processingType] || AMI_CONFIG.endpoints.default;
+  return await handleAMIConversation(chatId, userId, message, threadId, endpoint);
+}
+```
+
+### 🎨 **Frontend Implementation Tips**
+1. **Endpoint Selection UI**: Allow users to choose processing types (conversation, pilot, learning, etc.)
+2. **Smart Defaults**: Use sensible defaults based on context
+3. **Error Fallbacks**: Fall back to default endpoints if custom ones fail
+4. **Configuration Management**: Store endpoint preferences in user settings
+5. **Real-time Switching**: Allow users to switch processing types mid-conversation
+
+This dynamic architecture ensures your frontend can adapt to any AMI backend configuration without code changes, making your integration future-proof and flexible.

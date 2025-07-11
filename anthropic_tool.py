@@ -8,14 +8,14 @@ from typing import List, Any, Dict, AsyncGenerator
 from anthropic import Anthropic
 
 class AnthropicTool:
-    def __init__(self):
+    def __init__(self, model: str = "claude-3-5-sonnet-20241022"):
         """Initialize Anthropic client"""
         self.api_key = os.getenv("ANTHROPIC_API_KEY")
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is required")
         
         self.client = Anthropic(api_key=self.api_key)
-        self.model = "claude-3-5-sonnet-20241022"  # Latest Claude Sonnet model
+        self.model = model  # Custom model name (e.g., "claude-3-5-haiku", "claude-3-5-sonnet")
     
     def process_with_tools(self, user_query: str, available_tools: List[Any]) -> str:
         """

@@ -374,6 +374,7 @@ class LLMToolExecuteRequest(BaseModel):
     llm_provider: str  # 'anthropic' or 'openai'
     user_query: str
     system_prompt: Optional[str] = None
+    model: Optional[str] = None  # Custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
     model_params: Optional[Dict[str, Any]] = None
     org_id: str = "default"
     user_id: str = "anonymous"
@@ -381,6 +382,10 @@ class LLMToolExecuteRequest(BaseModel):
     enable_tools: Optional[bool] = True  # Whether to enable tools at all
     force_tools: Optional[bool] = False  # Force tool usage (tool_choice="required")
     tools_whitelist: Optional[List[str]] = None  # Only allow specific tools
+    # Conversation history support
+    conversation_history: Optional[List[Dict[str, Any]]] = None  # Previous messages
+    max_history_messages: Optional[int] = 25  # Maximum number of history messages to include
+    max_history_tokens: Optional[int] = 6000  # Maximum token count for history
     # Backward compatibility for frontend
     enable_search: Optional[bool] = None  # Deprecated: use enable_tools instead
 
@@ -1175,6 +1180,7 @@ async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
             llm_provider=request.llm_provider,
             user_query=request.user_query,
             system_prompt=request.system_prompt,
+            model=request.model,
             model_params=request.model_params,
             org_id=request.org_id,
             user_id=request.user_id,
@@ -1189,7 +1195,7 @@ async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
         logger.info(f"[REQUEST:{request_id}] LLM tool execution completed - time: {elapsed:.2f}s")
         logger.info(f"[REQUEST:{request_id}] Success: {response.success}, Provider: {response.provider}")
         
-        # Return the structured response
+        # Return the result with additional metadata
         result = {
             "success": response.success,
             "result": response.result,
@@ -1307,12 +1313,16 @@ async def generate_llm_tool_sse_stream(request: LLMToolExecuteRequest, thread_lo
                     llm_provider=request.llm_provider,
                     user_query=request.user_query,
                     system_prompt=request.system_prompt,
+                    model=request.model,
                     model_params=request.model_params,
                     org_id=request.org_id,
                     user_id=request.user_id,
                     enable_tools=enable_tools,
                     force_tools=request.force_tools,
-                    tools_whitelist=request.tools_whitelist
+                    tools_whitelist=request.tools_whitelist,
+                    conversation_history=request.conversation_history,
+                    max_history_messages=request.max_history_messages,
+                    max_history_tokens=request.max_history_tokens
                 ):
                     response_count += 1
                     
