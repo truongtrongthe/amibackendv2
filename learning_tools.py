@@ -954,7 +954,6 @@ NEXT_STEPS:
                 user_id=save_params["user_id"],
                 org_id=save_params["org_id"],
                 title=save_params["title"],
-                bank_name="conversation",
                 thread_id=save_params.get("thread_id"),
                 topic=save_params.get("title", "interactive_learning"),
                 categories=save_params.get("categories", ["teaching_intent", "human_approved"]),

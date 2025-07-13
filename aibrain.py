@@ -23,7 +23,7 @@ import traceback
 from pinecone import Pinecone
 from langchain_openai import ChatOpenAI
 from utilities import logger, EMBEDDINGS
-from pccontroller import get_org_index
+from pccontroller import get_production_index
 import os
 import re
 
@@ -69,19 +69,20 @@ class AIBrainAnalyzer:
     
     def __init__(self, org_id: str):
         self.org_id = org_id
-        self.index = get_org_index(org_id)
+        self.index = get_production_index()
+        self.namespace = f"ent-{org_id}"  # Use org_id as namespace in production index
         
     async def fetch_all_ai_synthesis_vectors(
         self, 
-        namespace: str = "conversation",
+        namespace: str = None,  # Keep for backward compatibility but ignored
         batch_size: int = 100,
         max_vectors: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Fetch ALL vectors with ai_synthesis category from the specified namespace.
+        Fetch ALL vectors with ai_synthesis category from the organization's namespace.
         
         Args:
-            namespace: Pinecone namespace to search (default: "conversation")
+            namespace: Ignored - uses org-specific namespace
             batch_size: Number of vectors to fetch per batch
             max_vectors: Maximum number of vectors to fetch (None = all)
             
@@ -91,7 +92,9 @@ class AIBrainAnalyzer:
                 - metadata: Summary statistics
                 - total_count: Total number of vectors found
         """
-        logger.info(f"Starting to fetch all ai_synthesis vectors from namespace '{namespace}'")
+        # Use the org-specific namespace
+        actual_namespace = self.namespace
+        logger.info(f"Starting to fetch all ai_synthesis vectors from namespace '{actual_namespace}' for org {self.org_id}")
         
         try:
             # Since Pinecone doesn't support querying by metadata alone without a vector,
@@ -118,7 +121,7 @@ class AIBrainAnalyzer:
                 vector=embedding,
                 top_k=query_top_k,
                 include_metadata=True,
-                namespace=namespace,
+                namespace=actual_namespace,
                 filter={
                     "categories": {"$in": ["ai_synthesis"]}
                 }
@@ -164,7 +167,7 @@ class AIBrainAnalyzer:
                 "success": True,
                 "vectors": ai_synthesis_vectors,
                 "total_count": total_fetched,
-                "namespace": namespace,
+                "namespace": actual_namespace,
                 "query_params": {
                     "batch_size": batch_size,
                     "max_vectors": max_vectors,
@@ -180,7 +183,7 @@ class AIBrainAnalyzer:
             return {
                 "success": False,
                 "error": str(e),
-                "namespace": namespace,
+                "namespace": actual_namespace,
                 "total_count": 0,
                 "vectors": []
             }
@@ -273,7 +276,7 @@ class AIBrainAnalyzer:
     async def summarize_all_knowledge(
         self,
         vectors: Optional[List[Dict]] = None,
-        namespace: str = "conversation",
+        namespace: str = None,  # Keep for backward compatibility but ignored
         max_content_length: int = 50000,
         summary_type: str = "comprehensive"
     ) -> Dict[str, Any]:
@@ -282,20 +285,22 @@ class AIBrainAnalyzer:
         
         Args:
             vectors: Pre-fetched vectors (if None, will fetch ai_synthesis vectors)
-            namespace: Pinecone namespace to analyze
+            namespace: Ignored - uses org-specific namespace
             max_content_length: Maximum characters to include in LLM analysis
             summary_type: Type of summary ("comprehensive", "topics_only", "categories_only")
             
         Returns:
             Dict containing comprehensive knowledge summary
         """
-        logger.info(f"Starting comprehensive knowledge summarization for namespace '{namespace}'")
+        # Use the org-specific namespace
+        actual_namespace = self.namespace
+        logger.info(f"Starting comprehensive knowledge summarization for namespace '{actual_namespace}' for org {self.org_id}")
         
         try:
             # Fetch vectors if not provided
             if vectors is None:
                 logger.info("Fetching ai_synthesis vectors for summarization")
-                fetch_result = await self.fetch_all_ai_synthesis_vectors(namespace=namespace)
+                fetch_result = await self.fetch_all_ai_synthesis_vectors()
                 if not fetch_result.get("success"):
                     return {
                         "success": False,
@@ -323,7 +328,7 @@ class AIBrainAnalyzer:
             # Combine all analysis
             comprehensive_summary = {
                 "success": True,
-                "namespace": namespace,
+                "namespace": actual_namespace,
                 "analysis_timestamp": datetime.now().isoformat(),
                 "vector_count": len(vectors),
                 "summary_type": summary_type,
@@ -346,7 +351,7 @@ class AIBrainAnalyzer:
             return {
                 "success": False,
                 "error": str(e),
-                "namespace": namespace
+                "namespace": actual_namespace
             }
     
     def _organize_content_for_llm(self, vectors: List[Dict], max_length: int) -> Dict[str, Any]:
@@ -641,14 +646,14 @@ class AIBrainAnalyzer:
 # Convenience functions for direct usage
 async def fetch_all_ai_synthesis_vectors(namespace: str = "conversation", max_vectors: Optional[int] = None) -> Dict[str, Any]:
     """Convenience function to fetch all AI synthesis vectors."""
-    analyzer = AIBrainAnalyzer()
-    return await analyzer.fetch_all_ai_synthesis_vectors(namespace=namespace, max_vectors=max_vectors)
+    analyzer = AIBrainAnalyzer("unknown")  # Pass a dummy org_id for this function
+    return await analyzer.fetch_all_ai_synthesis_vectors(max_vectors=max_vectors)
 
 
 async def summarize_knowledge_base(namespace: str = "conversation", summary_type: str = "comprehensive") -> Dict[str, Any]:
     """Convenience function to summarize all knowledge in the knowledge base."""
-    analyzer = AIBrainAnalyzer()
-    return await analyzer.summarize_all_knowledge(namespace=namespace, summary_type=summary_type)
+    analyzer = AIBrainAnalyzer("unknown")  # Pass a dummy org_id for this function
+    return await analyzer.summarize_all_knowledge(summary_type=summary_type)
 
 
 # FastAPI endpoint for brain preview
@@ -669,7 +674,7 @@ async def brain_preview_endpoint(request: BrainPreviewRequest):
     request_id = f"brain_{start_time.strftime('%Y%m%d_%H%M%S')}"
     
     logger.info(f"[{request_id}] === BEGIN brain-preview request ===")
-    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, namespace={request.namespace}, max_vectors={request.max_vectors}, summary_type={request.summary_type}")
+    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, max_vectors={request.max_vectors}, summary_type={request.summary_type}")
     
     try:
         # Initialize the analyzer
@@ -678,7 +683,6 @@ async def brain_preview_endpoint(request: BrainPreviewRequest):
         # Fetch AI synthesis vectors
         logger.info(f"[{request_id}] Fetching AI synthesis vectors...")
         vectors_result = await analyzer.fetch_all_ai_synthesis_vectors(
-            namespace=request.namespace,
             max_vectors=request.max_vectors
         )
         
@@ -700,99 +704,48 @@ async def brain_preview_endpoint(request: BrainPreviewRequest):
             logger.info(f"[{request_id}] Generating knowledge summary...")
             summary_result = await analyzer.summarize_all_knowledge(
                 vectors=vectors,
-                namespace=request.namespace,
                 max_content_length=request.max_content_length,
                 summary_type=request.summary_type
             )
             
             if not summary_result.get("success"):
                 logger.warning(f"[{request_id}] Failed to generate summary: {summary_result.get('error')}")
-                # Don't fail the whole request, just note the summary failure
+                summary_result = None
         
-        # Prepare response data
-        response_data = {
+        # Generate statistics and insights
+        stats = vectors_result.get("statistics", {})
+        recommendations = _generate_recommendations(stats, total_count)
+        
+        # Build response
+        response = {
             "success": True,
             "request_id": request_id,
-            "namespace": request.namespace,
-            "generated_at": datetime.now().isoformat(),
-            "processing_time_seconds": (datetime.now() - start_time).total_seconds(),
-            "vector_analysis": {
-                "total_ai_synthesis_vectors": total_count,
-                "vectors_analyzed": len(vectors),
-                "statistics": vectors_result.get("statistics", {}),
-                "query_params": vectors_result.get("query_params", {})
-            }
+            "org_id": request.org_id,
+            "namespace": analyzer.namespace,
+            "total_vectors": total_count,
+            "statistics": stats,
+            "summary": summary_result,
+            "recommendations": recommendations,
+            "analysis_timestamp": datetime.now().isoformat(),
+            "processing_time_seconds": (datetime.now() - start_time).total_seconds()
         }
         
-        # Add summary if available
-        if summary_result and summary_result.get("success"):
-            response_data["knowledge_summary"] = {
-                "summary_type": request.summary_type,
-                "analysis": summary_result.get("llm_analysis", {}),
-                "content_organization": summary_result.get("content_organization", {}),
-                "processing_info": summary_result.get("processing_info", {})
-            }
-        elif summary_result:
-            response_data["knowledge_summary"] = {
-                "error": summary_result.get("error"),
-                "summary_type": request.summary_type
-            }
+        # Include vectors if requested
+        if request.include_vectors:
+            response["vectors"] = vectors
         
-        # Include vectors if requested (be careful with large responses)
-        if request.include_vectors and vectors:
-            # Limit vector details to avoid huge responses
-            limited_vectors = []
-            for vector in vectors[:100]:  # Limit to first 100 vectors
-                limited_vector = {
-                    "id": vector["id"],
-                    "title": vector.get("title", ""),
-                    "created_at": vector.get("created_at", ""),
-                    "confidence": vector.get("confidence", 0.0),
-                    "categories": vector.get("categories", []),
-                    "topic": vector.get("topic", "unknown"),
-                    "content_preview": vector.get("raw", "")[:300] + "..." if len(vector.get("raw", "")) > 300 else vector.get("raw", "")
-                }
-                limited_vectors.append(limited_vector)
-            
-            response_data["vectors"] = {
-                "count": len(limited_vectors),
-                "total_available": len(vectors),
-                "vectors": limited_vectors
-            }
-        
-        # Add insights and recommendations
-        if vectors:
-            stats = vectors_result.get("statistics", {})
-            response_data["insights"] = {
-                "knowledge_health": {
-                    "total_vectors": total_count,
-                    "average_content_length": stats.get("content", {}).get("average_length", 0),
-                    "average_confidence": stats.get("confidence", {}).get("average", 0),
-                    "category_diversity": stats.get("categories", {}).get("unique_count", 0),
-                    "topic_diversity": stats.get("topics", {}).get("unique_count", 0)
-                },
-                "recommendations": _generate_recommendations(stats, total_count)
-            }
-        
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"[{request_id}] Successfully generated brain preview in {elapsed:.2f}s")
-        
-        return response_data
+        logger.info(f"[{request_id}] === END brain-preview request ===")
+        return response
         
     except HTTPException:
         raise
     except Exception as e:
-        elapsed = (datetime.now() - start_time).total_seconds()
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Error in brain-preview endpoint: {error_msg}")
+        logger.error(f"[{request_id}] Error in brain-preview endpoint: {str(e)}")
         logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
-        
         raise HTTPException(
             status_code=500,
-            detail=f"Internal server error: {error_msg}"
+            detail=f"Internal server error: {str(e)}"
         )
-    finally:
-        logger.info(f"[{request_id}] === END brain-preview request ===")
 
 
 def _generate_recommendations(stats: Dict[str, Any], total_count: int) -> List[str]:
@@ -870,7 +823,7 @@ async def brain_vectors_endpoint(request: BrainVectorsRequest):
     request_id = f"vectors_{start_time.strftime('%Y%m%d_%H%M%S')}"
     
     logger.info(f"[{request_id}] === BEGIN brain-vectors request ===")
-    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, namespace={request.namespace}, max_vectors={request.max_vectors}")
+    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, max_vectors={request.max_vectors}")
     
     try:
         # Initialize the analyzer
@@ -879,7 +832,6 @@ async def brain_vectors_endpoint(request: BrainVectorsRequest):
         # Fetch AI synthesis vectors
         logger.info(f"[{request_id}] Fetching AI synthesis vectors...")
         vectors_result = await analyzer.fetch_all_ai_synthesis_vectors(
-            namespace=request.namespace,
             batch_size=request.batch_size,
             max_vectors=request.max_vectors
         )
@@ -896,81 +848,70 @@ async def brain_vectors_endpoint(request: BrainVectorsRequest):
         
         logger.info(f"[{request_id}] Found {total_count} AI synthesis vectors")
         
-        # Format vectors for frontend consumption
+        # Format vectors for frontend display
         formatted_vectors = []
         for vector in vectors:
             formatted_vector = {
                 "id": vector["id"],
-                "title": vector.get("title", ""),
+                "score": vector.get("score", 0.0),
                 "created_at": vector.get("created_at", ""),
+                "expires_at": vector.get("expires_at"),
                 "confidence": vector.get("confidence", 0.0),
                 "source": vector.get("source", ""),
                 "user_id": vector.get("user_id", ""),
                 "thread_id": vector.get("thread_id", ""),
                 "topic": vector.get("topic", "unknown"),
-                "categories": vector.get("categories", []),
-                "score": vector.get("score", 0.0)
+                "categories": vector.get("categories", [])
             }
             
-            # Add content preview if requested
+            # Include content if requested
             if request.include_content:
                 raw_content = vector.get("raw", "")
-                if request.content_preview_length > 0 and len(raw_content) > request.content_preview_length:
-                    formatted_vector["content_preview"] = raw_content[:request.content_preview_length] + "..."
+                if request.content_preview_length and len(raw_content) > request.content_preview_length:
+                    formatted_vector["content"] = raw_content[:request.content_preview_length] + "..."
                     formatted_vector["content_truncated"] = True
                 else:
-                    formatted_vector["content_preview"] = raw_content
+                    formatted_vector["content"] = raw_content
                     formatted_vector["content_truncated"] = False
-                formatted_vector["content_length"] = len(raw_content)
             
-            # Add full metadata if requested
+            # Include metadata if requested
             if request.include_metadata:
                 formatted_vector["metadata"] = vector.get("metadata", {})
             
             formatted_vectors.append(formatted_vector)
         
-        # Prepare response data
-        response_data = {
+        # Build response
+        response = {
             "success": True,
             "request_id": request_id,
-            "namespace": request.namespace,
-            "generated_at": datetime.now().isoformat(),
-            "processing_time_seconds": (datetime.now() - start_time).total_seconds(),
-            "vectors": {
-                "total_count": total_count,
-                "returned_count": len(formatted_vectors),
-                "data": formatted_vectors
-            },
+            "org_id": request.org_id,
+            "namespace": analyzer.namespace,
+            "total_vectors": total_count,
+            "vectors": formatted_vectors,
             "statistics": vectors_result.get("statistics", {}),
             "query_params": {
-                "namespace": request.namespace,
                 "max_vectors": request.max_vectors,
                 "batch_size": request.batch_size,
-                "include_metadata": request.include_metadata,
                 "include_content": request.include_content,
+                "include_metadata": request.include_metadata,
                 "content_preview_length": request.content_preview_length
-            }
+            },
+            "fetched_at": datetime.now().isoformat(),
+            "processing_time_seconds": (datetime.now() - start_time).total_seconds()
         }
         
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"[{request_id}] Successfully fetched {len(formatted_vectors)} brain vectors in {elapsed:.2f}s")
-        
-        return response_data
+        logger.info(f"[{request_id}] === END brain-vectors request ===")
+        return response
         
     except HTTPException:
         raise
     except Exception as e:
-        elapsed = (datetime.now() - start_time).total_seconds()
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Error in brain-vectors endpoint: {error_msg}")
+        logger.error(f"[{request_id}] Error in brain-vectors endpoint: {str(e)}")
         logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
-        
         raise HTTPException(
             status_code=500,
-            detail=f"Internal server error: {error_msg}"
+            detail=f"Internal server error: {str(e)}"
         )
-    finally:
-        logger.info(f"[{request_id}] === END brain-vectors request ===")
 
 
 @router.options('/brain-vectors')
@@ -1005,7 +946,7 @@ async def pickup_line_endpoint(request: PickupLineRequest):
     request_id = f"pickup_{start_time.strftime('%Y%m%d_%H%M%S')}"
     
     logger.info(f"[{request_id}] === BEGIN pickup-line request ===")
-    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, namespace={request.namespace}, pickup_style={request.pickup_style}")
+    logger.info(f"[{request_id}] Parameters: org_id={request.org_id}, pickup_style={request.pickup_style}")
     
     try:
         # Initialize the analyzer
@@ -1014,7 +955,6 @@ async def pickup_line_endpoint(request: PickupLineRequest):
         # Fetch AI synthesis vectors (smaller set for faster processing)
         logger.info(f"[{request_id}] Fetching AI synthesis vectors for pickup line generation...")
         vectors_result = await analyzer.fetch_all_ai_synthesis_vectors(
-            namespace=request.namespace,
             max_vectors=request.max_vectors
         )
         
@@ -1083,41 +1023,50 @@ async def pickup_line_endpoint(request: PickupLineRequest):
             total_vectors=total_count
         )
         
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(f"[{request_id}] Successfully generated pickup line in {elapsed:.2f}s")
-        
-        return {
-            "success": True,
-            "request_id": request_id,
-            "pickup_line": pickup_line_result["pickup_line"],
-            "explanation": pickup_line_result["explanation"],
-            "style": request.pickup_style,
-            "based_on": "comprehensive_knowledge_analysis",
-            "analysis_summary": {
+        if pickup_line_result.get("success"):
+            response = {
+                "success": True,
+                "request_id": request_id,
+                "pickup_line": pickup_line_result.get("pickup_line", ""),
+                "style": request.pickup_style,
+                "based_on": "comprehensive_analysis",
                 "knowledge_base_analyzed": _get_friendly_knowledge_description(total_count),
-                "comprehensive_analysis_generated": True,
-                "language_detected": language_info.get('language_name', 'English'),
-                "detection_confidence": language_info.get('confidence', 0.7),
-                "approach": "multi_domain_exploratory_questions"
-            },
-            "generated_at": datetime.now().isoformat(),
-            "processing_time_seconds": elapsed
-        }
+                "analysis_depth": pickup_line_result.get("analysis_depth", "comprehensive"),
+                "language_detected": language_info.get("language_name", "English"),
+                "generated_at": datetime.now().isoformat(),
+                "processing_time_seconds": (datetime.now() - start_time).total_seconds()
+            }
+            
+            # Include analysis insights if available
+            if pickup_line_result.get("analysis_insights"):
+                response["analysis_insights"] = pickup_line_result["analysis_insights"]
+            
+            logger.info(f"[{request_id}] === END pickup-line request ===")
+            return response
+        else:
+            # Fallback to generic pickup line
+            logger.warning(f"[{request_id}] Failed to generate focused pickup line, using fallback")
+            pickup_line = await _generate_generic_pickup_line(request.pickup_style)
+            return {
+                "success": True,
+                "request_id": request_id,
+                "pickup_line": pickup_line,
+                "style": request.pickup_style,
+                "based_on": "generic_fallback",
+                "knowledge_base_analyzed": _get_friendly_knowledge_description(total_count),
+                "generated_at": datetime.now().isoformat(),
+                "processing_time_seconds": (datetime.now() - start_time).total_seconds()
+            }
         
     except HTTPException:
         raise
     except Exception as e:
-        elapsed = (datetime.now() - start_time).total_seconds()
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Error in pickup-line endpoint: {error_msg}")
+        logger.error(f"[{request_id}] Error in pickup-line endpoint: {str(e)}")
         logger.error(f"[{request_id}] Traceback: {traceback.format_exc()}")
-        
         raise HTTPException(
             status_code=500,
-            detail=f"Internal server error: {error_msg}"
+            detail=f"Internal server error: {str(e)}"
         )
-    finally:
-        logger.info(f"[{request_id}] === END pickup-line request ===")
 
 async def _generate_generic_pickup_line(style: str) -> str:
     """Generate a generic pickup line when no knowledge base is available."""

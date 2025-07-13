@@ -781,7 +781,7 @@ async def query_knowledge_endpoint(request: QueryKnowledgeRequest):
         # Fetch the vector
         result = await fetch_vector(
             vector_id=request.vector_id,
-            bank_name=request.bank_name
+            org_id="unknown"  # TODO: Get org_id from request context
         )
         
         end_time = datetime.now()

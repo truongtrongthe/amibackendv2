@@ -51,7 +51,6 @@ async def execute_save_knowledge_tool(parameters: dict, user_id: str, thread_id:
             user_id=user_id_param,
             org_id=org_id,
             title=title,
-            bank_name=bank_name,
             thread_id=thread_id,
             topic=topic,
             categories=categories,

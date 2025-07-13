@@ -1075,13 +1075,10 @@ class AVA:
                 thread_id = parameters.get("thread_id", None)
                 topic = parameters.get("topic", None)
                 
-                bank_name = "conversation"
-                
-                # Try querying the specified bank
+                # Try querying the org namespace
                 results = await query_knowledge(
                     query=query,
                     org_id=org_id,  # Add org_id
-                    bank_name=bank_name,
                     user_id=user_id,
                     thread_id=None,  # Remove thread_id restriction to find more results
                     topic=None,      # Remove topic restriction
@@ -1126,43 +1123,56 @@ class AVA:
                     "metadata": {}
                 }
                 
-                # Format content for different save types
-                if input_text.startswith("User:"):
-                    # Already in User+AI format - extract parts
-                    user_part = ""
-                    ai_part = ""
-                    if "\n\nAI:" in input_text:
-                        parts = input_text.split("\n\nAI:", 1)
-                        user_part = parts[0].replace("User:", "").strip()
-                        ai_part = parts[1].strip()
-                    else:
-                        # Fallback - treat whole thing as user input
-                        user_part = input_text.replace("User:", "").strip()
-                        ai_part = f"Knowledge saved via tool: {user_part}"
+                try:
+                    # Format content for different save types
+                    if input_text.startswith("User:"):
+                        # Already in User+AI format - extract parts
+                        user_part = ""
+                        ai_part = ""
+                        if "\n\nAI:" in input_text:
+                            parts = input_text.split("\n\nAI:", 1)
+                            user_part = parts[0].replace("User:", "").strip()
+                            ai_part = parts[1].strip()
+                        else:
+                            # Fallback - treat whole thing as user input
+                            user_part = input_text.replace("User:", "").strip()
+                            ai_part = f"Knowledge saved via tool: {user_part}"
+                        
+                        # Run multiple saves like teaching intent flow
+                        self._create_background_task(self._save_tool_knowledge_multiple(
+                            user_message=user_part,
+                            ai_response=ai_part,
+                            combined_content=input_text,
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            priority_topic_name=priority_topic_name,
+                            categories=categories,
+                            response=response,
+                            org_id=org_id
+                        ))
+                        
+                        # Return early to prevent duplicate saves
+                        return {
+                            "success": True,
+                            "message": "Knowledge saved successfully via multiple formats",
+                            "tool_name": "save_knowledge",
+                            "categories": categories,
+                            "priority_topic": priority_topic_name,
+                            "save_type": "multiple_formats"
+                        }
+                        
+                except Exception as e:
+                    logger.error(f"Error processing tool save format: {e}")
+                    # Continue to fallback save
                     
-                    # Run multiple saves like teaching intent flow
-                    self._create_background_task(self._save_tool_knowledge_multiple(
-                        user_message=user_part,
-                        ai_response=ai_part,
-                        combined_content=input_text,
-                        user_id=user_id,
-                        org_id=org_id,  # Add org_id
-                        bank_name=bank_name,
-                        thread_id=thread_id,
-                        priority_topic_name=priority_topic_name,
-                        categories=categories,
-                        response=response
-                    ))
-                else:
-                    # AI-only or plain content - create User+AI format
-                    if input_text.startswith("AI:"):
-                        ai_content = input_text.replace("AI:", "").strip()
-                    else:
-                        ai_content = input_text
-                    
-                    # Create a synthetic user message for context
-                    user_message = f"[Tool Save] Knowledge entry"
-                    combined_content = f"User: {user_message}\n\nAI: {ai_content}"
+                # Standard save fallback
+                logger.info(f"Saving via standard save_knowledge: {input_text[:100]}...")
+                
+                if "AI:" in input_text:
+                    # Parse AI response format
+                    ai_response = input_text.split("AI:", 1)[1].strip()
+                    user_message = input_text.split("AI:", 1)[0].replace("User:", "").strip()
+                    combined_content = f"User: {user_message}\nAI: {ai_response}"
                     
                     # Add ai_synthesis category since this contains AI content
                     if "ai_synthesis" not in categories:
@@ -1174,18 +1184,22 @@ class AVA:
                         ai_response=ai_content,
                         combined_content=combined_content,
                         user_id=user_id,
-                        org_id=org_id,  # Add org_id
-                        bank_name=bank_name,
                         thread_id=thread_id,
                         priority_topic_name=priority_topic_name,
                         categories=categories,
-                        response=response
+                        response=response,
+                        org_id=org_id
                     ))
-                
-                return {
-                    "status": "success",
-                    "message": f"Multiple knowledge vectors save initiated for '{input_text[:50]}...'"
-                }
+                    
+                    # Return early to prevent duplicate saves
+                    return {
+                        "success": True,
+                        "message": "Knowledge saved successfully via multiple formats",
+                        "tool_name": "save_knowledge",
+                        "categories": categories,
+                        "priority_topic": priority_topic_name,
+                        "save_type": "multiple_formats"
+                    }
 
             elif tool_name == "handle_update_decision":
                 request_id = parameters.get("request_id", "")
@@ -1245,293 +1259,280 @@ class AVA:
 
     async def handle_teaching_intent(self, message: str, response: Dict[str, Any], user_id: str, thread_id: Optional[str], priority_topic_name: str, org_id: str) -> None:
         """Handle teaching intent detection and knowledge saving."""
-        logger.info("Saving knowledge due to teaching intent.")
-        logger.info(f"Response: {response}")
-        message_content = response["message"]
-        conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
-        query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', message_content, re.DOTALL)
-        knowledge_queries = json.loads(query_section.group(1).strip()) if query_section else []
+        try:
+            logger.info("Saving knowledge due to teaching intent.")
+            logger.info(f"Response: {response}")
+            message_content = response["message"]
+            conversational_response = re.split(r'<knowledge_queries>', message_content)[0].strip()
+            query_section = re.search(r'<knowledge_queries>(.*?)</knowledge_queries>', message_content, re.DOTALL)
+            knowledge_queries = json.loads(query_section.group(1).strip()) if query_section else []
 
-        # NEW: Create conversation turns structure for multi-turn synthesis
-        conversation_turns = [
-            {
-                "user": message,
-                "ai": conversational_response
-            }
-        ]
-        
-        # Extract final synthesis content
-        final_synthesis = conversational_response
-        if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
-            # Try to extract knowledge_synthesis if available
-            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
+            # NEW: Create conversation turns structure for multi-turn synthesis
+            conversation_turns = [
+                {
+                    "user": message,
+                    "ai": conversational_response
+                }
+            ]
+            
+            # Extract final synthesis content
+            final_synthesis = conversational_response
+            if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
+                # Try to extract knowledge_synthesis if available
+                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
+                if synthesis_match:
+                    final_synthesis = synthesis_match.group(1).strip()
+            
+            # Call the new alpha.py function to save teaching synthesis
+            logger.info(f"Saving teaching synthesis with final_synthesis: {final_synthesis}")
+            synthesis_result = await save_teaching_synthesis(
+                conversation_turns=conversation_turns,
+                final_synthesis=final_synthesis,
+                topic=priority_topic_name or "user_teaching",
+                user_id=user_id,
+                thread_id=thread_id,
+                priority_topic_name=priority_topic_name
+            )
+            
+            logger.info(f"Teaching synthesis result: {synthesis_result}")
+            
+            # Store synthesis result in response metadata for tracking
+            response["metadata"]["teaching_synthesis_result"] = synthesis_result
+
+            # Set up categories and bank name
+            categories = ["general"]
+            bank_name = "conversation"
+            
+            # Add teaching intent category
+            categories.append("teaching_intent")
+            
+            # Add specific topic category if provided by LLM
+            if priority_topic_name and priority_topic_name not in categories:
+                categories.append(priority_topic_name.lower().replace(" ", "_"))
+            
+            # Create synthesis_content early so it's available for combined_knowledge
+            synthesis_content = conversational_response
+            
+            # Extract summary if present using regex
+            summary = ""
+            summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', conversational_response, re.IGNORECASE)
+            if summary_match:
+                summary = summary_match.group(1).strip()
+                logger.info(f"Topic Summary Gen by LLM: {summary}")
+            
+            # Check for structured format sections
+            user_response = ""
+            knowledge_synthesis = ""
+            knowledge_summary = ""
+            
+            # Always extract from full_structured_response first if available
+            if "full_structured_response" in response.get("metadata", {}):
+                full_response = response["metadata"]["full_structured_response"]
+                user_response_match = re.search(r'<user_response>(.*?)</user_response>', full_response, re.DOTALL)
+                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', full_response, re.DOTALL)
+                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', full_response, re.DOTALL)
+                
+                # Handle incomplete responses - try to extract even without closing tags
+                if not summary_match and '<knowledge_summary>' in full_response:
+                    # Try to extract without requiring closing tag
+                    incomplete_summary_match = re.search(r'<knowledge_summary>\s*(.*?)(?=\n\n|$)', full_response, re.DOTALL)
+                    if incomplete_summary_match:
+                        summary_match = incomplete_summary_match
+                        logger.info("Extracted knowledge_summary from incomplete response (missing closing tag)")
+                
+                logger.info("Extracting structured sections from full_structured_response metadata")
+            else:
+                # Fallback to message_content if full_structured_response not available
+                user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
+                synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
+                summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
+                
+                # Handle incomplete responses in message_content too
+                if not summary_match and '<knowledge_summary>' in message_content:
+                    incomplete_summary_match = re.search(r'<knowledge_summary>\s*(.*?)(?=\n\n|$)', message_content, re.DOTALL)
+                    if incomplete_summary_match:
+                        summary_match = incomplete_summary_match
+                        logger.info("Extracted knowledge_summary from incomplete message_content (missing closing tag)")
+                
+                logger.info("Extracting structured sections from message_content (fallback)")
+
+            logger.info(f"User response match: {user_response_match}")
+            logger.info(f"Synthesis match: {synthesis_match}")
+            logger.info(f"Summary match: {summary_match}")
+            
+            if user_response_match:
+                user_response = user_response_match.group(1).strip()
+                logger.info(f"Found structured user response section")
+            
             if synthesis_match:
-                final_synthesis = synthesis_match.group(1).strip()
-        
-        # Call the new alpha.py function to save teaching synthesis
-        logger.info(f"Saving teaching synthesis with final_synthesis: {final_synthesis}")
-        synthesis_result = await save_teaching_synthesis(
-            conversation_turns=conversation_turns,
-            final_synthesis=final_synthesis,
-            topic=priority_topic_name or "user_teaching",
-            user_id=user_id,
-            thread_id=thread_id,
-            priority_topic_name=priority_topic_name
-        )
-        
-        logger.info(f"Teaching synthesis result: {synthesis_result}")
-        
-        # Store synthesis result in response metadata for tracking
-        response["metadata"]["teaching_synthesis_result"] = synthesis_result
-
-        # Set up categories and bank name
-        categories = ["general"]
-        bank_name = "conversation"
-        
-        # Add teaching intent category
-        categories.append("teaching_intent")
-        
-        # Add specific topic category if provided by LLM
-        if priority_topic_name and priority_topic_name not in categories:
-            categories.append(priority_topic_name.lower().replace(" ", "_"))
-        
-        # Create synthesis_content early so it's available for combined_knowledge
-        synthesis_content = conversational_response
-        
-        # Extract summary if present using regex
-        summary = ""
-        summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', conversational_response, re.IGNORECASE)
-        if summary_match:
-            summary = summary_match.group(1).strip()
-            logger.info(f"Topic Summary Gen by LLM: {summary}")
-        
-        # Check for structured format sections
-        user_response = ""
-        knowledge_synthesis = ""
-        knowledge_summary = ""
-        
-        # Always extract from full_structured_response first if available
-        if "full_structured_response" in response.get("metadata", {}):
-            full_response = response["metadata"]["full_structured_response"]
-            user_response_match = re.search(r'<user_response>(.*?)</user_response>', full_response, re.DOTALL)
-            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', full_response, re.DOTALL)
-            summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', full_response, re.DOTALL)
+                knowledge_synthesis = synthesis_match.group(1).strip()
+                logger.info(f"Found structured knowledge synthesis section")
+                # Use the structured synthesis content if available
+                synthesis_content = knowledge_synthesis
             
-            # Handle incomplete responses - try to extract even without closing tags
-            if not summary_match and '<knowledge_summary>' in full_response:
-                # Try to extract without requiring closing tag
-                incomplete_summary_match = re.search(r'<knowledge_summary>\s*(.*?)(?=\n\n|$)', full_response, re.DOTALL)
-                if incomplete_summary_match:
-                    summary_match = incomplete_summary_match
-                    logger.info("Extracted knowledge_summary from incomplete response (missing closing tag)")
+            if summary_match:
+                knowledge_summary = summary_match.group(1).strip()
+                logger.info(f"Found structured knowledge summary section: {knowledge_summary}")
+                summary = knowledge_summary  # Use the explicit summary if available
             
-            logger.info("Extracting structured sections from full_structured_response metadata")
-        else:
-            # Fallback to message_content if full_structured_response not available
-            user_response_match = re.search(r'<user_response>(.*?)</user_response>', message_content, re.DOTALL)
-            synthesis_match = re.search(r'<knowledge_synthesis>(.*?)</knowledge_synthesis>', message_content, re.DOTALL)
-            summary_match = re.search(r'<knowledge_summary>(.*?)</knowledge_summary>', message_content, re.DOTALL)
+            # Format synthesis_content with summary if available
+            if summary and not synthesis_match:
+                # Only add summary prefix if we don't have structured synthesis
+                synthesis_content = f"SUMMARY: {summary}\n\nAI Synthesis: {conversational_response}"
+            elif not synthesis_match:
+                # Default format when no structured synthesis is found
+                synthesis_content = f"AI Synthesis: {conversational_response}"
             
-            # Handle incomplete responses in message_content too
-            if not summary_match and '<knowledge_summary>' in message_content:
-                incomplete_summary_match = re.search(r'<knowledge_summary>\s*(.*?)(?=\n\n|$)', message_content, re.DOTALL)
-                if incomplete_summary_match:
-                    summary_match = incomplete_summary_match
-                    logger.info("Extracted knowledge_summary from incomplete message_content (missing closing tag)")
+            logger.info(f"Final synthesis_content: {synthesis_content[:100]}...")
             
-            logger.info("Extracting structured sections from message_content (fallback)")
+            # Combine user input and AI synthesis content in a formatted way
+            combined_knowledge = f"User: {message}\n\nAI: {synthesis_content}"
+            logger.info(f"Combined knowledge: {combined_knowledge}")
+            
+            # Add synthesized flag if this was from TEACHING_INTENT strategy
+            if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
+                categories.append("synthesized_knowledge")
+                logger.info(f"Adding synthesized_knowledge category for enhanced teaching content")
+            
+            # Check if we have structured format available
+            has_structured_format = False
+            if response.get("metadata", {}).get("full_structured_response", ""):
+                full_response = response["metadata"]["full_structured_response"]
+                if ("<user_response>" in full_response and 
+                    "<knowledge_synthesis>" in full_response and 
+                    "<knowledge_summary>" in full_response):
+                    has_structured_format = True
+                    logger.info("Detected structured format in response, will use that instead of combined knowledge")
+            
+            # Save combined knowledge only if we don't have structured format
+            if not has_structured_format:
+                await self._save_combined_knowledge(
+                    combined_knowledge, user_id, thread_id, 
+                    priority_topic_name, categories, response, org_id
+                )
+            else:
+                logger.info("Skipping combined knowledge save due to structured format presence")
+            
+            # Handle structured format saving
+            if has_structured_format:
+                # Extract structured sections
+                structured_sections = self.support.extract_structured_sections(full_response)
+                
+                # Save each structured section separately
+                if structured_sections.get("knowledge_synthesis"):
+                    await self._save_ai_synthesis(
+                        message, structured_sections.get("synthesis_content", ""),
+                        structured_sections["knowledge_synthesis"],
+                        structured_sections.get("knowledge_summary", ""),
+                        structured_sections.get("summary", ""),
+                        structured_sections.get("conversational_response", ""),
+                        user_id, thread_id, priority_topic_name, categories, response, org_id
+                    )
+                elif structured_sections.get("knowledge_summary"):
+                    await self._save_standalone_summary(
+                        structured_sections.get("knowledge_synthesis", ""),
+                        structured_sections["knowledge_summary"],
+                        structured_sections.get("summary", ""),
+                        structured_sections.get("conversational_response", ""),
+                        user_id, thread_id, priority_topic_name, categories, org_id
+                    )
+            
+            # Log the result
+            logger.info(f"Teaching intent handling completed for user {user_id}, topic: {priority_topic_name}")
+            
+            # Update the response with the structured sections if they exist
+            if 'structured_sections' in locals():
+                response['structured_sections'] = structured_sections
+            
+            # Update the categories to include them in the response
+            response['categories'] = categories
+            
+            # Add priority topic to the response
+            response['priority_topic'] = priority_topic_name
+            
+            # Create a summary of the saved knowledge
+            knowledge_summary = {
+                "combined_knowledge_saved": not has_structured_format,
+                "structured_format_detected": has_structured_format,
+                "categories": categories,
+                "priority_topic": priority_topic_name
+            }
+            
+            response['knowledge_summary'] = knowledge_summary
+            
+            logger.info(f"Knowledge summary: {knowledge_summary}")
+            
+        except Exception as e:
+            logger.error(f"Error in handle_teaching_intent: {str(e)}")
+            logger.error(traceback.format_exc())
 
-        logger.info(f"User response match: {user_response_match}")
-        logger.info(f"Synthesis match: {synthesis_match}")
-        logger.info(f"Summary match: {summary_match}")
-        
-        if user_response_match:
-            user_response = user_response_match.group(1).strip()
-            logger.info(f"Found structured user response section")
-        
-        if synthesis_match:
-            knowledge_synthesis = synthesis_match.group(1).strip()
-            logger.info(f"Found structured knowledge synthesis section")
-            # Use the structured synthesis content if available
-            synthesis_content = knowledge_synthesis
-        
-        if summary_match:
-            knowledge_summary = summary_match.group(1).strip()
-            logger.info(f"Found structured knowledge summary section: {knowledge_summary}")
-            summary = knowledge_summary  # Use the explicit summary if available
-        
-        # Format synthesis_content with summary if available
-        if summary and not synthesis_match:
-            # Only add summary prefix if we don't have structured synthesis
-            synthesis_content = f"SUMMARY: {summary}\n\nAI Synthesis: {conversational_response}"
-        elif not synthesis_match:
-            # Default format when no structured synthesis is found
-            synthesis_content = f"AI Synthesis: {conversational_response}"
-        
-        logger.info(f"Final synthesis_content: {synthesis_content[:100]}...")
-        
-        # Combine user input and AI synthesis content in a formatted way
-        combined_knowledge = f"User: {message}\n\nAI: {synthesis_content}"
-        logger.info(f"Combined knowledge: {combined_knowledge}")
-        
-        # Add synthesized flag if this was from TEACHING_INTENT strategy
-        if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
-            categories.append("synthesized_knowledge")
-            logger.info(f"Adding synthesized_knowledge category for enhanced teaching content")
-        
-        # Check if we have structured format available
-        has_structured_format = False
-        if response.get("metadata", {}).get("full_structured_response", ""):
-            full_response = response["metadata"]["full_structured_response"]
-            if ("<user_response>" in full_response and 
-                "<knowledge_synthesis>" in full_response and 
-                "<knowledge_summary>" in full_response):
-                has_structured_format = True
-                logger.info("Detected structured format in response, will use that instead of combined knowledge")
-        
-        # Save combined knowledge only if we don't have structured format
-        if not has_structured_format:
-            await self._save_combined_knowledge(
-                combined_knowledge, user_id, bank_name, thread_id, 
-                priority_topic_name, categories, response, org_id
-            )
-        else:
-            logger.info(f"Skipping combined knowledge save since structured format is available")
-
-        # Save additional AI synthesis for TEACHING_INTENT strategy
-        if response.get("metadata", {}).get("response_strategy") == "TEACHING_INTENT":
-            await self._save_ai_synthesis(
-                message, synthesis_content, knowledge_synthesis, knowledge_summary,
-                summary, conversational_response, user_id, bank_name, thread_id,
-                priority_topic_name, categories, response, org_id
-            )
-
-    async def _save_combined_knowledge(self, combined_knowledge: str, user_id: str, bank_name: str, 
+    async def _save_combined_knowledge(self, combined_knowledge: str, user_id: str, 
                                      thread_id: Optional[str], priority_topic_name: str, 
                                      categories: List[str], response: Dict[str, Any], org_id: str) -> None:
         """Save combined knowledge to the knowledge base."""
         try:
-            logger.info(f"Saving combined knowledge to {bank_name} bank: '{combined_knowledge[:100]}...'")
+            logger.info(f"Saving combined knowledge: '{combined_knowledge[:100]}...'")
             save_result = await self.support.background_save_knowledge(
                 input_text=combined_knowledge,
                 title="", # Add empty title parameter 
                 user_id=user_id,
                 org_id=org_id,  # Add org_id
-                bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
                 categories=categories,
-                ttl_days=365  # 365 days TTL
+                ttl_days=365  # 1 year retention
             )
-            logger.info(f"Save combined knowledge completed: {save_result}")
-            logger.info(f"Save result type: {type(save_result)}, content: {save_result}")
             
-            # Store vector ID for frontend response
-            if isinstance(save_result, dict):
-                logger.info(f"Save result is dict, success: {save_result.get('success')}")
-                if save_result.get("success"):
-                    vector_id = save_result.get("vector_id")
-                    response["metadata"]["combined_knowledge_vector_id"] = vector_id
-                    logger.info(f"✅ Captured combined knowledge vector ID: {vector_id}")
-                else:
-                    logger.warning(f"Save operation failed: {save_result.get('error')}")
+            if save_result.get("success"):
+                logger.info(f"✅ Combined knowledge saved successfully: {save_result.get('vector_id', 'N/A')}")
             else:
-                logger.warning(f"Save result is not dict, got: {type(save_result)}")
+                logger.error(f"❌ Failed to save combined knowledge: {save_result.get('error', 'Unknown error')}")
+                
         except Exception as e:
-            logger.error(f"Error saving combined knowledge: {str(e)}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-        
-        logger.info(f"Saved combined knowledge for topic '{priority_topic_name or 'user_teaching'}'")
+            logger.error(f"Error in _save_combined_knowledge: {str(e)}")
+            logger.error(traceback.format_exc())
 
     async def _save_ai_synthesis(self, message: str, synthesis_content: str, knowledge_synthesis: str,
                                knowledge_summary: str, summary: str, conversational_response: str,
-                               user_id: str, bank_name: str, thread_id: Optional[str],
+                               user_id: str, thread_id: Optional[str],
                                priority_topic_name: str, categories: List[str], response: Dict[str, Any], org_id: str) -> None:
-        """Save AI synthesis and summary for improved future retrieval."""
+        """Save AI synthesis with structured knowledge sections."""
         try:
-            # Create categories list - do NOT add ai_synthesis here as this is for combined User+AI content
-            synthesis_categories = list(categories)
-            # Note: ai_synthesis should only be added to pure AI content, not combined User+AI content
+            logger.info(f"Saving AI synthesis with structured knowledge...")
             
-            logger.info(f"Saving additional AI synthesis for improved future retrieval")
-            
-            # Determine storage format and title
-            if knowledge_synthesis and knowledge_summary:
-                logger.info(f"Using structured sections for knowledge storage")
-                logger.info(f"knowledge_synthesis: {knowledge_synthesis[:100]}...")
-                logger.info(f"knowledge_summary (will be used as title): {knowledge_summary}")
-                # Format for storage: AI-only content for ai_synthesis vector
-                final_synthesis_content = f"AI: {knowledge_synthesis}"
-                summary_title = knowledge_summary
-            else:
-                # Use the synthesis_content that was already built - AI-only content for ai_synthesis vector
-                logger.info(f"Using synthesis_content for knowledge storage")
-                logger.info(f"No structured synthesis/summary found - falling back to legacy summary: '{summary}'")
-                final_synthesis_content = f"AI: {synthesis_content}"
-                summary_title = summary or ""
-            
-            logger.info(f"Final title that will be saved: '{summary_title}'")
-            logger.info(f"Categories for combined User+AI content: {synthesis_categories} (no ai_synthesis)")
-            
-            logger.info(f"Final synthesis content to save: {final_synthesis_content[:100]}...")
+            # Save the synthesis content
             synthesis_result = await self.support.background_save_knowledge(
-                input_text=final_synthesis_content,
-                title=summary_title,
+                input_text=synthesis_content,
+                title="AI Synthesis",
                 user_id=user_id,
                 org_id=org_id,  # Add org_id
-                bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
-                categories=synthesis_categories,
-                ttl_days=365  # 365 days TTL
+                categories=categories + ["ai_synthesis"],
+                ttl_days=365  # 1 year retention
             )
-            logger.info(f"Save AI synthesis completed: {synthesis_result}")
-            logger.info(f"Synthesis result type: {type(synthesis_result)}, content: {synthesis_result}")
             
-            # Store synthesis vector ID
-            if isinstance(synthesis_result, dict):
-                logger.info(f"Synthesis result is dict, success: {synthesis_result.get('success')}")
-                if synthesis_result.get("success"):
-                    vector_id = synthesis_result.get("vector_id")
-                    response["metadata"]["synthesis_vector_id"] = vector_id
-                    logger.info(f"✅ Captured synthesis vector ID: {vector_id}")
-                else:
-                    logger.warning(f"Synthesis save failed: {synthesis_result.get('error')}")
+            if synthesis_result.get("success"):
+                logger.info(f"✅ AI synthesis saved successfully: {synthesis_result.get('vector_id', 'N/A')}")
             else:
-                logger.warning(f"Synthesis result is not dict, got: {type(synthesis_result)}")
-            
-            # Save standalone summary if available - this will be pure AI content with ai_synthesis
-            await self._save_standalone_summary(
-                knowledge_synthesis, knowledge_summary, summary, conversational_response,
-                user_id, bank_name, thread_id, priority_topic_name, categories, org_id
-            )
+                logger.error(f"❌ Failed to save AI synthesis: {synthesis_result.get('error', 'Unknown error')}")
+                
         except Exception as e:
-            logger.error(f"Error saving AI synthesis: {str(e)}")
+            logger.error(f"Error in _save_ai_synthesis: {str(e)}")
+            logger.error(traceback.format_exc())
 
     async def _save_standalone_summary(self, knowledge_synthesis: str, knowledge_summary: str,
                                      summary: str, conversational_response: str, user_id: str,
-                                     bank_name: str, thread_id: Optional[str], priority_topic_name: str,
+                                     thread_id: Optional[str], priority_topic_name: str,
                                      categories: List[str], org_id: str) -> None:
-        """Save standalone summary for quick retrieval."""
-        if knowledge_summary:
-            # Define categories for summary - ensure ai_synthesis is included within first 5 categories
-            # Since pccontroller.py limits to 5 categories, we need to prioritize
+        """Save standalone summary when no full synthesis is available."""
+        try:
+            logger.info(f"Saving standalone summary...")
+            
+            # Prioritize categories to max 5 for focus
             summary_categories = []
-            
-            # Always include these core categories first
-            if "general" in categories:
-                summary_categories.append("general")
-            if "teaching_intent" in categories:
-                summary_categories.append("teaching_intent")
-            
-            # Add ai_synthesis early to ensure it's within the 5-category limit
-            summary_categories.append("ai_synthesis")
-            summary_categories.append("knowledge_summary")
-            
-            # Add one more category from the original list if space allows
             for cat in categories:
-                if cat not in summary_categories and len(summary_categories) < 5:
+                if len(summary_categories) < 5:
                     summary_categories.append(cat)
                     break
             
@@ -1543,50 +1544,40 @@ class AVA:
                 user_id=user_id,
                 org_id=org_id,  # Add org_id
                 title=knowledge_summary,
-                bank_name=bank_name,
                 thread_id=thread_id,
                 topic=priority_topic_name or "user_teaching",
                 categories=summary_categories,
-                ttl_days=365  # 365 days TTL
+                ttl_days=365  # 1 year retention
             )
-            logger.info(f"Save summary completed: {summary_success}")
-        elif summary and len(summary) > 10:  # Only save non-empty summaries
-            # Define categories for summary - ensure ai_synthesis is included within first 5 categories
-            summary_categories = []
             
-            # Always include these core categories first
-            if "general" in categories:
-                summary_categories.append("general")
-            if "teaching_intent" in categories:
-                summary_categories.append("teaching_intent")
-            
-            # Add ai_synthesis early to ensure it's within the 5-category limit
-            summary_categories.append("ai_synthesis")
-            summary_categories.append("knowledge_summary")
-            
-            # Add one more category from the original list if space allows
-            for cat in categories:
-                if cat not in summary_categories and len(summary_categories) < 5:
-                    summary_categories.append(cat)
-                    break
-            
-            logger.info(f"Saving standalone summary (legacy) with prioritized categories (max 5): {summary_categories}")
-            
-            # Call save_knowledge directly with correct parameter order
-            summary_success = await save_knowledge(
-                input=f"AI: {conversational_response}",
-                user_id=user_id,
-                org_id=org_id,  # Add org_id
-                title=summary,
-                bank_name=bank_name,
-                thread_id=thread_id,
-                topic=priority_topic_name or "user_teaching",
-                categories=summary_categories,
-                ttl_days=365  # 365 days TTL
-            )
-            logger.info(f"Save legacy summary completed: {summary_success}")
-        else:
-            logger.info("No valid summary available, skipping standalone summary save")
+            if summary_success.get("success"):
+                logger.info(f"✅ Standalone summary saved successfully: {summary_success.get('vector_id', 'N/A')}")
+                
+                # Also save the legacy version for backward compatibility
+                logger.info(f"Saving standalone summary (legacy) with prioritized categories (max 5): {summary_categories}")
+                
+                # Call save_knowledge directly with correct parameter order
+                summary_success = await save_knowledge(
+                    input=f"AI: {conversational_response}",
+                    user_id=user_id,
+                    org_id=org_id,  # Add org_id
+                    title=summary,
+                    thread_id=thread_id,
+                    topic=priority_topic_name or "user_teaching",
+                    categories=summary_categories,
+                    ttl_days=365  # 1 year retention
+                )
+                
+                if summary_success.get("success"):
+                    logger.info(f"✅ Legacy summary saved successfully: {summary_success.get('vector_id', 'N/A')}")
+                else:
+                    logger.error(f"❌ Failed to save legacy summary: {summary_success.get('error', 'Unknown error')}")
+            else:
+                logger.error(f"❌ Failed to save standalone summary: {summary_success.get('error', 'Unknown error')}")
+                
+        except Exception as e:
+            logger.error(f"Error in _save_standalone_summary: {str(e)}")
+            logger.error(traceback.format_exc())
 
     async def update_existing_knowledge(self, vector_id: str, new_content: str, user_id: str, org_id: str = "unknown", preserve_metadata: bool = True) -> Dict[str, Any]:
         """Update existing knowledge in the vector database by replacing the old vector."""
@@ -1598,7 +1589,6 @@ class AVA:
                 input=new_content,
                 user_id=user_id,
                 org_id=org_id,  # Use provided org_id
-                bank_name="conversation",
                 thread_id=None,
                 topic="updated_knowledge",
                 categories=["updated_knowledge", "teaching_intent"],
@@ -2085,7 +2075,7 @@ class AVA:
         clear_pending_knowledge_decisions()
 
     async def _save_tool_knowledge_multiple(self, user_message: str, ai_response: str, combined_content: str,
-                                          user_id: str, bank_name: str, thread_id: Optional[str],
+                                          user_id: str, thread_id: Optional[str],
                                           priority_topic_name: str, categories: List[str], response: Dict[str, Any], org_id: str) -> None:
         """Save knowledge in multiple formats like teaching intent flow (for tool-executed saves)."""
         try:
@@ -2096,66 +2086,40 @@ class AVA:
             # 1. Save Combined Knowledge (User + AI format)
             logger.info("Saving combined knowledge (User + AI format)")
             await self._save_combined_knowledge(
-                combined_knowledge=combined_content,
-                user_id=user_id,
-                bank_name=bank_name,
-                thread_id=thread_id,
-                priority_topic_name=priority_topic_name,
-                categories=categories,
-                response=response,
-                org_id=org_id
+                combined_content, user_id, thread_id, 
+                priority_topic_name, categories, response, org_id
             )
             
-            # 2. Save AI Synthesis for enhanced retrieval
-            logger.info("Saving AI synthesis for enhanced retrieval")
-            
-            # Extract or create summary information
-            summary = ""
-            knowledge_synthesis = ai_response
-            knowledge_summary = ""
-            
-            # Try to extract summary if present in AI response
-            summary_match = re.search(r'SUMMARY:\s*(.*?)(?:\n|$)', ai_response, re.IGNORECASE)
-            if summary_match:
-                summary = summary_match.group(1).strip()
-                knowledge_summary = summary
-                logger.info(f"Extracted summary from AI response: {summary}")
-            else:
-                # Generate a basic summary from first sentence or first 100 chars
-                first_sentence = ai_response.split('.')[0] if '.' in ai_response else ai_response
-                if len(first_sentence) > 100:
-                    knowledge_summary = first_sentence[:97] + "..."
-                else:
-                    knowledge_summary = first_sentence
-                summary = knowledge_summary
-                logger.info(f"Generated summary: {knowledge_summary}")
-            
-            # Save AI synthesis (this will also call _save_standalone_summary)
-            await self._save_ai_synthesis(
-                message=user_message,
-                synthesis_content=ai_response,
-                knowledge_synthesis=knowledge_synthesis,
-                knowledge_summary=knowledge_summary,
-                summary=summary,
-                conversational_response=ai_response,
+            # 2. Save AI response only
+            logger.info("Saving AI response only")
+            save_result = await self.support.background_save_knowledge(
+                input_text=ai_response,
+                title="AI Response",
                 user_id=user_id,
-                bank_name=bank_name,
+                org_id=org_id,
                 thread_id=thread_id,
-                priority_topic_name=priority_topic_name,
-                categories=categories,
-                response=response,
-                org_id=org_id
+                topic=priority_topic_name,
+                categories=categories + ["ai_response"],
+                ttl_days=365
             )
             
-            logger.info(f"✅ Successfully saved tool knowledge in multiple formats")
-            logger.info(f"Vectors saved: Combined Knowledge + AI Synthesis + Standalone Summary")
+            logger.info(f"AI response save result: {save_result}")
             
-            # Update response metadata with save status
-            response["metadata"]["tool_multiple_save_completed"] = True
-            response["metadata"]["save_types"] = ["combined_knowledge", "ai_synthesis", "standalone_summary"]
+            # 3. Save user message only
+            logger.info("Saving user message only")
+            save_result = await self.support.background_save_knowledge(
+                input_text=user_message,
+                title="User Message",
+                user_id=user_id,
+                org_id=org_id,
+                thread_id=thread_id,
+                topic=priority_topic_name,
+                categories=categories + ["user_message"],
+                ttl_days=365
+            )
+            
+            logger.info(f"User message save result: {save_result}")
             
         except Exception as e:
-            logger.error(f"Error saving tool knowledge in multiple formats: {str(e)}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            response["metadata"]["tool_multiple_save_error"] = str(e)
+            logger.error(f"Error in _save_tool_knowledge_multiple: {str(e)}")
+            logger.error(traceback.format_exc())

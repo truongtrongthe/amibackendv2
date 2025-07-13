@@ -26,30 +26,32 @@ supabase: Client = create_client(
 # Initialize Pinecone client
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY", ""))
 
-# Create or connect to index with serverless configuration
-def get_org_index(org_id: str):
+# Global production index
+_production_index = None
+
+def get_production_index():
     """
-    Get or create the Pinecone index for a specific organization.
+    Get or create the single production Pinecone index.
     
-    Args:
-        org_id: The organization ID
-        
     Returns:
-        Pinecone index for the organization
+        Pinecone index for production
     """
+    global _production_index
     try:
-        index_name = f"ent-{org_id}"
-        if index_name not in pc.list_indexes().names():
-            pc.create_index(
-                name=index_name,
-                dimension=1536,  # Matches OpenAI embeddings
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-west-2")
-            )
-            logger.info(f"Created Pinecone index for organization {org_id}: {index_name}")
-        return pc.Index(index_name)
+        if _production_index is None:
+            index_name = "production"
+            if index_name not in pc.list_indexes().names():
+                pc.create_index(
+                    name=index_name,
+                    dimension=1536,  # Matches OpenAI embeddings
+                    metric="cosine",
+                    spec=ServerlessSpec(cloud="aws", region="us-west-2")
+                )
+                logger.info(f"Created production Pinecone index: {index_name}")
+            _production_index = pc.Index(index_name)
+        return _production_index
     except Exception as e:
-        logger.error(f"Failed to initialize Pinecone index for organization {org_id}: {e}")
+        logger.error(f"Failed to initialize production Pinecone index: {e}")
         raise
 
 async def get_brain_banks(graph_version_id: str, org_id: str) -> List[Dict[str, str]]:
@@ -121,7 +123,6 @@ async def save_knowledge(
     user_id: str,
     org_id: str,
     title: str="",
-    bank_name: str = "",
     thread_id: Optional[str] = None,
     topic: Optional[str] = None,
     categories: Optional[List[str]] = None,
@@ -129,13 +130,13 @@ async def save_knowledge(
     batch_size: int = 100
 ) -> Dict:
     """
-    Save knowledge to organization-specific Pinecone vector database.
+    Save knowledge to production Pinecone index with organization-specific namespace.
 
     Args:
         input: The knowledge content to save.
         user_id: Identifier for the user.
         org_id: Organization ID.
-        bank_name: Namespace for the knowledge (optional).
+        title: Title for the knowledge entry.
         thread_id: Conversation thread identifier (optional).
         topic: Core topic of the knowledge.
         categories: List of categories.
@@ -146,10 +147,10 @@ async def save_knowledge(
         Dict containing success status and vector details.
     """
     try:
-        ns = bank_name or "default"
-        target_index = get_org_index(org_id)
+        ns = f"ent-{org_id}"
+        target_index = get_production_index()
 
-        logger.info(f"Saving to org={org_id}, namespace={ns}, user_id={user_id}, thread_id={thread_id}")
+        logger.info(f"Saving to production index, namespace={ns}, user_id={user_id}, thread_id={thread_id}")
 
         # Generate embedding
         embedding = await EMBEDDINGS.aembed_query(input)
@@ -226,7 +227,6 @@ async def save_knowledge(
 async def query_knowledge(
     query: str,
     org_id: str,
-    bank_name: str = "",
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     topic: Optional[str] = None,
@@ -235,12 +235,11 @@ async def query_knowledge(
     ef_search: int = 100
 ) -> List[Dict]:
     """
-    Query knowledge from organization-specific Pinecone index.
+    Query knowledge from production Pinecone index with organization-specific namespace.
 
     Args:
         query: The search query.
         org_id: Organization ID.
-        bank_name: Namespace to query (optional).
         user_id: Filter by user (optional).
         thread_id: Filter by conversation thread (optional).
         topic: Filter by topic.
@@ -257,11 +256,11 @@ async def query_knowledge(
             logger.error(f"Invalid query embedding dimension: {len(embedding)}")
             return []
 
-        ns = bank_name or "default"
-        target_index = get_org_index(org_id)
+        ns = f"ent-{org_id}"
+        target_index = get_production_index()
         knowledge = []
 
-        logger.info(f"Querying org={org_id}, namespace={ns}, user_id={user_id}, thread_id={thread_id}, topic={topic}")
+        logger.info(f"Querying production index, namespace={ns}, user_id={user_id}, thread_id={thread_id}, topic={topic}")
 
         # Dynamic filter
         filter_dict = {}
@@ -326,7 +325,7 @@ async def query_knowledge_from_graph(
     include_categories: Optional[List[str]] = None
 ) -> List[Dict]:
     """
-    Query knowledge from organization-specific Pinecone index for a graph version.
+    Query knowledge from production Pinecone index with organization-specific namespace for a graph version.
 
     Args:
         query: The search query.
@@ -342,58 +341,49 @@ async def query_knowledge_from_graph(
         include_categories: List of categories to include (only these categories will be returned).
     """
     
-    #brain_banks = await get_brain_banks(graph_version_id, org_id)
-    #valid_namespaces = [brain["bank_name"] for brain in brain_banks]
-    # Add conversation namespace to the list
-    valid_namespaces = ["conversation"]
-
-    # Get all knowledge from all namespaces
-    all_knowledge = []
-    for namespace in valid_namespaces:
-        knowledge = await query_knowledge(query, org_id, namespace, user_id, thread_id, topic, top_k, min_similarity, ef_search)
-        if knowledge:
-            all_knowledge.extend(knowledge)
+    # Since we're using a single namespace per org, we query the org's namespace directly
+    knowledge = await query_knowledge(query, org_id, user_id, thread_id, topic, top_k, min_similarity, ef_search)
 
     # Post-process to filter categories
     if include_categories:
         # Only include entries that have at least one of the included categories
         filtered_knowledge = []
-        for entry in all_knowledge:
+        for entry in knowledge:
             entry_categories = entry.get("categories", [])
             if any(cat in entry_categories for cat in include_categories):
                 filtered_knowledge.append(entry)
         logger.info(f"Filtered to include only {len(filtered_knowledge)} entries with included categories: {include_categories}")
-        all_knowledge = filtered_knowledge
+        knowledge = filtered_knowledge
     elif exclude_categories:
         # Exclude entries that have any of the excluded categories
         filtered_knowledge = []
-        for entry in all_knowledge:
+        for entry in knowledge:
             entry_categories = entry.get("categories", [])
             if not any(cat in entry_categories for cat in exclude_categories):
                 filtered_knowledge.append(entry)
-        logger.info(f"Filtered out {len(all_knowledge) - len(filtered_knowledge)} entries with excluded categories: {exclude_categories}")
-        all_knowledge = filtered_knowledge
-    logger.info(f"ALL KNOWLEDGE=: {all_knowledge}")
-    return all_knowledge
+        logger.info(f"Filtered out {len(knowledge) - len(filtered_knowledge)} entries with excluded categories: {exclude_categories}")
+        knowledge = filtered_knowledge
+    
+    logger.info(f"ALL KNOWLEDGE: {knowledge}")
+    return knowledge
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5)
-async def fetch_vector(vector_id: str, org_id: str, bank_name: str = "conversation") -> Dict:
+async def fetch_vector(vector_id: str, org_id: str) -> Dict:
     """
-    Fetch a specific vector by its ID from organization-specific Pinecone index.
+    Fetch a specific vector by its ID from production Pinecone index with organization-specific namespace.
 
     Args:
         vector_id: The unique vector ID to fetch.
         org_id: Organization ID.
-        bank_name: Namespace where the vector is stored (default: "conversation").
 
     Returns:
         Dict containing the vector data or error information.
     """
     try:
-        ns = bank_name or "conversation"
-        target_index = get_org_index(org_id)
+        ns = f"ent-{org_id}"
+        target_index = get_production_index()
 
-        logger.info(f"Fetching vector {vector_id} from org={org_id}, namespace={ns}")
+        logger.info(f"Fetching vector {vector_id} from production index, namespace={ns}")
 
         # Fetch the specific vector
         result = await asyncio.to_thread(
