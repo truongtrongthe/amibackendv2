@@ -79,7 +79,7 @@ class AIBrainAnalyzer:
         max_vectors: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Fetch ALL vectors with ai_synthesis category from the organization's namespace.
+        Fetch ALL vectors with human_approved category from the organization's namespace.
         
         Args:
             namespace: Ignored - uses org-specific namespace
@@ -88,13 +88,13 @@ class AIBrainAnalyzer:
             
         Returns:
             Dict containing:
-                - vectors: List of all ai_synthesis vectors
+                - vectors: List of all human_approved vectors
                 - metadata: Summary statistics
                 - total_count: Total number of vectors found
         """
         # Use the org-specific namespace
         actual_namespace = self.namespace
-        logger.info(f"Starting to fetch all ai_synthesis vectors from namespace '{actual_namespace}' for org {self.org_id}")
+        logger.info(f"Starting to fetch all human_approved vectors from namespace '{actual_namespace}' for org {self.org_id}")
         
         try:
             # Since Pinecone doesn't support querying by metadata alone without a vector,
@@ -106,16 +106,16 @@ class AIBrainAnalyzer:
                 logger.error(f"Invalid embedding dimension: {len(embedding)}")
                 return {"success": False, "error": "Invalid embedding dimension"}
             
-            ai_synthesis_vectors = []
+            human_approved_vectors = []
             total_fetched = 0
             
             # Use a high top_k to get as many results as possible
-            # We'll filter by ai_synthesis category in the metadata filter
+            # We'll filter by human_approved category in the metadata filter
             query_top_k = min(10000, max_vectors) if max_vectors else 10000
             
-            logger.info(f"Querying Pinecone with top_k={query_top_k} and ai_synthesis filter")
+            logger.info(f"Querying Pinecone with top_k={query_top_k} and human_approved filter")
             
-            # Query with metadata filter for ai_synthesis category
+            # Query with metadata filter for human_approved category
             results = await asyncio.to_thread(
                 self.index.query,
                 vector=embedding,
@@ -123,23 +123,23 @@ class AIBrainAnalyzer:
                 include_metadata=True,
                 namespace=actual_namespace,
                 filter={
-                    "categories": {"$in": ["ai_synthesis"]}
+                    "categories": {"$in": ["human_approved"]}
                 }
             )
             
             matches = results.get("matches", [])
-            logger.info(f"Found {len(matches)} vectors with ai_synthesis category")
+            logger.info(f"Found {len(matches)} vectors with human_approved category")
             
             # Process all matches
             for match in matches:
-                if max_vectors and len(ai_synthesis_vectors) >= max_vectors:
+                if max_vectors and len(human_approved_vectors) >= max_vectors:
                     break
                     
                 metadata = match.get("metadata", {})
                 categories = metadata.get("categories", [])
                 
-                # Double-check that ai_synthesis is in categories
-                if "ai_synthesis" in categories:
+                # Double-check that human_approved is in categories
+                if "human_approved" in categories:
                     vector_data = {
                         "id": match["id"],
                         "score": match.get("score", 0.0),
@@ -155,17 +155,17 @@ class AIBrainAnalyzer:
                         "categories": categories,
                         "metadata": metadata
                     }
-                    ai_synthesis_vectors.append(vector_data)
+                    human_approved_vectors.append(vector_data)
                     total_fetched += 1
             
             # Generate statistics
-            stats = self._generate_vector_statistics(ai_synthesis_vectors)
+            stats = self._generate_vector_statistics(human_approved_vectors)
             
-            logger.info(f"Successfully fetched {total_fetched} ai_synthesis vectors")
+            logger.info(f"Successfully fetched {total_fetched} human_approved vectors")
             
             return {
                 "success": True,
-                "vectors": ai_synthesis_vectors,
+                "vectors": human_approved_vectors,
                 "total_count": total_fetched,
                 "namespace": actual_namespace,
                 "query_params": {
@@ -178,7 +178,7 @@ class AIBrainAnalyzer:
             }
             
         except Exception as e:
-            logger.error(f"Error fetching ai_synthesis vectors: {str(e)}")
+            logger.error(f"Error fetching human_approved vectors: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "success": False,
@@ -808,16 +808,16 @@ async def brain_preview_options():
 @router.post('/brain-vectors')
 async def brain_vectors_endpoint(request: BrainVectorsRequest):
     """
-    Fetch all AI synthesis vectors from the knowledge base.
+    Fetch all human approved vectors from the knowledge base.
     
-    This endpoint returns all vectors with ai_synthesis category from the specified namespace,
+    This endpoint returns all vectors with human_approved category from the specified namespace,
     with optional content and metadata filtering for frontend display.
     
     Args:
         request: BrainVectorsRequest containing fetch parameters including org_id
         
     Returns:
-        List of AI synthesis vectors with statistics and metadata
+        List of human approved vectors with statistics and metadata
     """
     start_time = datetime.now()
     request_id = f"vectors_{start_time.strftime('%Y%m%d_%H%M%S')}"
@@ -829,8 +829,8 @@ async def brain_vectors_endpoint(request: BrainVectorsRequest):
         # Initialize the analyzer
         analyzer = AIBrainAnalyzer(request.org_id)
         
-        # Fetch AI synthesis vectors
-        logger.info(f"[{request_id}] Fetching AI synthesis vectors...")
+        # Fetch human approved vectors
+        logger.info(f"[{request_id}] Fetching human approved vectors...")
         vectors_result = await analyzer.fetch_all_ai_synthesis_vectors(
             batch_size=request.batch_size,
             max_vectors=request.max_vectors
@@ -840,13 +840,13 @@ async def brain_vectors_endpoint(request: BrainVectorsRequest):
             logger.error(f"[{request_id}] Failed to fetch vectors: {vectors_result.get('error')}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to fetch AI synthesis vectors: {vectors_result.get('error')}"
+                detail=f"Failed to fetch human approved vectors: {vectors_result.get('error')}"
             )
         
         vectors = vectors_result.get("vectors", [])
         total_count = vectors_result.get("total_count", 0)
         
-        logger.info(f"[{request_id}] Found {total_count} AI synthesis vectors")
+        logger.info(f"[{request_id}] Found {total_count} human approved vectors")
         
         # Format vectors for frontend display
         formatted_vectors = []
