@@ -18,6 +18,15 @@ from learning_tools import LearningToolsFactory
 
 logger = logging.getLogger(__name__)
 
+# Import language detection from lightweight language module
+try:
+    from language import detect_language_with_llm, LanguageDetector
+    LANGUAGE_DETECTION_AVAILABLE = True
+    logger.info("Language detection imported successfully from language.py")
+except Exception as e:
+    logger.warning(f"Failed to import language detection from language.py: {e}")
+    LANGUAGE_DETECTION_AVAILABLE = False
+
 
 @dataclass
 class ToolExecutionRequest:
@@ -118,6 +127,12 @@ Example: User says "Our company has 50 employees" → IMMEDIATELY call search_le
 
 Be proactive about learning - don't wait for permission!"""
         }
+        
+        # Initialize language detection if available
+        if LANGUAGE_DETECTION_AVAILABLE:
+            self.language_detector = LanguageDetector()
+        else:
+            self.language_detector = None
     
     def _initialize_tools(self) -> Dict[str, Any]:
         """Initialize available tools"""
@@ -148,6 +163,58 @@ Be proactive about learning - don't wait for permission!"""
             logger.error(f"Failed to initialize learning tools factory: {e}")
         
         return tools
+    
+    async def _detect_language_and_create_prompt(self, user_query: str, base_prompt: str) -> str:
+        """
+        Detect the language of user query and create a language-aware system prompt
+        
+        Args:
+            user_query: The user's input query
+            base_prompt: The base system prompt to enhance
+            
+        Returns:
+            Language-aware system prompt
+        """
+        if not LANGUAGE_DETECTION_AVAILABLE:
+            logger.warning("Language detection not available, using default prompt")
+            return base_prompt
+        
+        try:
+            # Detect language using the lightweight language detection function
+            language_info = await detect_language_with_llm(user_query)
+            
+            detected_language = language_info.get("language", "English")
+            language_code = language_info.get("code", "en")
+            confidence = language_info.get("confidence", 0.5)
+            response_guidance = language_info.get("responseGuidance", "")
+            
+            logger.info(f"Language detected: {detected_language} ({language_code}) with confidence {confidence:.2f}")
+            
+            # Create language-aware prompt
+            if detected_language.lower() != "english" and confidence > 0.3:
+                # Add language-specific instructions to the base prompt
+                language_instruction = f"""
+                
+IMPORTANT LANGUAGE INSTRUCTION:
+- The user is communicating in {detected_language} ({language_code})
+- You MUST respond in {detected_language}, not English
+- Response guidance: {response_guidance}
+- Maintain natural conversation flow in {detected_language}
+- If you need to use technical terms, provide them in {detected_language} when possible
+                """
+                
+                enhanced_prompt = base_prompt + language_instruction
+                logger.info(f"Enhanced prompt with {detected_language} language instructions")
+                return enhanced_prompt
+            else:
+                # Low confidence or English detected, use base prompt
+                logger.info("Using base prompt (English or low confidence detection)")
+                return base_prompt
+                
+        except Exception as e:
+            logger.error(f"Language detection failed: {e}")
+            logger.error(traceback.format_exc())
+            return base_prompt
     
     async def execute_tool_async(self, request: ToolExecutionRequest) -> ToolExecutionResponse:
         """
@@ -328,12 +395,12 @@ Be proactive about learning - don't wait for permission!"""
         model = request.model or self._get_default_model("anthropic")
         anthropic_tool = AnthropicTool(model=model)
         
-        # Override system prompt if provided (Anthropic handles system prompts differently)
-        if request.system_prompt:
-            # For Anthropic, we'll prepend the system prompt to the user query
-            enhanced_query = f"System: {request.system_prompt}\n\nUser: {request.user_query}"
-        else:
-            enhanced_query = request.user_query
+        # Apply language detection to create language-aware prompt
+        base_system_prompt = request.system_prompt or self.default_system_prompts["anthropic"]
+        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+        
+        # For Anthropic, we'll prepend the system prompt to the user query
+        enhanced_query = f"System: {system_prompt}\n\nUser: {request.user_query}"
         
         # Get available tools for execution
         tools_to_use = []
@@ -344,15 +411,16 @@ Be proactive about learning - don't wait for permission!"""
     
     def _execute_anthropic_sync(self, request: ToolExecutionRequest) -> str:
         """Synchronously execute using Anthropic Claude"""
+        # NOTE: Sync methods don't support language detection (requires async)
+        # For language-aware responses, use the async streaming methods
+        
         # Use custom model if provided, otherwise use default
         model = request.model or self._get_default_model("anthropic")
         anthropic_tool = AnthropicTool(model=model)
         
-        # Override system prompt if provided
-        if request.system_prompt:
-            enhanced_query = f"System: {request.system_prompt}\n\nUser: {request.user_query}"
-        else:
-            enhanced_query = request.user_query
+        # Use base system prompt without language detection
+        base_system_prompt = request.system_prompt or self.default_system_prompts["anthropic"]
+        enhanced_query = f"System: {base_system_prompt}\n\nUser: {request.user_query}"
         
         # Get available tools for execution
         tools_to_use = []
@@ -367,8 +435,9 @@ Be proactive about learning - don't wait for permission!"""
         model = request.model or self._get_default_model("openai")
         openai_tool = OpenAIToolWithCustomPrompt(model=model)
         
-        # Set custom system prompt if provided
-        system_prompt = request.system_prompt or self.default_system_prompts["openai"]
+        # Apply language detection to create language-aware prompt
+        base_system_prompt = request.system_prompt or self.default_system_prompts["openai"]
+        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
         
         # Get available tools for execution
         tools_to_use = []
@@ -384,11 +453,14 @@ Be proactive about learning - don't wait for permission!"""
     
     def _execute_openai_sync(self, request: ToolExecutionRequest) -> str:
         """Synchronously execute using OpenAI with custom system prompt"""
+        # NOTE: Sync methods don't support language detection (requires async)
+        # For language-aware responses, use the async streaming methods
+        
         # Use custom model if provided, otherwise use default
         model = request.model or self._get_default_model("openai")
         openai_tool = OpenAIToolWithCustomPrompt(model=model)
         
-        # Set custom system prompt if provided
+        # Use base system prompt without language detection
         system_prompt = request.system_prompt or self.default_system_prompts["openai"]
         
         # Get available tools for execution
@@ -452,7 +524,7 @@ Be proactive about learning - don't wait for permission!"""
         
                     # Set custom system prompt if provided, otherwise use appropriate default
             if request.system_prompt:
-                system_prompt = request.system_prompt
+                base_system_prompt = request.system_prompt
                 # If learning tools are available, append learning instructions to custom prompt
                 if has_learning_tools:
                     learning_instructions = """
@@ -488,18 +560,21 @@ Example: User says "Our company has 50 employees" → IMMEDIATELY call search_le
 Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
 
 BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
-                    system_prompt += learning_instructions
+                    base_system_prompt += learning_instructions
                     
                     # Force tool usage for learning content
                     request.force_tools = True
             else:
                 # Use learning-aware prompt if learning tools are available
                 if has_learning_tools:
-                    system_prompt = self.default_system_prompts["anthropic_with_learning"]
+                    base_system_prompt = self.default_system_prompts["anthropic_with_learning"]
                 elif tools_to_use:
-                    system_prompt = self.default_system_prompts["anthropic_with_tools"]
+                    base_system_prompt = self.default_system_prompts["anthropic_with_tools"]
                 else:
-                    system_prompt = self.default_system_prompts["anthropic"]
+                    base_system_prompt = self.default_system_prompts["anthropic"]
+            
+            # Apply language detection to create language-aware prompt
+            system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
         
         try:
             # Use the new streaming method from AnthropicTool with system prompt and tool config
@@ -570,7 +645,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
         
         # Set custom system prompt if provided, otherwise use appropriate default
         if request.system_prompt:
-            system_prompt = request.system_prompt
+            base_system_prompt = request.system_prompt
             # If learning tools are available, append learning instructions to custom prompt
             if has_learning_tools:
                 learning_instructions = """
@@ -606,18 +681,21 @@ Example: User says "Our company has 50 employees" → IMMEDIATELY call search_le
 Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
 
 BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
-                system_prompt += learning_instructions
+                base_system_prompt += learning_instructions
                 
                 # Force tool usage for learning content
                 request.force_tools = True
         else:
             # Use learning-aware prompt if learning tools are available
             if has_learning_tools:
-                system_prompt = self.default_system_prompts["openai_with_learning"]
+                base_system_prompt = self.default_system_prompts["openai_with_learning"]
             elif tools_to_use:
-                system_prompt = self.default_system_prompts["openai_with_tools"]
+                base_system_prompt = self.default_system_prompts["openai_with_tools"]
             else:
-                system_prompt = self.default_system_prompts["openai"]
+                base_system_prompt = self.default_system_prompts["openai"]
+        
+        # Apply language detection to create language-aware prompt
+        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
         
         try:
             # Use the new streaming method from OpenAITool with system prompt and tool config
