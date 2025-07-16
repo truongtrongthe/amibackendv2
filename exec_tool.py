@@ -7,6 +7,7 @@ import os
 import json
 import traceback
 import logging
+import asyncio
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from datetime import datetime
 from dataclasses import dataclass
@@ -47,6 +48,23 @@ class ToolExecutionRequest:
     conversation_history: Optional[List[Dict[str, Any]]] = None  # Previous messages
     max_history_messages: Optional[int] = 25  # Maximum number of history messages to include
     max_history_tokens: Optional[int] = 6000  # Maximum token count for history
+    # NEW: Cursor-style request handling
+    enable_intent_classification: Optional[bool] = True  # Enable intent analysis
+    enable_request_analysis: Optional[bool] = True  # Enable request analysis
+    cursor_mode: Optional[bool] = False  # Enable Cursor-style progressive enhancement
+
+
+@dataclass
+class RequestAnalysis:
+    """Analysis of user request for Cursor-style handling"""
+    intent: str  # 'learning', 'problem_solving', 'general_chat', 'task_execution'
+    confidence: float  # 0.0-1.0 confidence score
+    complexity: str  # 'low', 'medium', 'high'
+    suggested_tools: List[str]  # Recommended tools for this request
+    requires_code: bool  # Whether code generation/execution is likely needed
+    domain: Optional[str] = None  # Domain/category of the request
+    reasoning: Optional[str] = None  # Why this classification was made
+    metadata: Optional[Dict[str, Any]] = None  # Additional analysis data
 
 
 @dataclass
@@ -59,6 +77,9 @@ class ToolExecutionResponse:
     execution_time: float
     error: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    # NEW: Cursor-style analysis data
+    request_analysis: Optional[RequestAnalysis] = None
+    tool_orchestration_plan: Optional[Dict[str, Any]] = None
 
 
 class ExecutiveTool:
@@ -163,6 +184,143 @@ Be proactive about learning - don't wait for permission!"""
             logger.error(f"Failed to initialize learning tools factory: {e}")
         
         return tools
+    
+    async def _analyze_request_intent(self, user_query: str, conversation_history: Optional[List[Dict[str, Any]]] = None) -> RequestAnalysis:
+        """
+        Analyze user request to determine intent and suggest appropriate tools
+        
+        Args:
+            user_query: The user's input query
+            conversation_history: Previous conversation messages for context
+            
+        Returns:
+            RequestAnalysis with intent classification and tool suggestions
+        """
+        
+        # Create a lightweight LLM request for intent analysis
+        analysis_prompt = f"""
+        Analyze the following user message and classify its intent. Consider the conversation history if provided.
+        
+        User Message: "{user_query}"
+        
+        Conversation History: {conversation_history[-3:] if conversation_history else "None"}
+        
+        Classify the intent as one of:
+        1. "learning" - User is teaching, sharing knowledge, or providing information
+        2. "problem_solving" - User needs help solving a specific problem or issue
+        3. "general_chat" - General conversation, questions, or casual interaction
+        4. "task_execution" - User wants to perform a specific task or get something done
+        
+        Also determine:
+        - Complexity: low/medium/high
+        - Suggested tools: which tools would be most helpful
+        - Requires code: whether code generation/execution is likely needed
+        - Domain: the subject area or category
+        
+        Respond in JSON format:
+        {{
+            "intent": "learning|problem_solving|general_chat|task_execution",
+            "confidence": 0.85,
+            "complexity": "low|medium|high",
+            "suggested_tools": ["search", "context", "learning"],
+            "requires_code": false,
+            "domain": "technology|business|general|education|etc",
+            "reasoning": "Brief explanation of the classification"
+        }}
+        """
+        
+        try:
+            # Use a lightweight model for quick analysis
+            from anthropic_tool import AnthropicTool
+            analyzer = AnthropicTool(model="claude-3-5-haiku-20241022")  # Faster model for analysis
+            
+            # Get the analysis
+            analysis_response = analyzer.process_query(analysis_prompt)
+            
+            # Parse JSON response
+            import json
+            analysis_data = json.loads(analysis_response)
+            
+            return RequestAnalysis(
+                intent=analysis_data.get("intent", "general_chat"),
+                confidence=analysis_data.get("confidence", 0.5),
+                complexity=analysis_data.get("complexity", "medium"),
+                suggested_tools=analysis_data.get("suggested_tools", ["search"]),
+                requires_code=analysis_data.get("requires_code", False),
+                domain=analysis_data.get("domain"),
+                reasoning=analysis_data.get("reasoning"),
+                metadata=analysis_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Intent analysis failed: {e}")
+            # Return default analysis on failure
+            return RequestAnalysis(
+                intent="general_chat",
+                confidence=0.5,
+                complexity="medium",
+                suggested_tools=["search"],
+                requires_code=False,
+                reasoning="Analysis failed, using defaults"
+            )
+    
+    def _create_tool_orchestration_plan(self, request: ToolExecutionRequest, analysis: RequestAnalysis) -> Dict[str, Any]:
+        """
+        Create a tool orchestration plan based on request analysis
+        
+        Args:
+            request: The tool execution request
+            analysis: The request analysis results
+            
+        Returns:
+            Tool orchestration plan
+        """
+        
+        plan = {
+            "strategy": "adaptive",
+            "primary_tools": [],
+            "secondary_tools": [],
+            "tool_sequence": "parallel",  # or "sequential"
+            "force_tools": False,
+            "reasoning": ""
+        }
+        
+        # Intent-based tool selection
+        if analysis.intent == "learning":
+            plan["primary_tools"] = ["search_learning_context", "analyze_learning_opportunity"]
+            plan["secondary_tools"] = ["context", "search"]
+            plan["force_tools"] = True  # Learning requires tool usage
+            plan["reasoning"] = "Learning intent detected - prioritizing learning tools"
+            
+        elif analysis.intent == "problem_solving":
+            plan["primary_tools"] = ["search", "context"]
+            plan["secondary_tools"] = ["learning_search"] if analysis.complexity == "high" else []
+            plan["force_tools"] = True if analysis.complexity == "high" else False
+            plan["reasoning"] = "Problem solving - search and context tools prioritized"
+            
+        elif analysis.intent == "task_execution":
+            plan["primary_tools"] = ["context", "search"]
+            plan["secondary_tools"] = []
+            plan["tool_sequence"] = "sequential"
+            plan["reasoning"] = "Task execution - context first, then search if needed"
+            
+        else:  # general_chat
+            plan["primary_tools"] = ["search"] if analysis.complexity != "low" else []
+            plan["secondary_tools"] = ["context"]
+            plan["force_tools"] = False
+            plan["reasoning"] = "General conversation - minimal tool usage"
+        
+        # Override with user's explicit tool preferences
+        if request.tools_whitelist:
+            plan["primary_tools"] = [t for t in plan["primary_tools"] if t in request.tools_whitelist]
+            plan["secondary_tools"] = [t for t in plan["secondary_tools"] if t in request.tools_whitelist]
+            plan["reasoning"] += f" (Limited to whitelist: {request.tools_whitelist})"
+        
+        if request.force_tools:
+            plan["force_tools"] = True
+            plan["reasoning"] += " (Force tools enabled by user)"
+        
+        return plan
     
     async def _detect_language_and_create_prompt(self, user_query: str, base_prompt: str) -> str:
         """
@@ -481,11 +639,81 @@ IMPORTANT LANGUAGE INSTRUCTION:
         model = request.model or self._get_default_model("anthropic")
         anthropic_tool = AnthropicTool(model=model)
         
+        # NEW: Cursor-style request analysis
+        request_analysis = None
+        orchestration_plan = None
+        
+        if request.cursor_mode and request.enable_intent_classification:
+            # Yield initial analysis status
+            yield {
+                "type": "analysis_start",
+                "content": "🎯 Analyzing request intent...",
+                "provider": request.llm_provider,
+                "status": "analyzing"
+            }
+            
+            # Perform intent analysis
+            request_analysis = await self._analyze_request_intent(
+                request.user_query, 
+                request.conversation_history
+            )
+            
+            # Create orchestration plan
+            orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
+            
+            # Yield analysis results
+            yield {
+                "type": "analysis_complete",
+                "content": f"📊 Intent: {request_analysis.intent} (confidence: {request_analysis.confidence:.2f})",
+                "provider": request.llm_provider,
+                "analysis": {
+                    "intent": request_analysis.intent,
+                    "confidence": request_analysis.confidence,
+                    "complexity": request_analysis.complexity,
+                    "suggested_tools": request_analysis.suggested_tools,
+                    "reasoning": request_analysis.reasoning
+                },
+                "orchestration_plan": orchestration_plan
+            }
+            
+            # Brief pause for user to see analysis
+            import asyncio
+            await asyncio.sleep(0.5)
+            
+            # NEW: Generate Cursor-style thoughts
+            async for thought in self._generate_cursor_thoughts(request, request_analysis, orchestration_plan):
+                yield thought
+        
         # Get available tools for execution based on configuration
         tools_to_use = []
         has_learning_tools = False
         
         if request.enable_tools:
+            # If we have an orchestration plan, use it to guide tool selection
+            if orchestration_plan:
+                primary_tools = orchestration_plan.get("primary_tools", [])
+                secondary_tools = orchestration_plan.get("secondary_tools", [])
+                
+                # Override force_tools based on plan
+                if orchestration_plan.get("force_tools"):
+                    request.force_tools = True
+                
+                # Create whitelist based on orchestration plan
+                orchestrated_tools = primary_tools + secondary_tools
+                if orchestrated_tools:
+                    # Combine with user whitelist if exists
+                    if request.tools_whitelist:
+                        orchestrated_tools = [t for t in orchestrated_tools if t in request.tools_whitelist]
+                    request.tools_whitelist = orchestrated_tools
+                
+                if request.cursor_mode:
+                    yield {
+                        "type": "tool_orchestration",
+                        "content": f"🔧 Tool plan: {orchestration_plan['reasoning']}",
+                        "provider": request.llm_provider,
+                        "tools_planned": orchestrated_tools
+                    }
+        
             # Add search tool if available and whitelisted
             if "search" in self.available_tools:
                 if request.tools_whitelist is None or "search" in request.tools_whitelist:
@@ -520,14 +748,20 @@ IMPORTANT LANGUAGE INSTRUCTION:
                     # Add all learning tools to available tools
                     tools_to_use.extend(learning_tools)
                     has_learning_tools = True
-                    print(f"DEBUG: Added {len(learning_tools)} learning tools")
+                    if request.cursor_mode:
+                        yield {
+                            "type": "tools_loaded",
+                            "content": f"📚 Added {len(learning_tools)} learning tools",
+                            "provider": request.llm_provider,
+                            "tools_count": len(learning_tools)
+                        }
         
-                    # Set custom system prompt if provided, otherwise use appropriate default
-            if request.system_prompt:
-                base_system_prompt = request.system_prompt
-                # If learning tools are available, append learning instructions to custom prompt
-                if has_learning_tools:
-                    learning_instructions = """
+        # Set custom system prompt if provided, otherwise use appropriate default
+        if request.system_prompt:
+            base_system_prompt = request.system_prompt
+            # If learning tools are available, append learning instructions to custom prompt
+            if has_learning_tools:
+                learning_instructions = """
 
 CRITICAL LEARNING CAPABILITY: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
 
@@ -560,21 +794,27 @@ Example: User says "Our company has 50 employees" → IMMEDIATELY call search_le
 Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
 
 BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
-                    base_system_prompt += learning_instructions
-                    
-                    # Force tool usage for learning content
-                    request.force_tools = True
+                base_system_prompt += learning_instructions
+                
+                # Force tool usage for learning content
+                request.force_tools = True
+        else:
+            # Use learning-aware prompt if learning tools are available
+            if has_learning_tools:
+                base_system_prompt = self.default_system_prompts["anthropic_with_learning"]
+            elif tools_to_use:
+                base_system_prompt = self.default_system_prompts["anthropic_with_tools"]
             else:
-                # Use learning-aware prompt if learning tools are available
-                if has_learning_tools:
-                    base_system_prompt = self.default_system_prompts["anthropic_with_learning"]
-                elif tools_to_use:
-                    base_system_prompt = self.default_system_prompts["anthropic_with_tools"]
-                else:
-                    base_system_prompt = self.default_system_prompts["anthropic"]
-            
-            # Apply language detection to create language-aware prompt
-            system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+                base_system_prompt = self.default_system_prompts["anthropic"]
+        
+        # Apply language detection to create language-aware prompt
+        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+        
+        # Generate thoughts about response generation if in cursor mode
+        if request.cursor_mode:
+            has_tool_results = bool(tools_to_use)
+            async for thought in self._generate_response_thoughts(request.llm_provider, has_tool_results):
+                yield thought
         
         try:
             # Use the new streaming method from AnthropicTool with system prompt and tool config
@@ -587,6 +827,16 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 max_history_messages=request.max_history_messages,
                 max_history_tokens=request.max_history_tokens
             ):
+                # Enhance chunk with analysis data if available
+                if request.cursor_mode and request_analysis:
+                    chunk["request_analysis"] = {
+                        "intent": request_analysis.intent,
+                        "confidence": request_analysis.confidence,
+                        "complexity": request_analysis.complexity
+                    }
+                    if orchestration_plan:
+                        chunk["orchestration_plan"] = orchestration_plan
+                
                 yield chunk
             
         except Exception as e:
@@ -602,11 +852,81 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
         model = request.model or self._get_default_model("openai")
         openai_tool = OpenAITool(model=model)
         
-                # Get available tools for execution based on configuration
+        # NEW: Cursor-style request analysis
+        request_analysis = None
+        orchestration_plan = None
+        
+        if request.cursor_mode and request.enable_intent_classification:
+            # Yield initial analysis status
+            yield {
+                "type": "analysis_start",
+                "content": "🎯 Analyzing request intent...",
+                "provider": request.llm_provider,
+                "status": "analyzing"
+            }
+            
+            # Perform intent analysis
+            request_analysis = await self._analyze_request_intent(
+                request.user_query, 
+                request.conversation_history
+            )
+            
+            # Create orchestration plan
+            orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
+            
+            # Yield analysis results
+            yield {
+                "type": "analysis_complete",
+                "content": f"📊 Intent: {request_analysis.intent} (confidence: {request_analysis.confidence:.2f})",
+                "provider": request.llm_provider,
+                "analysis": {
+                    "intent": request_analysis.intent,
+                    "confidence": request_analysis.confidence,
+                    "complexity": request_analysis.complexity,
+                    "suggested_tools": request_analysis.suggested_tools,
+                    "reasoning": request_analysis.reasoning
+                },
+                "orchestration_plan": orchestration_plan
+            }
+            
+            # Brief pause for user to see analysis
+            import asyncio
+            await asyncio.sleep(0.5)
+            
+            # NEW: Generate Cursor-style thoughts
+            async for thought in self._generate_cursor_thoughts(request, request_analysis, orchestration_plan):
+                yield thought
+        
+        # Get available tools for execution based on configuration
         tools_to_use = []
         has_learning_tools = False
         
         if request.enable_tools:
+            # If we have an orchestration plan, use it to guide tool selection
+            if orchestration_plan:
+                primary_tools = orchestration_plan.get("primary_tools", [])
+                secondary_tools = orchestration_plan.get("secondary_tools", [])
+                
+                # Override force_tools based on plan
+                if orchestration_plan.get("force_tools"):
+                    request.force_tools = True
+                
+                # Create whitelist based on orchestration plan
+                orchestrated_tools = primary_tools + secondary_tools
+                if orchestrated_tools:
+                    # Combine with user whitelist if exists
+                    if request.tools_whitelist:
+                        orchestrated_tools = [t for t in orchestrated_tools if t in request.tools_whitelist]
+                    request.tools_whitelist = orchestrated_tools
+                
+                if request.cursor_mode:
+                    yield {
+                        "type": "tool_orchestration",
+                        "content": f"🔧 Tool plan: {orchestration_plan['reasoning']}",
+                        "provider": request.llm_provider,
+                        "tools_planned": orchestrated_tools
+                    }
+            
             # Add search tool if available and whitelisted
             if "search" in self.available_tools:
                 if request.tools_whitelist is None or "search" in request.tools_whitelist:
@@ -641,7 +961,13 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                     # Add all learning tools to available tools
                     tools_to_use.extend(learning_tools)
                     has_learning_tools = True
-                    print(f"DEBUG: Added {len(learning_tools)} learning tools")
+                    if request.cursor_mode:
+                        yield {
+                            "type": "tools_loaded",
+                            "content": f"📚 Added {len(learning_tools)} learning tools",
+                            "provider": request.llm_provider,
+                            "tools_count": len(learning_tools)
+                        }
         
         # Set custom system prompt if provided, otherwise use appropriate default
         if request.system_prompt:
@@ -697,6 +1023,12 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
         # Apply language detection to create language-aware prompt
         system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
         
+        # Generate thoughts about response generation if in cursor mode
+        if request.cursor_mode:
+            has_tool_results = bool(tools_to_use)
+            async for thought in self._generate_response_thoughts(request.llm_provider, has_tool_results):
+                yield thought
+        
         try:
             # Use the new streaming method from OpenAITool with system prompt and tool config
             async for chunk in openai_tool.process_with_tools_stream(
@@ -708,6 +1040,16 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 max_history_messages=request.max_history_messages,
                 max_history_tokens=request.max_history_tokens
             ):
+                # Enhance chunk with analysis data if available
+                if request.cursor_mode and request_analysis:
+                    chunk["request_analysis"] = {
+                        "intent": request_analysis.intent,
+                        "confidence": request_analysis.confidence,
+                        "complexity": request_analysis.complexity
+                    }
+                    if orchestration_plan:
+                        chunk["orchestration_plan"] = orchestration_plan
+                
                 yield chunk
             
         except Exception as e:
@@ -716,6 +1058,217 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 "content": f"OpenAI execution error: {str(e)}",
                 "complete": True
             }
+    
+    async def _generate_cursor_thoughts(self, request: ToolExecutionRequest, analysis: RequestAnalysis, orchestration_plan: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Generate Cursor-style "Thoughts" messages showing step-by-step reasoning
+        
+        Args:
+            request: The tool execution request
+            analysis: The request analysis results
+            orchestration_plan: The tool orchestration plan
+            
+        Yields:
+            Dict containing thought messages
+        """
+        
+        # Initial thought about understanding the request
+        yield {
+            "type": "thought",
+            "content": f"💭 I need to understand this request: \"{request.user_query[:80]}{'...' if len(request.user_query) > 80 else ''}\"",
+            "provider": request.llm_provider,
+            "thought_type": "understanding",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        await asyncio.sleep(0.3)  # Brief pause for natural feeling
+        
+        # Thought about intent analysis
+        yield {
+            "type": "thought",
+            "content": f"🔍 Analyzing the intent... This looks like a **{analysis.intent}** request with {analysis.complexity} complexity. I'm {analysis.confidence:.0%} confident about this classification.",
+            "provider": request.llm_provider,
+            "thought_type": "analysis",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        await asyncio.sleep(0.4)
+        
+        # Thought about tool selection
+        primary_tools = orchestration_plan.get("primary_tools", [])
+        secondary_tools = orchestration_plan.get("secondary_tools", [])
+        
+        if primary_tools:
+            tools_text = ", ".join([f"**{tool}**" for tool in primary_tools])
+            yield {
+                "type": "thought",
+                "content": f"🛠️ I'll use these tools to help: {tools_text}. This should give me the information I need to provide a comprehensive response.",
+                "provider": request.llm_provider,
+                "thought_type": "tool_selection",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            await asyncio.sleep(0.4)
+        
+        # Thought about execution strategy
+        if analysis.intent == "learning":
+            yield {
+                "type": "thought",
+                "content": "📚 Since this is a learning request, I'll first check existing knowledge to avoid duplicates, then analyze if this should be learned.",
+                "provider": request.llm_provider,
+                "thought_type": "strategy",
+                "timestamp": datetime.now().isoformat()
+            }
+        elif analysis.intent == "problem_solving":
+            yield {
+                "type": "thought",
+                "content": "🔧 For this problem-solving request, I'll search for current information and check internal context to provide the most relevant solution.",
+                "provider": request.llm_provider,
+                "thought_type": "strategy",
+                "timestamp": datetime.now().isoformat()
+            }
+        elif analysis.intent == "task_execution":
+            yield {
+                "type": "thought",
+                "content": "⚡ This is a task execution request. I'll gather context first, then search for any additional information needed to complete the task effectively.",
+                "provider": request.llm_provider,
+                "thought_type": "strategy",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            yield {
+                "type": "thought",
+                "content": "💬 This seems like a general conversation. I'll search for relevant information if needed and provide a helpful response.",
+                "provider": request.llm_provider,
+                "thought_type": "strategy",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        await asyncio.sleep(0.5)
+        
+        # Final thought before execution
+        yield {
+            "type": "thought",
+            "content": "🚀 Now I'll execute my plan and provide you with a comprehensive response...",
+            "provider": request.llm_provider,
+            "thought_type": "execution",
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    async def _generate_tool_execution_thoughts(self, tool_name: str, tool_input: Dict[str, Any], provider: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Generate thoughts about tool execution in progress
+        
+        Args:
+            tool_name: Name of the tool being executed
+            tool_input: Input parameters for the tool
+            provider: LLM provider name
+            
+        Yields:
+            Dict containing tool execution thoughts
+        """
+        
+        if tool_name == "search_google":
+            query = tool_input.get("query", "")
+            yield {
+                "type": "thought",
+                "content": f"🔍 Searching for: \"{query}\" - Let me find the most current information...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "get_context":
+            query = tool_input.get("query", "")
+            yield {
+                "type": "thought",
+                "content": f"📋 Getting context for: \"{query}\" - Checking internal knowledge and user information...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "search_learning_context":
+            query = tool_input.get("query", "")
+            yield {
+                "type": "thought",
+                "content": f"📚 Searching learning context for: \"{query}\" - Checking if I already know about this...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "analyze_learning_opportunity":
+            yield {
+                "type": "thought",
+                "content": "🧠 Analyzing learning opportunity - Evaluating if this information should be saved for future use...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "request_learning_decision":
+            yield {
+                "type": "thought",
+                "content": "🤝 Creating learning decision - I need human input to decide whether to save this knowledge...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        else:
+            yield {
+                "type": "thought",
+                "content": f"⚙️ Executing {tool_name} - Processing your request...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    async def _generate_response_thoughts(self, provider: str, has_tool_results: bool = False) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Generate thoughts about response generation
+        
+        Args:
+            provider: LLM provider name
+            has_tool_results: Whether tool results are available
+            
+        Yields:
+            Dict containing response generation thoughts
+        """
+        
+        if has_tool_results:
+            yield {
+                "type": "thought",
+                "content": "✅ Great! I have the information I need. Now I'll synthesize everything into a comprehensive response...",
+                "provider": provider,
+                "thought_type": "response_generation",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            yield {
+                "type": "thought",
+                "content": "💡 I'll use my existing knowledge to provide a helpful response...",
+                "provider": provider,
+                "thought_type": "response_generation",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        await asyncio.sleep(0.3)
+        
+        yield {
+            "type": "thought",
+            "content": "✍️ Generating response now...",
+            "provider": provider,
+            "thought_type": "response_generation",
+            "timestamp": datetime.now().isoformat()
+        }
     
     def _get_model_name(self, provider: str, custom_model: str = None) -> str:
         """Get the model name for the specified provider"""
@@ -897,7 +1450,11 @@ def create_tool_request(
     tools_whitelist: Optional[List[str]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     max_history_messages: Optional[int] = 25,
-    max_history_tokens: Optional[int] = 6000
+    max_history_tokens: Optional[int] = 6000,
+    # NEW: Cursor-style parameters
+    enable_intent_classification: bool = True,
+    enable_request_analysis: bool = True,
+    cursor_mode: bool = False
 ) -> ToolExecutionRequest:
     """
     Create a tool execution request with the specified parameters
@@ -916,6 +1473,9 @@ def create_tool_request(
         conversation_history: Previous conversation messages
         max_history_messages: Maximum number of history messages to include
         max_history_tokens: Maximum token count for history
+        enable_intent_classification: Enable intent analysis
+        enable_request_analysis: Enable request analysis
+        cursor_mode: Enable Cursor-style progressive enhancement
         
     Returns:
         ToolExecutionRequest object
@@ -933,7 +1493,10 @@ def create_tool_request(
         tools_whitelist=tools_whitelist,
         conversation_history=conversation_history,
         max_history_messages=max_history_messages,
-        max_history_tokens=max_history_tokens
+        max_history_tokens=max_history_tokens,
+        enable_intent_classification=enable_intent_classification,
+        enable_request_analysis=enable_request_analysis,
+        cursor_mode=cursor_mode
     )
 
 
@@ -1026,7 +1589,11 @@ async def execute_tool_stream(
     tools_whitelist: Optional[List[str]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     max_history_messages: Optional[int] = 25,
-    max_history_tokens: Optional[int] = 6000
+    max_history_tokens: Optional[int] = 6000,
+    # NEW: Cursor-style parameters
+    enable_intent_classification: bool = True,
+    enable_request_analysis: bool = True,
+    cursor_mode: bool = False
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream tool execution with specified parameters
@@ -1045,6 +1612,9 @@ async def execute_tool_stream(
         conversation_history: Previous conversation messages
         max_history_messages: Maximum number of history messages to include
         max_history_tokens: Maximum token count for history
+        enable_intent_classification: Enable intent analysis
+        enable_request_analysis: Enable request analysis
+        cursor_mode: Enable Cursor-style progressive enhancement
         
     Yields:
         Dict containing streaming response data
@@ -1063,7 +1633,10 @@ async def execute_tool_stream(
         tools_whitelist=tools_whitelist,
         conversation_history=conversation_history,
         max_history_messages=max_history_messages,
-        max_history_tokens=max_history_tokens
+        max_history_tokens=max_history_tokens,
+        enable_intent_classification=enable_intent_classification,
+        enable_request_analysis=enable_request_analysis,
+        cursor_mode=cursor_mode
     )
     async for chunk in executive_tool.execute_tool_stream(request):
         yield chunk 

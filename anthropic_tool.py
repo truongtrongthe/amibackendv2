@@ -70,6 +70,35 @@ class AnthropicTool:
         except Exception as e:
             return f"Error with Anthropic API: {str(e)}"
     
+    def process_query(self, user_query: str) -> str:
+        """
+        Process user query without tools (for simple queries like intent analysis)
+        
+        Args:
+            user_query: The user's input query
+            
+        Returns:
+            Response from Claude without tool execution
+        """
+        
+        try:
+            # API call to Claude without tools
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": user_query
+                    }
+                ]
+            )
+            
+            return response.content[0].text
+                
+        except Exception as e:
+            return f"Error with Anthropic API: {str(e)}"
+    
     async def process_with_tools_stream(self, user_query: str, available_tools: List[Any], system_prompt: str = None, force_tools: bool = False, conversation_history: List[Dict[str, Any]] = None, max_history_messages: int = 25, max_history_tokens: int = 6000) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Process user query with available tools using Claude with streaming

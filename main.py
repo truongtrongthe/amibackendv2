@@ -390,6 +390,10 @@ class LLMToolExecuteRequest(BaseModel):
     max_history_tokens: Optional[int] = 6000  # Maximum token count for history
     # Backward compatibility for frontend
     enable_search: Optional[bool] = None  # Deprecated: use enable_tools instead
+    # NEW: Cursor-style request handling parameters
+    enable_intent_classification: Optional[bool] = True  # Enable intent analysis
+    enable_request_analysis: Optional[bool] = True  # Enable request analysis  
+    cursor_mode: Optional[bool] = False  # Enable Cursor-style progressive enhancement
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -1324,7 +1328,11 @@ async def generate_llm_tool_sse_stream(request: LLMToolExecuteRequest, thread_lo
                     tools_whitelist=request.tools_whitelist,
                     conversation_history=request.conversation_history,
                     max_history_messages=request.max_history_messages,
-                    max_history_tokens=request.max_history_tokens
+                    max_history_tokens=request.max_history_tokens,
+                    # NEW: Cursor-style parameters
+                    enable_intent_classification=request.enable_intent_classification,
+                    enable_request_analysis=request.enable_request_analysis,
+                    cursor_mode=request.cursor_mode
                 ):
                     response_count += 1
                     
