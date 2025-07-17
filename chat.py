@@ -667,7 +667,7 @@ class CreateChatRequest(BaseModel):
 
 class UpdateChatRequest(BaseModel):
     """Request model for updating a chat"""
-    chat_id: str = Field(..., description="ID of the chat to update")
+    chat_id: Optional[str] = Field(None, description="ID of the chat to update (optional, taken from URL)")
     user_id: Optional[str] = Field(None, description="User ID for access control")
     title: Optional[str] = Field(None, description="New title for the chat")
     status: Optional[ChatStatus] = Field(None, description="New status for the chat")

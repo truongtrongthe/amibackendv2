@@ -153,6 +153,10 @@ async def get_user_chats(
 async def update_chat(chat_id: str, request: UpdateChatRequest):
     """Update a chat"""
     try:
+        # Validate chat_id if provided in request body matches URL path
+        if request.chat_id and request.chat_id != chat_id:
+            raise HTTPException(status_code=400, detail="Chat ID in request body does not match URL path")
+        
         updated_chat = chat_manager.update_chat(
             chat_id=chat_id,
             user_id=request.user_id,
@@ -173,6 +177,18 @@ async def update_chat(chat_id: str, request: UpdateChatRequest):
     except Exception as e:
         logger.error(f"Error updating chat {chat_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.options("/{chat_id}")
+async def chat_options(chat_id: str):
+    """Handle OPTIONS request for chat operations (PUT, DELETE)"""
+    return JSONResponse(
+        content={"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }
+    )
 
 @router.delete("/{chat_id}", response_model=StandardResponse)
 async def delete_chat(chat_id: str, user_id: str = Query(None)):

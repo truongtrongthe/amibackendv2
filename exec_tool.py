@@ -756,12 +756,12 @@ IMPORTANT LANGUAGE INSTRUCTION:
                             "tools_count": len(learning_tools)
                         }
         
-        # Set custom system prompt if provided, otherwise use appropriate default
-        if request.system_prompt:
-            base_system_prompt = request.system_prompt
-            # If learning tools are available, append learning instructions to custom prompt
-            if has_learning_tools:
-                learning_instructions = """
+                    # Set custom system prompt if provided, otherwise use appropriate default
+            if request.system_prompt:
+                base_system_prompt = request.system_prompt
+                # If learning tools are available, append learning instructions to custom prompt
+                if has_learning_tools:
+                    learning_instructions = """
 
 CRITICAL LEARNING CAPABILITY: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
 
@@ -794,21 +794,21 @@ Example: User says "Our company has 50 employees" → IMMEDIATELY call search_le
 Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
 
 BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
-                base_system_prompt += learning_instructions
-                
-                # Force tool usage for learning content
-                request.force_tools = True
-        else:
-            # Use learning-aware prompt if learning tools are available
-            if has_learning_tools:
-                base_system_prompt = self.default_system_prompts["anthropic_with_learning"]
-            elif tools_to_use:
-                base_system_prompt = self.default_system_prompts["anthropic_with_tools"]
+                    base_system_prompt += learning_instructions
+                    
+                    # Force tool usage for learning content
+                    request.force_tools = True
             else:
-                base_system_prompt = self.default_system_prompts["anthropic"]
-        
-        # Apply language detection to create language-aware prompt
-        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+                # Use learning-aware prompt if learning tools are available
+                if has_learning_tools:
+                    base_system_prompt = self.default_system_prompts["anthropic_with_learning"]
+                elif tools_to_use:
+                    base_system_prompt = self.default_system_prompts["anthropic_with_tools"]
+                else:
+                    base_system_prompt = self.default_system_prompts["anthropic"]
+            
+            # Apply language detection to create language-aware prompt
+            system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
         
         # Generate thoughts about response generation if in cursor mode
         if request.cursor_mode:
@@ -897,7 +897,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             async for thought in self._generate_cursor_thoughts(request, request_analysis, orchestration_plan):
                 yield thought
         
-        # Get available tools for execution based on configuration
+                # Get available tools for execution based on configuration
         tools_to_use = []
         has_learning_tools = False
         
@@ -1268,7 +1268,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             "provider": provider,
             "thought_type": "response_generation",
             "timestamp": datetime.now().isoformat()
-        }
+            }
     
     def _get_model_name(self, provider: str, custom_model: str = None) -> str:
         """Get the model name for the specified provider"""
