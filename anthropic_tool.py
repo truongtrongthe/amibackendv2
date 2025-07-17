@@ -468,6 +468,10 @@ class AnthropicTool:
         Execute tools and stream the final response like Cursor does
         """
         try:
+            # Ensure system_prompt is properly initialized
+            if system_prompt is None:
+                system_prompt = "You are a helpful assistant that can search for information and retrieve relevant context when needed."
+            
             # Step 1: Execute all tools (non-streaming but fast)
             tool_results = []
             
@@ -512,9 +516,7 @@ class AnthropicTool:
                 }
             
             # Step 2: Build conversation with tool results and history for Claude
-            # Use default system prompt if none provided
-            if system_prompt is None:
-                system_prompt = "You are a helpful assistant that can search for information and retrieve relevant context when needed."
+            # system_prompt is already initialized in the caller method
             
             messages = []
             
