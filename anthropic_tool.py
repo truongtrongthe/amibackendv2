@@ -417,7 +417,7 @@ class AnthropicTool:
                 
                 learning_analysis_tool = next((tool for tool in available_tools if hasattr(tool, 'analyze_learning_opportunity')), None)
                 if learning_analysis_tool:
-                    learning_analysis_result = learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
+                    learning_analysis_result = await learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
                     tool_results.append(f"Learning Analysis:\n{learning_analysis_result}")
                     
                     # Check if learning decision should be created

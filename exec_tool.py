@@ -29,6 +29,42 @@ except Exception as e:
     LANGUAGE_DETECTION_AVAILABLE = False
 
 
+# Add rate limit handling with exponential backoff
+async def anthropic_api_call_with_retry(api_call_func, max_retries=3, base_delay=1.0):
+    """
+    Wrapper for Anthropic API calls with exponential backoff retry logic
+    
+    Args:
+        api_call_func: Function that makes the API call
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay in seconds for exponential backoff
+        
+    Returns:
+        API response or raises exception after max retries
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return await api_call_func()
+        except Exception as e:
+            # Check if it's a rate limit error
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                if attempt < max_retries:
+                    # Exponential backoff: 1s, 2s, 4s, 8s...
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Rate limit hit, retrying in {delay}s (attempt {attempt + 1}/{max_retries + 1})")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Rate limit exceeded after {max_retries + 1} attempts")
+                    raise
+            else:
+                # For non-rate-limit errors, don't retry
+                raise
+    
+    # Should never reach here
+    raise Exception("Unexpected error in retry logic")
+
+
 @dataclass
 class ToolExecutionRequest:
     """Request model for tool execution"""
@@ -185,13 +221,12 @@ Be proactive about learning - don't wait for permission!"""
         
         return tools
     
-    async def _analyze_request_intent(self, user_query: str, conversation_history: Optional[List[Dict[str, Any]]] = None) -> RequestAnalysis:
+    async def _analyze_request_intent(self, request: ToolExecutionRequest) -> RequestAnalysis:
         """
         Analyze user request to determine intent and suggest appropriate tools
         
         Args:
-            user_query: The user's input query
-            conversation_history: Previous conversation messages for context
+            request: The tool execution request containing LLM provider and model
             
         Returns:
             RequestAnalysis with intent classification and tool suggestions
@@ -201,9 +236,9 @@ Be proactive about learning - don't wait for permission!"""
         analysis_prompt = f"""
         Analyze the following user message and classify its intent. Consider the conversation history if provided.
         
-        User Message: "{user_query}"
+        User Message: "{request.user_query}"
         
-        Conversation History: {conversation_history[-3:] if conversation_history else "None"}
+        Conversation History: {request.conversation_history[-3:] if request.conversation_history else "None"}
         
         Classify the intent as one of:
         1. "learning" - User is teaching, sharing knowledge, or providing information
@@ -230,16 +265,58 @@ Be proactive about learning - don't wait for permission!"""
         """
         
         try:
-            # Use a lightweight model for quick analysis
-            from anthropic_tool import AnthropicTool
-            analyzer = AnthropicTool(model="claude-3-5-haiku-20241022")  # Faster model for analysis
+            # Use the same provider and model as the main request for intent analysis
+            if request.llm_provider.lower() == "anthropic":
+                from anthropic_tool import AnthropicTool
+                analyzer = AnthropicTool(model=request.model or self._get_default_model("anthropic"))
+                async def make_analysis_call():
+                    return await asyncio.to_thread(analyzer.process_query, analysis_prompt)
+                
+                analysis_response = await anthropic_api_call_with_retry(make_analysis_call)
+            else:
+                from openai_tool import OpenAITool
+                analyzer = OpenAITool(model=request.model or self._get_default_model("openai"))
+                # OpenAI doesn't have process_query, so use a simple completion
+                response = analyzer.client.chat.completions.create(
+                    model=analyzer.model,
+                    messages=[
+                        {"role": "system", "content": "You are an intent analyzer. Respond only in JSON format."},
+                        {"role": "user", "content": analysis_prompt}
+                    ],
+                    temperature=0
+                )
+                analysis_response = response.choices[0].message.content
             
-            # Get the analysis
-            analysis_response = analyzer.process_query(analysis_prompt)
-            
-            # Parse JSON response
+            # Parse JSON response with better error handling
             import json
-            analysis_data = json.loads(analysis_response)
+            import re
+            
+            # Try to extract JSON from the response
+            analysis_data = None
+            try:
+                # First try to parse as direct JSON
+                analysis_data = json.loads(analysis_response)
+            except json.JSONDecodeError:
+                # If that fails, try to extract JSON from text response
+                json_match = re.search(r'\{[^}]*\}', analysis_response)
+                if json_match:
+                    try:
+                        analysis_data = json.loads(json_match.group(0))
+                    except json.JSONDecodeError:
+                        pass
+            
+            # If we still don't have valid JSON, create a default response
+            if not analysis_data:
+                logger.warning(f"Could not parse intent analysis response as JSON: {analysis_response[:200]}...")
+                analysis_data = {
+                    "intent": "general_chat",
+                    "confidence": 0.5,
+                    "complexity": "medium",
+                    "suggested_tools": ["search"],
+                    "requires_code": False,
+                    "domain": "general",
+                    "reasoning": "Failed to parse analysis response"
+                }
             
             return RequestAnalysis(
                 intent=analysis_data.get("intent", "general_chat"),
@@ -263,6 +340,133 @@ Be proactive about learning - don't wait for permission!"""
                 requires_code=False,
                 reasoning="Analysis failed, using defaults"
             )
+    
+    async def _analyze_request_and_detect_language_combined(self, request: ToolExecutionRequest, user_query: str, conversation_history: Optional[List[Dict[str, Any]]] = None) -> tuple[RequestAnalysis, str]:
+        """
+        Combined analysis: intent classification and language detection in one API call
+        
+        Args:
+            request: The tool execution request containing LLM provider and model
+            user_query: The user's input query
+            conversation_history: Previous conversation messages for context
+            
+        Returns:
+            Tuple of (RequestAnalysis, detected_language_prompt)
+        """
+        
+        # Create a combined analysis prompt
+        combined_prompt = f"""
+        Please analyze the following user message and provide a comprehensive analysis in JSON format.
+
+        User message: "{user_query}"
+
+        Please provide your analysis in the following JSON structure:
+        {{
+            "intent_analysis": {{
+                "intent": "research|code_development|data_analysis|general_chat|technical_support|creative_writing|learning|problem_solving",
+                "confidence": 0.0-1.0,
+                "complexity": "simple|medium|complex",
+                "suggested_tools": ["search", "context", "code_execution", "learning"],
+                "requires_code": true/false,
+                "domain": "technology|business|education|entertainment|health|other",
+                "reasoning": "Brief explanation of the classification"
+            }},
+            "language_detection": {{
+                "language": "English|Vietnamese|French|Spanish|etc",
+                "code": "en|vi|fr|es|etc",
+                "confidence": 0.0-1.0,
+                "responseGuidance": "How to respond in this language"
+            }}
+        }}
+
+        Guidelines:
+        - Analyze the intent based on what the user is trying to accomplish
+        - Suggest appropriate tools based on the intent
+        - Detect the primary language of the message
+        - Provide confidence scores for both analyses
+        - Be concise but accurate in your analysis
+
+        Respond with valid JSON only.
+        """
+        
+        try:
+            # Use the same provider and model as the main request for combined analysis
+            if request.llm_provider.lower() == "anthropic":
+                from anthropic_tool import AnthropicTool
+                analyzer = AnthropicTool(model=request.model or self._get_default_model("anthropic"))
+                
+                async def make_combined_call():
+                    return await asyncio.to_thread(analyzer.process_query, combined_prompt)
+                
+                combined_response = await anthropic_api_call_with_retry(make_combined_call)
+            else:
+                from openai_tool import OpenAITool
+                analyzer = OpenAITool(model=request.model or self._get_default_model("openai"))
+                combined_response = await asyncio.to_thread(analyzer.generate_response, combined_prompt)
+            
+            # Parse the combined response with better error handling
+            import json
+            import re
+            
+            # Try to extract JSON from the response
+            combined_data = None
+            try:
+                # First try to parse as direct JSON
+                combined_data = json.loads(combined_response)
+            except json.JSONDecodeError:
+                # If that fails, try to extract JSON from text response
+                json_match = re.search(r'\{[^}]*\}', combined_response, re.DOTALL)
+                if json_match:
+                    try:
+                        combined_data = json.loads(json_match.group(0))
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Extract intent analysis data
+            intent_data = combined_data.get("intent_analysis", {}) if combined_data else {}
+            request_analysis = RequestAnalysis(
+                intent=intent_data.get("intent", "general_chat"),
+                confidence=intent_data.get("confidence", 0.5),
+                complexity=intent_data.get("complexity", "medium"),
+                suggested_tools=intent_data.get("suggested_tools", ["search"]),
+                requires_code=intent_data.get("requires_code", False),
+                domain=intent_data.get("domain"),
+                reasoning=intent_data.get("reasoning"),
+                metadata=intent_data
+            )
+            
+            # Extract language detection data
+            language_data = combined_data.get("language_detection", {}) if combined_data else {}
+            detected_language = language_data.get("language", "English")
+            language_code = language_data.get("code", "en")
+            confidence = language_data.get("confidence", 0.5)
+            
+            # Create language-aware prompt
+            base_prompt = "You are a helpful assistant."
+            if confidence > 0.7 and language_code != "en":
+                enhanced_prompt = f"""{base_prompt}
+
+IMPORTANT LANGUAGE INSTRUCTION:
+The user is communicating in {detected_language} ({language_code}). Please respond in the same language.
+Response guidance: {language_data.get("responseGuidance", "Respond naturally in the detected language")}
+"""
+                return request_analysis, enhanced_prompt
+            
+            return request_analysis, base_prompt
+            
+        except Exception as e:
+            logger.error(f"Combined analysis failed: {e}")
+            # Return default values on failure
+            return RequestAnalysis(
+                intent="general_chat",
+                confidence=0.5,
+                complexity="medium",
+                suggested_tools=["search"],
+                requires_code=False,
+                domain="general",
+                reasoning="Combined analysis failed",
+                metadata={}
+            ), "You are a helpful assistant."
     
     def _create_tool_orchestration_plan(self, request: ToolExecutionRequest, analysis: RequestAnalysis) -> Dict[str, Any]:
         """
@@ -322,11 +526,12 @@ Be proactive about learning - don't wait for permission!"""
         
         return plan
     
-    async def _detect_language_and_create_prompt(self, user_query: str, base_prompt: str) -> str:
+    async def _detect_language_and_create_prompt(self, request: ToolExecutionRequest, user_query: str, base_prompt: str) -> str:
         """
         Detect the language of user query and create a language-aware system prompt
         
         Args:
+            request: The tool execution request containing LLM provider and model
             user_query: The user's input query
             base_prompt: The base system prompt to enhance
             
@@ -338,8 +543,70 @@ Be proactive about learning - don't wait for permission!"""
             return base_prompt
         
         try:
-            # Detect language using the lightweight language detection function
-            language_info = await detect_language_with_llm(user_query)
+            # Detect language using the same provider and model as the main request
+            language_detection_prompt = f"""
+            Detect the language of this user message and respond in JSON format:
+
+            User message: "{user_query}"
+
+            Respond with:
+            {{
+                "language": "English|Vietnamese|French|Spanish|etc",
+                "code": "en|vi|fr|es|etc",
+                "confidence": 0.95,
+                "responseGuidance": "Brief instruction for responding in this language"
+            }}
+            """
+            
+            # Use the same provider and model as the main request for language detection
+            if request.llm_provider.lower() == "anthropic":
+                from anthropic_tool import AnthropicTool
+                detector = AnthropicTool(model=request.model or self._get_default_model("anthropic"))
+                async def make_language_call():
+                    return await asyncio.to_thread(detector.process_query, language_detection_prompt)
+                
+                language_response = await anthropic_api_call_with_retry(make_language_call)
+            else:
+                from openai_tool import OpenAITool
+                detector = OpenAITool(model=request.model or self._get_default_model("openai"))
+                # OpenAI doesn't have process_query, so use a simple completion
+                response = detector.client.chat.completions.create(
+                    model=detector.model,
+                    messages=[
+                        {"role": "system", "content": "You are a language detector. Respond only in JSON format."},
+                        {"role": "user", "content": language_detection_prompt}
+                    ],
+                    temperature=0
+                )
+                language_response = response.choices[0].message.content
+            
+            # Parse the response with better error handling
+            import json
+            import re
+            
+            # Try to extract JSON from the response
+            language_info = None
+            try:
+                # First try to parse as direct JSON
+                language_info = json.loads(language_response)
+            except json.JSONDecodeError:
+                # If that fails, try to extract JSON from text response
+                json_match = re.search(r'\{[^}]*\}', language_response)
+                if json_match:
+                    try:
+                        language_info = json.loads(json_match.group(0))
+                    except json.JSONDecodeError:
+                        pass
+            
+            # If we still don't have valid JSON, create a default response
+            if not language_info:
+                logger.warning(f"Could not parse language detection response as JSON: {language_response[:200]}...")
+                language_info = {
+                    "language": "English",
+                    "code": "en",
+                    "confidence": 0.5,
+                    "responseGuidance": ""
+                }
             
             detected_language = language_info.get("language", "English")
             language_code = language_info.get("code", "en")
@@ -348,30 +615,30 @@ Be proactive about learning - don't wait for permission!"""
             
             logger.info(f"Language detected: {detected_language} ({language_code}) with confidence {confidence:.2f}")
             
-            # Create language-aware prompt
-            if detected_language.lower() != "english" and confidence > 0.3:
-                # Add language-specific instructions to the base prompt
-                language_instruction = f"""
-                
+            # Only enhance prompt if confidence is high enough and language is not English
+            if confidence > 0.7 and language_code != "en":
+                enhanced_prompt = f"""{base_prompt}
+
 IMPORTANT LANGUAGE INSTRUCTION:
-- The user is communicating in {detected_language} ({language_code})
-- You MUST respond in {detected_language}, not English
-- Response guidance: {response_guidance}
-- Maintain natural conversation flow in {detected_language}
-- If you need to use technical terms, provide them in {detected_language} when possible
-                """
-                
-                enhanced_prompt = base_prompt + language_instruction
-                logger.info(f"Enhanced prompt with {detected_language} language instructions")
+The user is communicating in {detected_language} ({language_code}). Please respond in the same language.
+
+{response_guidance}
+
+Remember to:
+1. Respond in {detected_language} naturally and fluently
+2. Use appropriate cultural context and expressions
+3. Maintain the same tone and formality level as the user
+4. If you need to clarify something, ask in {detected_language}
+"""
+                logger.info(f"Enhanced prompt with {detected_language} language guidance")
                 return enhanced_prompt
             else:
-                # Low confidence or English detected, use base prompt
                 logger.info("Using base prompt (English or low confidence detection)")
                 return base_prompt
-                
+        
         except Exception as e:
-            logger.error(f"Language detection failed: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Language detection error: {e}")
+            # Return base prompt if language detection fails
             return base_prompt
     
     async def execute_tool_async(self, request: ToolExecutionRequest) -> ToolExecutionResponse:
@@ -555,7 +822,7 @@ IMPORTANT LANGUAGE INSTRUCTION:
         
         # Apply language detection to create language-aware prompt
         base_system_prompt = request.system_prompt or self.default_system_prompts["anthropic"]
-        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+        system_prompt = await self._detect_language_and_create_prompt(request, request.user_query, base_system_prompt)
         
         # For Anthropic, we'll prepend the system prompt to the user query
         enhanced_query = f"System: {system_prompt}\n\nUser: {request.user_query}"
@@ -595,7 +862,7 @@ IMPORTANT LANGUAGE INSTRUCTION:
         
         # Apply language detection to create language-aware prompt
         base_system_prompt = request.system_prompt or self.default_system_prompts["openai"]
-        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+        system_prompt = await self._detect_language_and_create_prompt(request, request.user_query, base_system_prompt)
         
         # Get available tools for execution
         tools_to_use = []
@@ -653,10 +920,7 @@ IMPORTANT LANGUAGE INSTRUCTION:
             }
             
             # Perform intent analysis
-            request_analysis = await self._analyze_request_intent(
-                request.user_query, 
-                request.conversation_history
-            )
+            request_analysis = await self._analyze_request_intent(request)
             
             # Create orchestration plan
             orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
@@ -743,7 +1007,9 @@ IMPORTANT LANGUAGE INSTRUCTION:
                     # Create learning tools once with user context
                     learning_tools = self.available_tools["learning_factory"].create_learning_tools(
                         user_id=request.user_id, 
-                        org_id=request.org_id
+                        org_id=request.org_id,
+                        llm_provider=request.llm_provider,
+                        model=request.model
                     )
                     # Add all learning tools to available tools
                     tools_to_use.extend(learning_tools)
@@ -808,7 +1074,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                     base_system_prompt = self.default_system_prompts["anthropic"]
             
             # Apply language detection to create language-aware prompt
-            system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+            system_prompt = await self._detect_language_and_create_prompt(request, request.user_query, base_system_prompt)
         
         # Generate thoughts about response generation if in cursor mode
         if request.cursor_mode:
@@ -866,10 +1132,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             }
             
             # Perform intent analysis
-            request_analysis = await self._analyze_request_intent(
-                request.user_query, 
-                request.conversation_history
-            )
+            request_analysis = await self._analyze_request_intent(request)
             
             # Create orchestration plan
             orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
@@ -956,7 +1219,9 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                     # Create learning tools once with user context
                     learning_tools = self.available_tools["learning_factory"].create_learning_tools(
                         user_id=request.user_id, 
-                        org_id=request.org_id
+                        org_id=request.org_id,
+                        llm_provider=request.llm_provider,
+                        model=request.model
                     )
                     # Add all learning tools to available tools
                     tools_to_use.extend(learning_tools)
@@ -1021,7 +1286,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 base_system_prompt = self.default_system_prompts["openai"]
         
         # Apply language detection to create language-aware prompt
-        system_prompt = await self._detect_language_and_create_prompt(request.user_query, base_system_prompt)
+        system_prompt = await self._detect_language_and_create_prompt(request, request.user_query, base_system_prompt)
         
         # Generate thoughts about response generation if in cursor mode
         if request.cursor_mode:

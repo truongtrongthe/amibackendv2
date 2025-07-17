@@ -186,12 +186,15 @@ SIMILARITY ANALYSIS:
 class LearningAnalysisTool:
     """Tool for LLM to analyze learning opportunities"""
     
-    def __init__(self, user_id: str = "unknown", org_id: str = "unknown"):
+    def __init__(self, user_id: str = "unknown", org_id: str = "unknown", 
+                 llm_provider: str = "openai", model: str = None):
         self.user_id = user_id
         self.org_id = org_id
         self.name = "learning_analysis"
+        self.llm_provider = llm_provider.lower()
+        self.model = model
     
-    def analyze_learning_opportunity(self, user_message: str, conversation_context: str = "", search_results: str = "") -> str:
+    async def analyze_learning_opportunity(self, user_message: str, conversation_context: str = "", search_results: str = "") -> str:
         """
         LLM calls this to analyze if something should be learned
         
@@ -207,7 +210,7 @@ class LearningAnalysisTool:
             logger.info(f"LearningAnalysisTool: Analyzing message '{user_message[:50]}...'")
             
             # Analyze different aspects
-            teaching_intent = self._detect_teaching_intent(user_message, conversation_context)
+            teaching_intent = await self._detect_teaching_intent(user_message, conversation_context)
             knowledge_gap = self._detect_knowledge_gap(user_message, search_results)
             learning_value = self._assess_learning_value(user_message)
             content_quality = self._assess_content_quality(user_message)
@@ -292,7 +295,7 @@ NOTE: Teaching intent detection is now powered by LLM analysis for better accura
             }
         }
     
-    def _detect_teaching_intent(self, message: str, context: str) -> Dict[str, Any]:
+    async def _detect_teaching_intent(self, message: str, context: str) -> Dict[str, Any]:
         """Detect if user has teaching intent using LLM analysis"""
         try:
             # Use LLM to analyze teaching intent instead of hardcoded patterns
@@ -322,24 +325,66 @@ Respond with ONLY a JSON object in this exact format:
 Categories can include: "teaching", "instruction", "company_info", "task_assignment", "factual_sharing", "procedure", "explanation"
 """
 
-            # Use OpenAI to analyze the message
-            from openai import OpenAI
-            import os
+            # Use the same provider and model as the main request with retry logic
+            if self.llm_provider == "anthropic":
+                from anthropic import Anthropic
+                import os
+                import asyncio
+                
+                client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                
+                # Add retry logic for rate limiting
+                async def make_anthropic_call():
+                    response = client.messages.create(
+                        model=self.model or "claude-3-5-sonnet-20241022",
+                        max_tokens=200,
+                        messages=[
+                            {"role": "user", "content": f"You are an expert at analyzing teaching intent in messages. Always respond with valid JSON only.\n\n{analysis_prompt}"}
+                        ],
+                        temperature=0.1
+                    )
+                    return response.content[0].text.strip()
+                
+                # Apply retry logic for rate limiting
+                async def anthropic_api_call_with_retry(api_call_func, max_retries=3, base_delay=1.0):
+                    for attempt in range(max_retries + 1):
+                        try:
+                            return await api_call_func()
+                        except Exception as e:
+                            if "429" in str(e) or "Too Many Requests" in str(e):
+                                if attempt < max_retries:
+                                    delay = base_delay * (2 ** attempt)
+                                    logger.warning(f"Rate limit hit in learning analysis, retrying in {delay}s (attempt {attempt + 1}/{max_retries + 1})")
+                                    await asyncio.sleep(delay)
+                                    continue
+                                else:
+                                    logger.error(f"Learning analysis rate limit exceeded after {max_retries + 1} attempts")
+                                    raise
+                            else:
+                                raise
+                    raise Exception("Unexpected error in retry logic")
+                
+                # Use await since we're now in an async context
+                result_text = await anthropic_api_call_with_retry(make_anthropic_call)
+                
+            else:
+                from openai import OpenAI
+                import os
+                
+                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                
+                response = client.chat.completions.create(
+                    model=self.model or "gpt-4o-mini",  # Use faster model for analysis
+                    messages=[
+                        {"role": "system", "content": "You are an expert at analyzing teaching intent in messages. Always respond with valid JSON only."},
+                        {"role": "user", "content": analysis_prompt}
+                    ],
+                    temperature=0.1,  # Low temperature for consistent analysis
+                    max_tokens=200
+                )
+                result_text = response.choices[0].message.content.strip()
             
-            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",  # Use faster model for analysis
-                messages=[
-                    {"role": "system", "content": "You are an expert at analyzing teaching intent in messages. Always respond with valid JSON only."},
-                    {"role": "user", "content": analysis_prompt}
-                ],
-                temperature=0.1,  # Low temperature for consistent analysis
-                max_tokens=200
-            )
-            
-            # Parse the LLM response
-            result_text = response.choices[0].message.content.strip()
+            # Parse the LLM response (result_text is already set above)
             
             # Clean up the response to extract JSON
             if "```json" in result_text:
@@ -348,7 +393,31 @@ Categories can include: "teaching", "instruction", "company_info", "task_assignm
                 result_text = result_text.split("```")[1].strip()
             
             import json
-            llm_analysis = json.loads(result_text)
+            import re
+            
+            # Try to extract JSON from the response with better error handling
+            llm_analysis = None
+            try:
+                # First try to parse as direct JSON
+                llm_analysis = json.loads(result_text)
+            except json.JSONDecodeError:
+                # If that fails, try to extract JSON from text response
+                json_match = re.search(r'\{[^}]*\}', result_text)
+                if json_match:
+                    try:
+                        llm_analysis = json.loads(json_match.group(0))
+                    except json.JSONDecodeError:
+                        pass
+            
+            # If we still don't have valid JSON, create a default response
+            if not llm_analysis:
+                logger.warning(f"Could not parse learning analysis response as JSON: {result_text[:200]}...")
+                llm_analysis = {
+                    "has_teaching_intent": False,
+                    "confidence": 0.0,
+                    "categories": [],
+                    "reasoning": "Failed to parse analysis response"
+                }
             
             # Convert LLM analysis to our expected format
             detected = llm_analysis.get("has_teaching_intent", False)
@@ -1032,11 +1101,12 @@ class LearningToolsFactory:
     """Factory for creating and managing learning tools"""
     
     @staticmethod
-    def create_learning_tools(user_id: str = "unknown", org_id: str = "unknown") -> List[Any]:
+    def create_learning_tools(user_id: str = "unknown", org_id: str = "unknown", 
+                            llm_provider: str = "openai", model: str = None) -> List[Any]:
         """Create all learning tools for a user/org"""
         return [
             LearningSearchTool(user_id, org_id),
-            LearningAnalysisTool(user_id, org_id),
+            LearningAnalysisTool(user_id, org_id, llm_provider, model),
             HumanLearningTool(user_id, org_id),
             KnowledgePreviewTool(user_id, org_id),
             KnowledgeSaveTool(user_id, org_id)
