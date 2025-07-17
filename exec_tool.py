@@ -127,7 +127,7 @@ class ExecutiveTool:
         self.default_system_prompts = {
             "anthropic": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
             "openai": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
-            "anthropic_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
+            "anthropic_with_tools": "You are a helpful assistant that can search the web for current information when needed. Provide accurate, concise, and well-structured responses.",
             "openai_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
             "anthropic_with_learning": """You are a helpful assistant with interactive learning capabilities. 
 
@@ -138,7 +138,7 @@ CRITICAL: When users provide information about their company, share knowledge, g
 3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
 
 Available tools:
-- search_google: Search for information when needed
+- web_search: Search the web for current information when needed
 - get_context: Access user/organization context
 - search_learning_context: Search existing knowledge (CALL FOR ALL TEACHING)
 - analyze_learning_opportunity: Analyze if content should be learned (CALL FOR ALL TEACHING)
@@ -165,7 +165,7 @@ CRITICAL: When users provide information about their company, share knowledge, g
 3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
 
 Available tools:
-- search_google: Search for information when needed
+- search_google: Search for information when needed (uses SERPAPI)
 - get_context: Access user/organization context
 - search_learning_context: Search existing knowledge (CALL FOR ALL TEACHING)
 - analyze_learning_opportunity: Analyze if content should be learned (CALL FOR ALL TEACHING)
@@ -195,13 +195,13 @@ Be proactive about learning - don't wait for permission!"""
         """Initialize available tools"""
         tools = {}
         
-        # Initialize search tool
+        # Initialize search tools factory (creates appropriate search tool based on LLM provider)
         try:
-            from search_tool import SearchTool
-            tools["search"] = SearchTool()
-            logger.info("Search tool initialized successfully")
+            from search_tool import create_search_tool
+            tools["search_factory"] = create_search_tool
+            logger.info("Search tools factory initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize search tool: {e}")
+            logger.error(f"Failed to initialize search tools factory: {e}")
         
         # Initialize context tool
         try:
@@ -220,6 +220,20 @@ Be proactive about learning - don't wait for permission!"""
             logger.error(f"Failed to initialize learning tools factory: {e}")
         
         return tools
+    
+    def _get_search_tool(self, llm_provider: str, model: str = None) -> Any:
+        """Get the appropriate search tool based on LLM provider"""
+        if "search_factory" in self.available_tools:
+            return self.available_tools["search_factory"](llm_provider, model)
+        else:
+            logger.warning("Search factory not available, falling back to SERPAPI")
+            # Fallback to SERPAPI for compatibility
+            try:
+                from search_tool import SearchTool
+                return SearchTool()
+            except Exception as e:
+                logger.error(f"Failed to create fallback search tool: {e}")
+                return None
     
     async def _analyze_request_intent(self, request: ToolExecutionRequest) -> RequestAnalysis:
         """
@@ -829,10 +843,11 @@ Remember to:
         
         # Get available tools for execution
         tools_to_use = []
-        if "search" in self.available_tools:
-            tools_to_use.append(self.available_tools["search"])
+        search_tool = self._get_search_tool(request.llm_provider, request.model)
+        if search_tool:
+            tools_to_use.append(search_tool)
         
-        return anthropic_tool.process_with_tools(enhanced_query, tools_to_use)
+        return anthropic_tool.process_with_tools(enhanced_query, tools_to_use, enable_web_search=True)
     
     def _execute_anthropic_sync(self, request: ToolExecutionRequest) -> str:
         """Synchronously execute using Anthropic Claude"""
@@ -849,10 +864,11 @@ Remember to:
         
         # Get available tools for execution
         tools_to_use = []
-        if "search" in self.available_tools:
-            tools_to_use.append(self.available_tools["search"])
+        search_tool = self._get_search_tool(request.llm_provider, request.model)
+        if search_tool:
+            tools_to_use.append(search_tool)
         
-        return anthropic_tool.process_with_tools(enhanced_query, tools_to_use)
+        return anthropic_tool.process_with_tools(enhanced_query, tools_to_use, enable_web_search=True)
     
     async def _execute_openai(self, request: ToolExecutionRequest) -> str:
         """Execute using OpenAI with custom system prompt"""
@@ -866,8 +882,9 @@ Remember to:
         
         # Get available tools for execution
         tools_to_use = []
-        if "search" in self.available_tools:
-            tools_to_use.append(self.available_tools["search"])
+        search_tool = self._get_search_tool(request.llm_provider, request.model)
+        if search_tool:
+            tools_to_use.append(search_tool)
         
         return openai_tool.process_with_tools_and_prompt(
             request.user_query, 
@@ -979,9 +996,10 @@ Remember to:
                     }
         
             # Add search tool if available and whitelisted
-            if "search" in self.available_tools:
+            search_tool = self._get_search_tool(request.llm_provider, request.model)
+            if search_tool:
                 if request.tools_whitelist is None or "search" in request.tools_whitelist:
-                    tools_to_use.append(self.available_tools["search"])
+                    tools_to_use.append(search_tool)
             
             # Add context tool if available and whitelisted  
             if "context" in self.available_tools:
@@ -1191,9 +1209,10 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                     }
             
             # Add search tool if available and whitelisted
-            if "search" in self.available_tools:
+            search_tool = self._get_search_tool(request.llm_provider, request.model)
+            if search_tool:
                 if request.tools_whitelist is None or "search" in request.tools_whitelist:
-                    tools_to_use.append(self.available_tools["search"])
+                    tools_to_use.append(search_tool)
             
             # Add context tool if available and whitelisted  
             if "context" in self.available_tools:

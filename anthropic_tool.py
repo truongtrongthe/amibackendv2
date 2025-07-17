@@ -9,21 +9,38 @@ from anthropic import Anthropic
 
 class AnthropicTool:
     def __init__(self, model: str = "claude-3-5-sonnet-20241022"):
-        """Initialize Anthropic client"""
+        """Initialize Anthropic client with native web search support"""
         self.api_key = os.getenv("ANTHROPIC_API_KEY")
         if not self.api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is required")
         
         self.client = Anthropic(api_key=self.api_key)
         self.model = model  # Custom model name (e.g., "claude-3-5-haiku", "claude-3-5-sonnet")
+        
+        # Supported models for native web search
+        self.web_search_supported_models = [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-sonnet-20240620",
+            "claude-3-7-sonnet-20240509",
+            "claude-3-5-haiku-20241022",
+            # Claude Sonnet 4 models
+            "claude-sonnet-4-20250514",
+            "claude-4-sonnet-20250514",
+            "claude-4-opus-20250514"
+        ]
     
-    def process_with_tools(self, user_query: str, available_tools: List[Any]) -> str:
+    def supports_web_search(self) -> bool:
+        """Check if current model supports native web search"""
+        return self.model in self.web_search_supported_models
+    
+    def process_with_tools(self, user_query: str, available_tools: List[Any] = None, enable_web_search: bool = True) -> str:
         """
-        Process user query with available tools using Claude
+        Process user query with available tools using Claude with native web search
         
         Args:
             user_query: The user's input query
-            available_tools: List of available tool instances
+            available_tools: List of available tool instances (non-search tools)
+            enable_web_search: Whether to enable native web search
             
         Returns:
             Response from Claude with tool execution results
@@ -31,28 +48,58 @@ class AnthropicTool:
         
         # Define tools for Claude
         tools = []
-        for tool in available_tools:
+        
+        # Add native web search tool if supported and enabled
+        if enable_web_search and self.supports_web_search():
             tools.append({
-                "name": "search_google",
-                "description": "Search Google for information on any topic",
+                "name": "web_search",
+                "description": "Search the web for current information on any topic",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query to look up"
+                            "description": "The search query to look up current information"
                         }
                     },
                     "required": ["query"]
                 }
             })
+            print(f"✅ Native web search tool available for model: {self.model}")
+        else:
+            print(f"❌ Native web search not available for model: {self.model}")
+        
+        # Add other available tools (context, learning, etc.)
+        if available_tools:
+            for tool in available_tools:
+                if hasattr(tool, 'get_context'):  # Context tool
+                    tools.append({
+                        "name": "get_context", 
+                        "description": "Retrieve relevant context including user profile, system status, organization info, and knowledge base information",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "The topic or question to get context for"
+                                },
+                                "source_types": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Specific context sources to query: user_profile, system_status, organization_info, knowledge_base, recent_activity"
+                                }
+                            },
+                            "required": ["query"]
+                        }
+                    })
+                # Add learning tools and other tool types as needed...
         
         try:
-            # First API call to Claude
+            # API call to Claude with native web search
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=1024,
-                tools=tools,
+                tools=tools if tools else None,
                 messages=[
                     {
                         "role": "user",
@@ -120,8 +167,30 @@ class AnthropicTool:
         if system_prompt is None:
             system_prompt = "You are a helpful assistant that can search for information and retrieve relevant context when needed."
         
-        # Define tools for Claude only if tools are available
+        # Define tools for Claude
         tools = []
+        
+        # Add native web search tool if supported
+        if self.supports_web_search():
+            tools.append({
+                "name": "web_search",
+                "description": "Search the web for current information on any topic",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query to look up current information"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            })
+            print(f"✅ Native web search tool available for model: {self.model}")
+        else:
+            print(f"❌ Native web search not available for model: {self.model}")
+        
+        # Add other available tools if provided
         if available_tools:
             for tool in available_tools:
                 # Check tool type and add appropriate tool definition
@@ -543,7 +612,7 @@ class AnthropicTool:
     
     def _handle_tool_use(self, response: Any, available_tools: List[Any], original_query: str) -> str:
         """
-        Handle tool use requests from Claude
+        Handle tool use requests from Claude with native web search
         
         Args:
             response: Claude's response containing tool use requests
@@ -561,6 +630,12 @@ class AnthropicTool:
                 tool_name = content_block.name
                 tool_input = content_block.input
                 tool_use_id = content_block.id
+                
+                # Native web search is handled automatically by Claude API
+                if tool_name == "web_search":
+                    # For native web search, Claude handles the execution internally
+                    # We just need to continue with the response
+                    continue
                 
                 # Find the appropriate tool and execute it using reflection
                 tool_executed = False
@@ -613,24 +688,42 @@ class AnthropicTool:
                                 "content": result
                             })
         
-        # Send tool results back to Claude
-        try:
-            messages = [
-                {"role": "user", "content": original_query},
-                {"role": "assistant", "content": response.content},
-                {"role": "user", "content": tool_results}
-            ]
-            
-            final_response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                messages=messages
-            )
-            
-            return final_response.content[0].text
-            
-        except Exception as e:
-            return f"Error processing tool results: {str(e)}"
+        # For native web search, Claude handles the entire conversation internally
+        # We just need to return the response content
+        if any(block.type == "tool_use" and block.name == "web_search" for block in response.content):
+            # Claude will handle web search internally and provide the final response
+            text_content = ""
+            for block in response.content:
+                if block.type == "text":
+                    text_content += block.text
+            return text_content or "Web search completed by Claude."
+        
+        # Send tool results back to Claude for other tools
+        if tool_results:
+            try:
+                messages = [
+                    {"role": "user", "content": original_query},
+                    {"role": "assistant", "content": response.content},
+                    {"role": "user", "content": tool_results}
+                ]
+                
+                final_response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1024,
+                    messages=messages
+                )
+                
+                return final_response.content[0].text
+                
+            except Exception as e:
+                return f"Error processing tool results: {str(e)}"
+        
+        # Return original response if no tools were executed
+        text_content = ""
+        for block in response.content:
+            if block.type == "text":
+                text_content += block.text
+        return text_content
     
     async def _handle_tool_use_streaming(self, response: Any, available_tools: List[Any], original_query: str) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -680,6 +773,55 @@ class AnthropicTool:
                             })
                             tool_executed = True
                             break
+                
+                # Handle native web search tool
+                if not tool_executed and tool_name == "web_search":
+                    query = tool_input.get("query", "")
+                    print(f"🔍 Searching the web for: {query}")
+                    
+                    # Use Anthropic's native web search
+                    try:
+                        search_response = self.client.messages.create(
+                            model=self.model,
+                            max_tokens=1024,
+                            tools=[{
+                                "name": "web_search",
+                                "description": "Search the web for current information",
+                                "input_schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query": {"type": "string", "description": "Search query"}
+                                    },
+                                    "required": ["query"]
+                                }
+                            }],
+                            messages=[{
+                                "role": "user",
+                                "content": f"Search for: {query}"
+                            }]
+                        )
+                        
+                        # Extract search results
+                        search_result = ""
+                        for block in search_response.content:
+                            if block.type == "text":
+                                search_result += block.text
+                        
+                        tool_results.append({
+                            "tool_use_id": tool_use_id,
+                            "type": "tool_result",
+                            "content": search_result
+                        })
+                        tool_executed = True
+                        
+                    except Exception as e:
+                        print(f"❌ Native web search error: {e}")
+                        tool_results.append({
+                            "tool_use_id": tool_use_id,
+                            "type": "tool_result",
+                            "content": f"Search error: {str(e)}"
+                        })
+                        tool_executed = True
                 
                 # Legacy hardcoded tool handling for backward compatibility
                 if not tool_executed:
