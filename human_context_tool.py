@@ -271,7 +271,7 @@ class ContextDataRetriever:
             },
             "default": {
                 "name": "User",
-                "role": "analyst",
+                "role": "human",
                 "department": "operations",
                 "interests": ["automation", "data analysis"],
                 "skills": ["Excel", "Python", "SQL"],
@@ -317,10 +317,10 @@ class ContextDataRetriever:
             }
         
         return {
-            "user_interests": ["AI automation", "financial analysis", "process improvement"],
-            "work_patterns": ["data-heavy tasks", "repetitive analysis", "client reporting"],
-            "org_knowledge": ["M&A processes", "compliance requirements", "financial modeling"],
-            "recent_topics": ["due diligence", "valuation models", "risk assessment"]
+            "user_interests": ["AI automation"],
+            "work_patterns": ["repetitive tasks"],
+            "org_knowledge": [""],
+            "recent_topics": ["AI agents for works"]
         }
     
     
@@ -336,7 +336,7 @@ class HumanContextTool:
         self.data_retriever = ContextDataRetriever(db_connection, braingraph_service)
         self.mom_test_engine = MomTestEngine()
     
-    async def get_human_context(self, user_id: str, org_id: str, conversation_history: List = None) -> Dict:
+    async def get_human_context(self, user_id: str, org_id: str, conversation_history: List = None, llm_provider: str = "openai") -> Dict:
         """Get comprehensive human context for Mom Test discovery"""
         
         # Get all context data
@@ -344,8 +344,8 @@ class HumanContextTool:
         user_profile = await self.data_retriever.get_user_profile(user_id)
         braingraph_insights = await self.data_retriever.get_braingraph_context(user_id, org_id)
         
-        # Analyze conversation for additional clues
-        conversation_patterns = self._analyze_conversation_patterns(conversation_history)
+        # Analyze conversation for additional clues using LLM
+        conversation_patterns = await self._analyze_conversation_patterns(conversation_history, llm_provider)
         
         context = {
             "org_profile": org_profile,
@@ -379,13 +379,117 @@ class HumanContextTool:
             "context_summary": self._create_context_summary(context)
         }
     
-    def _analyze_conversation_patterns(self, conversation_history: List) -> Dict:
-        """Analyze conversation history for domain clues"""
+    async def _analyze_conversation_patterns(self, conversation_history: List, llm_provider: str = "openai") -> Dict:
+        """Analyze conversation history using LLM to extract facts and context"""
         
         if not conversation_history:
-            return {"patterns": [], "topics": [], "clues": []}
+            return {
+                "patterns": [], 
+                "topics": [], 
+                "clues": [],
+                "facts_extracted": [],
+                "pain_points": [],
+                "time_estimates": [],
+                "confidence_level": 0.0,
+                "readiness_for_suggestion": False
+            }
         
-        # Extract patterns from conversation
+        # Create conversation analysis prompt
+        conversation_text = "\n".join([
+            f"{msg.get('role', 'user')}: {msg.get('content', '')}" 
+            for msg in conversation_history[-10:]  # Last 10 messages
+        ])
+        
+        analysis_prompt = f"""
+        Analyze the following conversation to extract concrete facts about the user's work and problems.
+        Apply Mom Test principles: focus on past behavior, specific examples, and concrete information.
+        
+        CONVERSATION:
+        {conversation_text}
+        
+        Extract the following information in JSON format:
+        
+        {{
+            "facts_extracted": [
+                "List of concrete facts about their work, role, or tasks",
+                "Specific examples they've mentioned",
+                "Time estimates they've provided"
+            ],
+            "pain_points": [
+                "Specific problems they've mentioned experiencing",
+                "Frustrations or challenges they've described",
+                "Time-consuming tasks they've identified"
+            ],
+            "work_patterns": [
+                "Daily/weekly routines they've described",
+                "Repetitive tasks they've mentioned",
+                "Workflow details they've shared"
+            ],
+            "time_estimates": [
+                "Any time-related information they've provided",
+                "How long tasks take them",
+                "Frequency of activities"
+            ],
+            "industry_clues": [
+                "Industry or domain indicators from their language",
+                "Tools or systems they've mentioned",
+                "Professional context clues"
+            ],
+            "confidence_level": 0.0-1.0,
+            "readiness_for_suggestion": true/false,
+            "reasoning": "Why are we confident/not confident in suggesting AI agents",
+            "missing_information": [
+                "What key information is still needed",
+                "What questions should be asked next"
+            ]
+        }}
+        
+        IMPORTANT: Only mark readiness_for_suggestion as true if you have concrete information about:
+        - Their specific role and daily tasks
+        - Specific time-consuming or repetitive problems
+        - Clear understanding of their workflow
+        - Concrete examples of pain points
+        
+        Be conservative - better to gather more information than suggest prematurely.
+        """
+        
+        try:
+            # Use the appropriate LLM provider
+            if llm_provider.lower() == "anthropic":
+                from anthropic_tool import AnthropicTool
+                analyzer = AnthropicTool()
+                response = await asyncio.to_thread(analyzer.process_query, analysis_prompt)
+            else:
+                from openai_tool import OpenAITool
+                analyzer = OpenAITool()
+                response = await asyncio.to_thread(analyzer.generate_response, analysis_prompt)
+            
+            # Parse JSON response
+            import json
+            import re
+            
+            # Try to extract JSON from response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                analysis_data = json.loads(json_match.group(0))
+                
+                return {
+                    "patterns": analysis_data.get("work_patterns", []),
+                    "topics": analysis_data.get("industry_clues", []),
+                    "clues": analysis_data.get("industry_clues", []),
+                    "facts_extracted": analysis_data.get("facts_extracted", []),
+                    "pain_points": analysis_data.get("pain_points", []),
+                    "time_estimates": analysis_data.get("time_estimates", []),
+                    "confidence_level": analysis_data.get("confidence_level", 0.0),
+                    "readiness_for_suggestion": analysis_data.get("readiness_for_suggestion", False),
+                    "reasoning": analysis_data.get("reasoning", ""),
+                    "missing_information": analysis_data.get("missing_information", [])
+                }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing conversation patterns: {e}")
+        
+        # Fallback to simple pattern matching if LLM analysis fails
         patterns = []
         topics = []
         clues = []
@@ -412,7 +516,14 @@ class HumanContextTool:
         return {
             "patterns": list(set(patterns)),
             "topics": list(set(topics)),
-            "clues": list(set(clues))
+            "clues": list(set(clues)),
+            "facts_extracted": [],
+            "pain_points": [],
+            "time_estimates": [],
+            "confidence_level": 0.2,  # Low confidence with fallback
+            "readiness_for_suggestion": False,
+            "reasoning": "Using fallback analysis due to LLM error",
+            "missing_information": ["More specific information about their work", "Concrete examples of tasks"]
         }
     
     async def _create_conversational_approach(self, context: Dict, questions: List[str], llm_provider: str = "openai") -> str:

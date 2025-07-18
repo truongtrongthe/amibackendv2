@@ -18,6 +18,7 @@ import traceback
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from uuid import UUID
+import re
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
@@ -28,7 +29,7 @@ from chat import (
     create_chat_with_first_message, get_chat_statistics,
     # Import all Pydantic models
     CreateChatRequest, UpdateChatRequest, CreateMessageRequest, UpdateMessageRequest,
-    UpdateMessageMetadataRequest, CreateChatWithMessageRequest, GetChatsRequest, GetMessagesRequest,
+    UpdateMessageMetadataRequest, PostThoughtsRequest, CreateChatWithMessageRequest, GetChatsRequest, GetMessagesRequest,
     ChatResponse, MessageResponse, ChatWithMessagesResponse, ChatListResponse,
     MessageListResponse, ChatStatsResponse, CreateChatWithMessageResponse,
     StandardResponse, ChatRole, ChatStatus, MessageType, ChatType
@@ -41,6 +42,27 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 # Initialize managers
 chat_manager = ChatManager()
 message_manager = MessageManager()
+
+# UUID validation function
+def validate_uuid(uuid_string: str, field_name: str = "ID") -> None:
+    """Validate UUID format and provide helpful error messages"""
+    if not uuid_string:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    
+    # Check if it's a valid UUID format
+    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if not re.match(uuid_pattern, uuid_string.lower()):
+        if uuid_string.startswith('user_'):
+            user_id = uuid_string
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid {field_name}: '{uuid_string}' appears to be a user ID, not a message ID. Please use a valid message UUID. To find message IDs for this user, call: GET /api/chats/users/{user_id}/recent-messages"
+            )
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid {field_name} format: '{uuid_string}'. Expected UUID format (e.g., 123e4567-e89b-12d3-a456-426614174000)"
+            )
 
 # Dependency for error handling
 async def handle_exceptions(func):
@@ -178,17 +200,7 @@ async def update_chat(chat_id: str, request: UpdateChatRequest):
         logger.error(f"Error updating chat {chat_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.options("/{chat_id}")
-async def chat_options(chat_id: str):
-    """Handle OPTIONS request for chat operations (PUT, DELETE)"""
-    return JSONResponse(
-        content={"message": "OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-    )
+# OPTIONS requests are handled automatically by CORS middleware in main.py
 
 @router.delete("/{chat_id}", response_model=StandardResponse)
 async def delete_chat(chat_id: str, user_id: str = Query(None)):
@@ -275,10 +287,33 @@ async def get_chat_messages(
         logger.error(f"Error getting messages for chat {chat_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.options("/messages/{message_id}")
+async def message_options(message_id: str):
+    """Handle OPTIONS request for message operations - no UUID validation needed
+    
+    This must come BEFORE the GET handler to ensure OPTIONS requests 
+    don't trigger UUID validation from the GET endpoint.
+    """
+    logger.info(f"OPTIONS request received for message ID: {message_id}")
+    return JSONResponse(
+        content={"message": "OK"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+    )
+
 @router.get("/messages/{message_id}", response_model=StandardResponse)
 async def get_message(message_id: str):
     """Get a specific message by ID"""
     try:
+        # Validate message ID format
+        validate_uuid(message_id, "Message ID")
+        
         message = message_manager.get_message(message_id)
         
         if message:
@@ -290,6 +325,9 @@ async def get_message(message_id: str):
         else:
             raise HTTPException(status_code=404, detail="Message not found")
             
+    except HTTPException:
+        # Re-raise HTTPException as-is
+        raise
     except Exception as e:
         logger.error(f"Error getting message {message_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -322,6 +360,9 @@ async def update_message(message_id: str, request: UpdateMessageRequest):
 async def update_message_metadata(message_id: str, request: UpdateMessageMetadataRequest):
     """Update message metadata for storing thoughts and other supplementary data"""
     try:
+        # Validate message ID format
+        validate_uuid(message_id, "Message ID")
+        
         # First, get the existing message to retrieve current metadata
         existing_message = message_manager.get_message(message_id)
         
@@ -374,6 +415,159 @@ async def delete_message(message_id: str):
             
     except Exception as e:
         logger.error(f"Error deleting message {message_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/messages/{message_id}/thoughts", response_model=StandardResponse)
+async def get_message_thoughts(message_id: str):
+    """Get thoughts data from message metadata"""
+    try:
+        # Validate message ID format
+        validate_uuid(message_id, "Message ID")
+        
+        # Get the message
+        message = message_manager.get_message(message_id)
+        
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        
+        # Extract thoughts from metadata
+        metadata = message.get("metadata", {}) or {}
+        thoughts = metadata.get("thoughts", [])
+        
+        return StandardResponse(
+            success=True,
+            message="Thoughts retrieved successfully",
+            data={
+                "message_id": message_id,
+                "thoughts": thoughts,
+                "total_thoughts": len(thoughts)
+            }
+        )
+        
+    except HTTPException:
+        # Re-raise HTTPException as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error getting thoughts for message {message_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve thoughts: {str(e)}")
+
+@router.post("/messages/{message_id}/thoughts", response_model=StandardResponse)
+async def save_message_thoughts(message_id: str, request: PostThoughtsRequest):
+    """Save thoughts data to message metadata"""
+    try:
+        # Validate message ID format
+        validate_uuid(message_id, "Message ID")
+        
+        # Get the existing message to retrieve current metadata
+        existing_message = message_manager.get_message(message_id)
+        
+        if not existing_message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        
+        # Merge new thoughts with existing metadata
+        existing_metadata = existing_message.get("metadata", {}) or {}
+        merged_metadata = {**existing_metadata, "thoughts": request.thoughts}
+        
+        # Update the message with merged metadata
+        updated_message = message_manager.update_message(
+            message_id=message_id,
+            metadata=merged_metadata
+        )
+        
+        if updated_message:
+            return StandardResponse(
+                success=True,
+                message="Thoughts saved successfully",
+                data={
+                    "message_id": message_id,
+                    "thoughts": request.thoughts,
+                    "total_thoughts": len(request.thoughts)
+                }
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Message not found or not updated")
+            
+    except HTTPException:
+        # Re-raise HTTPException as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error saving thoughts for message {message_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save thoughts: {str(e)}")
+
+@router.get("/debug/message-id/{message_id}")
+async def debug_message_id(message_id: str):
+    """Debug endpoint to help identify message ID issues"""
+    try:
+        # Check if it's a valid UUID
+        uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        is_valid_uuid = re.match(uuid_pattern, message_id.lower()) is not None
+        
+        # Check if it looks like a user ID
+        looks_like_user_id = message_id.startswith('user_')
+        
+        # Try to get the message
+        message_exists = False
+        message_data = None
+        try:
+            message_data = message_manager.get_message(message_id)
+            message_exists = message_data is not None
+        except Exception as e:
+            message_exists = False
+        
+        return {
+            "message_id": message_id,
+            "is_valid_uuid": is_valid_uuid,
+            "looks_like_user_id": looks_like_user_id,
+            "message_exists": message_exists,
+            "message_data": message_data,
+            "suggestions": {
+                "if_user_id": "Use a valid message UUID instead of user ID",
+                "if_invalid_uuid": "Use format: 123e4567-e89b-12d3-a456-426614174000",
+                "if_not_found": "Check if message exists in database"
+            }
+        }
+    except Exception as e:
+        return {
+            "message_id": message_id,
+            "error": str(e),
+            "debug_info": "Exception occurred during debug"
+        }
+
+@router.get("/users/{user_id}/recent-messages")
+async def get_user_recent_messages(user_id: str, limit: int = Query(10, ge=1, le=50)):
+    """Get recent messages for a user - helpful for finding message IDs to attach thoughts to"""
+    try:
+        messages = message_manager.get_user_messages(
+            user_id=user_id,
+            limit=limit,
+            offset=0
+        )
+        
+        # Format the response to be helpful for frontend
+        formatted_messages = []
+        for msg in messages:
+            formatted_messages.append({
+                "message_id": msg.get("id"),
+                "chat_id": msg.get("chat_id"),
+                "role": msg.get("role"),
+                "content": msg.get("content", "")[:100] + "..." if len(msg.get("content", "")) > 100 else msg.get("content", ""),
+                "created_at": msg.get("created_at"),
+                "has_thoughts": bool(msg.get("metadata", {}).get("thoughts"))
+            })
+        
+        return StandardResponse(
+            success=True,
+            message=f"Retrieved {len(formatted_messages)} recent messages for user {user_id}",
+            data={
+                "user_id": user_id,
+                "messages": formatted_messages,
+                "total": len(formatted_messages),
+                "note": "Use the 'message_id' field to save/retrieve thoughts for each message"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting recent messages for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Utility endpoints

@@ -696,6 +696,10 @@ class UpdateMessageMetadataRequest(BaseModel):
     """Request model for updating message metadata via PATCH"""
     metadata: Dict = Field(..., description="Metadata to merge with existing message metadata")
 
+class PostThoughtsRequest(BaseModel):
+    """Request model for posting thoughts data to a message"""
+    thoughts: List[Dict] = Field(..., description="Array of thoughts to save to message metadata")
+
 class CreateChatWithMessageRequest(BaseModel):
     """Request model for creating a chat with an initial message"""
     user_id: str = Field(..., description="ID of the user")
