@@ -706,58 +706,7 @@ Remember to:
                 execution_time=execution_time,
                 error=error_msg
             )
-    
-    def execute_tool_sync(self, request: ToolExecutionRequest) -> ToolExecutionResponse:
-        """
-        Synchronously execute tool with the specified LLM provider
-        
-        Args:
-            request: ToolExecutionRequest containing execution parameters
-            
-        Returns:
-            ToolExecutionResponse with execution results
-        """
-        start_time = datetime.now()
-        
-        try:
-            # Validate provider
-            if request.llm_provider.lower() not in ["anthropic", "openai"]:
-                raise ValueError(f"Unsupported LLM provider: {request.llm_provider}")
-            
-            # Execute tool
-            if request.llm_provider.lower() == "anthropic":
-                result = self._execute_anthropic_sync(request)
-            else:
-                result = self._execute_openai_sync(request)
-            
-            execution_time = (datetime.now() - start_time).total_seconds()
-            
-            return ToolExecutionResponse(
-                success=True,
-                result=result,
-                provider=request.llm_provider,
-                model_used=self._get_model_name(request.llm_provider, request.model),
-                execution_time=execution_time,
-                metadata={
-                    "org_id": request.org_id,
-                    "user_id": request.user_id,
-                    "tools_used": list(self.available_tools.keys())
-                }
-            )
-            
-        except Exception as e:
-            execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Tool execution failed: {str(e)}"
-            traceback.print_exc()
-            
-            return ToolExecutionResponse(
-                success=False,
-                result="",
-                provider=request.llm_provider,
-                model_used=self._get_model_name(request.llm_provider, request.model),
-                execution_time=execution_time,
-                error=error_msg
-            )
+
     
     async def execute_tool_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """
@@ -848,27 +797,7 @@ Remember to:
             tools_to_use.append(search_tool)
         
         return anthropic_tool.process_with_tools(enhanced_query, tools_to_use, enable_web_search=True)
-    
-    def _execute_anthropic_sync(self, request: ToolExecutionRequest) -> str:
-        """Synchronously execute using Anthropic Claude"""
-        # NOTE: Sync methods don't support language detection (requires async)
-        # For language-aware responses, use the async streaming methods
-        
-        # Use custom model if provided, otherwise use default
-        model = request.model or self._get_default_model("anthropic")
-        anthropic_tool = AnthropicTool(model=model)
-        
-        # Use base system prompt without language detection
-        base_system_prompt = request.system_prompt or self.default_system_prompts["anthropic"]
-        enhanced_query = f"System: {base_system_prompt}\n\nUser: {request.user_query}"
-        
-        # Get available tools for execution
-        tools_to_use = []
-        search_tool = self._get_search_tool(request.llm_provider, request.model)
-        if search_tool:
-            tools_to_use.append(search_tool)
-        
-        return anthropic_tool.process_with_tools(enhanced_query, tools_to_use, enable_web_search=True)
+
     
     async def _execute_openai(self, request: ToolExecutionRequest) -> str:
         """Execute using OpenAI with custom system prompt"""
@@ -892,30 +821,7 @@ Remember to:
             system_prompt,
             request.model_params
         )
-    
-    def _execute_openai_sync(self, request: ToolExecutionRequest) -> str:
-        """Synchronously execute using OpenAI with custom system prompt"""
-        # NOTE: Sync methods don't support language detection (requires async)
-        # For language-aware responses, use the async streaming methods
-        
-        # Use custom model if provided, otherwise use default
-        model = request.model or self._get_default_model("openai")
-        openai_tool = OpenAIToolWithCustomPrompt(model=model)
-        
-        # Use base system prompt without language detection
-        system_prompt = request.system_prompt or self.default_system_prompts["openai"]
-        
-        # Get available tools for execution
-        tools_to_use = []
-        if "search" in self.available_tools:
-            tools_to_use.append(self.available_tools["search"])
-        
-        return openai_tool.process_with_tools_and_prompt(
-            request.user_query, 
-            tools_to_use, 
-            system_prompt,
-            request.model_params
-        )
+
     
     async def _execute_anthropic_stream(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute using Anthropic Claude with streaming"""
@@ -1822,42 +1728,6 @@ async def execute_tool_async(
     return await executive_tool.execute_tool_async(request)
 
 
-def execute_tool_sync(
-    llm_provider: str,
-    user_query: str,
-    system_prompt: Optional[str] = None,
-    model: Optional[str] = None,
-    model_params: Optional[Dict[str, Any]] = None,
-    org_id: str = "default",
-    user_id: str = "anonymous",
-    enable_tools: bool = True,
-    force_tools: bool = False,
-    tools_whitelist: Optional[List[str]] = None
-) -> ToolExecutionResponse:
-    """
-    Synchronously execute tool with specified parameters
-    
-    Args:
-        llm_provider: 'anthropic' or 'openai'
-        user_query: User's input query
-        system_prompt: Optional custom system prompt
-        model: Optional custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
-        model_params: Optional model parameters
-        org_id: Organization ID
-        user_id: User ID
-        enable_tools: Whether to enable tools at all
-        force_tools: Force tool usage (tool_choice="required")
-        tools_whitelist: Only allow specific tools
-        
-    Returns:
-        ToolExecutionResponse with results
-    """
-    executive_tool = ExecutiveTool()
-    request = create_tool_request(
-        llm_provider, user_query, system_prompt, model, model_params, org_id, user_id, 
-        enable_tools, force_tools, tools_whitelist
-    )
-    return executive_tool.execute_tool_sync(request) 
 
 # Add convenience function for streaming
 async def execute_tool_stream(

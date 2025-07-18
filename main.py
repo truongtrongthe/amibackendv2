@@ -31,7 +31,7 @@ from supabase import create_client, Client
 from ava import AVA
 
 # Import exec_tool module for LLM tool execution
-from exec_tool import execute_tool_sync, execute_tool_stream, ToolExecutionRequest, ToolExecutionResponse
+from exec_tool import execute_tool_async, execute_tool_stream, ToolExecutionRequest, ToolExecutionResponse
 
 from utilities import logger
 from org_integrations import get_org_integrations, get_integration_by_id, create_integration, update_integration, delete_integration, toggle_integration
@@ -1181,8 +1181,8 @@ async def execute_llm_tool_endpoint(request: LLMToolExecuteRequest):
             enable_tools = request.enable_search
             logger.info(f"[REQUEST:{request_id}] Using enable_search={request.enable_search} for backward compatibility")
         
-        # Execute the tool synchronously with tool control parameters
-        response: ToolExecutionResponse = execute_tool_sync(
+        # Execute the tool asynchronously with tool control parameters
+        response: ToolExecutionResponse = await execute_tool_async(
             llm_provider=request.llm_provider,
             user_query=request.user_query,
             system_prompt=request.system_prompt,

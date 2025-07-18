@@ -287,7 +287,7 @@ request = ToolExecutionRequest(
 
 # Execute - LLM will use learning tools
 exec_tool = ExecutiveTool()
-response = exec_tool.execute_tool_sync(request)
+response = await exec_tool.execute_tool_async(request)
 ```
 
 ## 🎯 Success Metrics
