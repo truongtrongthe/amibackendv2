@@ -125,11 +125,121 @@ class ExecutiveTool:
         """Initialize the executive tool handler"""
         self.available_tools = self._initialize_tools()
         self.default_system_prompts = {
-            "anthropic": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
-            "openai": "You are a helpful assistant. Provide accurate, concise, and well-structured responses based on your knowledge.",
-            "anthropic_with_tools": "You are a helpful assistant that can search the web for current information when needed. Provide accurate, concise, and well-structured responses.",
-            "openai_with_tools": "You are a helpful assistant that can search for information when needed. Provide accurate, concise, and well-structured responses.",
-            "anthropic_with_learning": """You are a helpful assistant with interactive learning capabilities. 
+            "anthropic": """You are Ami, a co-builder AI agent that helps users build and develop AI agents. You are enthusiastic, collaborative, and act as a copilot for AI development.
+
+CRITICAL INTRODUCTION PATTERN:
+1. ALWAYS introduce yourself as Ami, a co-builder that helps users build AI agents
+2. Suggest 2-3 practical AI agent use cases relevant to the user's domain/industry
+3. Emphasize that you handle ALL technical heavy lifting (tools, configuration, settings, coding)
+4. Position yourself as a copilot that makes AI development accessible to non-technical users
+
+Your role is to:
+- Be a true co-builder and copilot for AI agent development
+- Suggest practical, business-relevant AI agent use cases
+- Handle all technical complexity behind the scenes
+- Make AI development accessible to users without technical knowledge
+- Focus on business value and practical applications first
+- Only dive into technical details when specifically requested
+
+RESPONSE STYLE:
+- Start with co-builder introduction
+- Suggest 2-3 relevant AI agent use cases for their domain
+- Emphasize you handle the technical work
+- Ask which use case they want to build together
+- Keep it business-focused and accessible
+
+Always maintain an enthusiastic, collaborative tone while being a helpful copilot.""",
+            "openai": """You are Ami, a co-builder AI agent that helps users build and develop AI agents. You are enthusiastic, collaborative, and act as a copilot for AI development.
+
+CRITICAL INTRODUCTION PATTERN:
+1. ALWAYS introduce yourself as Ami, a co-builder that helps users build AI agents
+2. Suggest 2-3 practical AI agent use cases relevant to the user's domain/industry
+3. Emphasize that you handle ALL technical heavy lifting (tools, configuration, settings, coding)
+4. Position yourself as a copilot that makes AI development accessible to non-technical users
+
+Your role is to:
+- Be a true co-builder and copilot for AI agent development
+- Suggest practical, business-relevant AI agent use cases
+- Handle all technical complexity behind the scenes
+- Make AI development accessible to users without technical knowledge
+- Focus on business value and practical applications first
+- Only dive into technical details when specifically requested
+
+RESPONSE STYLE:
+- Start with co-builder introduction
+- Suggest 2-3 relevant AI agent use cases for their domain
+- Emphasize you handle the technical work
+- Ask which use case they want to build together
+- Keep it business-focused and accessible
+
+Always maintain an enthusiastic, collaborative tone while being a helpful copilot.""",
+            "anthropic_with_tools": """You are Ami, a co-builder AI agent that helps users build and develop AI agents. You are enthusiastic, collaborative, and act as a copilot for AI development.
+
+CRITICAL INTRODUCTION PATTERN:
+1. ALWAYS introduce yourself as Ami, a co-builder that helps users build AI agents
+2. Suggest 2-3 practical AI agent use cases relevant to the user's domain/industry
+3. Emphasize that you handle ALL technical heavy lifting (tools, configuration, settings, coding)
+4. Position yourself as a copilot that makes AI development accessible to non-technical users
+
+Your role is to:
+- Be a true co-builder and copilot for AI agent development
+- Suggest practical, business-relevant AI agent use cases
+- Handle all technical complexity behind the scenes
+- Make AI development accessible to users without technical knowledge
+- Focus on business value and practical applications first
+- Only dive into technical details when specifically requested
+
+You can search the web for current information when needed to provide the most up-to-date guidance on AI technologies, frameworks, and best practices.
+
+RESPONSE STYLE:
+- Start with co-builder introduction
+- Suggest 2-3 relevant AI agent use cases for their domain
+- Emphasize you handle the technical work
+- Ask which use case they want to build together
+- Keep it business-focused and accessible
+
+Always maintain an enthusiastic, collaborative tone while being a helpful copilot.""",
+            "openai_with_tools": """You are Ami, a co-builder AI agent that helps users build and develop AI agents. You are enthusiastic, collaborative, and act as a copilot for AI development.
+
+CRITICAL INTRODUCTION PATTERN:
+1. ALWAYS introduce yourself as Ami, a co-builder that helps users build AI agents
+2. Suggest 2-3 practical AI agent use cases relevant to the user's domain/industry
+3. Emphasize that you handle ALL technical heavy lifting (tools, configuration, settings, coding)
+4. Position yourself as a copilot that makes AI development accessible to non-technical users
+
+Your role is to:
+- Be a true co-builder and copilot for AI agent development
+- Suggest practical, business-relevant AI agent use cases
+- Handle all technical complexity behind the scenes
+- Make AI development accessible to users without technical knowledge
+- Focus on business value and practical applications first
+- Only dive into technical details when specifically requested
+
+You can search for information when needed to provide the most up-to-date guidance on AI technologies, frameworks, and best practices.
+
+RESPONSE STYLE:
+- Start with co-builder introduction
+- Suggest 2-3 relevant AI agent use cases for their domain
+- Emphasize you handle the technical work
+- Ask which use case they want to build together
+- Keep it business-focused and accessible
+
+Always maintain an enthusiastic, collaborative tone while being a helpful copilot.""",
+            "anthropic_with_learning": """You are Ami, a co-builder AI agent that helps users build and develop AI agents. You are enthusiastic, collaborative, and act as a copilot for AI development.
+
+CRITICAL INTRODUCTION PATTERN:
+1. ALWAYS introduce yourself as Ami, a co-builder that helps users build AI agents
+2. Suggest 2-3 practical AI agent use cases relevant to the user's domain/industry
+3. Emphasize that you handle ALL technical heavy lifting (tools, configuration, settings, coding)
+4. Position yourself as a copilot that makes AI development accessible to non-technical users
+
+Your role is to:
+- Be a true co-builder and copilot for AI agent development
+- Suggest practical, business-relevant AI agent use cases
+- Handle all technical complexity behind the scenes
+- Make AI development accessible to users without technical knowledge
+- Focus on business value and practical applications first
+- Only dive into technical details when specifically requested
 
 CRITICAL: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
 
@@ -155,8 +265,29 @@ LEARNING TRIGGERS (always use learning tools):
 
 Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context AND analyze_learning_opportunity
 
-Be proactive about learning - don't wait for permission!""",
-            "openai_with_learning": """You are a helpful assistant with interactive learning capabilities. 
+RESPONSE STYLE:
+- Start with co-builder introduction
+- Suggest 2-3 relevant AI agent use cases for their domain
+- Emphasize you handle the technical work
+- Ask which use case they want to build together
+- Keep it business-focused and accessible
+
+Always maintain an enthusiastic, collaborative tone while being a helpful copilot. Be proactive about learning - don't wait for permission!""",
+            "openai_with_learning": """You are Ami, a co-builder AI agent that helps users build and develop AI agents. You are enthusiastic, collaborative, and act as a copilot for AI development.
+
+CRITICAL INTRODUCTION PATTERN:
+1. ALWAYS introduce yourself as Ami, a co-builder that helps users build AI agents
+2. Suggest 2-3 practical AI agent use cases relevant to the user's domain/industry
+3. Emphasize that you handle ALL technical heavy lifting (tools, configuration, settings, coding)
+4. Position yourself as a copilot that makes AI development accessible to non-technical users
+
+Your role is to:
+- Be a true co-builder and copilot for AI agent development
+- Suggest practical, business-relevant AI agent use cases
+- Handle all technical complexity behind the scenes
+- Make AI development accessible to users without technical knowledge
+- Focus on business value and practical applications first
+- Only dive into technical details when specifically requested
 
 CRITICAL: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
 
@@ -182,7 +313,14 @@ LEARNING TRIGGERS (always use learning tools):
 
 Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context AND analyze_learning_opportunity
 
-Be proactive about learning - don't wait for permission!"""
+RESPONSE STYLE:
+- Start with co-builder introduction
+- Suggest 2-3 relevant AI agent use cases for their domain
+- Emphasize you handle the technical work
+- Ask which use case they want to build together
+- Keep it business-focused and accessible
+
+Always maintain an enthusiastic, collaborative tone while being a helpful copilot. Be proactive about learning - don't wait for permission!"""
         }
         
         # Initialize language detection if available
@@ -235,6 +373,184 @@ Be proactive about learning - don't wait for permission!"""
                 logger.error(f"Failed to create fallback search tool: {e}")
                 return None
     
+    async def _analyze_request_intent_with_thoughts(self, request: ToolExecutionRequest) -> tuple[RequestAnalysis, list[str]]:
+        """
+        Analyze user request with Cursor-style detailed thinking process
+        
+        Args:
+            request: The tool execution request containing LLM provider and model
+            
+        Returns:
+            Tuple of (RequestAnalysis, list of thought steps)
+        """
+        
+        # Create a Cursor-style analysis prompt that shows thinking process
+        analysis_prompt = f"""
+        You are analyzing a user request to understand their intent and provide helpful assistance. Think through this step-by-step like Cursor AI does.
+
+        User Message: "{request.user_query}"
+        
+        Conversation History: {request.conversation_history[-3:] if request.conversation_history else "None"}
+
+        Please provide your analysis in this EXACT format:
+
+        UNDERSTANDING:
+        [First, provide a clear understanding of what the user is asking for, what they want to achieve, and the context of their request. This should be 2-3 sentences explaining your comprehension of their intent.]
+
+        THINKING:
+        1. Looking at the current situation and context...
+        2. Based on the request type and key terms...
+        3. The user likely needs help with...
+        4. I need to determine the best approach...
+        5. The most appropriate tools and classification would be...
+
+        ANALYSIS:
+        {{
+            "intent": "learning|problem_solving|general_chat|task_execution",
+            "confidence": 0.85,
+            "complexity": "low|medium|high",
+            "suggested_tools": ["search", "context", "learning"],
+            "requires_code": false,
+            "domain": "technology|business|general|education|etc",
+            "reasoning": "Detailed explanation of the classification",
+            "understanding": "Your initial understanding of what the user wants",
+            "thinking_steps": [
+                "Step 1: Context analysis...",
+                "Step 2: Request breakdown...",
+                "Step 3: Intent determination...",
+                "Step 4: Tool selection..."
+            ]
+        }}
+
+        Intent Classifications:
+        - "learning": User is teaching, sharing knowledge, or providing information
+        - "problem_solving": User needs help solving a specific problem or issue  
+        - "general_chat": General conversation, questions, or casual interaction
+        - "task_execution": User wants to perform a specific task or get something done
+
+        IMPORTANT: Always start with UNDERSTANDING section, then THINKING, then ANALYSIS. The understanding should explain what you comprehend about the user's request.
+        """
+        
+        try:
+            # Use the same provider and model as the main request for intent analysis
+            if request.llm_provider.lower() == "anthropic":
+                from anthropic_tool import AnthropicTool
+                analyzer = AnthropicTool(model=request.model or self._get_default_model("anthropic"))
+                async def make_analysis_call():
+                    return await asyncio.to_thread(analyzer.process_query, analysis_prompt)
+                
+                analysis_response = await anthropic_api_call_with_retry(make_analysis_call)
+            else:
+                from openai_tool import OpenAITool
+                analyzer = OpenAITool(model=request.model or self._get_default_model("openai"))
+                response = analyzer.client.chat.completions.create(
+                    model=analyzer.model,
+                    messages=[
+                        {"role": "system", "content": "You are an intent analyzer that thinks step-by-step like Cursor AI. Provide detailed reasoning followed by JSON analysis."},
+                        {"role": "user", "content": analysis_prompt}
+                    ],
+                    temperature=0
+                )
+                analysis_response = response.choices[0].message.content
+            
+            # Parse the response to extract understanding, thinking steps and JSON
+            thinking_steps = []
+            analysis_data = {}
+            
+            # Extract understanding section (first thought)
+            import re
+            understanding_match = re.search(r'UNDERSTANDING:(.*?)THINKING:', analysis_response, re.DOTALL)
+            understanding_text = ""
+            if understanding_match:
+                understanding_text = understanding_match.group(1).strip()
+                # Clean up any bracketed instructions
+                understanding_text = re.sub(r'\[.*?\]', '', understanding_text).strip()
+            
+            # Extract thinking section
+            thinking_match = re.search(r'THINKING:(.*?)ANALYSIS:', analysis_response, re.DOTALL)
+            if thinking_match:
+                thinking_text = thinking_match.group(1).strip()
+                # Extract numbered steps
+                steps = re.findall(r'\d+\.\s*(.*?)(?=\d+\.|$)', thinking_text, re.DOTALL)
+                thinking_steps = [step.strip() for step in steps if step.strip()]
+            
+            # Extract JSON section
+            json_match = re.search(r'\{.*\}', analysis_response, re.DOTALL)
+            if json_match:
+                try:
+                    import json
+                    analysis_data = json.loads(json_match.group(0))
+                except json.JSONDecodeError:
+                    logger.warning(f"Could not parse JSON from analysis response")
+            
+            # Create final thinking steps with understanding first
+            final_thinking_steps = []
+            
+            # Add understanding as first thought if available
+            if understanding_text:
+                final_thinking_steps.append(understanding_text)
+            else:
+                # Default understanding if not found
+                final_thinking_steps.append(f"The user is asking: '{request.user_query[:100]}...' - Let me analyze what they want to achieve and how I can help them.")
+            
+            # Add thinking steps
+            if thinking_steps:
+                final_thinking_steps.extend(thinking_steps)
+            else:
+                # Default thinking steps if not found
+                final_thinking_steps.extend([
+                    "Looking at the request type and context to understand the user's needs...",
+                    "Analyzing the key terms and determining the most appropriate intent classification...",
+                    "Considering the complexity and selecting tools that would be most helpful..."
+                ])
+            
+            # Use extracted thinking steps from JSON if available (as fallback)
+            if analysis_data.get("thinking_steps") and not final_thinking_steps:
+                final_thinking_steps = analysis_data["thinking_steps"]
+            
+            thinking_steps = final_thinking_steps
+            
+            # Create RequestAnalysis object
+            request_analysis = RequestAnalysis(
+                intent=analysis_data.get("intent", "general_chat"),
+                confidence=analysis_data.get("confidence", 0.5),
+                complexity=analysis_data.get("complexity", "medium"),
+                suggested_tools=analysis_data.get("suggested_tools", ["search"]),
+                requires_code=analysis_data.get("requires_code", False),
+                domain=analysis_data.get("domain", "general"),
+                reasoning=analysis_data.get("reasoning", "Analysis completed with default reasoning"),
+                metadata={
+                    **analysis_data,
+                    "understanding": understanding_text or analysis_data.get("understanding", ""),
+                    "thinking_steps": thinking_steps
+                }
+            )
+            
+            return request_analysis, thinking_steps
+            
+        except Exception as e:
+            logger.error(f"Intent analysis with thoughts failed: {e}")
+            # Return default analysis and thinking steps with understanding first
+            default_thinking = [
+                f"The user is asking: '{request.user_query[:100]}...' - I need to analyze what they want to achieve, but the analysis encountered an error.",
+                "Since the detailed analysis failed, I'll use default classification to still provide helpful assistance.",
+                "This appears to be a general conversation request based on the available information.",
+                "I'll provide helpful assistance with available tools while working with the default analysis."
+            ]
+            
+            return RequestAnalysis(
+                intent="general_chat",
+                confidence=0.5,
+                complexity="medium",
+                suggested_tools=["search"],
+                requires_code=False,
+                reasoning="Analysis failed, using defaults",
+                metadata={
+                    "understanding": f"The user is asking: '{request.user_query[:100]}...' - Analysis failed, using defaults.",
+                    "thinking_steps": default_thinking
+                }
+            ), default_thinking
+
     async def _analyze_request_intent(self, request: ToolExecutionRequest) -> RequestAnalysis:
         """
         Analyze user request to determine intent and suggest appropriate tools
@@ -842,8 +1158,21 @@ Remember to:
                 "status": "analyzing"
             }
             
-            # Perform intent analysis
-            request_analysis = await self._analyze_request_intent(request)
+            # Perform intent analysis with Cursor-style thoughts
+            request_analysis, thinking_steps = await self._analyze_request_intent_with_thoughts(request)
+            
+            # Stream thinking steps to frontend like Cursor
+            for i, thought in enumerate(thinking_steps):
+                yield {
+                    "type": "thinking",
+                    "content": thought,
+                    "provider": request.llm_provider,
+                    "step": i + 1,
+                    "total_steps": len(thinking_steps),
+                    "thinking_type": "intent_analysis"
+                }
+                # Small delay between thoughts for natural reading pace
+                await asyncio.sleep(0.8)
             
             # Create orchestration plan
             orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
@@ -858,13 +1187,13 @@ Remember to:
                     "confidence": request_analysis.confidence,
                     "complexity": request_analysis.complexity,
                     "suggested_tools": request_analysis.suggested_tools,
-                    "reasoning": request_analysis.reasoning
+                    "reasoning": request_analysis.reasoning,
+                    "thinking_steps": thinking_steps
                 },
                 "orchestration_plan": orchestration_plan
             }
             
             # Brief pause for user to see analysis
-            import asyncio
             await asyncio.sleep(0.5)
             
             # NEW: Generate Cursor-style thoughts
@@ -953,7 +1282,7 @@ Remember to:
             if has_learning_tools:
                 learning_instructions = """
 
-CRITICAL LEARNING CAPABILITY: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+CRITICAL LEARNING CAPABILITY: As Ami, when users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
 
 1. IMMEDIATELY call search_learning_context to check existing knowledge
 2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
@@ -1055,8 +1384,21 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 "status": "analyzing"
             }
             
-            # Perform intent analysis
-            request_analysis = await self._analyze_request_intent(request)
+            # Perform intent analysis with Cursor-style thoughts
+            request_analysis, thinking_steps = await self._analyze_request_intent_with_thoughts(request)
+            
+            # Stream thinking steps to frontend like Cursor
+            for i, thought in enumerate(thinking_steps):
+                yield {
+                    "type": "thinking",
+                    "content": thought,
+                    "provider": request.llm_provider,
+                    "step": i + 1,
+                    "total_steps": len(thinking_steps),
+                    "thinking_type": "intent_analysis"
+                }
+                # Small delay between thoughts for natural reading pace
+                await asyncio.sleep(0.8)
             
             # Create orchestration plan
             orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
@@ -1071,13 +1413,13 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                     "confidence": request_analysis.confidence,
                     "complexity": request_analysis.complexity,
                     "suggested_tools": request_analysis.suggested_tools,
-                    "reasoning": request_analysis.reasoning
+                    "reasoning": request_analysis.reasoning,
+                    "thinking_steps": thinking_steps
                 },
                 "orchestration_plan": orchestration_plan
             }
             
             # Brief pause for user to see analysis
-            import asyncio
             await asyncio.sleep(0.5)
             
             # NEW: Generate Cursor-style thoughts
@@ -1166,7 +1508,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             if has_learning_tools:
                 learning_instructions = """
 
-CRITICAL LEARNING CAPABILITY: When users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+CRITICAL LEARNING CAPABILITY: As Ami, when users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
 
 1. IMMEDIATELY call search_learning_context to check existing knowledge
 2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
@@ -1617,7 +1959,8 @@ class OpenAIToolWithCustomPrompt(OpenAITool):
         try:
             final_response = self.client.chat.completions.create(
                 model=self.model,
-                messages=messages
+                messages=messages,
+                max_tokens=10000  # Default to 10k tokens for longer responses
             )
             
             return final_response.choices[0].message.content

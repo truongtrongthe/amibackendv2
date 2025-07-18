@@ -65,7 +65,8 @@ class OpenAITool:
                     }
                 ],
                 tools=functions,
-                tool_choice="auto"
+                tool_choice="auto",
+                max_tokens=10000  # Default to 10k tokens for longer responses
             )
             
             message = response.choices[0].message
@@ -547,7 +548,8 @@ class OpenAITool:
                 "model": self.model,
                 "messages": messages,
                 "stream": True,
-                "temperature": 0.7
+                "temperature": 0.7,
+                "max_tokens": 10000  # Default to 10k tokens for longer responses
             }
             
             response_stream = self.client.chat.completions.create(**final_response_params)
@@ -674,7 +676,8 @@ class OpenAITool:
         try:
             final_response = self.client.chat.completions.create(
                 model=self.model,
-                messages=messages
+                messages=messages,
+                max_tokens=10000  # Default to 10k tokens for longer responses
             )
             
             return final_response.choices[0].message.content
@@ -777,7 +780,8 @@ class OpenAITool:
             response_stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                stream=True
+                stream=True,
+                max_tokens=10000  # Default to 10k tokens for longer responses
             )
             
             content_buffer = ""

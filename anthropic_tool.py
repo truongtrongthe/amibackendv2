@@ -98,7 +98,7 @@ class AnthropicTool:
             # API call to Claude with native web search
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=10000,
                 tools=tools if tools else None,
                 messages=[
                     {
@@ -132,7 +132,7 @@ class AnthropicTool:
             # API call to Claude without tools
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=10000,
                 messages=[
                     {
                         "role": "user",
@@ -333,7 +333,7 @@ class AnthropicTool:
         # Prepare API call parameters
         api_params = {
             "model": self.model,
-            "max_tokens": 1024,
+            "max_tokens": 10000,
             "stream": True
         }
         
@@ -579,7 +579,7 @@ class AnthropicTool:
             # Step 3: Stream the final response using Claude
             final_response_params = {
                 "model": self.model,
-                "max_tokens": 1024,
+                "max_tokens": 10000,
                 "messages": messages,
                 "stream": True
             }
@@ -711,7 +711,7 @@ class AnthropicTool:
                 
                 final_response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=1024,
+                    max_tokens=10000,
                     messages=messages
                 )
                 
@@ -785,7 +785,7 @@ class AnthropicTool:
                     try:
                         search_response = self.client.messages.create(
                             model=self.model,
-                            max_tokens=1024,
+                            max_tokens=10000,
                             tools=[{
                                 "name": "web_search",
                                 "description": "Search the web for current information",
@@ -858,7 +858,7 @@ class AnthropicTool:
             
             response_stream = self.client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=10000,
                 messages=messages,
                 stream=True
             )
