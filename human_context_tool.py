@@ -207,6 +207,14 @@ class ContextDataRetriever:
                 "focus_areas": ["fintech", "M&A consulting", "risk management"],
                 "tech_maturity": "intermediate"
             },
+            "unknown_org": {
+                "name": "Unknown",
+                "industry": "unknown",
+                "size": "unknown",
+                "challenges": [],
+                "focus_areas": [],
+                "tech_maturity": "unknown"
+            },
             "default": {
                 "name": "Your Organization",
                 "industry": "business",
@@ -252,14 +260,25 @@ class ContextDataRetriever:
     
     def _get_mock_user_profile(self, user_id: str) -> Dict:
         """Mock user profile for testing"""
-        return {
-            "name": "User",
-            "role": "analyst",
-            "department": "operations",
-            "interests": ["automation", "data analysis"],
-            "skills": ["Excel", "Python", "SQL"],
-            "previous_projects": ["financial modeling", "process optimization"]
+        mock_profiles = {
+            "unknown_user": {
+                "name": "User",
+                "role": "unknown",
+                "department": "unknown",
+                "interests": [],
+                "skills": [],
+                "previous_projects": []
+            },
+            "default": {
+                "name": "User",
+                "role": "analyst",
+                "department": "operations",
+                "interests": ["automation", "data analysis"],
+                "skills": ["Excel", "Python", "SQL"],
+                "previous_projects": ["financial modeling", "process optimization"]
+            }
         }
+        return mock_profiles.get(user_id, mock_profiles["default"])
     
     async def get_braingraph_context(self, user_id: str, org_id: str) -> Dict:
         """Get insights from braingraph"""
@@ -289,6 +308,14 @@ class ContextDataRetriever:
     
     def _get_mock_braingraph_context(self, user_id: str, org_id: str) -> Dict:
         """Mock braingraph context for testing"""
+        if user_id == "unknown_user" or org_id == "unknown_org":
+            return {
+                "user_interests": [],
+                "work_patterns": [],
+                "org_knowledge": [],
+                "recent_topics": []
+            }
+        
         return {
             "user_interests": ["AI automation", "financial analysis", "process improvement"],
             "work_patterns": ["data-heavy tasks", "repetitive analysis", "client reporting"],
