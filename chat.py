@@ -692,6 +692,10 @@ class UpdateMessageRequest(BaseModel):
     metadata: Optional[Dict] = Field(None, description="New metadata for the message")
     token_count: Optional[int] = Field(None, description="New token count for the message")
 
+class UpdateMessageMetadataRequest(BaseModel):
+    """Request model for updating message metadata via PATCH"""
+    metadata: Dict = Field(..., description="Metadata to merge with existing message metadata")
+
 class CreateChatWithMessageRequest(BaseModel):
     """Request model for creating a chat with an initial message"""
     user_id: str = Field(..., description="ID of the user")

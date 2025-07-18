@@ -28,7 +28,7 @@ from chat import (
     create_chat_with_first_message, get_chat_statistics,
     # Import all Pydantic models
     CreateChatRequest, UpdateChatRequest, CreateMessageRequest, UpdateMessageRequest,
-    CreateChatWithMessageRequest, GetChatsRequest, GetMessagesRequest,
+    UpdateMessageMetadataRequest, CreateChatWithMessageRequest, GetChatsRequest, GetMessagesRequest,
     ChatResponse, MessageResponse, ChatWithMessagesResponse, ChatListResponse,
     MessageListResponse, ChatStatsResponse, CreateChatWithMessageResponse,
     StandardResponse, ChatRole, ChatStatus, MessageType, ChatType
@@ -317,6 +317,45 @@ async def update_message(message_id: str, request: UpdateMessageRequest):
     except Exception as e:
         logger.error(f"Error updating message {message_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/messages/{message_id}", response_model=StandardResponse)
+async def update_message_metadata(message_id: str, request: UpdateMessageMetadataRequest):
+    """Update message metadata for storing thoughts and other supplementary data"""
+    try:
+        # First, get the existing message to retrieve current metadata
+        existing_message = message_manager.get_message(message_id)
+        
+        if not existing_message:
+            raise HTTPException(status_code=404, detail="Message not found")
+        
+        # Merge new metadata with existing metadata
+        existing_metadata = existing_message.get("metadata", {}) or {}
+        merged_metadata = {**existing_metadata, **request.metadata}
+        
+        # Update the message with merged metadata
+        updated_message = message_manager.update_message(
+            message_id=message_id,
+            metadata=merged_metadata
+        )
+        
+        if updated_message:
+            return StandardResponse(
+                success=True,
+                message="Message metadata updated successfully",
+                data={
+                    "id": message_id,
+                    "metadata": updated_message.get("metadata", {})
+                }
+            )
+        else:
+            raise HTTPException(status_code=404, detail="Message not found or not updated")
+            
+    except HTTPException:
+        # Re-raise HTTPException as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error updating message metadata {message_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update message metadata: {str(e)}")
 
 @router.delete("/messages/{message_id}", response_model=StandardResponse)
 async def delete_message(message_id: str):
