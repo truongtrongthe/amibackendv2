@@ -5,7 +5,6 @@ Search Tool implementations for different LLM providers
 import os
 import json
 from typing import Dict, List, Any
-from serpapi import Client
 
 class SearchTool:
     """Google Search Tool implementation using SERPAPI (for OpenAI)"""
@@ -14,10 +13,18 @@ class SearchTool:
         """Initialize Google Search tool"""
         self.api_key = os.getenv("SERPAPI_API_KEY")
         if not self.api_key:
-            raise ValueError("SERPAPI_API_KEY environment variable is required")
+            # Make SERPAPI optional - only raise error when actually trying to search
+            self.api_key = None
+            self.client = None
+        else:
+            # Initialize SerpAPI client only if API key is available
+            try:
+                from serpapi import Client
+                self.client = Client(api_key=self.api_key)
+            except ImportError:
+                self.api_key = None
+                self.client = None
         
-        # Initialize SerpAPI client
-        self.client = Client(api_key=self.api_key)
         self.name = "serpapi_search"
     
     def search(self, query: str, num_results: int = 5) -> str:
@@ -31,6 +38,9 @@ class SearchTool:
         Returns:
             Formatted search results as a string
         """
+        
+        if not self.api_key or not self.client:
+            return "Error: SERPAPI_API_KEY environment variable is required for OpenAI search functionality. For Anthropic, native web search is used instead."
         
         try:
             # Setup search parameters
