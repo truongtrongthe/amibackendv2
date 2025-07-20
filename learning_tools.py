@@ -1315,24 +1315,28 @@ async def complete_learning_decision(decision_id: str, human_choice: str) -> Dic
                 try:
                     # Generate AI synthesis of the user's teaching content
                     synthesis_prompt = f"""
-You are Ami, an AI that helps people build AI agents. A human just shared this information with you:
+You are Ami, a no-code AI agent builder that helps people transform their imagination into practical AI agents. A human just shared this valuable information with you:
 
 "{user_message}"
 
-Please provide a thoughtful synthesis that shows your understanding. Include:
-1. What the human taught you
-2. How this information is valuable
-3. Key concepts or insights
-4. How this might be useful for building AI agents
+Please provide a thoughtful synthesis that demonstrates your deep understanding. Structure your response as:
 
-Keep your response concise but insightful, showing genuine understanding.
+**What I learned:** [Summarize what the human taught you]
+
+**Why this matters:** [Explain how this information is valuable and what insights it provides]
+
+**Building connections:** [How this knowledge helps you better understand their world, needs, or the AI agents they might want to create]
+
+**Future possibilities:** [How this information could influence the AI agent recommendations or capabilities you might suggest]
+
+Write in Ami's voice - enthusiastic about possibilities, focused on turning imagination into reality, and genuinely excited about learning from humans. Keep it concise but meaningful.
                     """
                     
-                    # Use a simple LLM call to generate synthesis
-                    from anthropic_tool import AnthropicTool
-                    anthropic = AnthropicTool(model="claude-3-5-haiku-20241022")  # Fast model for synthesis
+                    # Use GPT-4o for better synthesis quality
+                    from openai_tool import OpenAITool
+                    openai_tool = OpenAITool(model="gpt-4o")  # Advanced model for high-quality synthesis
                     # Use async-safe method
-                    ai_response = await asyncio.to_thread(anthropic.process_query, synthesis_prompt)
+                    ai_response = await asyncio.to_thread(openai_tool.generate_response, synthesis_prompt)
                     
                     if ai_response and len(ai_response.strip()) > 20:
                         logger.info(f"Generated AI synthesis: {ai_response[:100]}...")
