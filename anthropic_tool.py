@@ -29,6 +29,14 @@ class AnthropicTool:
             "claude-4-opus-20250514"
         ]
     
+    def _get_max_tokens(self) -> int:
+        """Get appropriate max_tokens based on model"""
+        # Claude-3-5-haiku has a lower limit
+        if "haiku" in self.model.lower():
+            return 8192  # Haiku model limit
+        # All other models support higher limits
+        return 10000
+    
     def supports_web_search(self) -> bool:
         """Check if current model supports native web search"""
         return self.model in self.web_search_supported_models
@@ -98,7 +106,7 @@ class AnthropicTool:
             # API call to Claude with native web search
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=10000,
+                max_tokens=self._get_max_tokens(),
                 tools=tools if tools else None,
                 messages=[
                     {
@@ -132,7 +140,7 @@ class AnthropicTool:
             # API call to Claude without tools
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=10000,
+                max_tokens=self._get_max_tokens(),
                 messages=[
                     {
                         "role": "user",
@@ -333,7 +341,7 @@ class AnthropicTool:
         # Prepare API call parameters
         api_params = {
             "model": self.model,
-            "max_tokens": 10000,
+            "max_tokens": self._get_max_tokens(),
             "stream": True
         }
         
@@ -579,7 +587,7 @@ class AnthropicTool:
             # Step 3: Stream the final response using Claude
             final_response_params = {
                 "model": self.model,
-                "max_tokens": 10000,
+                "max_tokens": self._get_max_tokens(),
                 "messages": messages,
                 "stream": True
             }
@@ -711,7 +719,7 @@ class AnthropicTool:
                 
                 final_response = self.client.messages.create(
                     model=self.model,
-                    max_tokens=10000,
+                    max_tokens=self._get_max_tokens(),
                     messages=messages
                 )
                 
@@ -785,7 +793,7 @@ class AnthropicTool:
                     try:
                         search_response = self.client.messages.create(
                             model=self.model,
-                            max_tokens=10000,
+                            max_tokens=self._get_max_tokens(),
                             tools=[{
                                 "name": "web_search",
                                 "description": "Search the web for current information",
@@ -858,7 +866,7 @@ class AnthropicTool:
             
             response_stream = self.client.messages.create(
                 model=self.model,
-                max_tokens=10000,
+                max_tokens=self._get_max_tokens(),
                 messages=messages,
                 stream=True
             )
