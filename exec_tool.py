@@ -1474,6 +1474,8 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             # Use learning-aware prompt if learning tools are available
             if has_learning_tools:
                 base_system_prompt = self.default_system_prompts["anthropic_with_learning"]
+                # Force tool usage for learning content when using general prompt
+                request.force_tools = True
             elif tools_to_use:
                 base_system_prompt = self.default_system_prompts["anthropic_with_tools"]
             else:
@@ -1731,6 +1733,8 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             # Use learning-aware prompt if learning tools are available
             if has_learning_tools:
                 base_system_prompt = self.default_system_prompts["openai_with_learning"]
+                # Force tool usage for learning content when using general prompt
+                request.force_tools = True
             elif tools_to_use:
                 base_system_prompt = self.default_system_prompts["openai_with_tools"]
             else:

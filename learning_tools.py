@@ -1304,22 +1304,112 @@ async def complete_learning_decision(decision_id: str, human_choice: str) -> Dic
             else:
                 user_message = context
             
-            # Create KnowledgeSaveTool instance and actually save the knowledge
-            save_tool = KnowledgeSaveTool(user_id=user_id, org_id=org_id)
+            # Get the AI response that was generated for this user message
+            # This should include AI's understanding and synthesis
+            ai_response = decision.get("ai_response", "") or decision.get("ai_synthesis", "")
             
-            # Prepare knowledge content
-            knowledge_content = f"Human-approved teaching content:\n\nUser: {user_message}"
-            knowledge_title = f"Knowledge from {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            knowledge_categories = ["teaching_intent", "human_approved", "interactive_learning"]
+            # If no AI response available, generate one using LLM synthesis
+            if not ai_response:
+                logger.info(f"No AI response found for decision {decision_id}, generating AI synthesis...")
+                
+                try:
+                    # Generate AI synthesis of the user's teaching content
+                    synthesis_prompt = f"""
+You are Ami, an AI that helps people build AI agents. A human just shared this information with you:
+
+"{user_message}"
+
+Please provide a thoughtful synthesis that shows your understanding. Include:
+1. What the human taught you
+2. How this information is valuable
+3. Key concepts or insights
+4. How this might be useful for building AI agents
+
+Keep your response concise but insightful, showing genuine understanding.
+                    """
+                    
+                    # Use a simple LLM call to generate synthesis
+                    from anthropic_tool import AnthropicTool
+                    anthropic = AnthropicTool(model="claude-3-5-haiku-20241022")  # Fast model for synthesis
+                    # Use async-safe method
+                    ai_response = await asyncio.to_thread(anthropic.process_query, synthesis_prompt)
+                    
+                    if ai_response and len(ai_response.strip()) > 20:
+                        logger.info(f"Generated AI synthesis: {ai_response[:100]}...")
+                        # Store the generated response in the decision for future reference
+                        decision["ai_synthesis"] = ai_response
+                    else:
+                        ai_response = f"I appreciate you sharing this information about {user_message[:100]}. This knowledge will be valuable for helping others build AI agents."
+                        logger.warning(f"LLM synthesis failed, using fallback response")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to generate AI synthesis: {e}")
+                    ai_response = f"I understand and appreciate this information: {user_message[:100]}. This will help me assist others better."
+                    
+            else:
+                logger.info(f"Found AI response for enhanced knowledge saving: {ai_response[:100]}...")
             
-            # Call the actual save_knowledge function
-            logger.info(f"Calling save_knowledge for decision {decision_id}")
-            save_result = await save_tool.save_knowledge(
-                content=knowledge_content,
-                title=knowledge_title,
-                categories=knowledge_categories,
-                decision_id=decision_id
-            )
+            # Use AVA-style multi-vector saving approach for richer knowledge storage
+            from ava import AVA
+            ava_instance = AVA()
+            
+            # Create a response-like structure for AVA's saving methods
+            response_structure = {
+                "message": ai_response,
+                "metadata": {
+                    "response_strategy": "LEARNING_DECISION",
+                    "has_teaching_intent": True,
+                    "is_priority_topic": True,
+                    "should_save_knowledge": True
+                }
+            }
+            
+            # Use AVA's sophisticated multi-vector saving approach
+            logger.info(f"Using AVA-style multi-vector knowledge saving for decision {decision_id}")
+            
+            try:
+                # Save using AVA's _save_tool_knowledge_multiple method which saves:
+                # 1. Combined Knowledge (User + AI format)
+                # 2. AI Synthesis (enhanced AI understanding)  
+                # 3. User message only (for reference)
+                await ava_instance._save_tool_knowledge_multiple(
+                    user_message=user_message,
+                    ai_response=ai_response,
+                    combined_content=f"User: {user_message}\n\nAI: {ai_response}",
+                    user_id=user_id,
+                    thread_id=decision.get("thread_id"),
+                    priority_topic_name=decision.get("topic", "interactive_learning"),
+                    categories=["teaching_intent", "human_approved", "interactive_learning", "multi_vector_save"],
+                    response=response_structure,
+                    org_id=org_id
+                )
+                
+                save_result = {
+                    "success": True,
+                    "message": "Knowledge saved using multi-vector AVA approach",
+                    "vectors_saved": 3,
+                    "save_method": "ava_multi_vector"
+                }
+                
+            except Exception as ava_error:
+                logger.error(f"AVA multi-vector save failed, falling back to single save: {ava_error}")
+                
+                # Fallback to single enhanced save if AVA method fails
+                save_tool = KnowledgeSaveTool(user_id=user_id, org_id=org_id)
+                
+                # Enhanced knowledge content with both user and AI
+                knowledge_content = f"User: {user_message}\n\nAI Synthesis: {ai_response}"
+                knowledge_title = f"Interactive Learning - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                knowledge_categories = ["teaching_intent", "human_approved", "interactive_learning", "enhanced_save"]
+                
+                # Call the actual save_knowledge function with enhanced content
+                logger.info(f"Calling enhanced save_knowledge for decision {decision_id}")
+                save_result = await save_tool.save_knowledge(
+                    content=knowledge_content,
+                    title=knowledge_title,
+                    categories=knowledge_categories,
+                    decision_id=decision_id
+                )
             
             # Log the actual save result
             logger.info(f"Knowledge save result: {save_result}")
