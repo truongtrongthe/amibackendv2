@@ -19,6 +19,15 @@ from learning_tools import LearningToolsFactory
 
 logger = logging.getLogger(__name__)
 
+# Configure detailed logging for tool calls
+tool_logger = logging.getLogger("tool_calls")
+tool_logger.setLevel(logging.INFO)
+if not tool_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('🔧 [TOOL] %(asctime)s - %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    tool_logger.addHandler(handler)
+
 # Import language detection from lightweight language module
 try:
     from language import detect_language_with_llm, LanguageDetector
@@ -569,18 +578,19 @@ Remember: You don't write code or build software - you build understanding, crea
     
     async def _analyze_request_intent_with_thoughts(self, request: ToolExecutionRequest) -> tuple[RequestAnalysis, list[str]]:
         """
-        Analyze user request with Cursor-style detailed thinking process
+        Analyze user request intent and return analysis data and raw thinking steps
+        (No longer streams thoughts directly - unified method handles that)
         
         Args:
             request: The tool execution request containing LLM provider and model
             
         Returns:
-            Tuple of (RequestAnalysis, list of thought steps)
+            Tuple of (RequestAnalysis, list of raw thinking steps from LLM)
         """
         
-        # Create a Cursor-style analysis prompt that shows thinking process
+        # Create analysis prompt that generates structured thinking data
         analysis_prompt = f"""
-        You are analyzing a user request to understand their intent and provide helpful assistance. Think through this step-by-step like Cursor AI does.
+        You are analyzing a user request to understand their intent. Think through this step-by-step and provide structured analysis.
 
         User Message: "{request.user_query}"
         
@@ -589,9 +599,9 @@ Remember: You don't write code or build software - you build understanding, crea
         Please provide your analysis in this EXACT format:
 
         UNDERSTANDING:
-        [First, provide a clear understanding of what the user is asking for, what they want to achieve, and the context of their request. This should be 2-3 sentences explaining your comprehension of their intent.]
+        [Provide a clear understanding of what the user is asking for and context]
 
-        THINKING:
+        DETAILED_THINKING:
         1. Looking at the current situation and context...
         2. Based on the request type and key terms...
         3. The user likely needs help with...
@@ -606,14 +616,7 @@ Remember: You don't write code or build software - you build understanding, crea
             "suggested_tools": ["search", "context", "learning"],
             "requires_code": false,
             "domain": "technology|business|general|education|etc",
-            "reasoning": "Detailed explanation of the classification",
-            "understanding": "Your initial understanding of what the user wants",
-            "thinking_steps": [
-                "Step 1: Context analysis...",
-                "Step 2: Request breakdown...",
-                "Step 3: Intent determination...",
-                "Step 4: Tool selection..."
-            ]
+            "reasoning": "Detailed explanation of the classification"
         }}
 
         Intent Classifications:
@@ -621,8 +624,6 @@ Remember: You don't write code or build software - you build understanding, crea
         - "problem_solving": User needs help solving a specific problem or issue  
         - "general_chat": General conversation, questions, or casual interaction
         - "task_execution": User wants to perform a specific task or get something done
-
-        IMPORTANT: Always start with UNDERSTANDING section, then THINKING, then ANALYSIS. The understanding should explain what you comprehend about the user's request.
         """
         
         try:
@@ -640,28 +641,28 @@ Remember: You don't write code or build software - you build understanding, crea
                 response = analyzer.client.chat.completions.create(
                     model=analyzer.model,
                     messages=[
-                        {"role": "system", "content": "You are an intent analyzer that thinks step-by-step like Cursor AI. Provide detailed reasoning followed by JSON analysis."},
+                        {"role": "system", "content": "You are an intent analyzer. Provide structured analysis with detailed reasoning."},
                         {"role": "user", "content": analysis_prompt}
                     ],
                     temperature=0
                 )
                 analysis_response = response.choices[0].message.content
             
-            # Parse the response to extract understanding, thinking steps and JSON
+            # Parse the response to extract components
             thinking_steps = []
             analysis_data = {}
-            
-            # Extract understanding section (first thought)
-            import re
-            understanding_match = re.search(r'UNDERSTANDING:(.*?)THINKING:', analysis_response, re.DOTALL)
             understanding_text = ""
+            
+            import re
+            # Extract understanding section
+            understanding_match = re.search(r'UNDERSTANDING:(.*?)DETAILED_THINKING:', analysis_response, re.DOTALL)
             if understanding_match:
                 understanding_text = understanding_match.group(1).strip()
                 # Clean up any bracketed instructions
                 understanding_text = re.sub(r'\[.*?\]', '', understanding_text).strip()
             
-            # Extract thinking section
-            thinking_match = re.search(r'THINKING:(.*?)ANALYSIS:', analysis_response, re.DOTALL)
+            # Extract detailed thinking section
+            thinking_match = re.search(r'DETAILED_THINKING:(.*?)ANALYSIS:', analysis_response, re.DOTALL)
             if thinking_match:
                 thinking_text = thinking_match.group(1).strip()
                 # Extract numbered steps
@@ -677,33 +678,6 @@ Remember: You don't write code or build software - you build understanding, crea
                 except json.JSONDecodeError:
                     logger.warning(f"Could not parse JSON from analysis response")
             
-            # Create final thinking steps with understanding first
-            final_thinking_steps = []
-            
-            # Add understanding as first thought if available
-            if understanding_text:
-                final_thinking_steps.append(understanding_text)
-            else:
-                # Default understanding if not found
-                final_thinking_steps.append(f"The user is asking: '{request.user_query[:100]}...' - Let me analyze what they want to achieve and how I can help them.")
-            
-            # Add thinking steps
-            if thinking_steps:
-                final_thinking_steps.extend(thinking_steps)
-            else:
-                # Default thinking steps if not found
-                final_thinking_steps.extend([
-                    "Looking at the request type and context to understand the user's needs...",
-                    "Analyzing the key terms and determining the most appropriate intent classification...",
-                    "Considering the complexity and selecting tools that would be most helpful..."
-                ])
-            
-            # Use extracted thinking steps from JSON if available (as fallback)
-            if analysis_data.get("thinking_steps") and not final_thinking_steps:
-                final_thinking_steps = analysis_data["thinking_steps"]
-            
-            thinking_steps = final_thinking_steps
-            
             # Create RequestAnalysis object
             request_analysis = RequestAnalysis(
                 intent=analysis_data.get("intent", "general_chat"),
@@ -715,21 +689,21 @@ Remember: You don't write code or build software - you build understanding, crea
                 reasoning=analysis_data.get("reasoning", "Analysis completed with default reasoning"),
                 metadata={
                     **analysis_data,
-                    "understanding": understanding_text or analysis_data.get("understanding", ""),
-                    "thinking_steps": thinking_steps
+                    "understanding": understanding_text,
+                    "detailed_thinking_steps": thinking_steps
                 }
             )
             
             return request_analysis, thinking_steps
             
         except Exception as e:
-            logger.error(f"Intent analysis with thoughts failed: {e}")
-            # Return default analysis and thinking steps with understanding first
+            logger.error(f"Intent analysis failed: {e}")
+            # Return default analysis and thinking steps
             default_thinking = [
-                f"The user is asking: '{request.user_query[:100]}...' - I need to analyze what they want to achieve, but the analysis encountered an error.",
-                "Since the detailed analysis failed, I'll use default classification to still provide helpful assistance.",
-                "This appears to be a general conversation request based on the available information.",
-                "I'll provide helpful assistance with available tools while working with the default analysis."
+                "Looking at the request to understand what the user wants to achieve...",
+                "Since detailed analysis failed, I'll use default classification to provide helpful assistance...",
+                "This appears to be a general conversation request based on available information...",
+                "I'll provide assistance with available tools while working with default analysis..."
             ]
             
             return RequestAnalysis(
@@ -741,10 +715,133 @@ Remember: You don't write code or build software - you build understanding, crea
                 reasoning="Analysis failed, using defaults",
                 metadata={
                     "understanding": f"The user is asking: '{request.user_query[:100]}...' - Analysis failed, using defaults.",
-                    "thinking_steps": default_thinking
+                    "detailed_thinking_steps": default_thinking
                 }
             ), default_thinking
 
+    async def _generate_unified_cursor_thoughts(self, request: ToolExecutionRequest, analysis: RequestAnalysis, orchestration_plan: Dict[str, Any], thinking_steps: List[str]) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Generate unified Cursor-style thoughts in logical order with UI/UX enhancements
+        
+        Args:
+            request: The tool execution request
+            analysis: The request analysis results
+            orchestration_plan: The tool orchestration plan
+            thinking_steps: Raw thinking steps from LLM analysis
+            
+        Yields:
+            Dict containing thought messages in natural logical order
+        """
+        
+        # 1. FIRST: Initial understanding (always first)
+        understanding = analysis.metadata.get("understanding", "")
+        if understanding:
+            yield {
+                "type": "thinking",
+                "content": f"💭 {understanding}",
+                "provider": request.llm_provider,
+                "thought_type": "understanding",
+                "step": 1,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # Fallback understanding
+            yield {
+                "type": "thinking",
+                "content": f"💭 I need to understand this request: \"{request.user_query[:80]}{'...' if len(request.user_query) > 80 else ''}\" - Let me analyze what they want to achieve and how I can help them.",
+                "provider": request.llm_provider,
+                "thought_type": "understanding",
+                "step": 1,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        await asyncio.sleep(0.4)  # Natural reading pace
+        
+        # 2. SECOND: Intent analysis result (UI/UX enhancement)
+        yield {
+            "type": "thinking",
+            "content": f"🔍 Analyzing the intent... This looks like a **{analysis.intent}** request with {analysis.complexity} complexity. I'm {analysis.confidence:.0%} confident about this classification.",
+            "provider": request.llm_provider,
+            "thought_type": "intent_analysis",
+            "step": 2,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        await asyncio.sleep(0.3)
+        
+        # 3. THIRD: Detailed thinking steps from LLM (the core reasoning)
+        for i, step in enumerate(thinking_steps, start=3):
+            yield {
+                "type": "thinking",
+                "content": f"🧠 {step}",
+                "provider": request.llm_provider,
+                "thought_type": "detailed_analysis",
+                "step": i,
+                "timestamp": datetime.now().isoformat()
+            }
+            await asyncio.sleep(0.3)  # Brief pause between detailed thoughts
+        
+        # 4. FOURTH: Tool selection (UI/UX enhancement)
+        current_step = len(thinking_steps) + 3
+        primary_tools = orchestration_plan.get("primary_tools", [])
+        secondary_tools = orchestration_plan.get("secondary_tools", [])
+        
+        if primary_tools:
+            tools_text = ", ".join([f"**{tool}**" for tool in primary_tools])
+            yield {
+                "type": "thinking",
+                "content": f"🛠️ I'll use these tools to help: {tools_text}. This should give me the information I need to provide a comprehensive response.",
+                "provider": request.llm_provider,
+                "thought_type": "tool_selection",
+                "step": current_step,
+                "timestamp": datetime.now().isoformat()
+            }
+            await asyncio.sleep(0.4)
+            current_step += 1
+        
+        # 5. FIFTH: Strategy explanation (UI/UX enhancement)
+        strategy_content = ""
+        if analysis.intent == "learning":
+            strategy_content = "📚 Since this is a learning request, I'll first check existing knowledge to avoid duplicates, then analyze if this should be learned."
+        elif analysis.intent == "problem_solving":
+            strategy_content = "🔧 For this problem-solving request, I'll search for current information and check internal context to provide the most relevant solution."
+        elif analysis.intent == "task_execution":
+            strategy_content = "⚡ This is a task execution request. I'll gather context first, then search for any additional information needed to complete the task effectively."
+        else:
+            strategy_content = "💬 This seems like a general conversation. I'll search for relevant information if needed and provide a helpful response."
+        
+        yield {
+            "type": "thinking",
+            "content": strategy_content,
+            "provider": request.llm_provider,
+            "thought_type": "strategy",
+            "step": current_step,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        await asyncio.sleep(0.4)
+        current_step += 1
+        
+        # 6. FINALLY: Execution readiness (UI/UX enhancement)
+        yield {
+            "type": "thinking",
+            "content": "🚀 Now I'll execute my plan and provide you with a comprehensive response...",
+            "provider": request.llm_provider,
+            "thought_type": "execution_ready",
+            "step": current_step,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    async def _generate_cursor_thoughts(self, request: ToolExecutionRequest, analysis: RequestAnalysis, orchestration_plan: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        DEPRECATED: Use _generate_unified_cursor_thoughts instead
+        This method is kept for backward compatibility but should not be used
+        """
+        # This method is now empty and deprecated
+        # All thought generation is handled by _generate_unified_cursor_thoughts
+        return
+        yield  # Make this a generator for compatibility
+    
     async def _analyze_request_intent(self, request: ToolExecutionRequest) -> RequestAnalysis:
         """
         Analyze user request to determine intent and suggest appropriate tools
@@ -1377,21 +1474,8 @@ Remember to:
                 "status": "analyzing"
             }
             
-            # Perform intent analysis with Cursor-style thoughts
-            request_analysis, thinking_steps = await self._analyze_request_intent_with_thoughts(request)
-            
-            # Stream thinking steps to frontend like Cursor
-            for i, thought in enumerate(thinking_steps):
-                yield {
-                    "type": "thinking",
-                    "content": thought,
-                    "provider": request.llm_provider,
-                    "step": i + 1,
-                    "total_steps": len(thinking_steps),
-                    "thinking_type": "intent_analysis"
-                }
-                # Small delay between thoughts for natural reading pace
-                await asyncio.sleep(0.8)
+            # Perform intent analysis with thoughts (returns raw thinking steps)
+            request_analysis, raw_thinking_steps = await self._analyze_request_intent_with_thoughts(request)
             
             # Create orchestration plan
             orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
@@ -1407,7 +1491,7 @@ Remember to:
                     "complexity": request_analysis.complexity,
                     "suggested_tools": request_analysis.suggested_tools,
                     "reasoning": request_analysis.reasoning,
-                    "thinking_steps": thinking_steps
+                    "thinking_steps": raw_thinking_steps
                 },
                 "orchestration_plan": orchestration_plan
             }
@@ -1415,8 +1499,8 @@ Remember to:
             # Brief pause for user to see analysis
             await asyncio.sleep(0.5)
             
-            # NEW: Generate Cursor-style thoughts
-            async for thought in self._generate_cursor_thoughts(request, request_analysis, orchestration_plan):
+            # NEW: Generate unified Cursor-style thoughts in correct logical order
+            async for thought in self._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
                 yield thought
         
         # Get available tools for execution based on configuration
@@ -1636,21 +1720,8 @@ Remember: Be genuinely curious about their actual work. Ask about past behavior,
                 "status": "analyzing"
             }
             
-            # Perform intent analysis with Cursor-style thoughts
-            request_analysis, thinking_steps = await self._analyze_request_intent_with_thoughts(request)
-            
-            # Stream thinking steps to frontend like Cursor
-            for i, thought in enumerate(thinking_steps):
-                yield {
-                    "type": "thinking",
-                    "content": thought,
-                    "provider": request.llm_provider,
-                    "step": i + 1,
-                    "total_steps": len(thinking_steps),
-                    "thinking_type": "intent_analysis"
-                }
-                # Small delay between thoughts for natural reading pace
-                await asyncio.sleep(0.8)
+            # Perform intent analysis with thoughts (returns raw thinking steps)
+            request_analysis, raw_thinking_steps = await self._analyze_request_intent_with_thoughts(request)
             
             # Create orchestration plan
             orchestration_plan = self._create_tool_orchestration_plan(request, request_analysis)
@@ -1666,7 +1737,7 @@ Remember: Be genuinely curious about their actual work. Ask about past behavior,
                     "complexity": request_analysis.complexity,
                     "suggested_tools": request_analysis.suggested_tools,
                     "reasoning": request_analysis.reasoning,
-                    "thinking_steps": thinking_steps
+                    "thinking_steps": raw_thinking_steps
                 },
                 "orchestration_plan": orchestration_plan
             }
@@ -1674,8 +1745,8 @@ Remember: Be genuinely curious about their actual work. Ask about past behavior,
             # Brief pause for user to see analysis
             await asyncio.sleep(0.5)
             
-            # NEW: Generate Cursor-style thoughts
-            async for thought in self._generate_cursor_thoughts(request, request_analysis, orchestration_plan):
+            # NEW: Generate unified Cursor-style thoughts in correct logical order
+            async for thought in self._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
                 yield thought
         
                 # Get available tools for execution based on configuration
@@ -1857,178 +1928,6 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 "complete": True
             }
     
-    async def _generate_cursor_thoughts(self, request: ToolExecutionRequest, analysis: RequestAnalysis, orchestration_plan: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Generate Cursor-style "Thoughts" messages showing step-by-step reasoning
-        
-        Args:
-            request: The tool execution request
-            analysis: The request analysis results
-            orchestration_plan: The tool orchestration plan
-            
-        Yields:
-            Dict containing thought messages
-        """
-        
-        # Initial thought about understanding the request
-        yield {
-            "type": "thought",
-            "content": f"💭 I need to understand this request: \"{request.user_query[:80]}{'...' if len(request.user_query) > 80 else ''}\"",
-            "provider": request.llm_provider,
-            "thought_type": "understanding",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        await asyncio.sleep(0.3)  # Brief pause for natural feeling
-        
-        # Thought about intent analysis
-        yield {
-            "type": "thought",
-            "content": f"🔍 Analyzing the intent... This looks like a **{analysis.intent}** request with {analysis.complexity} complexity. I'm {analysis.confidence:.0%} confident about this classification.",
-            "provider": request.llm_provider,
-            "thought_type": "analysis",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        await asyncio.sleep(0.4)
-        
-        # Thought about tool selection
-        primary_tools = orchestration_plan.get("primary_tools", [])
-        secondary_tools = orchestration_plan.get("secondary_tools", [])
-        
-        if primary_tools:
-            tools_text = ", ".join([f"**{tool}**" for tool in primary_tools])
-            yield {
-                "type": "thought",
-                "content": f"🛠️ I'll use these tools to help: {tools_text}. This should give me the information I need to provide a comprehensive response.",
-                "provider": request.llm_provider,
-                "thought_type": "tool_selection",
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            await asyncio.sleep(0.4)
-        
-        # Thought about execution strategy
-        if analysis.intent == "learning":
-            yield {
-                "type": "thought",
-                "content": "📚 Since this is a learning request, I'll first check existing knowledge to avoid duplicates, then analyze if this should be learned.",
-                "provider": request.llm_provider,
-                "thought_type": "strategy",
-                "timestamp": datetime.now().isoformat()
-            }
-        elif analysis.intent == "problem_solving":
-            yield {
-                "type": "thought",
-                "content": "🔧 For this problem-solving request, I'll search for current information and check internal context to provide the most relevant solution.",
-                "provider": request.llm_provider,
-                "thought_type": "strategy",
-                "timestamp": datetime.now().isoformat()
-            }
-        elif analysis.intent == "task_execution":
-            yield {
-                "type": "thought",
-                "content": "⚡ This is a task execution request. I'll gather context first, then search for any additional information needed to complete the task effectively.",
-                "provider": request.llm_provider,
-                "thought_type": "strategy",
-                "timestamp": datetime.now().isoformat()
-            }
-        else:
-            yield {
-                "type": "thought",
-                "content": "💬 This seems like a general conversation. I'll search for relevant information if needed and provide a helpful response.",
-                "provider": request.llm_provider,
-                "thought_type": "strategy",
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        await asyncio.sleep(0.5)
-        
-        # Final thought before execution
-        yield {
-            "type": "thought",
-            "content": "🚀 Now I'll execute my plan and provide you with a comprehensive response...",
-            "provider": request.llm_provider,
-            "thought_type": "execution",
-            "timestamp": datetime.now().isoformat()
-        }
-    
-    async def _generate_tool_execution_thoughts(self, tool_name: str, tool_input: Dict[str, Any], provider: str) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Generate thoughts about tool execution in progress
-        
-        Args:
-            tool_name: Name of the tool being executed
-            tool_input: Input parameters for the tool
-            provider: LLM provider name
-            
-        Yields:
-            Dict containing tool execution thoughts
-        """
-        
-        if tool_name == "search_google":
-            query = tool_input.get("query", "")
-            yield {
-                "type": "thought",
-                "content": f"🔍 Searching for: \"{query}\" - Let me find the most current information...",
-                "provider": provider,
-                "thought_type": "tool_execution",
-                "tool_name": tool_name,
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        elif tool_name == "get_context":
-            query = tool_input.get("query", "")
-            yield {
-                "type": "thought",
-                "content": f"📋 Getting context for: \"{query}\" - Checking internal knowledge and user information...",
-                "provider": provider,
-                "thought_type": "tool_execution",
-                "tool_name": tool_name,
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        elif tool_name == "search_learning_context":
-            query = tool_input.get("query", "")
-            yield {
-                "type": "thought",
-                "content": f"📚 Searching learning context for: \"{query}\" - Checking if I already know about this...",
-                "provider": provider,
-                "thought_type": "tool_execution",
-                "tool_name": tool_name,
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        elif tool_name == "analyze_learning_opportunity":
-            yield {
-                "type": "thought",
-                "content": "🧠 Analyzing learning opportunity - Evaluating if this information should be saved for future use...",
-                "provider": provider,
-                "thought_type": "tool_execution",
-                "tool_name": tool_name,
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        elif tool_name == "request_learning_decision":
-            yield {
-                "type": "thought",
-                "content": "🤝 Creating learning decision - I need human input to decide whether to save this knowledge...",
-                "provider": provider,
-                "thought_type": "tool_execution",
-                "tool_name": tool_name,
-                "timestamp": datetime.now().isoformat()
-            }
-        
-        else:
-            yield {
-                "type": "thought",
-                "content": f"⚙️ Executing {tool_name} - Processing your request...",
-                "provider": provider,
-                "thought_type": "tool_execution",
-                "tool_name": tool_name,
-                "timestamp": datetime.now().isoformat()
-            }
-    
     async def _generate_response_thoughts(self, provider: str, has_tool_results: bool = False) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Generate thoughts about response generation
@@ -2043,7 +1942,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
         
         if has_tool_results:
             yield {
-                "type": "thought",
+                "type": "thinking",
                 "content": "✅ Great! I have the information I need. Now I'll synthesize everything into a comprehensive response...",
                 "provider": provider,
                 "thought_type": "response_generation",
@@ -2051,7 +1950,7 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
             }
         else:
             yield {
-                "type": "thought",
+                "type": "thinking",
                 "content": "💡 I'll use my existing knowledge to provide a helpful response...",
                 "provider": provider,
                 "thought_type": "response_generation",
@@ -2061,11 +1960,87 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
         await asyncio.sleep(0.3)
         
         yield {
-            "type": "thought",
+            "type": "thinking",
             "content": "✍️ Generating response now...",
             "provider": provider,
             "thought_type": "response_generation",
             "timestamp": datetime.now().isoformat()
+        }
+
+    async def _generate_tool_execution_thoughts(self, tool_name: str, tool_input: Dict[str, Any], provider: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Generate thoughts about tool execution in progress (for real-time feedback)
+        
+        Args:
+            tool_name: Name of the tool being executed
+            tool_input: Input parameters for the tool
+            provider: LLM provider name
+            
+        Yields:
+            Dict containing tool execution thoughts
+        """
+        
+        if tool_name == "search_google":
+            query = tool_input.get("query", "")
+            yield {
+                "type": "thinking",
+                "content": f"🔍 Searching for: \"{query}\" - Let me find the most current information...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "get_context":
+            query = tool_input.get("query", "")
+            yield {
+                "type": "thinking",
+                "content": f"📋 Getting context for: \"{query}\" - Checking internal knowledge and user information...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "search_learning_context":
+            query = tool_input.get("query", "")
+            yield {
+                "type": "thinking",
+                "content": f"📚 Searching learning context for: \"{query}\" - Checking if I already know about this...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "analyze_learning_opportunity":
+            yield {
+                "type": "thinking",
+                "content": "🧠 Analyzing learning opportunity - Evaluating if this information should be saved for future use...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        elif tool_name == "request_learning_decision":
+            yield {
+                "type": "thinking",
+                "content": "🤝 Creating learning decision - I need human input to decide whether to save this knowledge...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        else:
+            yield {
+                "type": "thinking",
+                "content": f"⚙️ Executing {tool_name} - Processing your request...",
+                "provider": provider,
+                "thought_type": "tool_execution",
+                "tool_name": tool_name,
+                "timestamp": datetime.now().isoformat()
             }
     
     def _get_model_name(self, provider: str, custom_model: str = None) -> str:

@@ -6,206 +6,199 @@ the learning process interactive and human-guided, replacing the monolithic
 hidden learning logic.
 """
 
-import logging
+import os
 import json
 import uuid
+import logging
 import asyncio
-from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
-import re
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Global storage for pending learning decisions
-PENDING_LEARNING_DECISIONS = {}
+# Global dictionary to store pending learning decisions (in-memory for now)
+PENDING_LEARNING_DECISIONS: Dict[str, Dict[str, Any]] = {}
 
+def get_pending_knowledge_decisions(user_id: str = None) -> List[Dict[str, Any]]:
+    """Get all pending learning decisions, optionally filtered by user_id"""
+    decisions = []
+    for decision_id, decision_data in PENDING_LEARNING_DECISIONS.items():
+        if user_id is None or decision_data.get("user_id") == user_id:
+            # Only return decisions that are still pending
+            if decision_data.get("status") == "PENDING":
+                decisions.append({
+                    "decision_id": decision_id,
+                    **decision_data
+                })
+    
+    logger.info(f"Found {len(decisions)} pending decisions for user {user_id or 'all'}")
+    return decisions
+
+def clear_pending_knowledge_decisions():
+    """Clear all pending decisions (for testing)"""
+    global PENDING_LEARNING_DECISIONS
+    PENDING_LEARNING_DECISIONS.clear()
+    logger.info("Cleared all pending learning decisions")
+
+@dataclass
+class LearningContext:
+    """Context for learning operations"""
+    user_id: str
+    org_id: str
+    llm_provider: str = "openai"  # Default to OpenAI for GPT-4o
+    model: str = "gpt-4o"  # Use GPT-4o for better quality
 
 class LearningSearchTool:
-    """Tool for LLM to search for learning-relevant knowledge"""
+    """Tool for LLM to search existing learning context"""
     
-    def __init__(self, user_id: str = "unknown", org_id: str = "unknown"):
+    def __init__(self, user_id: str = "unknown", org_id: str = "unknown", llm_provider: str = "openai", model: str = "gpt-4o"):
         self.user_id = user_id
         self.org_id = org_id
+        self.llm_provider = llm_provider
+        self.model = model or "gpt-4o"  # Default to GPT-4o
         self.name = "learning_search"
     
-    def search_learning_context(self, query: str, search_depth: str = "basic") -> str:
+    def search_learning_context(self, query: str, context: str = "", limit: int = 5) -> str:
         """
-        LLM calls this to search for existing knowledge relevant to learning
+        LLM calls this to search for similar existing knowledge before learning something new
         
         Args:
-            query: What to search for
-            search_depth: "basic" (1 round), "deep" (2 rounds), "exhaustive" (3 rounds)
+            query: Search query to find similar knowledge
+            context: Additional context for the search
+            limit: Maximum number of results to return
             
         Returns:
-            Formatted search results for LLM to understand
+            Formatted search results
         """
         try:
-            logger.info(f"LearningSearchTool: Searching for '{query}' with depth '{search_depth}'")
+            logger.info(f"LearningSearchTool: Searching for '{query[:50]}...' with limit {limit}")
             
-            # Map search depth to exploration rounds
-            depth_mapping = {
-                "basic": 1,
-                "deep": 2, 
-                "exhaustive": 3
-            }
-            max_rounds = depth_mapping.get(search_depth, 1)
+            # Import here to avoid circular imports
+            from pccontroller import query_knowledge
             
-            # Use existing knowledge exploration logic (simplified for sync context)
-            search_result = self._perform_knowledge_search_sync(query, max_rounds)
+            # Search for existing knowledge - handle async context properly
+            try:
+                import asyncio
+                # Check if we're in an async context
+                try:
+                    loop = asyncio.get_running_loop()
+                    # We're in an async context, but this is a sync method called by LLM tools
+                    # Create a new task but don't use run_until_complete
+                    import threading
+                    import queue
+                    
+                    result_queue = queue.Queue()
+                    exception_queue = queue.Queue()
+                    
+                    def run_async_query():
+                        try:
+                            # Create new event loop for this thread
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            try:
+                                results = new_loop.run_until_complete(query_knowledge(
+                                    query=query,
+                                    org_id=self.org_id,
+                                    user_id=self.user_id,
+                                    top_k=limit,
+                                    min_similarity=0.3
+                                ))
+                                result_queue.put(results)
+                            finally:
+                                new_loop.close()
+                        except Exception as e:
+                            exception_queue.put(e)
+                    
+                    # Run in a separate thread
+                    thread = threading.Thread(target=run_async_query)
+                    thread.start()
+                    thread.join(timeout=10)  # 10 second timeout
+                    
+                    if not exception_queue.empty():
+                        raise exception_queue.get()
+                    
+                    if not result_queue.empty():
+                        results = result_queue.get()
+                    else:
+                        raise Exception("Query timed out")
+                        
+                except RuntimeError:
+                    # No event loop running, safe to use asyncio.run
+                    results = asyncio.run(query_knowledge(
+                        query=query,
+                        org_id=self.org_id,
+                        user_id=self.user_id,
+                        top_k=limit,
+                        min_similarity=0.3
+                    ))
+                    
+            except Exception as async_error:
+                logger.error(f"Async query failed: {async_error}")
+                # Fallback: return a message indicating search wasn't possible
+                return f"SEARCH_RESULTS: Unable to search existing knowledge due to async context error. Treating as new information for query '{query}'."
             
-            # Format results for LLM
-            similarity = search_result.get("similarity", 0.0)
-            knowledge_context = search_result.get("knowledge_context", "")
-            query_results = search_result.get("query_results", [])
+            if not results:
+                return f"SEARCH_RESULTS: No existing knowledge found for '{query}'. This appears to be new information."
             
-            # Determine recommendation based on similarity
-            if similarity >= 0.70:
-                recommendation = "HIGH_SIMILARITY - Consider updating existing knowledge"
-            elif similarity >= 0.35:
-                recommendation = "MEDIUM_SIMILARITY - Human decision recommended"
-            else:
-                recommendation = "LOW_SIMILARITY - Safe to create new knowledge"
+            # Format results for LLM analysis
+            formatted_results = []
+            for i, result in enumerate(results, 1):
+                similarity = result.get('score', 0.0)
+                content = result.get('raw', '')[:200] + "..." if len(result.get('raw', '')) > 200 else result.get('raw', '')
+                categories = result.get('categories', [])
+                
+                formatted_results.append(f"""
+RESULT {i} (Similarity: {similarity:.3f}):
+Content: {content}
+Categories: {', '.join(categories)}
+Created: {result.get('created_at', 'Unknown')}
+""")
             
-            # Log search results for debugging
-            logger.info(f"LearningSearch Results - Query: '{query}', Similarity: {similarity:.2f}, "
-                       f"Items Found: {len(query_results)}, Recommendation: {recommendation.split(' - ')[0]}")
+            results_text = "\n".join(formatted_results)
             
-            return f"""
-LEARNING SEARCH RESULTS:
-- Query: {query}
-- Search Depth: {search_depth} ({max_rounds} rounds)
-- Knowledge Items Found: {len(query_results)}
-- Best Similarity Score: {similarity:.2f}
-- Confidence Level: {self._calculate_confidence(similarity, len(query_results))}
-- Recommendation: {recommendation}
+            # Calculate max similarity for decision making
+            max_similarity = max([r.get('score', 0.0) for r in results]) if results else 0.0
+            
+            return f"""SEARCH_RESULTS for query "{query}":
 
-EXISTING KNOWLEDGE PREVIEW:
-{knowledge_context[:500] + "..." if len(knowledge_context) > 500 else knowledge_context}
+Found {len(results)} similar knowledge entries (Max similarity: {max_similarity:.3f}):
 
-SIMILARITY ANALYSIS:
-- High (≥70%): Update existing knowledge
-- Medium (35-70%): Human decision needed
-- Low (<35%): Create new knowledge
-            """.strip()
+{results_text}
+
+ANALYSIS:
+- High similarity (>0.7): Very similar content exists - consider updating instead of creating new
+- Medium similarity (0.3-0.7): Some related content exists - new information might be valuable
+- Low similarity (<0.3): No similar content found - new information is likely valuable
+"""
             
         except Exception as e:
-            logger.error(f"LearningSearchTool error: {e}")
-            return f"ERROR: Failed to search learning context - {str(e)}"
-    
-    def _perform_knowledge_search_sync(self, query: str, max_rounds: int) -> Dict[str, Any]:
-        """Perform knowledge search synchronously (simplified for tool context)"""
-        try:
-            # For now, return a simplified search result to avoid async issues
-            # This can be enhanced later with proper sync search implementation
-            logger.info(f"Performing simplified search for: {query}")
-            
-            # Return mock result with low similarity to trigger learning
-            return {
-                "similarity": 0.1,  # Low similarity to encourage learning
-                "knowledge_context": f"No existing knowledge found for '{query}'. This appears to be new information that could be valuable to learn.",
-                "query_results": [],
-                "queries": [query]
-            }
-            
-        except Exception as e:
-            logger.error(f"Knowledge search failed: {e}")
-            return {
-                "similarity": 0.0,
-                "knowledge_context": "",
-                "query_results": [],
-                "queries": [query]
-            }
-
-    async def _perform_knowledge_search(self, query: str, max_rounds: int) -> Dict[str, Any]:
-        """Perform the actual knowledge search using existing exploration logic (async version)"""
-        try:
-            # Import and use existing exploration logic
-            from curiosity import KnowledgeExplorer
-            from learning_support import LearningSupport
-            
-            # Create knowledge explorer
-            explorer = KnowledgeExplorer(
-                graph_version_id="default",
-                support_module=LearningSupport(None)  # We'll handle this gracefully
-            )
-            
-            # Perform exploration
-            result = await explorer.explore(
-                message=query,
-                conversation_context="",
-                user_id=self.user_id,
-                thread_id=None,
-                max_rounds=max_rounds,
-                org_id=self.org_id
-            )
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Knowledge search failed: {e}")
-            return {
-                "similarity": 0.0,
-                "knowledge_context": "",
-                "query_results": [],
-                "queries": [query]
-            }
-    
-    def _calculate_confidence(self, similarity: float, result_count: int) -> str:
-        """Calculate confidence level based on similarity and result count"""
-        if similarity >= 0.70 and result_count >= 3:
-            return "HIGH"
-        elif similarity >= 0.35 and result_count >= 1:
-            return "MEDIUM"
-        else:
-            return "LOW"
-    
-    def get_tool_description(self) -> Dict[str, Any]:
-        """Get tool description for LLM function calling"""
-        return {
-            "name": "search_learning_context",
-            "description": "Search for existing knowledge relevant to potential learning opportunities",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What to search for in existing knowledge"
-                    },
-                    "search_depth": {
-                        "type": "string",
-                        "enum": ["basic", "deep", "exhaustive"],
-                        "description": "How thorough the search should be",
-                        "default": "basic"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-
+            logger.error(f"Learning search error: {e}")
+            return f"SEARCH_ERROR: Failed to search existing knowledge - {str(e)}. Treating as new information."
 
 class LearningAnalysisTool:
-    """Tool for LLM to analyze learning opportunities"""
+    """Tool for LLM to analyze if something should be learned"""
     
-    def __init__(self, user_id: str = "unknown", org_id: str = "unknown", 
-                 llm_provider: str = "openai", model: str = None):
+    def __init__(self, user_id: str = "unknown", org_id: str = "unknown", llm_provider: str = "openai", model: str = "gpt-4o"):
         self.user_id = user_id
         self.org_id = org_id
+        self.llm_provider = llm_provider
+        self.model = model or "gpt-4o"  # Default to GPT-4o
         self.name = "learning_analysis"
-        self.llm_provider = llm_provider.lower()
-        self.model = model
     
     async def analyze_learning_opportunity(self, user_message: str, conversation_context: str = "", search_results: str = "") -> str:
         """
-        LLM calls this to analyze if something should be learned
+        LLM calls this to analyze if user input should be learned/saved
         
         Args:
             user_message: The user's message to analyze
             conversation_context: Previous conversation context
-            search_results: Results from learning search tool
+            search_results: Results from searching existing knowledge
             
         Returns:
-            Detailed analysis of learning opportunity
+            Analysis result with recommendation
         """
+        
         try:
             logger.info(f"LearningAnalysisTool: Analyzing message '{user_message[:50]}...'")
             
@@ -227,145 +220,125 @@ class LearningAnalysisTool:
                        f"Indicators: {teaching_intent['indicators']}, Reasoning: {reasoning}, "
                        f"Final Action: {recommendation['action']}, Confidence: {recommendation['confidence']:.2f}")
             
-            return f"""
-LEARNING OPPORTUNITY ANALYSIS:
+            # Format comprehensive analysis result
+            return f"""LEARNING_OPPORTUNITY_ANALYSIS:
 
-TEACHING INTENT DETECTION (LLM-POWERED):
-- Has Teaching Intent: {teaching_intent['detected']}
-- Confidence: {teaching_intent['confidence']:.2f}
-- LLM Reasoning: {reasoning}
-- Categories Detected: {', '.join(teaching_intent['indicators'])}
+TEACHING_INTENT: {teaching_intent['detected']} (Confidence: {teaching_intent['confidence']:.2f})
+Reasoning: {teaching_intent['reasoning']}
+Categories: {', '.join(teaching_intent.get('categories', []))}
 
-KNOWLEDGE GAP ANALYSIS:
-- Knowledge Gap Detected: {knowledge_gap['detected']}
-- Gap Type: {knowledge_gap['type']}
-- Significance: {knowledge_gap['significance']}
+KNOWLEDGE_GAP: {knowledge_gap['exists']} (Score: {knowledge_gap['score']:.2f})
+Analysis: {knowledge_gap['reasoning']}
 
-LEARNING VALUE ASSESSMENT:
-- Educational Value: {learning_value['educational_value']:.2f}
-- Practical Value: {learning_value['practical_value']:.2f}
-- Uniqueness: {learning_value['uniqueness']:.2f}
+LEARNING_VALUE: {learning_value:.2f}/1.0
+CONTENT_QUALITY: {content_quality:.2f}/1.0
+SIMILARITY_SCORE: {similarity_score:.3f} (from existing knowledge)
 
-CONTENT QUALITY:
-- Clarity: {content_quality['clarity']:.2f}
-- Completeness: {content_quality['completeness']:.2f}
-- Accuracy Indicators: {content_quality['accuracy']}
+RECOMMENDATION: {recommendation['action']}
+Confidence: {recommendation['confidence']:.2f}
+Reason: {recommendation['reason']}
 
-SIMILARITY TO EXISTING:
-- Similarity Score: {similarity_score:.2f}
-- Similarity Category: {self._categorize_similarity(similarity_score)}
-
-OVERALL RECOMMENDATION:
-- Action: {recommendation['action']}
-- Confidence: {recommendation['confidence']:.2f}
-- Reasoning: {recommendation['reasoning']}
-- Next Steps: {recommendation['next_steps']}
-
-NOTE: Teaching intent detection is now powered by LLM analysis for better accuracy and flexibility.
-            """.strip()
+NEXT_STEPS:
+{recommendation['next_steps']}
+"""
             
         except Exception as e:
-            logger.error(f"LearningAnalysisTool error: {e}")
-            return f"ERROR: Failed to analyze learning opportunity - {str(e)}"
-    
-    def get_tool_description(self) -> Dict[str, Any]:
-        """Get tool description for LLM function calling"""
-        return {
-            "name": "analyze_learning_opportunity",
-            "description": "Analyze whether something should be learned from user input",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_message": {
-                        "type": "string",
-                        "description": "The user's message to analyze"
-                    },
-                    "conversation_context": {
-                        "type": "string",
-                        "description": "Previous conversation context",
-                        "default": ""
-                    },
-                    "search_results": {
-                        "type": "string",
-                        "description": "Results from learning search tool",
-                        "default": ""
-                    }
-                },
-                "required": ["user_message"]
-            }
-        }
+            logger.error(f"Learning analysis error: {e}")
+            return f"ANALYSIS_ERROR: Failed to analyze learning opportunity - {str(e)}"
     
     async def _detect_teaching_intent(self, message: str, context: str) -> Dict[str, Any]:
-        """Detect if user has teaching intent using LLM analysis"""
+        """Detect if user has valuable information sharing intent using GPT-4o analysis"""
         try:
-            # Use LLM to analyze teaching intent instead of hardcoded patterns
+            # Use GPT-4o to analyze information sharing value with expanded criteria
             analysis_prompt = f"""
-Analyze this message to determine if the user has teaching intent (wants to share knowledge, give instructions, or provide information that should be learned/remembered).
+Analyze this message to determine if it contains valuable information that should be learned and remembered for better personalization and context understanding.
 
 Message: "{message}"
 Context: "{context}"
 
-Please analyze if this message contains:
-1. Teaching intent (sharing knowledge, giving instructions, providing facts)
-2. Company/organizational information 
-3. Task assignments or procedures
-4. Factual information that should be remembered
-5. Educational content
+EXPANDED LEARNING CRITERIA - Look for ANY of these valuable information types:
+
+🏢 **BUSINESS/COMPANY CONTEXT:**
+- Company description, services, products
+- Industry, market, business model
+- Team size, structure, departments
+- Business processes, workflows
+- Company goals, values, culture
+
+👤 **PERSONAL/PROFESSIONAL CONTEXT:**  
+- User's role, job title, responsibilities
+- Skills, expertise, experience level
+- Work environment, tools used
+- Professional goals, career focus
+- Personal preferences, working style
+
+🎯 **DOMAIN KNOWLEDGE:**
+- Industry insights, expertise sharing
+- Technical knowledge, best practices
+- Process descriptions, methodologies
+- Tool recommendations, experiences
+- Problem-solving approaches
+
+📊 **SITUATIONAL CONTEXT:**
+- Current projects, initiatives
+- Challenges, pain points, obstacles
+- Requirements, specifications, needs
+- Timelines, deadlines, constraints
+- Success metrics, evaluation criteria
+
+🔄 **OPERATIONAL INFORMATION:**
+- How they work, daily routines
+- Communication preferences
+- Decision-making processes  
+- Resource availability, budgets
+- Vendor relationships, partnerships
+
+❌ **NOT VALUABLE (Skip learning):**
+- Pure greetings without context
+- Generic thank you messages
+- Simple yes/no responses
+- Casual small talk
+- Repetitive information already known
+
+EVALUATION FRAMEWORK:
+- **High Value**: Business context, domain expertise, operational details
+- **Medium Value**: Personal preferences, tool usage, process insights
+- **Low Value**: Casual conversation, generic responses
 
 Respond with ONLY a JSON object in this exact format:
 {{
-    "has_teaching_intent": true/false,
+    "has_information_value": true/false,
+    "value_category": "business_context|personal_context|domain_knowledge|situational_context|operational_info|low_value",
     "confidence": 0.0-1.0,
-    "reasoning": "brief explanation",
-    "categories": ["category1", "category2", ...],
-    "is_organizational_info": true/false,
-    "is_factual_content": true/false
+    "reasoning": "detailed explanation of why this information is/isn't valuable for future interactions",
+    "information_types": ["company_description", "role_info", "process_description", ...],
+    "is_business_info": true/false,
+    "is_personal_context": true/false,
+    "is_domain_expertise": true/false,
+    "personalization_value": 0.0-1.0,
+    "context_building_value": 0.0-1.0,
+    "future_utility": "high|medium|low"
 }}
 
-Categories can include: "teaching", "instruction", "company_info", "task_assignment", "factual_sharing", "procedure", "explanation"
-"""
+Information types can include: "company_description", "role_info", "industry_insight", "process_description", "tool_usage", "preferences", "goals", "challenges", "expertise_sharing", "operational_detail", "team_structure", "business_model", etc.
 
-            # Use the same provider and model as the main request with retry logic
-            if self.llm_provider == "anthropic":
-                from anthropic import Anthropic
-                import os
-                import asyncio
+IMPORTANT: Focus on information VALUE for building better context and personalization, not just traditional "teaching" scenarios.
+"""
+            
+            # Use GPT-4o for better analysis
+            if self.llm_provider.lower() == "anthropic":
+                import anthropic
                 
-                client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                
-                # Add retry logic for rate limiting
-                async def make_anthropic_call():
-                    response = client.messages.create(
-                        model=self.model or "claude-3-5-sonnet-20241022",
-                        max_tokens=200,
-                        messages=[
-                            {"role": "user", "content": f"You are an expert at analyzing teaching intent in messages. Always respond with valid JSON only.\n\n{analysis_prompt}"}
-                        ],
-                        temperature=0.1
-                    )
-                    return response.content[0].text.strip()
-                
-                # Apply retry logic for rate limiting
-                async def anthropic_api_call_with_retry(api_call_func, max_retries=3, base_delay=1.0):
-                    for attempt in range(max_retries + 1):
-                        try:
-                            return await api_call_func()
-                        except Exception as e:
-                            if "429" in str(e) or "Too Many Requests" in str(e):
-                                if attempt < max_retries:
-                                    delay = base_delay * (2 ** attempt)
-                                    logger.warning(f"Rate limit hit in learning analysis, retrying in {delay}s (attempt {attempt + 1}/{max_retries + 1})")
-                                    await asyncio.sleep(delay)
-                                    continue
-                                else:
-                                    logger.error(f"Learning analysis rate limit exceeded after {max_retries + 1} attempts")
-                                    raise
-                            else:
-                                raise
-                    raise Exception("Unexpected error in retry logic")
-                
-                # Use await since we're now in an async context
-                result_text = await anthropic_api_call_with_retry(make_anthropic_call)
+                client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+                response = client.messages.create(
+                    model="claude-3-5-sonnet-20241022",  # Use latest Claude model
+                    max_tokens=500,
+                    temperature=0.1,
+                    messages=[
+                        {"role": "user", "content": analysis_prompt}
+                    ]
+                )
+                result_text = response.content[0].text.strip()
                 
             else:
                 from openai import OpenAI
@@ -374,13 +347,13 @@ Categories can include: "teaching", "instruction", "company_info", "task_assignm
                 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
                 
                 response = client.chat.completions.create(
-                    model=self.model or "gpt-4o-mini",  # Use faster model for analysis
+                    model="gpt-4o",  # Use GPT-4o for better analysis
                     messages=[
-                        {"role": "system", "content": "You are an expert at analyzing teaching intent in messages. Always respond with valid JSON only."},
+                        {"role": "system", "content": "You are an expert at analyzing information value for personalization and context building. Always respond with valid JSON only."},
                         {"role": "user", "content": analysis_prompt}
                     ],
                     temperature=0.1,  # Low temperature for consistent analysis
-                    max_tokens=200
+                    max_tokens=500
                 )
                 result_text = response.choices[0].message.content.strip()
             
@@ -402,7 +375,7 @@ Categories can include: "teaching", "instruction", "company_info", "task_assignm
                 llm_analysis = json.loads(result_text)
             except json.JSONDecodeError:
                 # If that fails, try to extract JSON from text response
-                json_match = re.search(r'\{[^}]*\}', result_text)
+                json_match = re.search(r'\{[^}]*\}', result_text, re.DOTALL)
                 if json_match:
                     try:
                         llm_analysis = json.loads(json_match.group(0))
@@ -411,250 +384,348 @@ Categories can include: "teaching", "instruction", "company_info", "task_assignm
             
             # If we still don't have valid JSON, create a default response
             if not llm_analysis:
-                logger.warning(f"Could not parse learning analysis response as JSON: {result_text[:200]}...")
+                logger.warning(f"Could not parse LLM information value analysis as JSON: {result_text[:200]}...")
                 llm_analysis = {
-                    "has_teaching_intent": False,
-                    "confidence": 0.0,
-                    "categories": [],
-                    "reasoning": "Failed to parse analysis response"
+                    "has_information_value": False,
+                    "value_category": "low_value",
+                    "confidence": 0.5,
+                    "reasoning": "Failed to parse LLM analysis response",
+                    "information_types": [],
+                    "is_business_info": False,
+                    "is_personal_context": False,
+                    "is_domain_expertise": False,
+                    "personalization_value": 0.0,
+                    "context_building_value": 0.0,
+                    "future_utility": "low"
                 }
             
-            # Convert LLM analysis to our expected format
-            detected = llm_analysis.get("has_teaching_intent", False)
-            confidence = float(llm_analysis.get("confidence", 0.0))
-            categories = llm_analysis.get("categories", [])
-            reasoning = llm_analysis.get("reasoning", "")
-            
-            # Boost confidence for organizational info or factual content
-            if llm_analysis.get("is_organizational_info", False):
-                confidence = min(confidence + 0.3, 1.0)
-                categories.append("organizational_info")
-            
-            if llm_analysis.get("is_factual_content", False):
-                confidence = min(confidence + 0.2, 1.0)
-                categories.append("factual_content")
-            
-            logger.info(f"LLM Teaching Intent Analysis - Detected: {detected}, Confidence: {confidence:.2f}, "
-                       f"Categories: {categories}, Reasoning: {reasoning}")
-            
+            # Map the new analysis format to the legacy format for compatibility
             return {
-                "detected": detected,
-                "confidence": confidence,
-                "indicators": categories,
-                "reasoning": reasoning
+                "detected": llm_analysis.get("has_information_value", False),
+                "confidence": llm_analysis.get("confidence", 0.5),
+                "reasoning": llm_analysis.get("reasoning", ""),
+                "indicators": llm_analysis.get("information_types", []),
+                "categories": [llm_analysis.get("value_category", "low_value")],
+                "is_organizational_info": llm_analysis.get("is_business_info", False),
+                "is_factual_content": llm_analysis.get("has_information_value", False),
+                "knowledge_type": llm_analysis.get("value_category", "general"),
+                # Enhanced metadata
+                "personalization_value": llm_analysis.get("personalization_value", 0.0),
+                "context_building_value": llm_analysis.get("context_building_value", 0.0),
+                "future_utility": llm_analysis.get("future_utility", "low"),
+                "is_personal_context": llm_analysis.get("is_personal_context", False),
+                "is_domain_expertise": llm_analysis.get("is_domain_expertise", False)
             }
             
         except Exception as e:
-            logger.error(f"LLM teaching intent analysis failed: {e}")
-            # Fallback to simple heuristics if LLM analysis fails
-            return self._fallback_teaching_intent_detection(message, context)
+            logger.error(f"Error in LLM information value detection: {str(e)}")
+            # Fallback to basic detection
+            return self._fallback_information_detection(message)
     
-    def _fallback_teaching_intent_detection(self, message: str, context: str) -> Dict[str, Any]:
-        """Fallback teaching intent detection using simple heuristics"""
-        indicators = []
+    def _fallback_information_detection(self, message: str) -> Dict[str, Any]:
+        """Fallback information value detection if LLM call fails"""
+        
+        # Expanded patterns for valuable information
+        business_patterns = [
+            "công ty", "company", "business", "startup", "doanh nghiệp", "dịch vụ", "service",
+            "sản phẩm", "product", "khách hàng", "customer", "client", "thị trường", "market",
+            "ngành", "industry", "chuyên", "specialize", "làm", "do", "cung cấp", "provide"
+        ]
+        
+        personal_patterns = [
+            "tôi là", "i am", "i work", "my role", "my job", "responsibility", "responsible",
+            "nhiệm vụ", "vai trò", "chức vụ", "position", "experience", "kinh nghiệm",
+            "skill", "kỹ năng", "good at", "giỏi", "know how", "biết cách"
+        ]
+        
+        process_patterns = [
+            "process", "quy trình", "workflow", "how we", "cách chúng tôi", "procedure",
+            "thủ tục", "method", "phương pháp", "approach", "cách tiếp cận", "strategy",
+            "chiến lược", "plan", "kế hoạch", "system", "hệ thống"
+        ]
+        
+        goal_patterns = [
+            "goal", "mục tiêu", "want to", "muốn", "need to", "cần", "looking for",
+            "tìm kiếm", "hope to", "hy vọng", "plan to", "dự định", "objective",
+            "target", "aim", "aim to"
+        ]
+        
         message_lower = message.lower()
         
-        # Strong organizational indicators (specific to company/business context)
-        if any(org in message_lower for org in ["company", "công ty", "organization", "tổ chức", "our company", "của chúng ta"]):
-            indicators.append("organizational_info")
+        # Score different types of valuable information
+        business_score = len([p for p in business_patterns if p in message_lower])
+        personal_score = len([p for p in personal_patterns if p in message_lower])  
+        process_score = len([p for p in process_patterns if p in message_lower])
+        goal_score = len([p for p in goal_patterns if p in message_lower])
         
-        # Strong task/instruction indicators
-        if any(task in message_lower for task in ["task", "nhiệm vụ", "job", "công việc", "need to do", "cần làm", "your task", "nhiệm vụ của"]):
-            indicators.append("task_assignment")
+        total_score = business_score + personal_score + process_score + goal_score
         
-        # Strong procedural indicators
-        if any(proc in message_lower for proc in ["procedure", "process", "quy trình", "step", "bước", "how to", "cách"]):
-            indicators.append("procedural_info")
+        # Determine information value
+        has_value = total_score > 0
+        confidence = min(0.9, total_score * 0.2) if has_value else 0.3
         
-        # Specific factual/informational indicators (avoid generic words)
-        if any(info in message_lower for info in ["information about", "thông tin về", "data shows", "dữ liệu cho thấy", "revenue", "doanh thu", "employees", "nhân viên"]):
-            indicators.append("factual_sharing")
+        # Determine category
+        category = "low_value"
+        if business_score > 0:
+            category = "business_context"
+        elif personal_score > 0:
+            category = "personal_context"
+        elif process_score > 0:
+            category = "operational_info"
+        elif goal_score > 0:
+            category = "situational_context"
         
-        # Filter out casual conversation patterns
-        casual_patterns = ["how are you", "weather", "thời tiết", "hello", "xin chào", "thanks", "cảm ơn", "good morning", "chào buổi sáng"]
-        is_casual = any(pattern in message_lower for pattern in casual_patterns)
-        
-        # Only detect teaching intent if we have strong indicators and it's not casual conversation
-        detected = len(indicators) >= 1 and not is_casual and len(message) > 20  # Require substantial content
-        confidence = min(len(indicators) * 0.4, 0.6) if detected else 0.1  # Lower confidence for fallback
-        
-        logger.info(f"Fallback Analysis - Indicators: {indicators}, Casual: {is_casual}, Length: {len(message)}, Detected: {detected}")
+        indicators = []
+        if business_score > 0:
+            indicators.extend(["business_info", "company_description"])
+        if personal_score > 0:
+            indicators.extend(["personal_context", "role_info"])
+        if process_score > 0:
+            indicators.extend(["process_description", "operational_detail"])
+        if goal_score > 0:
+            indicators.extend(["goals", "objectives"])
         
         return {
-            "detected": detected,
+            "detected": has_value,
             "confidence": confidence,
+            "reasoning": f"Pattern-based detection found {total_score} information indicators: Business({business_score}), Personal({personal_score}), Process({process_score}), Goals({goal_score})" if has_value else "No valuable information patterns detected",
             "indicators": indicators,
-            "reasoning": f"fallback_analysis (casual={is_casual}, indicators={len(indicators)})"
+            "categories": [category],
+            "is_organizational_info": business_score > 0,
+            "is_factual_content": has_value,
+            "knowledge_type": category,
+            # Enhanced metadata
+            "personalization_value": confidence,
+            "context_building_value": confidence,
+            "future_utility": "high" if total_score >= 3 else "medium" if total_score >= 2 else "low",
+            "is_personal_context": personal_score > 0,
+            "is_domain_expertise": process_score > 0
         }
     
     def _detect_knowledge_gap(self, message: str, search_results: str) -> Dict[str, Any]:
-        """Analyze if there's a knowledge gap"""
-        # Extract similarity from search results
-        similarity = self._extract_similarity_from_search(search_results)
+        """Detect if there's a knowledge gap that learning would fill"""
+        if "No existing knowledge found" in search_results:
+            return {
+                "exists": True,
+                "score": 1.0,
+                "reasoning": "No existing knowledge found - clear knowledge gap"
+            }
         
-        if similarity < 0.35:
-            gap_type = "NEW_KNOWLEDGE"
-            significance = "HIGH"
-        elif similarity < 0.70:
-            gap_type = "PARTIAL_KNOWLEDGE"
-            significance = "MEDIUM"
-        else:
-            gap_type = "EXISTING_KNOWLEDGE"
-            significance = "LOW"
+        # Extract similarity scores from search results
+        similarities = []
+        lines = search_results.split('\n')
+        for line in lines:
+            if "Similarity:" in line:
+                try:
+                    similarity = float(line.split("Similarity:")[1].split(")")[0].strip())
+                    similarities.append(similarity)
+                except:
+                    continue
+        
+        if similarities:
+            max_similarity = max(similarities)
+            gap_score = 1.0 - max_similarity  # Higher gap when similarity is low
+            exists = gap_score > 0.3  # Knowledge gap exists if similarity < 0.7
+            
+            return {
+                "exists": exists,
+                "score": gap_score,
+                "reasoning": f"Max similarity {max_similarity:.3f} indicates {'significant' if exists else 'minimal'} knowledge gap"
+            }
         
         return {
-            "detected": similarity < 0.70,
-            "type": gap_type,
-            "significance": significance
+            "exists": False,
+            "score": 0.0,
+            "reasoning": "Unable to determine knowledge gap from search results"
         }
     
-    def _assess_learning_value(self, message: str) -> Dict[str, Any]:
-        """Assess the learning value of the content"""
-        # Educational value indicators
-        educational_indicators = ["example", "ví dụ", "method", "phương pháp", "principle", "nguyên tắc"]
-        educational_value = sum(1 for indicator in educational_indicators if indicator in message.lower())
-        
-        # Practical value indicators
-        practical_indicators = ["how to", "cách", "implement", "triển khai", "use", "sử dụng"]
-        practical_value = sum(1 for indicator in practical_indicators if indicator in message.lower())
-        
-        # Uniqueness (length and detail)
-        uniqueness = min(len(message) / 100, 1.0)  # Normalize by length
-        
-        return {
-            "educational_value": min(educational_value * 0.3, 1.0),
-            "practical_value": min(practical_value * 0.3, 1.0), 
-            "uniqueness": uniqueness
+    def _assess_learning_value(self, message: str) -> float:
+        """Assess the learning value of the message content"""
+        value_indicators = {
+            "specific facts": 0.3,
+            "company info": 0.4,
+            "procedures": 0.4,
+            "definitions": 0.3,
+            "instructions": 0.4,
+            "policies": 0.4,
+            "contact info": 0.3,
+            "dates/numbers": 0.2
         }
+        
+        message_lower = message.lower()
+        total_value = 0.0
+        
+        # Check for company/organizational content
+        if any(word in message_lower for word in ["company", "organization", "team", "department"]):
+            total_value += 0.3
+        
+        # Check for factual content
+        if any(word in message_lower for word in ["is", "are", "has", "have", "contains", "includes"]):
+            total_value += 0.2
+        
+        # Check for instructional content
+        if any(word in message_lower for word in ["should", "must", "need to", "have to", "always", "never"]):
+            total_value += 0.3
+        
+        # Length factor (longer messages often have more value)
+        length_factor = min(0.2, len(message.split()) / 50)  # Up to 0.2 for 50+ words
+        total_value += length_factor
+        
+        return min(1.0, total_value)
     
-    def _assess_content_quality(self, message: str) -> Dict[str, Any]:
-        """Assess the quality of the content"""
-        # Clarity indicators
-        clarity_score = 0.7  # Default reasonable clarity
-        if len(message) > 50:  # Longer messages tend to be clearer
-            clarity_score += 0.2
-        if any(punct in message for punct in [".", "!", "?"]):  # Proper punctuation
-            clarity_score += 0.1
+    def _assess_content_quality(self, message: str) -> float:
+        """Assess the quality and clarity of the message content"""
+        # Basic quality indicators
+        word_count = len(message.split())
+        sentence_count = len([s for s in message.split('.') if s.strip()])
         
-        # Completeness indicators
-        completeness_score = min(len(message) / 200, 1.0)  # Based on message length
+        quality_score = 0.0
         
-        # Accuracy indicators (simple heuristics)
-        accuracy_indicators = []
-        if re.search(r'\d+', message):  # Contains numbers/data
-            accuracy_indicators.append("contains_data")
-        if any(word in message.lower() for word in ["research", "study", "proven", "nghiên cứu"]):
-            accuracy_indicators.append("research_based")
+        # Word count scoring
+        if word_count >= 10:
+            quality_score += 0.3
+        if word_count >= 20:
+            quality_score += 0.2
         
-        return {
-            "clarity": min(clarity_score, 1.0),
-            "completeness": completeness_score,
-            "accuracy": accuracy_indicators
-        }
+        # Sentence structure scoring
+        if sentence_count >= 2:
+            quality_score += 0.2
+        
+        # Completeness scoring
+        if message.strip().endswith('.') or message.strip().endswith('!'):
+            quality_score += 0.1
+        
+        # Specificity scoring (presence of specific terms)
+        specific_terms = ['specific', 'exactly', 'precisely', 'details', 'information']
+        if any(term in message.lower() for term in specific_terms):
+            quality_score += 0.2
+        
+        return min(1.0, quality_score)
     
     def _extract_similarity_from_search(self, search_results: str) -> float:
-        """Extract similarity score from search results"""
-        try:
-            match = re.search(r'Best Similarity Score: (\d+\.?\d*)', search_results)
-            if match:
-                return float(match.group(1))
-        except:
-            pass
+        """Extract the maximum similarity score from search results"""
+        if "Max similarity:" in search_results:
+            try:
+                similarity_line = [line for line in search_results.split('\n') if "Max similarity:" in line][0]
+                similarity = float(similarity_line.split("Max similarity:")[1].split(")")[0].strip())
+                return similarity
+            except:
+                pass
+        
         return 0.0
     
-    def _categorize_similarity(self, similarity: float) -> str:
-        """Categorize similarity score"""
-        if similarity >= 0.70:
-            return "HIGH (Update existing)"
-        elif similarity >= 0.35:
-            return "MEDIUM (Human decision)"
-        else:
-            return "LOW (Create new)"
-    
-    def _generate_learning_recommendation(self, teaching_intent: Dict, knowledge_gap: Dict, 
-                                        learning_value: Dict, content_quality: Dict, 
-                                        similarity_score: float) -> Dict[str, Any]:
-        """Generate overall learning recommendation"""
+    def _generate_learning_recommendation(self, teaching_intent: Dict, knowledge_gap: Dict, learning_value: float, content_quality: float, similarity_score: float) -> Dict[str, Any]:
+        """Generate overall learning recommendation based on expanded information value analysis"""
         
-        # Calculate overall learning score
-        score = 0.0
-        reasoning_parts = []
+        # Extract enhanced information from the analysis
+        detected_info = teaching_intent['detected']
+        confidence = teaching_intent['confidence']
+        personalization_value = teaching_intent.get('personalization_value', 0.0)
+        context_building_value = teaching_intent.get('context_building_value', 0.0)
+        future_utility = teaching_intent.get('future_utility', 'low')
+        is_business_info = teaching_intent.get('is_organizational_info', False)
+        is_personal_context = teaching_intent.get('is_personal_context', False)
+        is_domain_expertise = teaching_intent.get('is_domain_expertise', False)
         
-        # Teaching intent contributes 30%
-        if teaching_intent['detected']:
-            score += 0.3 * teaching_intent['confidence']
-            reasoning_parts.append("strong teaching intent detected")
+        # EXPANDED LEARNING DECISION LOGIC
         
-        # Knowledge gap contributes 25%
-        if knowledge_gap['detected']:
-            gap_weight = {"HIGH": 0.25, "MEDIUM": 0.15, "LOW": 0.05}
-            score += gap_weight.get(knowledge_gap['significance'], 0.05)
-            reasoning_parts.append(f"{knowledge_gap['significance'].lower()} knowledge gap")
+        # Strong indicators for learning - HIGH PRIORITY
+        if detected_info and confidence > 0.6:
+            # Business context is almost always valuable
+            if is_business_info or personalization_value >= 0.7 or context_building_value >= 0.7:
+                return {
+                    "action": "SHOULD_LEARN",
+                    "confidence": 0.9,
+                    "reason": f"High-value information detected: Business({is_business_info}), Personalization({personalization_value:.2f}), Context({context_building_value:.2f})",
+                    "next_steps": "Create learning decision for human approval - this information will improve future interactions"
+                }
+            
+            # Domain expertise and personal context are also valuable
+            if is_domain_expertise or is_personal_context:
+                if knowledge_gap['exists'] and knowledge_gap['score'] > 0.3:
+                    return {
+                        "action": "SHOULD_LEARN",
+                        "confidence": 0.85,
+                        "reason": f"Valuable context detected: Domain expertise({is_domain_expertise}), Personal context({is_personal_context}) with knowledge gap({knowledge_gap['score']:.2f})",
+                        "next_steps": "Create learning decision for human approval - this context will enhance personalization"
+                    }
         
-        # Learning value contributes 25%
-        value_score = (learning_value['educational_value'] + learning_value['practical_value']) / 2
-        score += 0.25 * value_score
-        if value_score > 0.5:
-            reasoning_parts.append("high educational/practical value")
+        # Medium priority - consider learning with moderate confidence
+        if detected_info and confidence > 0.4:
+            # If there's a clear knowledge gap and decent quality
+            if knowledge_gap['exists'] and learning_value >= 0.4 and content_quality >= 0.3:
+                return {
+                    "action": "MAYBE_LEARN",
+                    "confidence": 0.7,
+                    "reason": f"Moderate value information with knowledge gap: Value({learning_value:.2f}), Quality({content_quality:.2f}), Future utility({future_utility})",
+                    "next_steps": "Present to human for decision - information has moderate learning value"
+                }
+            
+            # High-value information even without perfect quality
+            if personalization_value >= 0.5 or context_building_value >= 0.5:
+                return {
+                    "action": "MAYBE_LEARN",
+                    "confidence": 0.75,
+                    "reason": f"Good personalization/context building value: Personalization({personalization_value:.2f}), Context({context_building_value:.2f})",
+                    "next_steps": "Present to human for decision - will improve understanding of user context"
+                }
         
-        # Content quality contributes 20%
-        quality_score = (content_quality['clarity'] + content_quality['completeness']) / 2
-        score += 0.20 * quality_score
-        if quality_score > 0.7:
-            reasoning_parts.append("good content quality")
+        # Handle potential updates to existing knowledge
+        if similarity_score > 0.7 and detected_info and confidence > 0.3:
+            return {
+                "action": "MAYBE_UPDATE",
+                "confidence": 0.6,
+                "reason": f"Similar content exists (similarity: {similarity_score:.3f}) but contains new information with confidence {confidence:.2f}",
+                "next_steps": "Consider updating existing knowledge instead of creating new - presents options to human"
+            }
         
-        # Determine action based on score and similarity
-        if score >= 0.7 and similarity_score < 0.35:
-            action = "LEARN_NEW"
-            next_steps = "Proceed with saving new knowledge"
-        elif score >= 0.7 and similarity_score >= 0.35:
-            action = "REQUEST_HUMAN_DECISION"
-            next_steps = "Ask human whether to update existing or create new knowledge"
-        elif score >= 0.4:
-            action = "MAYBE_LEARN"
-            next_steps = "Consider learning with human confirmation"
-        else:
-            action = "SKIP_LEARNING"
-            next_steps = "Continue conversation without learning"
+        # Special case: Even low confidence business/personal info might be worth asking about
+        if (is_business_info or is_personal_context) and confidence > 0.3:
+            return {
+                "action": "MAYBE_LEARN",
+                "confidence": 0.6,
+                "reason": f"Business or personal context detected with moderate confidence ({confidence:.2f}) - valuable for personalization even if not perfectly clear",
+                "next_steps": "Ask human to decide - business/personal context is often valuable even when uncertain"
+            }
         
+        # Low learning indicators - skip learning
         return {
-            "action": action,
-            "confidence": min(score, 1.0),
-            "reasoning": "; ".join(reasoning_parts) if reasoning_parts else "low learning indicators",
-            "next_steps": next_steps
+            "action": "NO_LEARN",
+            "confidence": 0.8,
+            "reason": f"Insufficient information value: Confidence({confidence:.2f}), Personalization({personalization_value:.2f}), Context({context_building_value:.2f}), Future utility({future_utility})",
+            "next_steps": "Continue conversation without learning - information doesn't meet learning thresholds"
         }
 
-
 class HumanLearningTool:
-    """Tool for LLM to request human input on learning decisions"""
+    """Tool for LLM to request human decisions about learning"""
     
-    def __init__(self, user_id: str = "unknown", org_id: str = "unknown"):
+    def __init__(self, user_id: str = "unknown", org_id: str = "unknown", llm_provider: str = "openai", model: str = "gpt-4o"):
         self.user_id = user_id
         self.org_id = org_id
+        self.llm_provider = llm_provider
+        self.model = model or "gpt-4o"  # Default to GPT-4o
         self.name = "human_learning"
     
-    def request_learning_decision(self, decision_type: str, context: str, 
-                                options: List[str], additional_info: str = "") -> str:
+    def request_learning_decision(self, decision_type: str, context: str, options: List[str], additional_info: str = "", thread_id: str = None) -> str:
         """
-        LLM calls this to ask human for learning decisions
+        LLM calls this to request a human decision about learning
         
         Args:
             decision_type: Type of decision needed
-            context: Context about what the decision is for
-            options: Available options for human to choose from
-            additional_info: Any additional information to help decision
+            context: Context for the decision
+            options: List of available options
+            additional_info: Additional information for decision making
+            thread_id: Optional thread ID for context
             
         Returns:
-            Decision request ID and status
+            Decision request confirmation with decision ID
         """
         try:
-            logger.info(f"HumanLearningTool: Requesting decision '{decision_type}' for user {self.user_id}")
-            
-            # Create unique decision ID
+            # Generate unique decision ID
             decision_id = f"learning_decision_{uuid.uuid4().hex[:8]}"
             
-            # Store decision request
-            decision_request = {
+            # Store decision request globally
+            PENDING_LEARNING_DECISIONS[decision_id] = {
                 "id": decision_id,
                 "type": decision_type,
                 "context": context,
@@ -662,101 +733,34 @@ class HumanLearningTool:
                 "additional_info": additional_info,
                 "user_id": self.user_id,
                 "org_id": self.org_id,
+                "thread_id": thread_id,
                 "status": "PENDING",
                 "created_at": datetime.now().isoformat(),
-                "expires_at": self._calculate_expiry()
+                "human_choice": None,
+                "completed_at": None
             }
             
-            PENDING_LEARNING_DECISIONS[decision_id] = decision_request
+            logger.info(f"Created learning decision request: {decision_id} for user {self.user_id}")
             
-            # Log decision request for debugging
-            logger.info(f"HumanDecision Created - ID: {decision_id}, Type: {decision_type}, "
-                       f"Options: {len(options)}, Context: '{context[:50]}...'")
-            
-            # Format response for LLM
-            return f"""
-HUMAN_DECISION_REQUESTED:
-- Decision ID: {decision_id}
-- Type: {decision_type}
-- Status: WAITING_FOR_HUMAN_INPUT
-- Expires: {decision_request['expires_at']}
+            return f"""LEARNING_DECISION_REQUESTED:
 
-FRONTEND_ACTION_REQUIRED:
-The frontend should display a learning decision UI with:
-- Context: {context}
-- Options: {', '.join(options)}
-- Additional Info: {additional_info}
+Decision ID: {decision_id}
+Type: {decision_type}
+Context: {context}
+Options: {', '.join(options)}
 
-NEXT_STEPS:
-1. Frontend displays decision interface
-2. Human makes selection
-3. Frontend calls /api/learning/decision endpoint
-4. System continues based on human choice
+STATUS: Pending human decision
+NEXT_STEPS: 
+- Human will be presented with these options
+- Decision will be processed when human chooses
+- Knowledge will only be saved if human approves
 
-Note: This decision will expire in 5 minutes if not answered.
-            """.strip()
+Additional Info: {additional_info}
+"""
             
         except Exception as e:
-            logger.error(f"HumanLearningTool error: {e}")
-            return f"ERROR: Failed to create learning decision request - {str(e)}"
-    
-    def check_decision_status(self, decision_id: str) -> str:
-        """Check the status of a learning decision"""
-        if decision_id not in PENDING_LEARNING_DECISIONS:
-            return f"DECISION_NOT_FOUND: {decision_id}"
-        
-        decision = PENDING_LEARNING_DECISIONS[decision_id]
-        
-        if decision["status"] == "COMPLETED":
-            return f"""
-DECISION_COMPLETED:
-- Decision ID: {decision_id}
-- Human Choice: {decision.get('human_choice', 'unknown')}
-- Completed At: {decision.get('completed_at', 'unknown')}
-            """.strip()
-        elif decision["status"] == "EXPIRED":
-            return f"DECISION_EXPIRED: {decision_id}"
-        else:
-            return f"DECISION_PENDING: {decision_id} (waiting for human input)"
-    
-    def _calculate_expiry(self) -> str:
-        """Calculate when the decision expires"""
-        from datetime import timedelta
-        expiry_time = datetime.now() + timedelta(minutes=5)
-        return expiry_time.isoformat()
-    
-    def get_tool_description(self) -> Dict[str, Any]:
-        """Get tool description for LLM function calling"""
-        return {
-            "name": "request_learning_decision",
-            "description": "Ask human for decision about learning action",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "decision_type": {
-                        "type": "string",
-                        "enum": ["save_new", "update_existing", "merge_knowledge", "skip_learning"],
-                        "description": "Type of decision needed"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Context about what the decision is for"
-                    },
-                    "options": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Available options for human to choose"
-                    },
-                    "additional_info": {
-                        "type": "string",
-                        "description": "Additional info to help with decision",
-                        "default": ""
-                    }
-                },
-                "required": ["decision_type", "context", "options"]
-            }
-        }
-
+            logger.error(f"Error creating learning decision: {e}")
+            return f"DECISION_ERROR: Failed to create learning decision - {str(e)}"
 
 class KnowledgePreviewTool:
     """Tool for LLM to preview what knowledge would be saved"""
@@ -780,102 +784,53 @@ class KnowledgePreviewTool:
             Preview of what would be saved
         """
         try:
-            logger.info(f"KnowledgePreviewTool: Previewing save for format '{save_format}'")
+            logger.info(f"Previewing knowledge save in format: {save_format}")
             
-            # Generate different preview formats
-            previews = {}
+            preview_content = ""
             
-            if save_format in ["conversation", "all"]:
-                previews["conversation"] = f"User: {user_message}\n\nAI: {ai_response}"
-            
-            if save_format in ["synthesis", "all"]:
-                previews["synthesis"] = self._extract_synthesis_content(ai_response)
-            
-            if save_format in ["summary", "all"]:
-                previews["summary"] = self._generate_summary(user_message, ai_response)
-            
-            # Calculate storage estimates
-            total_chars = sum(len(content) for content in previews.values())
-            estimated_tokens = total_chars // 4  # Rough estimate
-            
-            # Format preview
-            preview_text = ""
-            for format_type, content in previews.items():
-                preview_text += f"\n=== {format_type.upper()} FORMAT ===\n{content}\n"
-            
-            return f"""
-KNOWLEDGE SAVE PREVIEW:
+            if save_format == "conversation":
+                preview_content = f"User: {user_message}\n\nAI: {ai_response}"
+            elif save_format == "synthesis":
+                preview_content = ai_response
+            elif save_format == "summary":
+                # Create a brief summary
+                summary = f"Summary: {user_message[:100]}..." if len(user_message) > 100 else user_message
+                preview_content = f"{summary}\n\nAI Analysis: {ai_response[:200]}..." if len(ai_response) > 200 else ai_response
+            elif save_format == "all":
+                preview_content = f"""=== CONVERSATION FORMAT ===
+User: {user_message}
 
-CONTENT TO BE SAVED:
-{preview_text}
+AI: {ai_response}
+
+=== SYNTHESIS FORMAT ===
+{ai_response}
+
+=== SUMMARY FORMAT ===
+Summary: {user_message[:100]}...
+AI Analysis: {ai_response[:200]}..."""
+            
+            return f"""KNOWLEDGE_SAVE_PREVIEW:
+
+Format: {save_format}
+Content Length: {len(preview_content)} characters
+User ID: {self.user_id}
+Organization: {self.org_id}
+
+--- CONTENT PREVIEW ---
+{preview_content}
+--- END PREVIEW ---
 
 METADATA:
-- Save Format(s): {save_format}
-- Total Characters: {total_chars}
-- Estimated Tokens: {estimated_tokens}
-- User ID: {self.user_id}
-- Organization: {self.org_id}
+- Source: Interactive Learning
 - Categories: ["teaching_intent", "human_approved"]
+- Timestamp: {datetime.now().isoformat()}
 
-STORAGE IMPACT:
-- Vector Embeddings: {len(previews)} vectors will be created
-- Search Impact: This content will be findable in future searches
-- Update Impact: May affect similarity calculations for future content
-
-NEXT_STEPS:
-If you want to proceed with saving, call the knowledge_save tool.
-If you want to modify the content first, call this preview tool again with changes.
-            """.strip()
+NOTE: This is only a preview. Actual saving requires human approval.
+"""
             
         except Exception as e:
-            logger.error(f"KnowledgePreviewTool error: {e}")
-            return f"ERROR: Failed to preview knowledge save - {str(e)}"
-    
-    def _extract_synthesis_content(self, ai_response: str) -> str:
-        """Extract synthesis content from AI response"""
-        # Look for structured sections
-        synthesis_patterns = [
-            r'<knowledge_synthesis>(.*?)</knowledge_synthesis>',
-            r'<synthesis>(.*?)</synthesis>',
-            r'SYNTHESIS:(.*?)(?=\n[A-Z]+:|$)',
-        ]
-        
-        for pattern in synthesis_patterns:
-            match = re.search(pattern, ai_response, re.DOTALL | re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-        
-        # Fallback: return first paragraph if no structured content
-        paragraphs = ai_response.split('\n\n')
-        if paragraphs:
-            return paragraphs[0].strip()
-        
-        return ai_response[:200] + "..." if len(ai_response) > 200 else ai_response
-    
-    def _generate_summary(self, user_message: str, ai_response: str) -> str:
-        """Generate a summary of the knowledge"""
-        # Extract key concepts
-        user_concepts = self._extract_key_concepts(user_message)
-        ai_concepts = self._extract_key_concepts(ai_response)
-        
-        # Combine unique concepts
-        all_concepts = list(set(user_concepts + ai_concepts))
-        
-        return f"Summary: Discussion about {', '.join(all_concepts[:5])} covering key aspects shared by user and elaborated by AI."
-    
-    def _extract_key_concepts(self, text: str) -> List[str]:
-        """Extract key concepts from text"""
-        # Simple keyword extraction (could be enhanced with NLP)
-        words = re.findall(r'\b[A-Za-z]{4,}\b', text.lower())
-        # Filter common words and return most frequent
-        common_words = {'this', 'that', 'with', 'from', 'they', 'have', 'been', 'were', 'said', 'each', 'which', 'their', 'time', 'will', 'about', 'would', 'there', 'could', 'other', 'more', 'very', 'what', 'know', 'just', 'first', 'into', 'over', 'think', 'also', 'your', 'work', 'life', 'only', 'can', 'still', 'should', 'after', 'being', 'now', 'made', 'before', 'here', 'through', 'when', 'where', 'much', 'same', 'right', 'used', 'take', 'three', 'want', 'different', 'new', 'good', 'need', 'way', 'well', 'without', 'most', 'these', 'come', 'might', 'every', 'since', 'many', 'back', 'great', 'year', 'years', 'such', 'important', 'because', 'some', 'people', 'system', 'example', 'information', 'using', 'process', 'approach'}
-        
-        filtered_words = [word for word in words if word not in common_words and len(word) > 4]
-        
-        # Return top 10 most frequent
-        from collections import Counter
-        word_counts = Counter(filtered_words)
-        return [word for word, count in word_counts.most_common(10)]
+            logger.error(f"Preview error: {e}")
+            return f"PREVIEW_ERROR: Failed to generate preview - {str(e)}"
     
     def get_tool_description(self) -> Dict[str, Any]:
         """Get tool description for LLM function calling"""
@@ -906,7 +861,7 @@ If you want to modify the content first, call this preview tool again with chang
 
 
 class KnowledgeSaveTool:
-    """Tool for LLM to actually save knowledge (with human approval)"""
+    """Tool for LLM to actually save knowledge (REQUIRES HUMAN APPROVAL)"""
     
     def __init__(self, user_id: str = "unknown", org_id: str = "unknown"):
         self.user_id = user_id
@@ -916,14 +871,14 @@ class KnowledgeSaveTool:
     async def save_knowledge(self, content: str, title: str = "", categories: List[str] = None, 
                       thread_id: str = None, decision_id: str = None) -> str:
         """
-        LLM calls this to save knowledge (requires human approval)
+        LLM calls this to save knowledge (REQUIRES HUMAN APPROVAL via decision_id)
         
         Args:
             content: The knowledge content to save
             title: Optional title for the knowledge
             categories: Categories to tag the knowledge with
             thread_id: Thread ID for conversation context
-            decision_id: Reference to human decision (if applicable)
+            decision_id: Reference to human decision (REQUIRED)
             
         Returns:
             Save status and result
@@ -931,14 +886,21 @@ class KnowledgeSaveTool:
         try:
             logger.info(f"KnowledgeSaveTool: [STEP 1] Starting save for user {self.user_id}")
             
-            # Validate human approval if decision_id provided
-            if decision_id:
-                logger.info(f"KnowledgeSaveTool: [STEP 2] Checking human approval for decision {decision_id}")
-                approval_status = self._check_human_approval(decision_id)
-                if not approval_status["approved"]:
-                    return f"SAVE_REJECTED: {approval_status['reason']}"
+            # 🚨 CRITICAL SECURITY FIX: REQUIRE decision_id for ALL saves
+            if not decision_id:
+                error_msg = "SAVE_REJECTED: decision_id is REQUIRED for all knowledge saves. Use request_learning_decision first to get human approval."
+                logger.error(f"KnowledgeSaveTool: [SECURITY] {error_msg}")
+                return error_msg
             
-            logger.info(f"KnowledgeSaveTool: [STEP 3] Preparing save parameters")
+            # ALWAYS validate human approval
+            logger.info(f"KnowledgeSaveTool: [STEP 2] Checking human approval for decision {decision_id}")
+            approval_status = self._check_human_approval(decision_id)
+            if not approval_status["approved"]:
+                error_msg = f"SAVE_REJECTED: {approval_status['reason']}"
+                logger.error(f"KnowledgeSaveTool: [SECURITY] {error_msg}")
+                return error_msg
+            
+            logger.info(f"KnowledgeSaveTool: [STEP 3] ✅ Human approval confirmed, preparing save parameters")
             # Prepare save parameters
             save_params = {
                 "content": content,
@@ -950,7 +912,8 @@ class KnowledgeSaveTool:
                 "metadata": {
                     "source": "interactive_learning",
                     "decision_id": decision_id,
-                    "saved_at": datetime.now().isoformat()
+                    "saved_at": datetime.now().isoformat(),
+                    "human_approved": True  # Explicitly mark as human approved
                 }
             }
             
@@ -960,18 +923,19 @@ class KnowledgeSaveTool:
             
             logger.info(f"KnowledgeSaveTool: [STEP 5] Save completed with result: {save_result}")
             # Log save attempt for debugging
-            logger.info(f"KnowledgeSave Attempt - Success: {save_result['success']}, "
+            logger.info(f"✅ HUMAN APPROVED KNOWLEDGE SAVE - Success: {save_result['success']}, "
                        f"Title: '{title[:30]}...', Content Length: {len(content)}, "
                        f"Decision ID: {decision_id}")
             
             if save_result["success"]:
                 return f"""
-KNOWLEDGE_SAVED_SUCCESSFULLY:
+✅ KNOWLEDGE_SAVED_SUCCESSFULLY:
 - Knowledge ID: {save_result.get('knowledge_id', 'unknown')}
 - Title: {save_params['title']}
 - Categories: {', '.join(save_params['categories'])}
 - Content Length: {len(content)} characters
 - Vectors Created: {save_result.get('vectors_created', 1)}
+- Human Approved: ✅ YES (Decision ID: {decision_id})
 
 IMPACT:
 - This knowledge is now searchable for future questions
@@ -994,20 +958,23 @@ NEXT_STEPS:
     def _check_human_approval(self, decision_id: str) -> Dict[str, Any]:
         """Check if human has approved the save"""
         if decision_id not in PENDING_LEARNING_DECISIONS:
-            return {"approved": False, "reason": "Decision not found"}
+            return {"approved": False, "reason": "Decision not found - invalid decision_id"}
         
         decision = PENDING_LEARNING_DECISIONS[decision_id]
         
         if decision["status"] != "COMPLETED":
-            return {"approved": False, "reason": "Decision not completed"}
+            return {"approved": False, "reason": "Decision not completed - waiting for human choice"}
         
         human_choice = decision.get("human_choice", "")
         
         # Check if choice indicates approval
-        approval_choices = ["save_new", "update_existing", "yes", "approve", "proceed"]
+        approval_choices = ["save_new", "update_existing", "yes", "approve", "proceed", "save"]
         approved = any(choice in human_choice.lower() for choice in approval_choices)
         
-        return {"approved": approved, "reason": "Approved by human" if approved else "Human chose not to save"}
+        return {
+            "approved": approved, 
+            "reason": "Human approved the knowledge save" if approved else "Human chose not to save knowledge"
+        }
     
     async def _perform_knowledge_save(self, save_params: Dict[str, Any]) -> Dict[str, Any]:
         """Perform the actual knowledge saving using the correct save_knowledge function like AVA does"""
@@ -1015,7 +982,7 @@ NEXT_STEPS:
             # Use the same save_knowledge function that AVA uses for Pinecone
             from pccontroller import save_knowledge
             
-            logger.info(f"Calling pccontroller.save_knowledge for decision-based save")
+            logger.info(f"✅ Calling pccontroller.save_knowledge for HUMAN APPROVED decision-based save")
             
             # Call save_knowledge with the same parameters AVA uses
             result = await save_knowledge(
@@ -1062,7 +1029,7 @@ NEXT_STEPS:
         """Get tool description for LLM function calling"""
         return {
             "name": "save_knowledge",
-            "description": "Actually save knowledge (requires human approval)",
+            "description": "Actually save knowledge (REQUIRES HUMAN APPROVAL via decision_id)",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1088,11 +1055,11 @@ NEXT_STEPS:
                     },
                     "decision_id": {
                         "type": "string",
-                        "description": "Reference to human decision",
-                        "default": None
+                        "description": "Reference to human decision (REQUIRED FOR ALL SAVES)",
+                        # 🚨 CRITICAL: Remove default None and make it required
                     }
                 },
-                "required": ["content"]
+                "required": ["content", "decision_id"]  # 🚨 MAKE decision_id REQUIRED
             }
         }
 
@@ -1215,7 +1182,7 @@ class LearningToolsFactory:
             },
             {
                 "name": "save_knowledge",
-                "description": "Actually save knowledge (requires human approval)",
+                "description": "Actually save knowledge (REQUIRES HUMAN APPROVAL via decision_id)",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1241,24 +1208,17 @@ class LearningToolsFactory:
                         },
                         "decision_id": {
                             "type": "string",
-                            "description": "Reference to human decision",
+                            "description": "Reference to human decision (REQUIRED FOR ALL SAVES)",
                             "default": None
                         }
                     },
-                    "required": ["content"]
+                    "required": ["content", "decision_id"]  # 🚨 MAKE decision_id REQUIRED
                 }
             }
         ]
 
 
 # Utility functions for decision management
-def get_pending_decisions(user_id: str = None) -> Dict[str, Any]:
-    """Get pending learning decisions for a user"""
-    if user_id:
-        return {k: v for k, v in PENDING_LEARNING_DECISIONS.items() if v.get("user_id") == user_id}
-    return PENDING_LEARNING_DECISIONS.copy()
-
-
 def get_pending_decisions(user_id: Optional[str] = None) -> Dict[str, Any]:
     """Get pending learning decisions, optionally filtered by user_id"""
     if user_id:

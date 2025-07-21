@@ -77,6 +77,7 @@ class SignupRequest(BaseModel):
     organization: Optional[str] = None
     password: str
     confirmPassword: str
+    language: Optional[str] = "en"  # Default to English, supports: en, vi, es, fr, etc.
     
     @validator('confirmPassword')
     def passwords_match(cls, v, values, **kwargs):
@@ -94,6 +95,13 @@ class SignupRequest(BaseModel):
             raise ValueError('Password must contain at least one lowercase letter')
         if not any(c.isdigit() for c in v):
             raise ValueError('Password must contain at least one number')
+        return v
+    
+    @validator('language')
+    def language_code_validation(cls, v):
+        supported_languages = ["en", "vi", "es", "fr", "de", "zh", "ja", "ko", "th", "id", "ms", "tl"]
+        if v and v not in supported_languages:
+            raise ValueError(f'Language must be one of: {", ".join(supported_languages)}')
         return v
 
 class GoogleAuthRequest(BaseModel):
@@ -120,6 +128,29 @@ class SetPasswordRequest(BaseModel):
     user_id: str
     new_password: str
 
+class UpdateLanguageRequest(BaseModel):
+    language: str
+    
+    @validator('language')
+    def language_code_validation(cls, v):
+        supported_languages = ["en", "vi", "es", "fr", "de", "zh", "ja", "ko", "th", "id", "ms", "tl"]
+        if v not in supported_languages:
+            raise ValueError(f'Language must be one of: {", ".join(supported_languages)}')
+        return v
+
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    language: Optional[str] = None
+    
+    @validator('language')
+    def language_code_validation(cls, v):
+        if v is not None:
+            supported_languages = ["en", "vi", "es", "fr", "de", "zh", "ja", "ko", "th", "id", "ms", "tl"]
+            if v not in supported_languages:
+                raise ValueError(f'Language must be one of: {", ".join(supported_languages)}')
+        return v
+
 # Response Models
 class UserResponse(BaseModel):
     id: str
@@ -133,6 +164,7 @@ class UserResponse(BaseModel):
     provider: str = "email"
     googleId: Optional[str] = None
     emailVerified: bool = False
+    language: str = "en"  # User's preferred language
 
 class AuthResponse(BaseModel):
     user: UserResponse
@@ -449,7 +481,7 @@ def get_user_by_google_id(google_id: str) -> Optional[dict]:
 
 def create_user(email: str, name: str, password: str = None, phone: str = None, 
                 organization: str = None, provider: str = "email", 
-                google_id: str = None, avatar: str = None) -> dict:
+                google_id: str = None, avatar: str = None, language: str = "en") -> dict:
     """Create a new user in database"""
     try:
         user_id = generate_user_id()
@@ -466,6 +498,7 @@ def create_user(email: str, name: str, password: str = None, phone: str = None,
             "provider": provider,
             "google_id": google_id,
             "email_verified": False,  # All users require email verification
+            "language": language,  # Store user's preferred language
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat()
         }
@@ -708,7 +741,8 @@ def user_to_response(user: dict) -> UserResponse:
         avatar=user.get("avatar"),
         provider=user.get("provider", "email"),
         googleId=user.get("google_id"),
-        emailVerified=user.get("email_verified", False)
+        emailVerified=user.get("email_verified", False),
+        language=user.get("language", "en") # Add language field
     )
 
 # Authentication Endpoints
@@ -770,7 +804,8 @@ async def signup(request: SignupRequest):
             name=request.name,
             password=request.password,
             phone=request.phone,
-            organization=request.organization
+            organization=request.organization,
+            language=request.language
         )
         
         # Create verification token
@@ -838,7 +873,8 @@ async def google_auth(request: GoogleAuthRequest):
                     name=name,
                     provider="google",
                     google_id=google_id,
-                    avatar=avatar
+                    avatar=avatar,
+                    language="en"  # Default to English for Google users, can be updated later
                 )
                 is_new_user = True
                 
@@ -1490,6 +1526,42 @@ def set_password(user_id: str, new_password: str) -> bool:
     }).eq("id", user_id).execute()
     return bool(response.data)
 
+def get_user_language_preference(user_id: str) -> str:
+    """
+    Get user's preferred language from database.
+    Returns language code (e.g., 'en', 'vi') or 'en' as default.
+    """
+    try:
+        user = get_user_by_id(user_id)
+        if user and user.get("language"):
+            return user["language"]
+        return "en"  # Default to English
+    except Exception as e:
+        logger.error(f"Error getting user language preference: {str(e)}")
+        return "en"
+
+def get_language_display_name(language_code: str) -> dict:
+    """
+    Get display names for a language code.
+    Returns dict with 'name' (English) and 'native' (native language) names.
+    """
+    language_map = {
+        "en": {"name": "English", "native": "English"},
+        "vi": {"name": "Vietnamese", "native": "Tiếng Việt"},
+        "es": {"name": "Spanish", "native": "Español"},
+        "fr": {"name": "French", "native": "Français"},
+        "de": {"name": "German", "native": "Deutsch"},
+        "zh": {"name": "Chinese", "native": "中文"},
+        "ja": {"name": "Japanese", "native": "日本語"},
+        "ko": {"name": "Korean", "native": "한국어"},
+        "th": {"name": "Thai", "native": "ไทย"},
+        "id": {"name": "Indonesian", "native": "Bahasa Indonesia"},
+        "ms": {"name": "Malay", "native": "Bahasa Melayu"},
+        "tl": {"name": "Tagalog", "native": "Tagalog"}
+    }
+    
+    return language_map.get(language_code, {"name": "English", "native": "English"})
+
 @router.post("/change-password")
 async def change_password_endpoint(request: ChangePasswordRequest, current_user: dict = Depends(get_current_user)):
     """Change the current user's password after verifying the current password."""
@@ -1507,3 +1579,90 @@ async def set_password_endpoint(request: SetPasswordRequest):
         return {"message": "Password set successfully"}
     else:
         raise HTTPException(status_code=400, detail="Failed to set password.")
+
+@router.post("/update-language")
+async def update_language_endpoint(request: UpdateLanguageRequest, current_user: dict = Depends(get_current_user)):
+    """Update the current user's language preference."""
+    try:
+        # Update user's language in database
+        response = supabase.table("users").update({
+            "language": request.language,
+            "updated_at": datetime.now(UTC).isoformat()
+        }).eq("id", current_user["id"]).execute()
+        
+        if response.data:
+            # Get updated user data
+            updated_user = get_user_by_id(current_user["id"])
+            return {
+                "message": "Language updated successfully",
+                "user": user_to_response(updated_user)
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to update language")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating user language: {str(e)}")
+        raise HTTPException(status_code=500, detail="Language update failed")
+
+@router.post("/update-profile")
+async def update_profile_endpoint(request: UpdateProfileRequest, current_user: dict = Depends(get_current_user)):
+    """Update the current user's profile information."""
+    try:
+        # Prepare update data (only include non-None values)
+        update_data = {"updated_at": datetime.now(UTC).isoformat()}
+        
+        if request.name is not None:
+            update_data["name"] = request.name
+        if request.phone is not None:
+            update_data["phone"] = request.phone
+        if request.language is not None:
+            update_data["language"] = request.language
+        
+        # Only proceed if there's something to update besides timestamp
+        if len(update_data) == 1:  # Only timestamp
+            raise HTTPException(status_code=400, detail="No fields provided to update")
+        
+        # Update user's profile in database
+        response = supabase.table("users").update(update_data).eq("id", current_user["id"]).execute()
+        
+        if response.data:
+            # Get updated user data
+            updated_user = get_user_by_id(current_user["id"])
+            return {
+                "message": "Profile updated successfully",
+                "user": user_to_response(updated_user)
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to update profile")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating user profile: {str(e)}")
+        raise HTTPException(status_code=500, detail="Profile update failed")
+
+@router.get("/supported-languages")
+async def get_supported_languages():
+    """Get list of supported languages."""
+    languages = {
+        "en": {"name": "English", "native": "English"},
+        "vi": {"name": "Vietnamese", "native": "Tiếng Việt"},
+        "es": {"name": "Spanish", "native": "Español"},
+        "fr": {"name": "French", "native": "Français"},
+        "de": {"name": "German", "native": "Deutsch"},
+        "zh": {"name": "Chinese", "native": "中文"},
+        "ja": {"name": "Japanese", "native": "日本語"},
+        "ko": {"name": "Korean", "native": "한국어"},
+        "th": {"name": "Thai", "native": "ไทย"},
+        "id": {"name": "Indonesian", "native": "Bahasa Indonesia"},
+        "ms": {"name": "Malay", "native": "Bahasa Melayu"},
+        "tl": {"name": "Tagalog", "native": "Tagalog"}
+    }
+    
+    return {
+        "languages": languages,
+        "default": "en",
+        "message": "Supported languages for user preferences"
+    }

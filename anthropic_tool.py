@@ -1,11 +1,24 @@
 """
-Anthropic Claude Sonnet LLM implementation with tool calling
+Anthropic Claude LLM implementation with native web search and tool calling
 """
 
 import os
 import json
-from typing import List, Any, Dict, AsyncGenerator
+import logging
+from typing import List, Any, AsyncGenerator, Dict
 from anthropic import Anthropic
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+# Configure detailed logging for tool calls
+tool_logger = logging.getLogger("tool_calls")
+tool_logger.setLevel(logging.INFO)
+if not tool_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('🔧 [ANTHROPIC_TOOL] %(asctime)s - %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    tool_logger.addHandler(handler)
 
 class AnthropicTool:
     def __init__(self, model: str = "claude-3-5-sonnet-20241022"):
@@ -482,40 +495,231 @@ class AnthropicTool:
             
             # Step 1: Execute all tools (non-streaming but fast)
             tool_results = []
+            tools_executed = []
             
             if available_tools:
+                tool_logger.info(f"🚀 Starting tool execution for query: '{user_query[:60]}{'...' if len(user_query) > 60 else ''}'")
+                tool_logger.info(f"📋 Available tools: {len(available_tools)} tools")
+                
                 # Execute search tool if available
                 search_tool = next((tool for tool in available_tools if hasattr(tool, 'search')), None)
                 if search_tool:
-                    search_result = search_tool.search(user_query)
-                    tool_results.append(f"Search Results:\n{search_result}")
+                    tool_start_time = datetime.now()
+                    tool_logger.info("🔍 EXECUTING: search_google")
+                    tool_logger.info(f"   Parameters: {{'query': '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'}}")
+                    
+                    try:
+                        search_result = search_tool.search(user_query)
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        result_preview = search_result[:200] + "..." if len(search_result) > 200 else search_result
+                        
+                        tool_logger.info(f"✅ SUCCESS: search_google completed in {tool_execution_time:.2f}s")
+                        tool_logger.info(f"   Result preview: {result_preview}")
+                        
+                        tool_results.append(f"Search Results:\n{search_result}")
+                        tools_executed.append({
+                            "name": "search_google",
+                            "status": "success",
+                            "execution_time": tool_execution_time,
+                            "result_length": len(search_result)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"🔍 Search completed ({tool_execution_time:.1f}s) - Found {len(search_result)} chars of results",
+                            "tool_name": "search_google",
+                            "status": "completed",
+                            "execution_time": tool_execution_time
+                        }
+                        
+                    except Exception as e:
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: search_google failed in {tool_execution_time:.2f}s - {str(e)}")
+                        tools_executed.append({
+                            "name": "search_google",
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"❌ Search failed: {str(e)}",
+                            "tool_name": "search_google",
+                            "status": "error",
+                            "execution_time": tool_execution_time
+                        }
                 
                 # Execute learning tools if available
                 learning_search_tool = next((tool for tool in available_tools if hasattr(tool, 'search_learning_context')), None)
                 if learning_search_tool:
-                    learning_search_result = learning_search_tool.search_learning_context(query=user_query)
-                    tool_results.append(f"Learning Context Search:\n{learning_search_result}")
+                    tool_start_time = datetime.now()
+                    tool_logger.info("📚 EXECUTING: search_learning_context")
+                    tool_logger.info(f"   Parameters: {{'query': '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'}}")
+                    
+                    try:
+                        learning_search_result = learning_search_tool.search_learning_context(query=user_query)
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        result_preview = learning_search_result[:200] + "..." if len(learning_search_result) > 200 else learning_search_result
+                        
+                        tool_logger.info(f"✅ SUCCESS: search_learning_context completed in {tool_execution_time:.2f}s")
+                        tool_logger.info(f"   Result preview: {result_preview}")
+                        
+                        tool_results.append(f"Learning Context Search:\n{learning_search_result}")
+                        tools_executed.append({
+                            "name": "search_learning_context",
+                            "status": "success",
+                            "execution_time": tool_execution_time,
+                            "result_length": len(learning_search_result)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"📚 Learning context search completed ({tool_execution_time:.1f}s)",
+                            "tool_name": "search_learning_context",
+                            "status": "completed",
+                            "execution_time": tool_execution_time
+                        }
+                        
+                    except Exception as e:
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: search_learning_context failed in {tool_execution_time:.2f}s - {str(e)}")
+                        tools_executed.append({
+                            "name": "search_learning_context",
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"❌ Learning context search failed: {str(e)}",
+                            "tool_name": "search_learning_context",
+                            "status": "error",
+                            "execution_time": tool_execution_time
+                        }
                 
                 learning_analysis_tool = next((tool for tool in available_tools if hasattr(tool, 'analyze_learning_opportunity')), None)
                 if learning_analysis_tool:
-                    learning_analysis_result = await learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
-                    tool_results.append(f"Learning Analysis:\n{learning_analysis_result}")
+                    tool_start_time = datetime.now()
+                    tool_logger.info("🧠 EXECUTING: analyze_learning_opportunity")
+                    tool_logger.info(f"   Parameters: {{'user_message': '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'}}")
                     
-                    # Check if learning decision should be created
-                    if "MAYBE_LEARN" in learning_analysis_result or "SHOULD_LEARN" in learning_analysis_result:
-                        human_learning_tool = next((tool for tool in available_tools if hasattr(tool, 'request_learning_decision')), None)
-                        if human_learning_tool:
-                            try:
-                                # Extract key information for learning decision
-                                decision_result = human_learning_tool.request_learning_decision(
-                                    decision_type="save_new",
-                                    context=f"Teaching content detected: {user_query}",
-                                    options=["Save as new knowledge", "Skip learning", "Need more context"],
-                                    additional_info="AI analysis detected teaching intent with factual content"
-                                )
-                                tool_results.append(f"Learning Decision Created:\n{decision_result}")
-                            except Exception as e:
-                                tool_results.append(f"Learning Decision Error:\n{str(e)}")
+                    try:
+                        learning_analysis_result = await learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        result_preview = learning_analysis_result[:200] + "..." if len(learning_analysis_result) > 200 else learning_analysis_result
+                        
+                        tool_logger.info(f"✅ SUCCESS: analyze_learning_opportunity completed in {tool_execution_time:.2f}s")
+                        tool_logger.info(f"   Result preview: {result_preview}")
+                        
+                        tool_results.append(f"Learning Analysis:\n{learning_analysis_result}")
+                        tools_executed.append({
+                            "name": "analyze_learning_opportunity",
+                            "status": "success",
+                            "execution_time": tool_execution_time,
+                            "result_length": len(learning_analysis_result)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"🧠 Learning analysis completed ({tool_execution_time:.1f}s)",
+                            "tool_name": "analyze_learning_opportunity",
+                            "status": "completed",
+                            "execution_time": tool_execution_time
+                        }
+                        
+                        # Check if learning decision should be created
+                        if "MAYBE_LEARN" in learning_analysis_result or "SHOULD_LEARN" in learning_analysis_result:
+                            human_learning_tool = next((tool for tool in available_tools if hasattr(tool, 'request_learning_decision')), None)
+                            if human_learning_tool:
+                                decision_start_time = datetime.now()
+                                tool_logger.info("🤝 EXECUTING: request_learning_decision")
+                                tool_logger.info(f"   Reason: Learning analysis suggested saving content")
+                                
+                                try:
+                                    # Extract key information for learning decision
+                                    decision_result = human_learning_tool.request_learning_decision(
+                                        decision_type="save_new",
+                                        context=f"Teaching content detected: {user_query}",
+                                        options=["Save as new knowledge", "Skip learning", "Need more context"],
+                                        additional_info="AI analysis detected teaching intent with factual content"
+                                    )
+                                    decision_execution_time = (datetime.now() - decision_start_time).total_seconds()
+                                    
+                                    tool_logger.info(f"✅ SUCCESS: request_learning_decision completed in {decision_execution_time:.2f}s")
+                                    tool_logger.info(f"   Decision created for human approval")
+                                    
+                                    tool_results.append(f"Learning Decision Created:\n{decision_result}")
+                                    tools_executed.append({
+                                        "name": "request_learning_decision",
+                                        "status": "success",
+                                        "execution_time": decision_execution_time,
+                                        "result_length": len(decision_result)
+                                    })
+                                    
+                                    yield {
+                                        "type": "tool_execution",
+                                        "content": f"🤝 Learning decision created ({decision_execution_time:.1f}s) - Awaiting human approval",
+                                        "tool_name": "request_learning_decision",
+                                        "status": "completed",
+                                        "execution_time": decision_execution_time
+                                    }
+                                    
+                                except Exception as e:
+                                    decision_execution_time = (datetime.now() - decision_start_time).total_seconds()
+                                    tool_logger.error(f"❌ ERROR: request_learning_decision failed in {decision_execution_time:.2f}s - {str(e)}")
+                                    tool_results.append(f"Learning Decision Error:\n{str(e)}")
+                                    tools_executed.append({
+                                        "name": "request_learning_decision",
+                                        "status": "error",
+                                        "execution_time": decision_execution_time,
+                                        "error": str(e)
+                                    })
+                                    
+                                    yield {
+                                        "type": "tool_execution",
+                                        "content": f"❌ Learning decision failed: {str(e)}",
+                                        "tool_name": "request_learning_decision",
+                                        "status": "error",
+                                        "execution_time": decision_execution_time
+                                    }
+                        
+                    except Exception as e:
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: analyze_learning_opportunity failed in {tool_execution_time:.2f}s - {str(e)}")
+                        tools_executed.append({
+                            "name": "analyze_learning_opportunity",
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"❌ Learning analysis failed: {str(e)}",
+                            "tool_name": "analyze_learning_opportunity",
+                            "status": "error",
+                            "execution_time": tool_execution_time
+                        }
+                
+                # Summary of all tool executions
+                successful_tools = [t for t in tools_executed if t["status"] == "success"]
+                failed_tools = [t for t in tools_executed if t["status"] == "error"]
+                total_execution_time = sum(t["execution_time"] for t in tools_executed)
+                
+                tool_logger.info(f"📊 TOOL EXECUTION SUMMARY:")
+                tool_logger.info(f"   Total tools: {len(tools_executed)}")
+                tool_logger.info(f"   Successful: {len(successful_tools)}")
+                tool_logger.info(f"   Failed: {len(failed_tools)}")
+                tool_logger.info(f"   Total time: {total_execution_time:.2f}s")
+                
+                yield {
+                    "type": "tools_summary",
+                    "content": f"🏁 Tools completed: {len(successful_tools)}/{len(tools_executed)} successful ({total_execution_time:.1f}s total)",
+                    "tools_executed": tools_executed,
+                    "total_execution_time": total_execution_time
+                }
                 
                 yield {
                     "type": "response_chunk",

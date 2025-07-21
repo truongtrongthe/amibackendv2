@@ -4,8 +4,21 @@ OpenAI GPT-4.1 LLM implementation with tool calling
 
 import os
 import json
+import logging
 from typing import List, Any, Dict, AsyncGenerator
 from openai import OpenAI
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+# Configure detailed logging for tool calls
+tool_logger = logging.getLogger("tool_calls")
+tool_logger.setLevel(logging.INFO)
+if not tool_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('🔧 [OPENAI_TOOL] %(asctime)s - %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    tool_logger.addHandler(handler)
 
 class OpenAITool:
     def __init__(self, model: str = "gpt-4-1106-preview"):
@@ -428,47 +441,176 @@ class OpenAITool:
         try:
             # Step 1: Execute all tools (non-streaming but fast)
             tool_results = []
+            tools_executed = []
             
 
             if available_tools:
+                tool_logger.info(f"🚀 Starting OpenAI streaming tool execution for query: '{user_query[:60]}{'...' if len(user_query) > 60 else ''}'")
+                tool_logger.info(f"📋 Available tools: {len(available_tools)} tools")
+                
                 # Execute search tool if available
                 search_tool = next((tool for tool in available_tools if hasattr(tool, 'search')), None)
                 if search_tool:
-                    search_result = search_tool.search(user_query)
-                    tool_results.append(f"Search Results:\n{search_result}")
+                    tool_start_time = datetime.now()
+                    query = user_query
+                    tool_logger.info("🔍 EXECUTING: search_google (streaming)")
+                    tool_logger.info(f"   Parameters: {{'query': '{query[:100]}{'...' if len(query) > 100 else ''}'}}")
+                    
+                    try:
+                        search_result = search_tool.search(query)
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        result_preview = search_result[:200] + "..." if len(search_result) > 200 else search_result
+                        
+                        tool_logger.info(f"✅ SUCCESS: search_google completed in {tool_execution_time:.2f}s")
+                        tool_logger.info(f"   Result preview: {result_preview}")
+                        
+                        tool_results.append(f"Search Results:\n{search_result}")
+                        tools_executed.append({
+                            "name": "search_google",
+                            "status": "success",
+                            "execution_time": tool_execution_time,
+                            "result_length": len(search_result)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"🔍 Search completed ({tool_execution_time:.1f}s) - Found {len(search_result)} chars of results",
+                            "tool_name": "search_google",
+                            "status": "completed",
+                            "execution_time": tool_execution_time
+                        }
+                        
+                    except Exception as e:
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: search_google failed in {tool_execution_time:.2f}s - {str(e)}")
+                        tools_executed.append({
+                            "name": "search_google",
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"❌ Search failed: {str(e)}",
+                            "tool_name": "search_google",
+                            "status": "error",
+                            "execution_time": tool_execution_time
+                        }
                 
                 # Execute learning tools if available
                 learning_search_tool = next((tool for tool in available_tools if hasattr(tool, 'search_learning_context')), None)
                 if learning_search_tool:
-                    # Extract key terms from user query for learning search
-                    learning_search_result = learning_search_tool.search_learning_context(query=user_query)
-                    tool_results.append(f"Learning Context Search:\n{learning_search_result}")
+                    tool_start_time = datetime.now()
+                    tool_logger.info("📚 EXECUTING: search_learning_context (streaming)")
+                    tool_logger.info(f"   Parameters: {{'query': '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'}}")
+                    
+                    try:
+                        learning_search_result = learning_search_tool.search_learning_context(query=user_query)
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        result_preview = learning_search_result[:200] + "..." if len(learning_search_result) > 200 else learning_search_result
+                        
+                        tool_logger.info(f"✅ SUCCESS: search_learning_context completed in {tool_execution_time:.2f}s")
+                        tool_logger.info(f"   Result preview: {result_preview}")
+                        
+                        tool_results.append(f"Learning Context Search:\n{learning_search_result}")
+                        tools_executed.append({
+                            "name": "search_learning_context",
+                            "status": "success",
+                            "execution_time": tool_execution_time,
+                            "result_length": len(learning_search_result)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"📚 Learning context search completed ({tool_execution_time:.1f}s)",
+                            "tool_name": "search_learning_context",
+                            "status": "completed",
+                            "execution_time": tool_execution_time
+                        }
+                        
+                    except Exception as e:
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: search_learning_context failed in {tool_execution_time:.2f}s - {str(e)}")
+                        tools_executed.append({
+                            "name": "search_learning_context",
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"❌ Learning context search failed: {str(e)}",
+                            "tool_name": "search_learning_context",
+                            "status": "error",
+                            "execution_time": tool_execution_time
+                        }
                 
                 learning_analysis_tool = next((tool for tool in available_tools if hasattr(tool, 'analyze_learning_opportunity')), None)
                 if learning_analysis_tool:
-                    learning_analysis_result = await learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
-                    tool_results.append(f"Learning Analysis:\n{learning_analysis_result}")
+                    tool_start_time = datetime.now()
+                    tool_logger.info("🧠 EXECUTING: analyze_learning_opportunity (streaming)")
+                    tool_logger.info(f"   Parameters: {{'user_message': '{user_query[:100]}{'...' if len(user_query) > 100 else ''}'}}")
                     
-                    # Check if learning decision should be created
-                    if "MAYBE_LEARN" in learning_analysis_result or "SHOULD_LEARN" in learning_analysis_result:
-                        human_learning_tool = next((tool for tool in available_tools if hasattr(tool, 'request_learning_decision')), None)
-                        if human_learning_tool:
-                            try:
-                                # Extract key information for learning decision
-                                decision_result = human_learning_tool.request_learning_decision(
-                                    decision_type="save_new",
-                                    context=f"Teaching content detected: {user_query}",
-                                    options=["Save as new knowledge", "Skip learning", "Need more context"],
-                                    additional_info="AI analysis detected teaching intent with factual content"
-                                )
-                                tool_results.append(f"Learning Decision Created:\n{decision_result}")
-                            except Exception as e:
-                                tool_results.append(f"Learning Decision Error:\n{str(e)}")
+                    try:
+                        learning_analysis_result = await learning_analysis_tool.analyze_learning_opportunity(user_message=user_query)
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        result_preview = learning_analysis_result[:200] + "..." if len(learning_analysis_result) > 200 else learning_analysis_result
+                        
+                        tool_logger.info(f"✅ SUCCESS: analyze_learning_opportunity completed in {tool_execution_time:.2f}s")
+                        tool_logger.info(f"   Result preview: {result_preview}")
+                        
+                        tool_results.append(f"Learning Analysis:\n{learning_analysis_result}")
+                        tools_executed.append({
+                            "name": "analyze_learning_opportunity",
+                            "status": "success",
+                            "execution_time": tool_execution_time,
+                            "result_length": len(learning_analysis_result)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"🧠 Learning analysis completed ({tool_execution_time:.1f}s)",
+                            "tool_name": "analyze_learning_opportunity",
+                            "status": "completed",
+                            "execution_time": tool_execution_time
+                        }
+                        
+                    except Exception as e:
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: analyze_learning_opportunity failed in {tool_execution_time:.2f}s - {str(e)}")
+                        tools_executed.append({
+                            "name": "analyze_learning_opportunity",
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e)
+                        })
+                        
+                        yield {
+                            "type": "tool_execution",
+                            "content": f"❌ Learning analysis failed: {str(e)}",
+                            "tool_name": "analyze_learning_opportunity",
+                            "status": "error",
+                            "execution_time": tool_execution_time
+                        }
+                
+                # Summary of all tool executions
+                successful_tools = [t for t in tools_executed if t["status"] == "success"]
+                failed_tools = [t for t in tools_executed if t["status"] == "error"]
+                total_execution_time = sum(t["execution_time"] for t in tools_executed)
+                
+                tool_logger.info(f"📊 OPENAI STREAMING TOOL EXECUTION SUMMARY:")
+                tool_logger.info(f"   Total tools: {len(tools_executed)}")
+                tool_logger.info(f"   Successful: {len(successful_tools)}")
+                tool_logger.info(f"   Failed: {len(failed_tools)}")
+                tool_logger.info(f"   Total time: {total_execution_time:.2f}s")
                 
                 yield {
-                    "type": "response_chunk",
-                    "content": "\n[Tools executed, generating response...]",
-                    "complete": False
+                    "type": "tools_summary",
+                    "content": f"🏁 Tools completed: {len(successful_tools)}/{len(tools_executed)} successful ({total_execution_time:.1f}s total)",
+                    "tools_executed": tools_executed,
+                    "total_execution_time": total_execution_time
                 }
             
             # Step 2: Build conversation with tool results and history
@@ -610,9 +752,18 @@ class OpenAITool:
         ]
         
         # Execute each tool call
+        tools_executed = []
+        tool_logger.info(f"🚀 Starting OpenAI tool execution for query: '{original_query[:60]}{'...' if len(original_query) > 60 else ''}'")
+        tool_logger.info(f"📋 Tool calls requested: {len(message.tool_calls)} tools")
+        
         for tool_call in message.tool_calls:
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
+            
+            tool_start_time = datetime.now()
+            tool_logger.info(f"🔍 EXECUTING: {function_name}")
+            tool_logger.info(f"   Tool Call ID: {tool_call.id}")
+            tool_logger.info(f"   Parameters: {function_args}")
             
             # Find the appropriate tool and execute it
             tool_executed = False
@@ -625,53 +776,94 @@ class OpenAITool:
                         # Call the method with the provided arguments
                         if callable(method):
                             result = method(**function_args)
+                            tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                            result_preview = result[:200] + "..." if len(result) > 200 else result
+                            
+                            tool_logger.info(f"✅ SUCCESS: {function_name} completed in {tool_execution_time:.2f}s")
+                            tool_logger.info(f"   Result preview: {result_preview}")
+                            
                             messages.append({
                                 "tool_call_id": tool_call.id,
                                 "role": "tool",
                                 "name": function_name,
                                 "content": result
                             })
+                            
+                            tools_executed.append({
+                                "name": function_name,
+                                "status": "success",
+                                "execution_time": tool_execution_time,
+                                "result_length": len(result),
+                                "tool_call_id": tool_call.id
+                            })
                             tool_executed = True
                             break
                     except Exception as e:
-                        print(f"Error executing tool {function_name}: {e}")
+                        tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                        tool_logger.error(f"❌ ERROR: {function_name} failed in {tool_execution_time:.2f}s - {str(e)}")
+                        
                         messages.append({
                             "tool_call_id": tool_call.id,
                             "role": "tool",
                             "name": function_name,
                             "content": f"Error: {str(e)}"
                         })
+                        
+                        tools_executed.append({
+                            "name": function_name,
+                            "status": "error",
+                            "execution_time": tool_execution_time,
+                            "error": str(e),
+                            "tool_call_id": tool_call.id
+                        })
                         tool_executed = True
                         break
             
-            # Legacy hardcoded tool handling for backward compatibility
-            if not tool_executed:
-                if function_name == "search_google":
-                    # Find the search tool
-                    search_tool = next((tool for tool in available_tools if hasattr(tool, 'search')), None)
-                    if search_tool:
-                        result = search_tool.search(function_args.get("query", ""))
-                        messages.append({
-                            "tool_call_id": tool_call.id,
-                            "role": "tool",
-                            "name": function_name,
-                            "content": result
-                        })
-                elif function_name == "get_context":
-                    # Find the context tool
-                    context_tool = next((tool for tool in available_tools if hasattr(tool, 'get_context')), None)
-                    if context_tool:
-                        query = function_args.get("query", "")
-                        source_types = function_args.get("source_types", None)
-                        # Pass user info if available from the conversation
-                        result = context_tool.get_context(query, source_types, user_id="unknown", org_id="unknown")
-                        messages.append({
-                            "tool_call_id": tool_call.id,
-                            "role": "tool", 
-                            "name": function_name,
-                            "content": result
-                        })
-        print("Tool result:", messages)
+            # Handle fallback for search_google if no tool found
+            if not tool_executed and function_name == "search_google":
+                tool_logger.warning(f"⚠️  No search tool found for {function_name}, using fallback")
+                messages.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool", 
+                    "name": function_name,
+                    "content": "Search functionality not available"
+                })
+                
+                tools_executed.append({
+                    "name": function_name,
+                    "status": "fallback",
+                    "execution_time": (datetime.now() - tool_start_time).total_seconds(),
+                    "tool_call_id": tool_call.id
+                })
+            elif not tool_executed:
+                tool_execution_time = (datetime.now() - tool_start_time).total_seconds()
+                tool_logger.error(f"❌ UNKNOWN TOOL: {function_name} not found in available tools")
+                
+                messages.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": function_name, 
+                    "content": f"Error: Tool '{function_name}' not found"
+                })
+                
+                tools_executed.append({
+                    "name": function_name,
+                    "status": "not_found",
+                    "execution_time": tool_execution_time,
+                    "error": f"Tool '{function_name}' not found",
+                    "tool_call_id": tool_call.id
+                })
+        
+        # Summary of all tool executions
+        successful_tools = [t for t in tools_executed if t["status"] == "success"]
+        failed_tools = [t for t in tools_executed if t["status"] in ["error", "not_found"]]
+        total_execution_time = sum(t["execution_time"] for t in tools_executed)
+        
+        tool_logger.info(f"📊 OPENAI TOOL EXECUTION SUMMARY:")
+        tool_logger.info(f"   Total tools: {len(tools_executed)}")
+        tool_logger.info(f"   Successful: {len(successful_tools)}")
+        tool_logger.info(f"   Failed: {len(failed_tools)}")
+        tool_logger.info(f"   Total time: {total_execution_time:.2f}s")
         # Send tool results back to GPT-4
         try:
             final_response = self.client.chat.completions.create(
