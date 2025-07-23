@@ -5,6 +5,7 @@ Provides dynamic parameter support and customizable system prompts for API endpo
 
 import os
 import json
+import re
 import traceback
 import logging
 import asyncio
@@ -1011,6 +1012,298 @@ Respond with ONLY the JSON array, no additional text.
         except Exception as e:
             logger.error(f"Knowledge extraction error: {e}")
             return []
+
+    async def _extract_user_input_knowledge(self, user_query: str, request: 'ToolExecutionRequest') -> List[Dict[str, Any]]:
+        """
+        Extract structured, actionable knowledge pieces from user input (for teaching scenarios)
+        
+        Args:
+            user_query: The user's input to analyze
+            request: ToolExecutionRequest with LLM provider and model info
+            
+        Returns:
+            List of structured knowledge pieces with titles, content, categories, and quality scores
+        """
+        
+        try:
+            logger.info(f"Starting user input knowledge extraction for query: {user_query[:100]}...")
+            
+            # Use GPT-4o for knowledge extraction from user input
+            extraction_prompt = f"""
+Analyze this user input and extract discrete, actionable knowledge pieces that represent processes, requirements, or instructions they want to implement.
+
+User Input to Analyze:
+"{user_query}"
+
+EXTRACTION CRITERIA:
+Focus on extracting actionable knowledge such as:
+• Specific business processes or workflows they describe
+• Technical requirements or specifications they mention  
+• Step-by-step procedures they outline
+• Integration requirements (APIs, tools, systems)
+• Automation goals and objectives
+• Data processing requirements (spreadsheets, databases)
+• Communication workflows (email, notifications)
+• Business rules or logic they want to implement
+• Tool configurations or settings needed
+
+For each valuable knowledge piece found, extract:
+
+Response format (JSON array):
+[
+  {{
+    "title": "Concise, descriptive title (max 60 chars)",
+    "content": "The actual actionable knowledge/instruction",
+    "category": "process|requirement|automation|integration|workflow|configuration",
+    "quality_score": 0.0-1.0,
+    "actionability": "high|medium|low",
+    "reusability": "high|medium|low",
+    "specificity": "high|medium|low"
+  }}
+]
+
+If no actionable knowledge pieces are found, return an empty array: []
+
+RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
+"""
+
+            # Get LLM response
+            logger.info("Calling _get_reasoning_llm_response for knowledge extraction...")
+            llm_response = await self._get_reasoning_llm_response(extraction_prompt, request)
+            logger.info(f"Received LLM response for knowledge extraction: {len(llm_response)} chars")
+            
+            # Parse JSON response
+            try:
+                # Extract JSON from response (handling cases where LLM adds extra text)
+                json_match = re.search(r'\[.*\]', llm_response, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                    knowledge_data = json.loads(json_str)
+                else:
+                    logger.warning("No JSON array found in knowledge extraction response")
+                    return []
+                
+                # Validate and structure the knowledge pieces
+                validated_pieces = []
+                for piece in knowledge_data:
+                    if isinstance(piece, dict) and "title" in piece and "content" in piece:
+                        validated_pieces.append({
+                            "title": piece.get("title", "")[:60],  # Limit title length
+                            "content": piece.get("content", ""),
+                            "category": piece.get("category", "process"),
+                            "quality_score": float(piece.get("quality_score", 0.7)),
+                            "actionability": piece.get("actionability", "medium"),
+                            "reusability": piece.get("reusability", "medium"),
+                            "specificity": piece.get("specificity", "medium")
+                        })
+                
+                logger.info(f"User input knowledge extraction: Found {len(knowledge_data)} pieces, {len(validated_pieces)} passed validation")
+                return validated_pieces
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse user input knowledge extraction JSON: {e}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"User input knowledge extraction error: {e}")
+            return []
+
+    async def _stream_knowledge_approval_request(self, knowledge_pieces: List[Dict[str, Any]], request: 'ToolExecutionRequest') -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream knowledge approval request to frontend for human-in-the-loop flow
+        
+        Args:
+            knowledge_pieces: List of extracted knowledge pieces to approve
+            request: ToolExecutionRequest for context
+            
+        Yields:
+            Dict chunks for streaming the approval request
+        """
+        
+        try:
+            # Create the approval request data structure
+            approval_data = {
+                "type": "knowledge_approval_request",
+                "content": f"📚 I've extracted {len(knowledge_pieces)} knowledge pieces from your input. Please review and approve which ones should be learned:",
+                "knowledge_pieces": knowledge_pieces,
+                "requires_human_input": True,
+                "timestamp": datetime.now().isoformat(),
+                "metadata": {
+                    "extraction_method": "user_input",
+                    "total_pieces": len(knowledge_pieces),
+                    "user_id": getattr(request, 'user_id', 'unknown'),
+                    "org_id": getattr(request, 'org_id', 'unknown')
+                }
+            }
+            
+            # Stream the approval request
+            yield approval_data
+            
+            # Also yield individual knowledge pieces for detailed review
+            for i, piece in enumerate(knowledge_pieces):
+                yield {
+                    "type": "knowledge_piece",
+                    "content": f"**{piece['title']}**\n{piece['content']}",
+                    "piece_index": i,
+                    "piece_data": piece,
+                    "category": piece.get('category', 'unknown'),
+                    "quality_score": piece.get('quality_score', 0.0),
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Error streaming knowledge approval request: {e}")
+            yield {
+                "type": "error",
+                "content": f"Error preparing knowledge approval: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }
+
+    async def handle_knowledge_approval(self, approved_knowledge_ids: List[str], all_knowledge_pieces: List[Dict[str, Any]], request: 'ToolExecutionRequest') -> AsyncGenerator[str, None]:
+        """
+        Handle human approval of knowledge pieces and generate copilot-style summary
+        
+        Args:
+            approved_knowledge_ids: List of approved knowledge piece IDs
+            all_knowledge_pieces: All knowledge pieces that were presented for approval
+            request: Original ToolExecutionRequest for context
+            
+        Yields:
+            String chunks (JSON) for streaming the copilot summary response
+        """
+        
+        try:
+            # Filter approved knowledge pieces - handle multiple possible ID formats
+            approved_pieces = []
+            for i, piece in enumerate(all_knowledge_pieces):
+                # Check various possible ID formats
+                piece_matched = (
+                    str(i) in approved_knowledge_ids or  # Index as string
+                    i in approved_knowledge_ids or      # Index as number
+                    piece.get('id') in approved_knowledge_ids or  # Piece ID
+                    piece.get('title') in approved_knowledge_ids  # Title match
+                )
+                if piece_matched:
+                    approved_pieces.append(piece)
+            
+            # If no pieces matched but we have approval IDs, assume all are approved
+            if not approved_pieces and approved_knowledge_ids and all_knowledge_pieces:
+                logger.warning(f"No pieces matched approval IDs {approved_knowledge_ids}, assuming all pieces approved")
+                approved_pieces = all_knowledge_pieces
+            
+            logger.info(f"Processing {len(approved_pieces)} approved knowledge pieces out of {len(all_knowledge_pieces)} total")
+            
+            # Save approved knowledge pieces (if any)
+            if approved_pieces:
+                yield f"data: {json.dumps({
+                    'type': 'thinking',
+                    'content': f'💾 Saving {len(approved_pieces)} approved knowledge pieces to your agent\'s brain...',
+                    'thought_type': 'knowledge_saving',
+                    'timestamp': datetime.now().isoformat()
+                })}\n\n"
+                
+                # Actually save knowledge pieces to brain vectors using pccontroller
+                from pccontroller import save_knowledge
+                
+                saved_count = 0
+                for piece in approved_pieces:
+                    try:
+                        result = await save_knowledge(
+                            input=piece['content'],
+                            user_id=request.user_id,
+                            org_id=request.org_id,
+                            title=piece['title'],
+                            thread_id=None,  # No specific thread for knowledge extraction
+                            topic=piece.get('category', 'user_teaching'),
+                            categories=['human_approved', 'teaching_intent', piece.get('category', 'process')],
+                            ttl_days=365  # Keep for 1 year
+                        )
+                        
+                        if result and result.get('success'):
+                            saved_count += 1
+                            logger.info(f"✅ SAVED KNOWLEDGE TO BRAIN: {piece['title']} -> {result.get('vector_id')}")
+                        else:
+                            logger.error(f"❌ FAILED TO SAVE: {piece['title']} -> {result}")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ ERROR SAVING KNOWLEDGE: {piece['title']} -> {str(e)}")
+                
+                logger.info(f"Successfully saved {saved_count}/{len(approved_pieces)} knowledge pieces to brain vectors")
+                
+                yield f"data: {json.dumps({
+                    'type': 'thinking',
+                    'content': f'✅ Successfully saved {saved_count}/{len(approved_pieces)} knowledge pieces to your agent\'s brain',
+                    'thought_type': 'knowledge_saved',
+                    'timestamp': datetime.now().isoformat()
+                })}\n\n"
+            
+            # Generate copilot-style summary
+            yield f"data: {json.dumps({
+                'type': 'thinking',
+                'content': '🤖 Generating copilot-style summary based on your request and approved knowledge...',
+                'thought_type': 'summary_generation',
+                'timestamp': datetime.now().isoformat()
+            })}\n\n"
+            
+            # Create summary prompt
+            approved_knowledge_text = "\n".join([
+                f"- {piece['title']}: {piece['content']}" 
+                for piece in approved_pieces
+            ])
+            
+            summary_prompt = f"""
+Based on the user's request and the approved knowledge pieces, provide a concise, actionable copilot-style summary.
+
+User Request: "{request.user_query}"
+
+Approved Knowledge Pieces:
+{approved_knowledge_text}
+
+Generate a brief, focused summary that:
+1. Acknowledges what the user wants to accomplish
+2. References the key knowledge pieces that were learned
+3. Provides next steps or recommendations
+4. Maintains a helpful, professional tone
+
+Keep it concise (2-3 sentences maximum).
+"""
+            
+            # Get summary from LLM
+            summary_response = await self._get_reasoning_llm_response(summary_prompt, request)
+            
+            # Stream the summary as response chunks
+            sentences = summary_response.split('. ')
+            for sentence in sentences:
+                if sentence.strip():
+                    yield f"data: {json.dumps({
+                        'type': 'response_chunk',
+                        'content': sentence.strip() + ('. ' if not sentence.endswith('.') else ' '),
+                        'complete': False,
+                        'timestamp': datetime.now().isoformat()
+                    })}\n\n"
+                    await asyncio.sleep(0.1)  # Small delay for streaming effect
+            
+            # Final completion
+            yield f"data: {json.dumps({
+                'type': 'response_complete',
+                'content': '',
+                'complete': True,
+                'metadata': {
+                    'approved_knowledge_count': len(approved_pieces),
+                    'total_knowledge_count': len(all_knowledge_pieces),
+                    'summary_generated': True
+                },
+                'timestamp': datetime.now().isoformat()
+            })}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Error handling knowledge approval: {e}")
+            yield f"data: {json.dumps({
+                'type': 'error',
+                'content': f'Error generating summary after approval: {str(e)}',
+                'complete': True,
+                'timestamp': datetime.now().isoformat()
+            })}\n\n"
     
     def _get_model_name(self, provider: str, custom_model: str = None) -> str:
         """Get the model name for the specified provider"""

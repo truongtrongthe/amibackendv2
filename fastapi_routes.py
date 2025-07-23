@@ -485,3 +485,85 @@ def verify_webhook_token(token, org_id):
     # Implementation depends on your verification logic
     return token == VERIFY_TOKEN 
 
+# Add the new endpoint
+@router.post("/tool/knowledge-approval")
+async def handle_knowledge_approval(request: Request):
+    """Handle human approval of knowledge pieces and return copilot-style summary"""
+    try:
+        # Parse request body
+        body = await request.json()
+        approved_knowledge_ids = body.get("approved_knowledge_ids", [])
+        all_knowledge_pieces = body.get("all_knowledge_pieces", [])
+        original_request = body.get("original_request", {})
+        
+        # Debug logging
+        logger.info(f"Knowledge approval request body keys: {list(body.keys())}")
+        logger.info(f"Approved knowledge IDs: {approved_knowledge_ids}")
+        logger.info(f"All knowledge pieces count: {len(all_knowledge_pieces)}")
+        logger.info(f"Original request keys: {list(original_request.keys()) if original_request else 'None'}")
+        logger.info(f"Original request org_id: {original_request.get('org_id', 'NOT_FOUND')}")
+        logger.info(f"Body content: {json.dumps(body, indent=2)[:500]}...")
+        
+        # Import ExecutiveTool
+        from exec_tool import ExecutiveTool, ToolExecutionRequest
+        
+        # Create executive tool and request
+        executive_tool = ExecutiveTool()
+        
+        # Try to get org_id from multiple possible sources
+        org_id = (
+            original_request.get("org_id") or 
+            body.get("org_id") or 
+            "5376f68e-ff74-43fe-a72c-c1be9c6ae652"  # Fallback to your known org_id
+        )
+        
+        user_id = (
+            original_request.get("user_id") or 
+            body.get("user_id") or 
+            "user_GjswTZUz8Fhv2v2X0c8OyA"  # Fallback to your known user_id
+        )
+        
+        logger.info(f"Using org_id: {org_id}, user_id: {user_id}")
+        
+        # Safely construct ToolExecutionRequest with required fields
+        tool_request = ToolExecutionRequest(
+            llm_provider=original_request.get("llm_provider", "openai"),
+            user_query=original_request.get("user_query", ""),
+            system_prompt=original_request.get("system_prompt"),
+            model=original_request.get("model"),
+            model_params=original_request.get("model_params"),
+            tools_config=original_request.get("tools_config"),
+            org_id=org_id,
+            user_id=user_id,
+            enable_tools=original_request.get("enable_tools", True),
+            force_tools=original_request.get("force_tools", False),
+            tools_whitelist=original_request.get("tools_whitelist"),
+            conversation_history=original_request.get("conversation_history"),
+            max_history_messages=original_request.get("max_history_messages", 25),
+            max_history_tokens=original_request.get("max_history_tokens", 6000)
+        )
+        
+        # Return streaming response with copilot summary
+        return StreamingResponse(
+            executive_tool.handle_knowledge_approval(
+                approved_knowledge_ids,
+                all_knowledge_pieces, 
+                tool_request
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Knowledge approval endpoint error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Knowledge approval failed: {str(e)}"}
+        ) 
+

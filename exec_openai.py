@@ -548,6 +548,40 @@ Remember: You don't write code or build software - you build understanding, crea
         """Get the appropriate search tool for OpenAI"""
         return self.executive_tool._get_search_tool("openai", model)
     
+    def _contains_teaching_content(self, user_query: str) -> bool:
+        """Detect if user input contains teaching content that should trigger knowledge extraction"""
+        
+        # Vietnamese teaching patterns
+        vietnamese_patterns = [
+            "tôi cần", "tôi muốn", "làm thế nào", "quy trình", "bước", "cách thức",
+            "hướng dẫn", "thiết lập", "cấu hình", "xây dựng", "tạo", "phát triển"
+        ]
+        
+        # English teaching patterns  
+        english_patterns = [
+            "i need", "i want", "how to", "process", "step", "procedure",
+            "guide", "setup", "configure", "build", "create", "develop"
+        ]
+        
+        query_lower = user_query.lower()
+        
+        # Check for teaching patterns
+        for pattern in vietnamese_patterns + english_patterns:
+            if pattern in query_lower:
+                return True
+        
+        # Check for process descriptions (multiple steps)
+        if ("1." in user_query or "2." in user_query or 
+            "first" in query_lower or "then" in query_lower or
+            "trước" in query_lower or "sau đó" in query_lower):
+            return True
+            
+        # Check for detailed explanations (long content)
+        if len(user_query) > 100 and ("để" in query_lower or "for" in query_lower):
+            return True
+            
+        return False
+
     async def _analyze_with_openai(self, prompt: str, model: str = None) -> str:
         """Simple analysis method for internal use"""
         from openai_tool import OpenAITool
@@ -661,6 +695,7 @@ Remember: You don't write code or build software - you build understanding, crea
         # NEW: Cursor-style request analysis
         request_analysis = None
         orchestration_plan = None
+        raw_thinking_steps = []  # Initialize to prevent UnboundLocalError
         
         if request.cursor_mode and request.enable_intent_classification:
             # Yield initial analysis status
@@ -696,11 +731,94 @@ Remember: You don't write code or build software - you build understanding, crea
             # Brief pause for user to see analysis
             await asyncio.sleep(0.5)
         
-            # NEW: Generate unified Cursor-style thoughts in correct logical order
-            async for thought in self.executive_tool._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
-                yield thought
+        # NEW: Generate unified Cursor-style thoughts in correct logical order
+        async for thought in self.executive_tool._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
+            yield thought
         
-                # Get available tools for execution based on configuration
+        # NEW: Deep reasoning chain (when enabled) - MOVED TO CORRECT POSITION
+        if request.enable_deep_reasoning and request.cursor_mode and request_analysis:
+            yield {
+                "type": "thinking",
+                "content": "🧠 Activating deep reasoning mode - I'll investigate your specific context before proposing solutions...",
+                "thought_type": "deep_reasoning_start",
+                "reasoning_step": "init",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            async for reasoning_chunk in self._execute_deep_reasoning_chain(request, request_analysis):
+                yield reasoning_chunk
+        
+        # CRITICAL: Knowledge extraction BEFORE LLM response (for teaching scenarios)
+        teaching_detected = self._contains_teaching_content(request.user_query)
+        logger.info(f"Teaching content detection result: {teaching_detected} for query: {request.user_query[:50]}...")
+        if teaching_detected:
+            yield {
+                "type": "thinking",
+                "content": f"🔍 Teaching content detected in query: '{request.user_query[:50]}...' - Extracting actionable knowledge pieces from your input...",
+                "thought_type": "knowledge_extraction",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            try:
+                # Extract knowledge from USER INPUT using specialized method
+                extracted_knowledge = await self.executive_tool._extract_user_input_knowledge(
+                    request.user_query,
+                    request
+                )
+                
+                yield {
+                    "type": "thinking",
+                    "content": f"🔧 Knowledge extraction completed. Found: {len(extracted_knowledge) if extracted_knowledge else 0} pieces",
+                    "thought_type": "knowledge_debug",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+            except Exception as e:
+                yield {
+                    "type": "thinking",
+                    "content": f"❌ Knowledge extraction failed: {str(e)}",
+                    "thought_type": "knowledge_error",
+                    "timestamp": datetime.now().isoformat()
+                }
+                extracted_knowledge = None
+            
+            if extracted_knowledge:
+                yield {
+                    "type": "thinking", 
+                    "content": f"🔍 Extracted {len(extracted_knowledge)} knowledge pieces from your input",
+                    "thought_type": "knowledge_extracted",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                # Stream knowledge approval request IMMEDIATELY
+                async for approval_chunk in self.executive_tool._stream_knowledge_approval_request(extracted_knowledge, request):
+                    yield approval_chunk
+                
+                # STOP HERE - Wait for human approval before any LLM response
+                yield {
+                    "type": "awaiting_approval",
+                    "content": "⏳ Waiting for your approval on the knowledge pieces...",
+                    "requires_human_input": True,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                # EXIT - No LLM response until human approves
+                yield {
+                    "type": "thinking",
+                    "content": "🛑 STOPPING execution - waiting for human approval before any LLM response",
+                    "thought_type": "execution_stopped",
+                    "timestamp": datetime.now().isoformat()
+                }
+                return
+            else:
+                yield {
+                    "type": "thinking",
+                    "content": f"⚠️ No knowledge pieces extracted - continuing with normal response flow",
+                    "thought_type": "no_knowledge",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        # Get available tools for execution based on configuration
         tools_to_use = []
         has_learning_tools = False
         
@@ -805,51 +923,50 @@ Remember: You don't write code or build software - you build understanding, crea
             if has_learning_tools:
                 learning_instructions = """
 
-CRITICAL LEARNING CAPABILITY: As Ami, when users provide information about their company, share knowledge, give instructions, or teach you something, you MUST:
+CRITICAL LEARNING CAPABILITY: When users provide information, immediately use learning tools.
 
-1. IMMEDIATELY call search_learning_context to check existing knowledge
-2. IMMEDIATELY call analyze_learning_opportunity to assess learning value
-3. If analysis suggests learning, IMMEDIATELY call request_learning_decision
-
-MANDATORY TOOL USAGE: For ANY message that contains:
-- Company information or facts
-- Instructions or tasks
-- Teaching content
-- Personal/organizational data
-- Procedures or guidelines
-
-YOU MUST CALL THESE TOOLS IMMEDIATELY - NO EXCEPTIONS:
-✓ search_learning_context - Search existing knowledge (CALL FOR ALL TEACHING)
-✓ analyze_learning_opportunity - Analyze if content should be learned (CALL FOR ALL TEACHING)
-✓ request_learning_decision - Request human decision (CALL WHEN ANALYSIS SUGGESTS LEARNING)
-✓ preview_knowledge_save - Preview what would be saved
-✓ save_knowledge - Save knowledge with human approval
-
-LEARNING TRIGGERS (MANDATORY tool usage):
-- User shares company information → CALL search_learning_context + analyze_learning_opportunity
-- User provides factual information → CALL search_learning_context + analyze_learning_opportunity
-- User gives instructions or procedures → CALL search_learning_context + analyze_learning_opportunity
-- User teaches concepts or explains things → CALL search_learning_context + analyze_learning_opportunity
-- User shares personal/organizational data → CALL search_learning_context + analyze_learning_opportunity
-
-Example: User says "Our company has 50 employees" → IMMEDIATELY call search_learning_context("company employee count") AND analyze_learning_opportunity("Our company has 50 employees")
-Example: User says "Your task is to manage the fanpage daily" → IMMEDIATELY call search_learning_context("fanpage management tasks") AND analyze_learning_opportunity("Your task is to manage the fanpage daily")
-
-BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
+MANDATORY TOOL USAGE for company info, instructions, or teaching content:
+✓ search_learning_context - Check existing knowledge
+✓ analyze_learning_opportunity - Assess learning value  
+✓ request_learning_decision - Get approval to learn"""
                 base_system_prompt += learning_instructions
-                
-                # Force tool usage for learning content
                 request.force_tools = True
         else:
-            # Use learning-aware prompt if learning tools are available
+            # CURSOR-STYLE COPILOT BEHAVIOR
             if has_learning_tools:
-                base_system_prompt = self.default_system_prompts["openai_with_learning"]
-                # Force tool usage for learning content when using general prompt
+                base_system_prompt = """You are Ami, an intelligent copilot assistant similar to Cursor or GitHub Copilot.
+
+COPILOT BEHAVIOR (NOT CHATBOT):
+- Act like Cursor: Investigate → Analyze → Propose → Wait for approval
+- Provide structured plans and next steps, not conversational responses  
+- After analysis, propose concrete actions and wait for user direction
+- Be concise and action-oriented
+
+RESPONSE STRUCTURE:
+1. Brief acknowledgment
+2. Propose 2-3 specific approaches/options
+3. Ask which direction they want to take
+4. Wait for their choice before proceeding
+
+LEARNING CAPABILITY: When users share information, immediately use learning tools.
+
+MANDATORY TOOL USAGE for company info, instructions, or teaching content:
+✓ search_learning_context - Check existing knowledge
+✓ analyze_learning_opportunity - Assess learning value
+✓ request_learning_decision - Get approval to learn"""
                 request.force_tools = True
             elif tools_to_use:
-                base_system_prompt = self.default_system_prompts["openai_with_tools"]
+                base_system_prompt = """You are Ami, an intelligent copilot assistant similar to Cursor.
+
+COPILOT BEHAVIOR:
+- Investigate → Analyze → Propose → Wait for approval
+- Provide structured plans, not conversational responses
+- Be concise and action-oriented
+- Propose specific options and wait for user choice"""
             else:
-                base_system_prompt = self.default_system_prompts["openai"]
+                base_system_prompt = """You are Ami, a helpful copilot assistant.
+
+Act like Cursor: Analyze the request, propose structured approaches, and wait for user direction."""
         
         # Apply language detection to create language-aware prompt
         system_prompt = await self.executive_tool._detect_language_and_create_prompt(request, request.user_query, base_system_prompt)
@@ -890,99 +1007,12 @@ BE PROACTIVE ABOUT LEARNING - USE TOOLS FIRST, THEN RESPOND!"""
                 
                 yield chunk
             
-            # CRITICAL FIX: Post-Response Learning Analysis
-            # After LLM completes response, analyze the response content for learning opportunities
-            if has_learning_tools and full_response_content.strip():
-                logger.info(f"🚀 [OPENAI] POST-RESPONSE LEARNING: Extracting structured knowledge from LLM response ({len(full_response_content)} chars)")
-                yield {
-                    "type": "thinking", 
-                    "content": "🔍 Extracting actionable knowledge pieces from my response...",
-                    "provider": request.llm_provider,
-                    "thought_type": "post_response_learning"
-                }
-                
-                try:
-                    # NEW: Structured Knowledge Extraction System
-                    learning_tools_dict = {tool.name: tool for tool in tools_to_use if hasattr(tool, 'name')}
+            # Knowledge extraction now happens BEFORE LLM response, so this section is removed
                     
-                    if "learning_analysis" in learning_tools_dict and "human_learning" in learning_tools_dict:
-                        # Extract structured knowledge pieces from LLM response
-                        knowledge_pieces = await self.executive_tool._extract_structured_knowledge(
-                            full_response_content, 
-                            request.user_query,
-                            request.llm_provider
-                        )
-                        
-                        yield {
-                            "type": "thinking",
-                            "content": f"🔍 Extracted {len(knowledge_pieces)} knowledge pieces from response",
-                            "provider": request.llm_provider,
-                            "thought_type": "knowledge_extraction_result"
-                        }
-                        
-                        # Create batched learning decision for all high-quality pieces
-                        decision_tool = learning_tools_dict["human_learning"]
-                        decisions_created = 0
-                        
-                        # Filter high-quality knowledge pieces (lowered threshold)
-                        high_quality_pieces = [kp for kp in knowledge_pieces if kp["quality_score"] >= 0.6]
-                        
-                        if high_quality_pieces:
-                            # Create single batched learning decision for all pieces
-                            batched_context = "Multiple Knowledge Pieces Found:\n\n"
-                            batched_options = []
-                            
-                            for i, knowledge_piece in enumerate(high_quality_pieces):
-                                batched_context += f"**{i+1}. {knowledge_piece['title']}** (Quality: {knowledge_piece['quality_score']:.2f})\n"
-                                batched_context += f"Content: {knowledge_piece['content'][:200]}...\n"
-                                batched_context += f"Category: {knowledge_piece['category']}\n\n"
-                                
-                                batched_options.append(f"Save: {knowledge_piece['title']}")
-                            
-                            batched_options.extend(["Save all knowledge pieces", "Skip all knowledge"])
-                            
-                            decision_result = decision_tool.request_learning_decision(
-                                decision_type="batched_knowledge_save",
-                                context=batched_context,
-                                options=batched_options,
-                                additional_info=f"Found {len(high_quality_pieces)} knowledge pieces | User asked: {request.user_query}",
-                                thread_id=getattr(request, 'thread_id', None)
-                            )
-                            
-                            decisions_created = 1
-                            yield {
-                                "type": "learning_decision",
-                                "content": f"💎 Found {len(high_quality_pieces)} knowledge pieces to save",
-                                "provider": request.llm_provider,
-                                "decision_result": decision_result,
-                                "knowledge_metadata": {
-                                    "total_pieces": len(high_quality_pieces),
-                                    "pieces": [{"title": kp['title'], "quality_score": kp['quality_score']} for kp in high_quality_pieces],
-                                    "batch_mode": True
-                                }
-                            }
-                        
-                        if decisions_created == 0:
-                            yield {
-                                "type": "thinking",
-                                "content": "📋 No high-quality knowledge pieces found for learning",
-                                "provider": request.llm_provider,
-                                "thought_type": "no_learning_needed"
-                            }
-                                
-                except Exception as learning_error:
-                    logger.error(f"Post-response learning analysis error: {learning_error}")
-                    yield {
-                        "type": "thinking",
-                        "content": f"⚠️ Learning analysis error: {str(learning_error)}",
-                        "provider": request.llm_provider,
-                        "thought_type": "learning_error"
-                    }
-            
         except Exception as e:
             yield {
                 "type": "error",
-                "content": f"OpenAI execution error: {str(e)}",
+                "content": f"Error with OpenAI API: {str(e)}",
                 "complete": True
             }
 
