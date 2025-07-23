@@ -41,6 +41,144 @@ except Exception as e:
 
 
 @dataclass
+class InvestigationStep:
+    """Single step in the deep reasoning investigation chain"""
+    key: str
+    search_query: str
+    thought_description: str
+    discovery_template: str
+    requires_search: bool = True
+    requires_analysis: bool = True
+    analysis_type: str = "capability_analysis"
+    context_vars: Optional[Dict[str, Any]] = None
+    order: int = 1
+
+
+@dataclass
+class InvestigationPlan:
+    """Complete plan for contextual investigation"""
+    initial_thought: str
+    steps: List[InvestigationStep]
+    total_steps: int
+    reasoning_focus: str
+    
+    @classmethod
+    def from_llm_response(cls, llm_response: str) -> 'InvestigationPlan':
+        """Parse LLM JSON response into structured plan"""
+        try:
+            import json
+            import re
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                
+                steps = []
+                for i, step_data in enumerate(data.get("steps", []), 1):
+                    step = InvestigationStep(
+                        key=step_data.get("key", f"step_{i}"),
+                        search_query=step_data.get("search_query", ""),
+                        thought_description=step_data.get("thought_description", ""),
+                        discovery_template=step_data.get("discovery_template", ""),
+                        requires_search=step_data.get("requires_search", True),
+                        requires_analysis=step_data.get("requires_analysis", True),
+                        analysis_type=step_data.get("analysis_type", "capability_analysis"),
+                        context_vars=step_data.get("context_vars", {}),
+                        order=i
+                    )
+                    steps.append(step)
+                
+                return cls(
+                    initial_thought=data.get("initial_thought", "Starting investigation..."),
+                    steps=steps,
+                    total_steps=len(steps),
+                    reasoning_focus=data.get("reasoning_focus", "general")
+                )
+            else:
+                # Fallback plan if parsing fails
+                return cls._create_fallback_plan()
+                
+        except Exception as e:
+            logger.error(f"Failed to parse investigation plan: {e}")
+            return cls._create_fallback_plan()
+    
+    @classmethod
+    def _create_fallback_plan(cls) -> 'InvestigationPlan':
+        """Create a basic fallback investigation plan"""
+        fallback_step = InvestigationStep(
+            key="brain_knowledge",
+            search_query="agent capabilities and knowledge",
+            thought_description="Let me check your agent's knowledge base to understand its capabilities...",
+            discovery_template="Found {count} knowledge pieces about your agent - analyzing capabilities...",
+            analysis_type="capability_analysis",
+            order=1
+        )
+        
+        return cls(
+            initial_thought="I need to understand your agent's capabilities first...",
+            steps=[fallback_step],
+            total_steps=1,
+            reasoning_focus="capability_analysis"
+        )
+
+
+@dataclass
+class ContextualStrategy:
+    """Strategy synthesized from investigation findings"""
+    reasoning_summary: str
+    action_plan: List[str]
+    context_specific_recommendations: List[str]
+    tailored_guidance: str
+    
+    @classmethod
+    def from_llm_response(cls, llm_response: str) -> 'ContextualStrategy':
+        """Parse LLM strategy response"""
+        try:
+            import json
+            import re
+            
+            # Try to extract JSON structure
+            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                return cls(
+                    reasoning_summary=data.get("reasoning_summary", ""),
+                    action_plan=data.get("action_plan", []),
+                    context_specific_recommendations=data.get("context_specific_recommendations", []),
+                    tailored_guidance=data.get("tailored_guidance", "")
+                )
+            else:
+                # Parse from text format
+                return cls._parse_text_strategy(llm_response)
+                
+        except Exception as e:
+            logger.error(f"Failed to parse contextual strategy: {e}")
+            return cls._create_fallback_strategy(llm_response)
+    
+    @classmethod
+    def _parse_text_strategy(cls, response: str) -> 'ContextualStrategy':
+        """Parse strategy from text format"""
+        lines = response.split('\n')
+        return cls(
+            reasoning_summary=response[:200] + "..." if len(response) > 200 else response,
+            action_plan=["Follow the guidance provided in the response"],
+            context_specific_recommendations=["Review the specific recommendations in the detailed response"],
+            tailored_guidance=response
+        )
+    
+    @classmethod
+    def _create_fallback_strategy(cls, response: str) -> 'ContextualStrategy':
+        """Create fallback strategy"""
+        return cls(
+            reasoning_summary="Based on the analysis, here's the recommended approach",
+            action_plan=["Review the provided guidance", "Implement step by step"],
+            context_specific_recommendations=["Follow best practices for your specific setup"],
+            tailored_guidance=response or "Please refer to the detailed guidance provided"
+        )
+
+
+@dataclass
 class ToolExecutionRequest:
     """Request model for tool execution"""
     llm_provider: str  # 'anthropic' or 'openai'
@@ -63,6 +201,13 @@ class ToolExecutionRequest:
     enable_intent_classification: Optional[bool] = True  # Enable intent analysis
     enable_request_analysis: Optional[bool] = True  # Enable request analysis
     cursor_mode: Optional[bool] = False  # Enable Cursor-style progressive enhancement
+    # NEW: Deep reasoning parameters
+    enable_deep_reasoning: Optional[bool] = False  # Enable multi-step reasoning
+    reasoning_depth: Optional[str] = "standard"    # "light", "standard", "deep"
+    brain_reading_enabled: Optional[bool] = True   # Read user's brain vectors
+    max_investigation_steps: Optional[int] = 5     # Limit reasoning steps
+    # Internal state (set during execution)
+    contextual_strategy: Optional[ContextualStrategy] = None
 
 
 @dataclass
@@ -229,9 +374,9 @@ class ExecutiveTool:
         try:
             # Use the same provider and model as the main request for intent analysis
             if request.llm_provider.lower() == "anthropic":
-                analysis_response = await self.anthropic_executor.executive_tool._analyze_with_anthropic(analysis_prompt, request.model)
+                analysis_response = await self.anthropic_executor._analyze_with_anthropic(analysis_prompt, request.model)
             else:
-                analysis_response = await self.openai_executor.executive_tool._analyze_with_openai(analysis_prompt, request.model)
+                analysis_response = await self.openai_executor._analyze_with_openai(analysis_prompt, request.model)
             
             # Parse the response to extract components
             thinking_steps = []
@@ -613,6 +758,146 @@ Remember to:
             "timestamp": datetime.now().isoformat()
         }
 
+    async def _read_agent_brain_vectors(self, request: ToolExecutionRequest, search_context: str) -> List[Dict]:
+        """Read user's brain vectors like Cursor reads source files"""
+        
+        brain_vectors = []
+        try:
+            # Query brain vectors with user-specific context
+            if "brain_vector" in self.available_tools:
+                brain_vectors = await asyncio.to_thread(
+                    self.available_tools["brain_vector"].query_knowledge,
+                    user_id=request.user_id,
+                    org_id=request.org_id,
+                    query=search_context,
+                    limit=50
+                )
+            
+        except Exception as e:
+            logger.error(f"Failed to read brain vectors: {e}")
+            brain_vectors = []
+            
+        return brain_vectors
+
+    async def _stream_brain_reading_thoughts(self, request: ToolExecutionRequest, search_context: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream thoughts during brain vector reading"""
+        
+        yield {
+            "type": "thinking",
+            "content": f"🧠 Reading your agent's brain vectors to understand its knowledge...",
+            "thought_type": "brain_reading_start",
+            "reasoning_step": "brain_access",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        brain_vectors = await self._read_agent_brain_vectors(request, search_context)
+        
+        if brain_vectors:
+            yield {
+                "type": "thinking", 
+                "content": f"📚 Found {len(brain_vectors)} knowledge vectors - analyzing your agent's capabilities...",
+                "thought_type": "brain_vectors_loaded",
+                "reasoning_step": "brain_analysis",
+                "metadata": {
+                    "vector_count": len(brain_vectors),
+                    "search_context": search_context
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            yield {
+                "type": "thinking",
+                "content": f"⚠️ Could not access brain vectors - proceeding with available knowledge...",
+                "thought_type": "brain_reading_error",
+                "reasoning_step": "brain_fallback",
+                "timestamp": datetime.now().isoformat()
+            }
+
+    async def _analyze_brain_vector_contents(self, brain_vectors: List[Dict], request: ToolExecutionRequest, analysis_focus: str) -> Dict[str, Any]:
+        """Analyze brain contents like Cursor analyzes code structure"""
+        
+        if not brain_vectors:
+            return {"summary": "No specific agent knowledge found", "core_capabilities": [], "knowledge_domains": []}
+        
+        # Create analysis prompt
+        analysis_prompt = f"""
+        I'm analyzing an agent's brain vectors to understand its capabilities, similar to how Cursor analyzes source code.
+        
+        Analysis Focus: {analysis_focus}
+        User Query: "{request.user_query}"
+        
+        Brain Vector Contents (first 200 chars each):
+        {json.dumps([str(v).get('content', str(v))[:200] + '...' if len(str(v)) > 200 else str(v) for v in brain_vectors[:10]], indent=2)}
+        
+        Total vectors: {len(brain_vectors)}
+        
+        Provide analysis in this JSON format:
+        {{
+            "core_capabilities": ["capability1", "capability2"],
+            "knowledge_domains": ["domain1", "domain2"], 
+            "specific_processes": ["process1", "process2"],
+            "integration_points": ["integration1", "integration2"],
+            "strengths": ["strength1", "strength2"],
+            "potential_gaps": ["gap1", "gap2"],
+            "summary": "Brief summary of agent's specialization"
+        }}
+        
+        Analyze like you're reading source code to understand system architecture.
+        """
+        
+        try:
+            analysis_response = await self._get_reasoning_llm_response(analysis_prompt, request)
+            
+            # Parse analysis response
+            import re
+            json_match = re.search(r'\{.*\}', analysis_response, re.DOTALL)
+            if json_match:
+                analysis_data = json.loads(json_match.group(0))
+            else:
+                analysis_data = {"summary": "Agent capabilities analyzed", "core_capabilities": ["general assistance"]}
+            
+            return analysis_data
+            
+        except Exception as e:
+            logger.error(f"Brain analysis failed: {e}")
+            return {"summary": "Agent analysis completed with general approach", "core_capabilities": ["general assistance"]}
+
+    async def _stream_brain_analysis_thoughts(self, brain_vectors: List[Dict], request: ToolExecutionRequest, analysis_focus: str) -> AsyncGenerator[Dict[str, Any], None]:
+        """Stream thoughts during brain vector analysis"""
+        
+        if not brain_vectors:
+            yield {
+                "type": "thinking",
+                "content": "💡 No brain vectors found - will provide general guidance based on best practices...",
+                "thought_type": "brain_analysis_empty",
+                "reasoning_step": "capability_understanding",
+                "timestamp": datetime.now().isoformat()
+            }
+            return
+        
+        # Perform analysis
+        analysis_data = await self._analyze_brain_vector_contents(brain_vectors, request, analysis_focus)
+        
+        # Stream the results
+        yield {
+            "type": "thinking",
+            "content": f"💡 Your agent specializes in: {analysis_data.get('summary', 'multiple areas')}",
+            "thought_type": "brain_analysis_complete",
+            "reasoning_step": "capability_understanding",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    async def _get_reasoning_llm_response(self, prompt: str, request: ToolExecutionRequest) -> str:
+        """Get LLM response for reasoning analysis"""
+        try:
+            if request.llm_provider.lower() == "anthropic":
+                return await self.anthropic_executor._analyze_with_anthropic(prompt, request.model)
+            else:
+                return await self.openai_executor._analyze_with_openai(prompt, request.model)
+        except Exception as e:
+            logger.error(f"Reasoning LLM response failed: {e}")
+            return "Analysis completed with available information."
+
     async def _extract_structured_knowledge(self, response_content: str, user_query: str, llm_provider: str) -> List[Dict[str, Any]]:
         """
         Extract structured, actionable knowledge pieces from LLM response
@@ -867,10 +1152,150 @@ Respond with ONLY the JSON array, no additional text.
                 "success": False
             }
     
-    def get_available_providers(self) -> List[str]:
-        """Get list of available LLM providers"""
-        return ["anthropic", "openai"]
-    
+    async def _plan_contextual_investigation(self, request: ToolExecutionRequest, analysis: RequestAnalysis) -> InvestigationPlan:
+        """Plan investigation steps based on specific request type"""
+        
+        planning_prompt = f"""
+        Plan a contextual investigation for this specific request:
+        
+        User Query: "{request.user_query}"
+        Intent: {analysis.intent}
+        Complexity: {analysis.complexity}
+        Domain: {analysis.domain}
+        
+        Analyze what type of request this is:
+        - Information retrieval ("tell me about...", "what is...")
+        - Agent assessment ("test my agent", "evaluate performance") 
+        - Problem diagnosis ("X isn't working", "how to fix...")
+        - Knowledge sharing ("our company does...", "we use...")
+        - Creation/action ("create...", "build...", "do...")
+        - Learning guidance ("how to learn...", "teach me...")
+        
+        Based on the specific request type, create an investigation plan in this EXACT JSON format:
+        
+        {{
+            "initial_thought": "I need to understand their specific situation first...",
+            "reasoning_focus": "agent_testing|information_gathering|problem_solving|knowledge_sharing|task_creation|learning_guidance",
+            "steps": [
+                {{
+                    "key": "brain_knowledge",
+                    "search_query": "relevant brain vector search terms based on the request",
+                    "thought_description": "What I'm investigating and why",
+                    "discovery_template": "Found {{count}} knowledge pieces about {{domain}} - analyzing capabilities...",
+                    "analysis_type": "capability_analysis|information_synthesis|problem_diagnosis|knowledge_assessment",
+                    "requires_search": true,
+                    "requires_analysis": true,
+                    "order": 1
+                }}
+            ]
+        }}
+        
+        Make investigation steps specific to the request type! 
+        For agent testing: focus on capabilities and testing strategies
+        For information requests: focus on finding and synthesizing relevant information
+        For problem solving: focus on diagnosis and solution finding
+        
+        Respond with ONLY the JSON, no additional text.
+        """
+        
+        try:
+            plan_response = await self._get_reasoning_llm_response(planning_prompt, request)
+            return InvestigationPlan.from_llm_response(plan_response)
+        except Exception as e:
+            logger.error(f"Investigation planning failed: {e}")
+            return InvestigationPlan._create_fallback_plan()
+
+    async def _execute_investigation_step(self, step: InvestigationStep, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """Execute any type of investigation step and yield thoughts"""
+        
+        findings = {}
+        
+        # Brain vector reading (primary source)
+        if step.requires_search and step.key == "brain_knowledge":
+            # Stream brain reading thoughts
+            async for thought in self._stream_brain_reading_thoughts(request, step.search_query):
+                yield thought
+            
+            # Get brain vectors data
+            brain_vectors = await self._read_agent_brain_vectors(request, step.search_query)
+            findings["brain_vectors"] = brain_vectors
+            
+            if step.requires_analysis and brain_vectors:
+                # Stream brain analysis thoughts
+                async for thought in self._stream_brain_analysis_thoughts(brain_vectors, request, step.analysis_type):
+                    yield thought
+                
+                # Get analysis data
+                analysis_data = await self._analyze_brain_vector_contents(brain_vectors, request, step.analysis_type)
+                findings["brain_analysis"] = analysis_data
+        
+        # External search (secondary source)
+        elif step.requires_search and step.key == "external_knowledge":
+            search_tool = self._get_search_tool(request.llm_provider, request.model)
+            if search_tool:
+                try:
+                    search_results = await asyncio.to_thread(search_tool.search, step.search_query)
+                    findings["search_results"] = search_results
+                except Exception as e:
+                    logger.error(f"External search failed: {e}")
+                    findings["search_results"] = []
+        
+        # Context gathering (tertiary source)
+        elif step.requires_search and step.key == "context_knowledge":
+            if "context" in self.available_tools:
+                try:
+                    context_results = await asyncio.to_thread(
+                        self.available_tools["context"].get_context,
+                        query=step.search_query,
+                        source_types=["user_profile", "system_status", "org_info"]
+                    )
+                    findings["context_results"] = context_results
+                except Exception as e:
+                    logger.error(f"Context gathering failed: {e}")
+                    findings["context_results"] = {}
+        
+        # Yield the findings as the final result
+        yield {
+            "type": "investigation_result",
+            "findings": findings,
+            "step_key": step.key,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    async def _synthesize_contextual_strategy(self, context_findings: Dict[str, Any], request: ToolExecutionRequest, analysis: RequestAnalysis) -> ContextualStrategy:
+        """Synthesize findings into actionable strategy - works for any request type"""
+        
+        synthesis_prompt = f"""
+        Based on my investigation findings, create a tailored strategy:
+        
+        Original Request: "{request.user_query}"
+        Intent: {analysis.intent}
+        Complexity: {analysis.complexity}
+        
+        Investigation Findings:
+        {json.dumps({k: str(v)[:500] + "..." if len(str(v)) > 500 else str(v) for k, v in context_findings.items()}, indent=2)}
+        
+        Now synthesize this into a specific, actionable strategy that addresses their exact situation.
+        Focus on their specific context and capabilities I discovered.
+        
+        Provide response in this JSON format:
+        {{
+            "reasoning_summary": "Why this approach fits their specific situation",
+            "action_plan": ["step1", "step2", "step3"],
+            "context_specific_recommendations": ["rec1", "rec2"],
+            "tailored_guidance": "Detailed guidance based on their specific setup"
+        }}
+        
+        Make it specific to what I found about their agent/situation!
+        """
+        
+        try:
+            strategy_response = await self._get_reasoning_llm_response(synthesis_prompt, request)
+            return ContextualStrategy.from_llm_response(strategy_response)
+        except Exception as e:
+            logger.error(f"Strategy synthesis failed: {e}")
+            return ContextualStrategy._create_fallback_strategy("Strategy created based on available information")
+
     def get_available_tools(self) -> List[str]:
         """Get list of available tools"""
         return list(self.available_tools.keys())
@@ -993,13 +1418,18 @@ async def execute_tool_stream(
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     max_history_messages: Optional[int] = 25,
     max_history_tokens: Optional[int] = 6000,
-    # NEW: Cursor-style parameters
+    # Cursor-style parameters
     enable_intent_classification: bool = True,
     enable_request_analysis: bool = True,
-    cursor_mode: bool = False
+    cursor_mode: bool = False,
+    # NEW: Deep reasoning parameters
+    enable_deep_reasoning: bool = False,
+    reasoning_depth: str = "standard",
+    brain_reading_enabled: bool = True,
+    max_investigation_steps: int = 5
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Stream tool execution with specified parameters
+    Stream tool execution with specified parameters including deep reasoning
     
     Args:
         llm_provider: 'anthropic' or 'openai'
@@ -1018,9 +1448,13 @@ async def execute_tool_stream(
         enable_intent_classification: Enable intent analysis
         enable_request_analysis: Enable request analysis
         cursor_mode: Enable Cursor-style progressive enhancement
+        enable_deep_reasoning: Enable multi-step reasoning with brain reading
+        reasoning_depth: Depth of reasoning ("light", "standard", "deep")
+        brain_reading_enabled: Whether to read user's brain vectors
+        max_investigation_steps: Maximum number of investigation steps
         
     Yields:
-        Dict containing streaming response data
+        Dict containing streaming response data with deep reasoning thoughts
     """
     executive_tool = ExecutiveTool()
     request = ToolExecutionRequest(
@@ -1039,7 +1473,11 @@ async def execute_tool_stream(
         max_history_tokens=max_history_tokens,
         enable_intent_classification=enable_intent_classification,
         enable_request_analysis=enable_request_analysis,
-        cursor_mode=cursor_mode
+        cursor_mode=cursor_mode,
+        enable_deep_reasoning=enable_deep_reasoning,
+        reasoning_depth=reasoning_depth,
+        brain_reading_enabled=brain_reading_enabled,
+        max_investigation_steps=max_investigation_steps
     )
     async for chunk in executive_tool.execute_tool_stream(request):
         yield chunk 

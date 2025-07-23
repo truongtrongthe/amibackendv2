@@ -10,6 +10,16 @@ import asyncio
 from typing import Dict, List, Any, Optional, AsyncGenerator
 from datetime import datetime
 
+import anthropic
+from anthropic import Anthropic, AsyncAnthropic
+
+# Import data classes from exec_tool
+from dataclasses import dataclass
+
+# Forward declarations for type hints (will be imported at runtime)
+if False:  # TYPE_CHECKING equivalent
+    from exec_tool import ToolExecutionRequest, RequestAnalysis
+
 from anthropic_tool import AnthropicTool
 
 logger = logging.getLogger(__name__)
@@ -609,6 +619,71 @@ Remember: You don't write code or build software - you build understanding, crea
             return await asyncio.to_thread(analyzer.process_query, prompt)
         return await anthropic_api_call_with_retry(make_call)
     
+    async def _execute_deep_reasoning_chain(self, request: "ToolExecutionRequest", analysis: "RequestAnalysis") -> AsyncGenerator[Dict[str, Any], None]:
+        """Execute multi-step reasoning chain with brain reading"""
+        
+        # Step 1: Plan investigation
+        investigation_plan = await self.executive_tool._plan_contextual_investigation(request, analysis)
+        
+        yield {
+            "type": "thinking",
+            "content": f"🔍 {investigation_plan.initial_thought}",
+            "thought_type": "investigation_planning",
+            "reasoning_step": 1,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Step 2: Execute investigation steps
+        context_findings = {}
+        for step in investigation_plan.steps:
+            yield {
+                "type": "thinking", 
+                "content": f"🧠 {step.thought_description}",
+                "thought_type": "investigation_execution",
+                "reasoning_step": step.order,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Execute investigation step and stream thoughts
+            step_findings = {}
+            async for investigation_result in self.executive_tool._execute_investigation_step(step, request):
+                if investigation_result.get("type") == "investigation_result":
+                    step_findings = investigation_result.get("findings", {})
+                else:
+                    yield investigation_result
+            
+            context_findings[step.key] = step_findings
+            
+            # Share discoveries
+            discovery_message = step.discovery_template.format(
+                count=len(step_findings.get('brain_vectors', [])),
+                domain=analysis.domain or 'your area'
+            )
+            
+            yield {
+                "type": "thinking",
+                "content": f"💡 {discovery_message}",
+                "thought_type": "discovery_sharing", 
+                "reasoning_step": step.order,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Step 3: Synthesize strategy
+        strategy = await self.executive_tool._synthesize_contextual_strategy(
+            context_findings, request, analysis
+        )
+        
+        yield {
+            "type": "thinking",
+            "content": f"🎯 {strategy.reasoning_summary}",
+            "thought_type": "strategy_formation",
+            "reasoning_step": len(investigation_plan.steps) + 1,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Store strategy for use in main response
+        request.contextual_strategy = strategy
+
     async def execute(self, request) -> str:
         """Execute using Anthropic Claude with custom parameters"""
         # Use custom model if provided, otherwise use default
@@ -704,6 +779,11 @@ Remember: You don't write code or build software - you build understanding, crea
             # NEW: Generate unified Cursor-style thoughts in correct logical order
             async for thought in self.executive_tool._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
                 yield thought
+        
+        # NEW: Deep reasoning chain (when enabled)
+        if request.enable_deep_reasoning and request.cursor_mode and request_analysis:
+            async for reasoning_chunk in self._execute_deep_reasoning_chain(request, request_analysis):
+                yield reasoning_chunk
         
         # Get available tools for execution based on configuration
         tools_to_use = []

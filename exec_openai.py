@@ -562,6 +562,71 @@ Remember: You don't write code or build software - you build understanding, crea
         )
         return response.choices[0].message.content
     
+    async def _execute_deep_reasoning_chain(self, request: "ToolExecutionRequest", analysis: "RequestAnalysis") -> AsyncGenerator[Dict[str, Any], None]:
+        """Execute multi-step reasoning chain with brain reading"""
+        
+        # Step 1: Plan investigation
+        investigation_plan = await self.executive_tool._plan_contextual_investigation(request, analysis)
+        
+        yield {
+            "type": "thinking",
+            "content": f"🔍 {investigation_plan.initial_thought}",
+            "thought_type": "investigation_planning",
+            "reasoning_step": 1,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Step 2: Execute investigation steps
+        context_findings = {}
+        for step in investigation_plan.steps:
+            yield {
+                "type": "thinking", 
+                "content": f"🧠 {step.thought_description}",
+                "thought_type": "investigation_execution",
+                "reasoning_step": step.order,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Execute investigation step and stream thoughts
+            step_findings = {}
+            async for investigation_result in self.executive_tool._execute_investigation_step(step, request):
+                if investigation_result.get("type") == "investigation_result":
+                    step_findings = investigation_result.get("findings", {})
+                else:
+                    yield investigation_result
+            
+            context_findings[step.key] = step_findings
+            
+            # Share discoveries
+            discovery_message = step.discovery_template.format(
+                count=len(step_findings.get('brain_vectors', [])),
+                domain=analysis.domain or 'your area'
+            )
+            
+            yield {
+                "type": "thinking",
+                "content": f"💡 {discovery_message}",
+                "thought_type": "discovery_sharing", 
+                "reasoning_step": step.order,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Step 3: Synthesize strategy
+        strategy = await self.executive_tool._synthesize_contextual_strategy(
+            context_findings, request, analysis
+        )
+        
+        yield {
+            "type": "thinking",
+            "content": f"🎯 {strategy.reasoning_summary}",
+            "thought_type": "strategy_formation",
+            "reasoning_step": len(investigation_plan.steps) + 1,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Store strategy for use in main response
+        request.contextual_strategy = strategy
+
     async def execute(self, request) -> str:
         """Execute using OpenAI with custom system prompt"""
         # Use custom model if provided, otherwise use default
