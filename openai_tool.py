@@ -36,13 +36,13 @@ class OpenAITool:
         
         Args:
             user_query: The user's input query
-            available_tools: List of available tool instances
+            available_tools: List of available tool instances (search, context, etc.)
             
         Returns:
             Response from GPT-4 with tool execution results
         """
         
-        # Define functions for OpenAI
+        # Define functions for OpenAI only if tools are available
         functions = []
         for tool in available_tools:
             functions.append({
@@ -79,7 +79,7 @@ class OpenAITool:
                 ],
                 tools=functions,
                 tool_choice="auto",
-                max_tokens=10000  # Default to 10k tokens for longer responses
+                max_tokens=4000  # Use reasonable default that works with most models
             )
             
             message = response.choices[0].message
@@ -93,7 +93,7 @@ class OpenAITool:
         except Exception as e:
             return f"Error with OpenAI API: {str(e)}"
     
-    async def process_with_tools_stream(self, user_query: str, available_tools: List[Any], system_prompt: str = None, force_tools: bool = False, conversation_history: List[Dict[str, Any]] = None, max_history_messages: int = 25, max_history_tokens: int = 6000) -> AsyncGenerator[Dict[str, Any], None]:
+    async def process_with_tools_stream(self, user_query: str, available_tools: List[Any], system_prompt: str = None, force_tools: bool = False, conversation_history: List[Dict[str, Any]] = None, max_history_messages: int = 25, max_history_tokens: int = 6000, model_params: Dict[str, Any] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Process user query with available tools using GPT-4 with streaming
         
@@ -105,6 +105,7 @@ class OpenAITool:
             conversation_history: Previous conversation messages
             max_history_messages: Maximum number of history messages to include
             max_history_tokens: Maximum token count for history
+            model_params: Optional model parameters (temperature, max_tokens, etc.)
             
         Yields:
             Dict containing streaming response data
@@ -355,6 +356,18 @@ class OpenAITool:
             "messages": messages,
             "stream": True
         }
+        
+        # Add model parameters if provided
+        if model_params:
+            if "temperature" in model_params:
+                api_params["temperature"] = model_params["temperature"]
+            if "max_tokens" in model_params:
+                api_params["max_tokens"] = model_params["max_tokens"]
+            if "top_p" in model_params:
+                api_params["top_p"] = model_params["top_p"]
+        else:
+            # Use reasonable defaults
+            api_params["max_tokens"] = 4000
         
         # Only add tools if available
         if functions:
@@ -691,7 +704,7 @@ class OpenAITool:
                 "messages": messages,
                 "stream": True,
                 "temperature": 0.7,
-                "max_tokens": 10000  # Default to 10k tokens for longer responses
+                "max_tokens": 4000  # Use reasonable default that works with most models
             }
             
             response_stream = self.client.chat.completions.create(**final_response_params)
@@ -869,7 +882,7 @@ class OpenAITool:
             final_response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=10000  # Default to 10k tokens for longer responses
+                max_tokens=4000  # Use reasonable default that works with most models
             )
             
             return final_response.choices[0].message.content
@@ -973,7 +986,7 @@ class OpenAITool:
                 model=self.model,
                 messages=messages,
                 stream=True,
-                max_tokens=10000  # Default to 10k tokens for longer responses
+                max_tokens=4000  # Use reasonable default that works with most models
             )
             
             content_buffer = ""

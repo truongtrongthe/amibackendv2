@@ -456,16 +456,28 @@ class ExecutiveTool:
         
         Args:
             request: The tool execution request
-            analysis: The request analysis results
-            orchestration_plan: The tool orchestration plan
+            analysis: The request analysis results (can be None)
+            orchestration_plan: The tool orchestration plan (can be None)
             thinking_steps: Raw thinking steps from LLM analysis
             
         Yields:
             Dict containing thought messages in natural logical order
         """
         
+        # Handle case where analysis is None
+        if analysis is None:
+            yield {
+                "type": "thinking",
+                "content": f"💭 Processing your request: \"{request.user_query[:80]}{'...' if len(request.user_query) > 80 else ''}\"",
+                "provider": request.llm_provider,
+                "thought_type": "understanding",
+                "step": 1,
+                "timestamp": datetime.now().isoformat()
+            }
+            return
+        
         # 1. FIRST: Initial understanding (always first)
-        understanding = analysis.metadata.get("understanding", "")
+        understanding = analysis.metadata.get("understanding", "") if analysis.metadata else ""
         if understanding:
             yield {
                 "type": "thinking",
@@ -486,7 +498,7 @@ class ExecutiveTool:
                 "timestamp": datetime.now().isoformat()
             }
         
-        await asyncio.sleep(0.4)  # Natural reading pace
+        await asyncio.sleep(0.4)
         
         # 2. SECOND: Intent analysis result (UI/UX enhancement)
         yield {
@@ -514,8 +526,8 @@ class ExecutiveTool:
         
         # 4. FOURTH: Tool selection (UI/UX enhancement)
         current_step = len(thinking_steps) + 3
-        primary_tools = orchestration_plan.get("primary_tools", [])
-        secondary_tools = orchestration_plan.get("secondary_tools", [])
+        primary_tools = orchestration_plan.get("primary_tools", []) if orchestration_plan else []
+        secondary_tools = orchestration_plan.get("secondary_tools", []) if orchestration_plan else []
         
         if primary_tools:
             tools_text = ", ".join([f"**{tool}**" for tool in primary_tools])
@@ -532,14 +544,14 @@ class ExecutiveTool:
         
         # 5. FIFTH: Strategy explanation (UI/UX enhancement)
         strategy_content = ""
-        if analysis.intent == "learning":
+        if analysis and analysis.intent == "learning":
             strategy_content = "📚 Since this is a learning request, I'll first check existing knowledge to avoid duplicates, then analyze if this should be learned."
-        elif analysis.intent == "problem_solving":
+        elif analysis and analysis.intent == "problem_solving":
             strategy_content = "🔧 For this problem-solving request, I'll search for current information and check internal context to provide the most relevant solution."
-        elif analysis.intent == "task_execution":
+        elif analysis and analysis.intent == "task_execution":
             strategy_content = "⚡ This is a task execution request. I'll gather context first, then search for any additional information needed to complete the task effectively."
         else:
-            strategy_content = "💬 This seems like a general conversation. I'll search for relevant information if needed and provide a helpful response."
+            strategy_content = "💬 I'll analyze your request and provide a helpful response with any relevant information."
         
         yield {
             "type": "thinking",

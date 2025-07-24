@@ -554,33 +554,47 @@ Remember: You don't write code or build software - you build understanding, crea
         try:
             # Use fast, lightweight analysis for teaching intent detection
             teaching_detection_prompt = f"""
-Analyze this user message and determine if it contains teaching content that an AI agent should learn from.
+Analyze this user message and determine if it contains TEACHING CONTENT that requires ADDING NEW KNOWLEDGE to an AI agent.
 
 User Message: "{user_query}"
 
-Teaching content includes:
-- Process descriptions or workflows
-- Requirements or specifications  
-- Additional requests or modifications ("also", "ngoài ra", "thêm")
-- Preferences or choices ("both", "cả hai", "all")
-- Technical integrations or tools mentioned
-- Step-by-step instructions
-- Configuration details
-- Business rules or logic
+CRITICAL DISTINCTION:
+🔧 **TEACHING CONTENT (TRUE)** - User wants to BUILD/ADD knowledge to agent:
+- "I need an agent to read files" (building new capability)
+- "Also send via Zalo" (adding new requirement)
+- "The agent should handle cancellations" (defining new behavior)
+- Process descriptions for NEW workflows
+- Requirements for NEW features/capabilities
+- Configuration for NEW integrations
+- Business rules for NEW scenarios
+
+📊 **ANALYSIS/COMMAND REQUESTS (FALSE)** - User wants to USE EXISTING knowledge:
+- "Based on the AI agent's knowledge vectors, generate a list..." (analyzing existing data)
+- "What can this agent do?" (querying existing capabilities)
+- "Show me the agent's abilities" (displaying current state)
+- "Analyze the brain vectors" (using existing knowledge for analysis)
+- "Generate a report based on..." (performing task with existing data)
+- "Tell me about..." (information retrieval)
+
+KEY QUESTION: Is the user trying to TEACH the agent something NEW, or asking the agent to PERFORM/ANALYZE using what it already knows?
+
+INTENT ANALYSIS:
+- TEACHING = Adding new knowledge/capabilities to agent
+- ANALYSIS/COMMAND = Using existing knowledge to perform tasks
 
 Respond with ONLY a JSON object:
 {{
     "contains_teaching": true/false,
     "confidence": 0.0-1.0,
-    "reasoning": "Brief explanation of why this is/isn't teaching content",
-    "type": "initial_request|follow_up|clarification|preference|technical_detail"
+    "reasoning": "Brief explanation focusing on teaching vs analysis distinction",
+    "type": "teaching_new_capability|adding_requirement|analysis_request|command_execution|information_query"
 }}
 
 Examples:
-- "I need an agent to read files" → {{"contains_teaching": true, "confidence": 0.95, "reasoning": "Describes a clear process requirement", "type": "initial_request"}}
-- "Also send via Zalo" → {{"contains_teaching": true, "confidence": 0.90, "reasoning": "Additional requirement that modifies the original request", "type": "follow_up"}}
-- "Both" → {{"contains_teaching": true, "confidence": 0.85, "reasoning": "User preference that affects implementation", "type": "preference"}}
-- "Thank you" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "Polite acknowledgment with no actionable content", "type": "acknowledgment"}}
+- "I need an agent to read files" → {{"contains_teaching": true, "confidence": 0.95, "reasoning": "User wants to build new file reading capability", "type": "teaching_new_capability"}}
+- "Based on the AI agent's knowledge vectors, generate a list" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "User wants analysis of existing knowledge, not adding new knowledge", "type": "analysis_request"}}
+- "Also send via Zalo" → {{"contains_teaching": true, "confidence": 0.90, "reasoning": "Adding new communication requirement to existing agent", "type": "adding_requirement"}}
+- "What can this agent do?" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "Querying existing capabilities, not teaching new ones", "type": "information_query"}}
 """
 
             # Get LLM analysis using the existing method
@@ -615,11 +629,29 @@ Examples:
             return self._fallback_teaching_detection(user_query)
     
     def _fallback_teaching_detection(self, user_query: str) -> bool:
-        """Simple fallback when LLM detection fails"""
-        # Basic patterns as safety net
-        basic_patterns = ["tôi cần", "i need", "ngoài ra", "also", "cả hai", "both", "zalo", "slack"]
+        """Enhanced fallback when LLM detection fails"""
         query_lower = user_query.lower()
-        return any(pattern in query_lower for pattern in basic_patterns)
+        
+        # Analysis/command patterns (should NOT trigger teaching)
+        analysis_patterns = [
+            "based on", "generate", "analyze", "what can", "show me", 
+            "tell me about", "list", "display", "report", "summary",
+            "capabilities", "abilities", "knowledge vectors", "brain vectors"
+        ]
+        
+        # Teaching patterns (should trigger teaching)
+        teaching_patterns = [
+            "i need", "tôi cần", "agent should", "ngoài ra", "also", 
+            "cả hai", "both", "zalo", "slack", "build", "create",
+            "add", "thêm", "configure", "setup", "integrate"
+        ]
+        
+        # Check for analysis patterns first (higher priority)
+        if any(pattern in query_lower for pattern in analysis_patterns):
+            return False
+            
+        # Then check for teaching patterns
+        return any(pattern in query_lower for pattern in teaching_patterns)
 
     async def _analyze_with_openai(self, prompt: str, model: str = None) -> str:
         """Simple analysis method for internal use"""
@@ -769,10 +801,10 @@ Examples:
             
             # Brief pause for user to see analysis
             await asyncio.sleep(0.5)
-        
-        # NEW: Generate unified Cursor-style thoughts in correct logical order
-        async for thought in self.executive_tool._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
-            yield thought
+            
+            # NEW: Generate unified Cursor-style thoughts in correct logical order
+            async for thought in self.executive_tool._generate_unified_cursor_thoughts(request, request_analysis, orchestration_plan, raw_thinking_steps):
+                yield thought
         
         # NEW: Deep reasoning chain (when enabled) - MOVED TO CORRECT POSITION
         if request.enable_deep_reasoning and request.cursor_mode and request_analysis:
@@ -1028,7 +1060,8 @@ Act like Cursor: Analyze the request, propose structured approaches, and wait fo
                 force_tools=request.force_tools,
                 conversation_history=request.conversation_history,
                 max_history_messages=request.max_history_messages,
-                max_history_tokens=request.max_history_tokens
+                max_history_tokens=request.max_history_tokens,
+                model_params=request.model_params
             ):
                 # Collect response content for post-analysis
                 if chunk.get("type") == "response_chunk" and "content" in chunk:
@@ -1186,7 +1219,7 @@ class OpenAIToolWithCustomPrompt(OpenAITool):
             final_response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=10000  # Default to 10k tokens for longer responses
+                max_tokens=4000  # Use reasonable default that works with most models
             )
             
             return final_response.choices[0].message.content
