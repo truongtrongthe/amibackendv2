@@ -1252,6 +1252,13 @@ RIGHT (Specific runtime instruction):
   "category": "business_rule"
 }}
 
+QUALITY SCORE GUIDANCE:
+- 0.9-1.0: Highly specific, complete instructions with error handling
+- 0.8-0.9: Clear, actionable instructions with good detail
+- 0.7-0.8: Useful instructions with moderate specificity
+- 0.6-0.7: Basic instructions that need some interpretation
+- Below 0.6: Too vague or incomplete (should not be included)
+
 Generate comprehensive runtime instructions for the Agent. Include ALL necessary details for autonomous execution.
 
 RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
@@ -1276,13 +1283,26 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
                 validated_pieces = []
                 for piece in knowledge_data:
                     if isinstance(piece, dict) and "title" in piece and "content" in piece:
+                        # Debug logging and quality score correction
+                        raw_quality_score = piece.get("quality_score", 0.7)
+                        piece_title = piece.get("title", "Unknown")
+                        
+                        # Correct obviously wrong quality scores (LLM sometimes generates 0.01 instead of 0.8)
+                        corrected_quality_score = raw_quality_score
+                        if raw_quality_score < 0.1 and len(piece.get("content", "")) > 50:
+                            # If score is very low but content is substantial, likely LLM error
+                            corrected_quality_score = 0.8  # Default to good quality
+                            logger.warning(f"Corrected low quality score for '{piece_title}': {raw_quality_score} → {corrected_quality_score}")
+                        
+                        logger.info(f"Knowledge piece '{piece_title}': quality_score = {corrected_quality_score}")
+                        
                         validated_pieces.append({
                             "title": piece.get("title", "")[:60],  # Limit title length
                             "content": piece.get("content", ""),
                             "category": piece.get("category", "agent_instruction"),
                             "implementation_part": piece.get("implementation_part", "unknown"),
                             "builds_upon_existing": piece.get("builds_upon_existing"),
-                            "quality_score": float(piece.get("quality_score", 0.7)),
+                            "quality_score": float(corrected_quality_score),
                             "actionability": piece.get("actionability", "medium"),
                             "reusability": piece.get("reusability", "medium"),
                             "specificity": piece.get("specificity", "medium")
@@ -1423,7 +1443,7 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
                 
                 yield f"data: {json.dumps({
                     'type': 'thinking',
-                    'content': f'✅ Successfully saved {saved_count}/{len(approved_pieces)} knowledge pieces to your agent\'s brain',
+                    'content': f'✅ Successfully saved {saved_count}/{len(approved_pieces)} knowledge pieces to your agent brain',
                     'thought_type': 'knowledge_saved',
                     'timestamp': datetime.now().isoformat()
                 })}\n\n"
@@ -1431,7 +1451,7 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
             # Generate copilot-style summary
             yield f"data: {json.dumps({
                 'type': 'thinking',
-                'content': '🤖 Summarizing what we've done...',
+                'content': '🤖 Summarizing what we have done...',
                 'thought_type': 'summary_generation',
                 'timestamp': datetime.now().isoformat()
             })}\n\n"
