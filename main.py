@@ -33,6 +33,9 @@ from ava import AVA
 # Import exec_tool module for LLM tool execution
 from exec_tool import execute_tool_async, execute_tool_stream, ToolExecutionRequest, ToolExecutionResponse
 
+# NEW: Import agent module for agent execution
+from agent import execute_agent_stream, execute_agent_async
+
 from utilities import logger
 from org_integrations import get_org_integrations, get_integration_by_id, create_integration, update_integration, delete_integration, toggle_integration
 # Initialize FastAPI app
@@ -396,6 +399,38 @@ class LLMToolExecuteRequest(BaseModel):
     cursor_mode: Optional[bool] = False  # Enable Cursor-style progressive enhancement
     # NEW: Grading context for approval flow
     grading_context: Optional[Dict[str, Any]] = None  # Scenario data and approval info
+
+# NEW: Request model for agent execution API
+class AgentAPIRequest(BaseModel):
+    """Request model for agent execution API with dynamic parameters"""
+    llm_provider: str = "openai"  # 'anthropic' or 'openai' 
+    user_request: str  # The task to execute
+    agent_id: str  # Specific agent instance ID
+    agent_type: str  # Type of agent (e.g., "sales_agent", "support_agent", "analyst_agent")
+    system_prompt: Optional[str] = None
+    model: Optional[str] = None  # Custom model name (e.g., "gpt-4o", "claude-3-5-haiku")
+    model_params: Optional[Dict[str, Any]] = None
+    org_id: str = "default"
+    user_id: str = "anonymous"
+    
+    # Agent-specific parameters (tools enabled & deep reasoning by default)
+    enable_tools: Optional[bool] = True  # Tools enabled by default for agents
+    enable_deep_reasoning: Optional[bool] = True  # Deep reasoning enabled by default
+    reasoning_depth: Optional[str] = "standard"  # "light", "standard", "deep"
+    task_focus: Optional[str] = "execution"  # "execution", "analysis", "communication"
+    
+    # Tool control parameters
+    force_tools: Optional[bool] = False  # Force tool usage (tool_choice="required")
+    tools_whitelist: Optional[List[str]] = None  # Only allow specific tools
+    
+    # Agent knowledge context
+    specialized_knowledge_domains: Optional[List[str]] = None  # Agent's specialization areas
+    conversation_history: Optional[List[Dict[str, Any]]] = None  # Previous messages
+    max_history_messages: Optional[int] = 15  # Agents focus on recent context
+    max_history_tokens: Optional[int] = 4000
+    
+    # Backward compatibility for frontend
+    enable_search: Optional[bool] = None  # Deprecated: use enable_tools instead
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -1362,6 +1397,202 @@ async def generate_llm_tool_sse_stream(request: LLMToolExecuteRequest, thread_lo
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[REQUEST:{request_id}] === END LLM tool stream request - total time: {elapsed:.2f}s ===")
+
+# NEW: Agent execution endpoint
+@app.post('/api/tool/agent')
+async def execute_agent_endpoint(request: AgentAPIRequest):
+    """
+    Execute a specialized agent with dynamic system prompts and parameters.
+    Supports both Anthropic Claude and OpenAI GPT-4 with customizable settings.
+    Default: tools enabled, deep reasoning enabled, search optional.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN /api/tool/agent request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Agent: {request.agent_id} ({request.agent_type}), Task: {request.user_request[:100]}...")
+    logger.info(f"[REQUEST:{request_id}] System prompt: {request.system_prompt[:100] if request.system_prompt else 'None'}...")
+    logger.info(f"[REQUEST:{request_id}] Model params: {request.model_params}")
+    
+    try:
+        # Handle backward compatibility for enable_search parameter
+        enable_tools = request.enable_tools
+        if request.enable_search is not None:
+            # Frontend sent enable_search, use it instead of enable_tools
+            enable_tools = request.enable_search
+            logger.info(f"[REQUEST:{request_id}] Using enable_search={request.enable_search} for backward compatibility")
+        
+        # Execute the agent asynchronously using the agent module interface
+        response = await execute_agent_async(
+            llm_provider=request.llm_provider,
+            user_request=request.user_request,
+            agent_id=request.agent_id,
+            agent_type=request.agent_type,
+            system_prompt=request.system_prompt,
+            model=request.model,
+            org_id=request.org_id,
+            user_id=request.user_id,
+            specialized_knowledge_domains=request.specialized_knowledge_domains
+        )
+        
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.info(f"[REQUEST:{request_id}] Agent execution completed - time: {elapsed:.2f}s")
+        logger.info(f"[REQUEST:{request_id}] Success: {response.success}, Agent: {response.agent_id}")
+        
+        # Return the result with additional metadata
+        result = {
+            "success": response.success,
+            "result": response.result,
+            "agent_id": response.agent_id,
+            "agent_type": response.agent_type,
+            "execution_time": response.execution_time,
+            "tasks_completed": response.tasks_completed,
+            "request_id": request_id,
+            "total_elapsed_time": elapsed,
+            "metadata": response.metadata,
+            "error": response.error
+        }
+        
+        if response.success:
+            return JSONResponse(content=result)
+        else:
+            return JSONResponse(status_code=400, content=result)
+            
+    except Exception as e:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        
+        logger.error(f"[REQUEST:{request_id}] Error in /api/tool/agent endpoint: {str(e)} - time: {elapsed:.2f}s")
+        import traceback
+        logger.error(f"[REQUEST:{request_id}] Traceback: {traceback.format_exc()}")
+        
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "result": "",
+                "agent_id": request.agent_id,
+                "agent_type": request.agent_type,
+                "execution_time": 0,
+                "tasks_completed": 0,
+                "request_id": request_id,
+                "total_elapsed_time": elapsed,
+                "error": str(e),
+                "metadata": None
+            }
+        )
+    finally:
+        logger.info(f"[REQUEST:{request_id}] === END /api/tool/agent request - total time: {(datetime.now() - start_time).total_seconds():.2f}s ===")
+
+@app.options('/api/tool/agent')
+async def execute_agent_options():
+    return handle_options()
+
+# NEW: Agent streaming endpoint
+@app.post('/api/tool/agent/stream')
+async def execute_agent_stream_endpoint(request: AgentAPIRequest, background_tasks: BackgroundTasks):
+    """
+    Stream agent execution with dynamic system prompts and parameters.
+    Supports both Anthropic Claude and OpenAI GPT-4 with real-time streaming.
+    Default: tools enabled, deep reasoning enabled, search optional.
+    """
+    start_time = datetime.now()
+    request_id = str(uuid4())[:8]
+    
+    logger.info(f"[REQUEST:{request_id}] === BEGIN /api/tool/agent/stream request at {start_time.isoformat()} ===")
+    logger.info(f"[REQUEST:{request_id}] Agent: {request.agent_id} ({request.agent_type}), Task: {request.user_request[:100]}...")
+    logger.info(f"[REQUEST:{request_id}] System prompt: {request.system_prompt[:100] if request.system_prompt else 'None'}...")
+    logger.info(f"[REQUEST:{request_id}] Model params: {request.model_params}")
+    
+    # Get a lock for this request (using user_id as thread identifier)
+    thread_id = f"agent_tool_{request.user_id}_{request_id}"
+    logger.info(f"[REQUEST:{request_id}] Getting lock for thread {thread_id}")
+    thread_lock = await lock_manager.get_lock(thread_id)
+    logger.info(f"[REQUEST:{request_id}] Got lock manager lock for thread {thread_id}")
+    
+    # Always use StreamingResponse for better UX
+    logger.info(f"[REQUEST:{request_id}] Creating StreamingResponse with generate_agent_sse_stream")
+    response = StreamingResponse(
+        generate_agent_sse_stream(request, thread_lock, start_time, request_id),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
+    logger.info(f"[REQUEST:{request_id}] Returning StreamingResponse to client")
+    return response
+
+@app.options('/api/tool/agent/stream')
+async def execute_agent_stream_options():
+    return handle_options()
+
+# NEW: Streaming SSE generator for agent execution
+async def generate_agent_sse_stream(request: AgentAPIRequest, thread_lock: asyncio.Lock, start_time: datetime, request_id: str):
+    """Generate an SSE stream with agent execution response"""
+    
+    try:
+        # Try to acquire the lock with timeout
+        async with asyncio.timeout(180):  # 180-second timeout
+            async with thread_lock:
+                logger.info(f"[REQUEST:{request_id}] Acquired lock for agent execution")
+                
+                # Log request to agent execution
+                logger.info(f"[REQUEST:{request_id}] Calling execute_agent_stream with agent: {request.agent_id}")
+                
+                # Handle backward compatibility for enable_search parameter
+                enable_tools = request.enable_tools
+                if request.enable_search is not None:
+                    # Frontend sent enable_search, use it instead of enable_tools
+                    enable_tools = request.enable_search
+                    logger.info(f"[REQUEST:{request_id}] Using enable_search={request.enable_search} for backward compatibility")
+                
+                # Track response count
+                response_count = 0
+                
+                # Process the agent execution and yield results
+                async for result in execute_agent_stream(
+                    llm_provider=request.llm_provider,
+                    user_request=request.user_request,
+                    agent_id=request.agent_id,
+                    agent_type=request.agent_type,
+                    system_prompt=request.system_prompt,
+                    model=request.model,
+                    org_id=request.org_id,
+                    user_id=request.user_id,
+                    enable_deep_reasoning=request.enable_deep_reasoning,
+                    reasoning_depth=request.reasoning_depth,
+                    task_focus=request.task_focus,
+                    specialized_knowledge_domains=request.specialized_knowledge_domains,
+                    conversation_history=request.conversation_history
+                ):
+                    response_count += 1
+                    
+                    # Format the response as SSE
+                    if isinstance(result, dict):
+                        # Format JSON for SSE
+                        yield f"data: {json.dumps(result)}\n\n"
+                    else:
+                        # For string responses without SSE format
+                        yield f"data: {json.dumps({'message': str(result)})}\n\n"
+                
+                logger.info(f"[REQUEST:{request_id}] Completed yielding {response_count} responses")
+                logger.info(f"[REQUEST:{request_id}] Released lock for agent execution")
+                
+    except asyncio.TimeoutError:
+        logger.error(f"[REQUEST:{request_id}] Could not acquire lock for agent execution after 180 seconds")
+        yield f"data: {json.dumps({'error': 'Server busy. Please try again.'})}\n\n"
+    except Exception as e:
+        logger.error(f"[REQUEST:{request_id}] Error generating agent SSE stream: {str(e)}")
+        logger.error(traceback.format_exc())
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    finally:
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info(f"[REQUEST:{request_id}] === END agent SSE request - total time: {elapsed:.2f}s ===")
 
 # Organization Integration endpoints
 class OrganizationIntegrationRequest(BaseModel):
