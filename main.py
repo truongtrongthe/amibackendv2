@@ -394,6 +394,8 @@ class LLMToolExecuteRequest(BaseModel):
     enable_intent_classification: Optional[bool] = True  # Enable intent analysis
     enable_request_analysis: Optional[bool] = True  # Enable request analysis  
     cursor_mode: Optional[bool] = False  # Enable Cursor-style progressive enhancement
+    # NEW: Grading context for approval flow
+    grading_context: Optional[Dict[str, Any]] = None  # Scenario data and approval info
 
 # Main havefun endpoint
 @app.post('/havefun')
@@ -1332,7 +1334,9 @@ async def generate_llm_tool_sse_stream(request: LLMToolExecuteRequest, thread_lo
                     # NEW: Cursor-style parameters
                     enable_intent_classification=request.enable_intent_classification,
                     enable_request_analysis=request.enable_request_analysis,
-                    cursor_mode=request.cursor_mode
+                    cursor_mode=request.cursor_mode,
+                    # NEW: Grading context parameter
+                    grading_context=request.grading_context
                 ):
                     response_count += 1
                     

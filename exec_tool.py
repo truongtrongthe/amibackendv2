@@ -207,6 +207,8 @@ class ToolExecutionRequest:
     reasoning_depth: Optional[str] = "standard"    # "light", "standard", "deep"
     brain_reading_enabled: Optional[bool] = True   # Read user's brain vectors
     max_investigation_steps: Optional[int] = 5     # Limit reasoning steps
+    # NEW: Grading context for approval flow
+    grading_context: Optional[Dict[str, Any]] = None  # Scenario data and approval info
     # Internal state (set during execution)
     contextual_strategy: Optional[ContextualStrategy] = None
 
@@ -305,6 +307,14 @@ class ExecutiveTool:
             logger.info("Human context tool initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize human context tool: {e}")
+        
+        # Initialize grading tool for comprehensive agent capability analysis
+        try:
+            from grading_tool import GradingTool
+            tools["grading"] = GradingTool()
+            logger.info("Grading tool initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize grading tool: {e}")
         
         return tools
     
@@ -791,6 +801,47 @@ Remember to:
             brain_vectors = []
             
         return brain_vectors
+
+    async def _read_comprehensive_agent_capabilities(self, request: ToolExecutionRequest) -> Dict[str, Any]:
+        """
+        Read comprehensive agent capabilities for grading scenarios
+        Uses enhanced multi-domain scanning instead of single search query
+        """
+        
+        try:
+            if "grading" in self.available_tools:
+                logger.info(f"Reading comprehensive capabilities for org: {request.org_id}")
+                
+                # Use grading tool's comprehensive scanning
+                capabilities = await self.available_tools["grading"].get_comprehensive_agent_capabilities(
+                    user_id=request.user_id,
+                    org_id=request.org_id,
+                    max_vectors=200  # Comprehensive scan
+                )
+                
+                if capabilities.get("success"):
+                    logger.info(f"Successfully analyzed {capabilities['total_vectors_analyzed']} vectors across {capabilities['unique_domains_covered']} domains")
+                    return capabilities
+                else:
+                    logger.error(f"Comprehensive capability analysis failed: {capabilities.get('error')}")
+                    return {"success": False, "error": capabilities.get('error')}
+            
+            else:
+                # Fallback to regular brain vector reading if grading tool not available
+                logger.warning("Grading tool not available, falling back to regular brain vector reading")
+                brain_vectors = await self._read_agent_brain_vectors(request, "agent capabilities knowledge")
+                
+                return {
+                    "success": True,
+                    "total_vectors_analyzed": len(brain_vectors),
+                    "unique_domains_covered": 1,
+                    "capabilities": [],
+                    "fallback_vectors": brain_vectors
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to read comprehensive agent capabilities: {e}")
+            return {"success": False, "error": str(e)}
 
     async def _stream_brain_reading_thoughts(self, request: ToolExecutionRequest, search_context: str) -> AsyncGenerator[Dict[str, Any], None]:
         """Stream thoughts during brain vector reading"""
@@ -1661,6 +1712,34 @@ Generate the markdown summary now:
                 "status": "processing"
             }
             
+            # NEW: Check for grading requests BEFORE going to provider executors
+            is_grading_request = await self.detect_grading_request(request.user_query, request.grading_context)
+            if is_grading_request:
+                logger.info(f"Grading request detected: '{request.user_query[:100]}...'")
+                
+                # Handle grading scenario generation and execution
+                async for chunk in self._handle_grading_request(request):
+                    yield chunk
+                
+                # Yield completion status for grading
+                execution_time = (datetime.now() - start_time).total_seconds()
+                yield {
+                    "type": "complete",
+                    "content": "Grading scenario execution completed successfully",
+                    "provider": request.llm_provider,
+                    "model_used": self._get_model_name(request.llm_provider, request.model),
+                    "execution_time": execution_time,
+                    "success": True,
+                    "metadata": {
+                        "org_id": request.org_id,
+                        "user_id": request.user_id,
+                        "tools_used": list(self.available_tools.keys()),
+                        "grading_request": True
+                    }
+                }
+                return
+            
+            # Standard execution path for non-grading requests
             # Execute tool with streaming using provider-specific executor
             if request.llm_provider.lower() == "anthropic":
                 async for chunk in self.anthropic_executor.execute_stream(request):
@@ -1843,9 +1922,371 @@ Generate the markdown summary now:
             logger.error(f"Strategy synthesis failed: {e}")
             return ContextualStrategy._create_fallback_strategy("Strategy created based on available information")
 
+    async def _handle_grading_request(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Handle grading/testing requests by analyzing capabilities and proposing scenarios
+        OR execute approved scenarios based on grading context
+        Uses internal brain vectors and grading tools only - no external search needed
+        """
+        
+        # Check if this is an approval for an existing scenario
+        if request.grading_context and request.grading_context.get("approved_scenario"):
+            yield {
+                "type": "thinking",
+                "content": "✅ Scenario approved! Starting agent demonstration now...",
+                "thought_type": "grading_approval",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Execute the approved scenario
+            approved_scenario = request.grading_context["approved_scenario"]
+            test_inputs = request.grading_context.get("test_inputs", {})
+            
+            async for chunk in self._execute_grading_scenario_demonstration(approved_scenario, test_inputs, request):
+                yield chunk
+            
+            return
+        
+        # Check for approval keywords in combination with scenario context
+        approval_keywords = ["yes", "proceed", "execute", "approve", "start", "begin", "run", "go ahead", "continue"]
+        is_approval = any(keyword in request.user_query.lower() for keyword in approval_keywords)
+        
+        if is_approval and ("scenario" in request.user_query.lower() or "demonstration" in request.user_query.lower()):
+            yield {
+                "type": "thinking",
+                "content": "⚠️ I see you want to proceed with a scenario, but I don't have the scenario data. Please provide the scenario details or start a new grading request.",
+                "thought_type": "grading_approval_missing_data",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            yield {
+                "type": "error", 
+                "content": "❌ Missing scenario data for approval. Please start a new grading request or provide scenario details.",
+                "timestamp": datetime.now().isoformat()
+            }
+            return
+        
+        # This is a new grading request - generate scenario proposal
+        yield {
+            "type": "thinking",
+            "content": "🎯 I understand you want to test your agent's capabilities! Let me analyze what your agent can do and propose the best grading scenario.",
+            "thought_type": "grading_intent",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        yield {
+            "type": "thinking", 
+            "content": "📋 Using internal brain vector analysis and grading tools - no external search required.",
+            "thought_type": "grading_method",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Generate grading scenario proposal using only internal tools
+        async for chunk in self._generate_grading_scenario_proposal(request):
+            yield chunk
+
+    async def _generate_grading_scenario_proposal(self, request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Generate optimal grading scenario based on comprehensive agent capability analysis
+        """
+        
+        # Step 1: Comprehensive capability analysis
+        yield {
+            "type": "thinking",
+            "content": "🧠 Analyzing your agent's brain vectors comprehensively to understand its full capabilities...",
+            "thought_type": "grading_analysis",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        capabilities = await self._read_comprehensive_agent_capabilities(request)
+        
+        if not capabilities.get("success"):
+            yield {
+                "type": "thinking", 
+                "content": f"⚠️ Could not analyze agent capabilities: {capabilities.get('error')}",
+                "thought_type": "grading_error",
+                "timestamp": datetime.now().isoformat()
+            }
+            return
+        
+        yield {
+            "type": "thinking",
+            "content": f"📊 Analyzed {capabilities['total_vectors_analyzed']} vectors across {capabilities['unique_domains_covered']} knowledge domains",
+            "thought_type": "grading_analysis_complete",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Step 2: Generate optimal grading scenario
+        yield {
+            "type": "thinking",
+            "content": "🎯 Designing optimal grading scenario to showcase your agent's best capabilities...",
+            "thought_type": "scenario_generation",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            if "grading" in self.available_tools:
+                # Extract agent name from request context or use default
+                agent_name = "Your Agent"  # Could be enhanced to extract from brain vectors
+                
+                scenario = await self.available_tools["grading"].generate_optimal_grading_scenario(
+                    capabilities.get("capabilities", []),
+                    agent_name
+                )
+                
+                yield {
+                    "type": "thinking",
+                    "content": f"✨ Generated optimal scenario: **{scenario.scenario_name}** - showcasing {len(scenario.showcased_capabilities)} key capabilities",
+                    "thought_type": "scenario_ready",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                # Step 3: Present scenario proposal with diagrams
+                yield {
+                    "type": "grading_scenario_proposal",
+                    "content": f"""
+🎯 **Optimal Grading Scenario Generated**
+
+**Scenario:** {scenario.scenario_name}
+**Description:** {scenario.description}
+**Estimated Time:** {scenario.estimated_time}
+**Difficulty:** {scenario.difficulty_level}
+
+🤖 **Agent Role-Play Introduction:**
+"{scenario.agent_role_play}"
+
+📋 **Test Components:**
+{chr(10).join([f"• {inp['description']}" for inp in scenario.test_inputs])}
+
+✅ **Expected Demonstrations:**
+{chr(10).join([f"• {out['description']}" for out in scenario.expected_outputs])}
+
+🎖️ **Capabilities Showcased:**
+{chr(10).join([f"• {cap}" for cap in scenario.showcased_capabilities])}
+
+**This scenario will demonstrate your agent's strongest capabilities. Ready to proceed?**
+""",
+                    "scenario_data": {
+                        "scenario_name": scenario.scenario_name,
+                        "description": scenario.description,
+                        "agent_role_play": scenario.agent_role_play,
+                        "test_inputs": scenario.test_inputs,
+                        "expected_outputs": scenario.expected_outputs,
+                        "showcased_capabilities": scenario.showcased_capabilities,
+                        "difficulty_level": scenario.difficulty_level,
+                        "estimated_time": scenario.estimated_time,
+                        "success_criteria": scenario.success_criteria,
+                        # NEW: Diagram data for frontend rendering
+                        "scenario_diagram": scenario.scenario_diagram,
+                        "capability_map": scenario.capability_map,
+                        "process_diagrams": scenario.process_diagrams
+                    },
+                    "requires_approval": True,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+            else:
+                yield {
+                    "type": "error",
+                    "content": "❌ Grading tool not available - cannot generate scenario",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Grading scenario generation failed: {e}")
+            yield {
+                "type": "error",
+                "content": f"❌ Failed to generate grading scenario: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }
+
+    async def _execute_grading_scenario_demonstration(self, scenario_data: Dict[str, Any], test_inputs: Dict[str, Any], request: ToolExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Execute the approved grading scenario with the agent demonstrating its capabilities
+        """
+        
+        yield {
+            "type": "thinking",
+            "content": f"🚀 Starting grading demonstration: **{scenario_data['scenario_name']}**",
+            "thought_type": "demo_start",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            if "grading" in self.available_tools:
+                # Convert scenario_data back to GradingScenario object
+                from grading_tool import GradingScenario
+                scenario = GradingScenario(
+                    scenario_name=scenario_data["scenario_name"],
+                    description=scenario_data["description"],
+                    agent_role_play=scenario_data["agent_role_play"],
+                    test_inputs=scenario_data["test_inputs"],
+                    expected_outputs=scenario_data["expected_outputs"],
+                    showcased_capabilities=scenario_data["showcased_capabilities"],
+                    difficulty_level=scenario_data["difficulty_level"],
+                    estimated_time=scenario_data["estimated_time"],
+                    success_criteria=scenario_data["success_criteria"],
+                    # Include diagram data
+                    scenario_diagram=scenario_data.get("scenario_diagram"),
+                    capability_map=scenario_data.get("capability_map"),
+                    process_diagrams=scenario_data.get("process_diagrams", [])
+                )
+                
+                # Execute the scenario
+                execution_results = await self.available_tools["grading"].execute_grading_scenario(
+                    scenario=scenario,
+                    test_inputs=test_inputs,
+                    user_id=request.user_id,
+                    org_id=request.org_id
+                )
+                
+                if execution_results["success"]:
+                    results = execution_results["results"]
+                    
+                    # Stream the agent's role-play introduction
+                    yield {
+                        "type": "agent_demonstration",
+                        "content": f"🤖 **Agent Introduction:**\n\n{results['agent_introduction']}",
+                        "demo_step": "introduction",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    # Stream capability map diagram after introduction
+                    if scenario.capability_map:
+                        yield {
+                            "type": "agent_demonstration",
+                            "content": "📊 **Agent Capability Map:**\n\nHere's a visual overview of my capabilities:",
+                            "demo_step": "capability_visualization",
+                            "diagram_data": {
+                                "type": "capability_map",
+                                "diagram": scenario.capability_map,
+                                "title": "Agent Capabilities Overview"
+                            },
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    
+                    # Stream each execution step with process diagrams
+                    for i, step in enumerate(results["execution_steps"]):
+                        if step["step"] != "agent_introduction":  # Skip introduction as we already showed it
+                            yield {
+                                "type": "agent_demonstration", 
+                                "content": f"**{step['step'].replace('_', ' ').title()}:**\n\n{step.get('output', {}).get('analysis', 'Processing...')}",
+                                "demo_step": step["step"],
+                                "demo_data": step,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            
+                            # Stream relevant process diagram if available
+                            if scenario.process_diagrams and i < len(scenario.process_diagrams):
+                                process_diagram = scenario.process_diagrams[i]
+                                yield {
+                                    "type": "agent_demonstration",
+                                    "content": f"🔄 **{process_diagram['title']}:**\n\n{process_diagram['description']}",
+                                    "demo_step": f"process_diagram_{i+1}",
+                                    "diagram_data": {
+                                        "type": "process_flow",
+                                        "diagram": process_diagram['diagram'],
+                                        "title": process_diagram['title'],
+                                        "description": process_diagram['description']
+                                    },
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                    
+                    # Stream final assessment
+                    assessment = results["final_assessment"]
+                    yield {
+                        "type": "grading_assessment",
+                        "content": f"""
+🎯 **Grading Assessment Complete**
+
+**Overall Score:** {assessment['overall_score']:.1%}
+**Criteria Met:** {assessment['criteria_met']}/{assessment['total_criteria']}
+
+✅ **Strengths:**
+{chr(10).join([f"• {strength}" for strength in assessment['strengths']])}
+
+🔄 **Areas for Improvement:**
+{chr(10).join([f"• {area}" for area in assessment['areas_for_improvement']])}
+
+**Recommendation:** {assessment['recommendation']}
+""",
+                        "assessment_data": assessment,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    # Stream assessment visualization diagram using grading tool
+                    if "grading" in self.available_tools:
+                        assessment_diagram = self.available_tools["grading"]._generate_assessment_diagram(assessment, scenario)
+                        if assessment_diagram:
+                            yield {
+                                "type": "grading_assessment",
+                                "content": "📊 **Performance Visualization:**\n\nVisual breakdown of assessment results:",
+                                "diagram_data": {
+                                    "type": "assessment_results",
+                                    "diagram": assessment_diagram,
+                                    "title": "Assessment Results Visualization"
+                                },
+                                "timestamp": datetime.now().isoformat()
+                            }
+                    
+                else:
+                    yield {
+                        "type": "error",
+                        "content": f"❌ Scenario execution failed: {execution_results.get('error')}",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+            else:
+                yield {
+                    "type": "error",
+                    "content": "❌ Grading tool not available for execution",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+        except Exception as e:
+            logger.error(f"Grading scenario execution failed: {e}")
+            yield {
+                "type": "error",
+                "content": f"❌ Failed to execute grading scenario: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }
+
     def get_available_tools(self) -> List[str]:
         """Get list of available tools"""
         return list(self.available_tools.keys())
+    
+    async def detect_grading_request(self, user_query: str, grading_context: Dict[str, Any] = None) -> bool:
+        """Detect if user is requesting agent grading/testing or approving a scenario"""
+        
+        # Check for approval keywords first
+        approval_keywords = [
+            "yes", "proceed", "execute", "approve", "start", "begin", "run",
+            "go ahead", "continue", "do it", "let's do it", "approved"
+        ]
+        
+        # Check for grading scenario approval
+        if grading_context and grading_context.get("approval_action") == "execute_demonstration":
+            return True
+        
+        # Check for approval language combined with grading context
+        if any(keyword in user_query.lower() for keyword in approval_keywords):
+            if grading_context and grading_context.get("approved_scenario"):
+                return True
+            # Also check if the message mentions grading/scenario/demonstration
+            grading_approval_terms = ["scenario", "demonstration", "grading", "test"]
+            if any(term in user_query.lower() for term in grading_approval_terms):
+                return True
+        
+        # Check for initial grading request keywords
+        initial_grading_keywords = [
+            "try out", "test", "grade", "grading", "capability", "demonstrate", 
+            "show performance", "test agent", "evaluate", "assess", "benchmark",
+            "showcase", "flex", "prove", "validation"
+        ]
+        
+        return any(keyword in user_query.lower() for keyword in initial_grading_keywords)
+    
+
 
 
 # Convenience functions for easy API integration
@@ -1866,7 +2307,9 @@ def create_tool_request(
     # NEW: Cursor-style parameters
     enable_intent_classification: bool = True,
     enable_request_analysis: bool = True,
-    cursor_mode: bool = False
+    cursor_mode: bool = False,
+    # NEW: Grading context parameter
+    grading_context: Optional[Dict[str, Any]] = None
 ) -> ToolExecutionRequest:
     """
     Create a tool execution request with the specified parameters
@@ -1888,6 +2331,7 @@ def create_tool_request(
         enable_intent_classification: Enable intent analysis
         enable_request_analysis: Enable request analysis
         cursor_mode: Enable Cursor-style progressive enhancement
+        grading_context: Grading scenario data and approval information
         
     Returns:
         ToolExecutionRequest object
@@ -1908,7 +2352,8 @@ def create_tool_request(
         max_history_tokens=max_history_tokens,
         enable_intent_classification=enable_intent_classification,
         enable_request_analysis=enable_request_analysis,
-        cursor_mode=cursor_mode
+        cursor_mode=cursor_mode,
+        grading_context=grading_context
     )
 
 
@@ -1973,7 +2418,9 @@ async def execute_tool_stream(
     enable_deep_reasoning: bool = False,
     reasoning_depth: str = "standard",
     brain_reading_enabled: bool = True,
-    max_investigation_steps: int = 5
+    max_investigation_steps: int = 5,
+    # NEW: Grading parameters
+    grading_context: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream tool execution with specified parameters including deep reasoning
@@ -1999,6 +2446,7 @@ async def execute_tool_stream(
         reasoning_depth: Depth of reasoning ("light", "standard", "deep")
         brain_reading_enabled: Whether to read user's brain vectors
         max_investigation_steps: Maximum number of investigation steps
+        grading_context: Grading scenario data and approval information
         
     Yields:
         Dict containing streaming response data with deep reasoning thoughts
@@ -2024,7 +2472,8 @@ async def execute_tool_stream(
         enable_deep_reasoning=enable_deep_reasoning,
         reasoning_depth=reasoning_depth,
         brain_reading_enabled=brain_reading_enabled,
-        max_investigation_steps=max_investigation_steps
+        max_investigation_steps=max_investigation_steps,
+        grading_context=grading_context
     )
     async for chunk in executive_tool.execute_tool_stream(request):
         yield chunk 
