@@ -548,39 +548,78 @@ Remember: You don't write code or build software - you build understanding, crea
         """Get the appropriate search tool for OpenAI"""
         return self.executive_tool._get_search_tool("openai", model)
     
-    def _contains_teaching_content(self, user_query: str) -> bool:
-        """Detect if user input contains teaching content that should trigger knowledge extraction"""
+    async def _contains_teaching_content(self, user_query: str) -> bool:
+        """Use LLM to intelligently detect if user input contains teaching content that should trigger knowledge extraction"""
         
-        # Vietnamese teaching patterns
-        vietnamese_patterns = [
-            "tôi cần", "tôi muốn", "làm thế nào", "quy trình", "bước", "cách thức",
-            "hướng dẫn", "thiết lập", "cấu hình", "xây dựng", "tạo", "phát triển"
-        ]
-        
-        # English teaching patterns  
-        english_patterns = [
-            "i need", "i want", "how to", "process", "step", "procedure",
-            "guide", "setup", "configure", "build", "create", "develop"
-        ]
-        
+        try:
+            # Use fast, lightweight analysis for teaching intent detection
+            teaching_detection_prompt = f"""
+Analyze this user message and determine if it contains teaching content that an AI agent should learn from.
+
+User Message: "{user_query}"
+
+Teaching content includes:
+- Process descriptions or workflows
+- Requirements or specifications  
+- Additional requests or modifications ("also", "ngoài ra", "thêm")
+- Preferences or choices ("both", "cả hai", "all")
+- Technical integrations or tools mentioned
+- Step-by-step instructions
+- Configuration details
+- Business rules or logic
+
+Respond with ONLY a JSON object:
+{{
+    "contains_teaching": true/false,
+    "confidence": 0.0-1.0,
+    "reasoning": "Brief explanation of why this is/isn't teaching content",
+    "type": "initial_request|follow_up|clarification|preference|technical_detail"
+}}
+
+Examples:
+- "I need an agent to read files" → {{"contains_teaching": true, "confidence": 0.95, "reasoning": "Describes a clear process requirement", "type": "initial_request"}}
+- "Also send via Zalo" → {{"contains_teaching": true, "confidence": 0.90, "reasoning": "Additional requirement that modifies the original request", "type": "follow_up"}}
+- "Both" → {{"contains_teaching": true, "confidence": 0.85, "reasoning": "User preference that affects implementation", "type": "preference"}}
+- "Thank you" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "Polite acknowledgment with no actionable content", "type": "acknowledgment"}}
+"""
+
+            # Get LLM analysis using the existing method
+            response = await self._analyze_with_openai(teaching_detection_prompt, "gpt-4o-mini")  # Use faster model
+            
+            # Parse JSON response
+            import json
+            import re
+            
+            # Extract JSON from response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                analysis = json.loads(json_match.group(0))
+                
+                contains_teaching = analysis.get("contains_teaching", False)
+                confidence = analysis.get("confidence", 0.0)
+                reasoning = analysis.get("reasoning", "")
+                content_type = analysis.get("type", "unknown")
+                
+                # Log the analysis for debugging
+                logger.info(f"Teaching content analysis: contains={contains_teaching}, confidence={confidence:.2f}, type={content_type}, reasoning='{reasoning}'")
+                
+                # Only proceed if confidence is reasonably high
+                return contains_teaching and confidence >= 0.7
+            else:
+                logger.warning(f"Could not parse teaching detection response: {response}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in LLM teaching content detection: {e}")
+            # Fallback to simple heuristic
+            return self._fallback_teaching_detection(user_query)
+    
+    def _fallback_teaching_detection(self, user_query: str) -> bool:
+        """Simple fallback when LLM detection fails"""
+        # Basic patterns as safety net
+        basic_patterns = ["tôi cần", "i need", "ngoài ra", "also", "cả hai", "both", "zalo", "slack"]
         query_lower = user_query.lower()
-        
-        # Check for teaching patterns
-        for pattern in vietnamese_patterns + english_patterns:
-            if pattern in query_lower:
-                return True
-        
-        # Check for process descriptions (multiple steps)
-        if ("1." in user_query or "2." in user_query or 
-            "first" in query_lower or "then" in query_lower or
-            "trước" in query_lower or "sau đó" in query_lower):
-            return True
-            
-        # Check for detailed explanations (long content)
-        if len(user_query) > 100 and ("để" in query_lower or "for" in query_lower):
-            return True
-            
-        return False
+        return any(pattern in query_lower for pattern in basic_patterns)
 
     async def _analyze_with_openai(self, prompt: str, model: str = None) -> str:
         """Simple analysis method for internal use"""
@@ -749,7 +788,7 @@ Remember: You don't write code or build software - you build understanding, crea
                 yield reasoning_chunk
         
         # CRITICAL: Knowledge extraction BEFORE LLM response (for teaching scenarios)
-        teaching_detected = self._contains_teaching_content(request.user_query)
+        teaching_detected = await self._contains_teaching_content(request.user_query)
         logger.info(f"Teaching content detection result: {teaching_detected} for query: {request.user_query[:50]}...")
         if teaching_detected:
             yield {

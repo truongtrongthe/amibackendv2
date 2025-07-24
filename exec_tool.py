@@ -1252,20 +1252,24 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
             ])
             
             summary_prompt = f"""
-Based on the user's request and the approved knowledge pieces, provide a concise, actionable copilot-style summary.
+Generate a copilot-style summary that shows Ami's role as an AI assistant who has just completed a task from the user.
 
 User Request: "{request.user_query}"
 
 Approved Knowledge Pieces:
 {approved_knowledge_text}
 
-Generate a brief, focused summary that:
-1. Acknowledges what the user wants to accomplish
-2. References the key knowledge pieces that were learned
-3. Provides next steps or recommendations
-4. Maintains a helpful, professional tone
+Write a summary in this copilot style:
+- Start with "I've added [knowledge description] to your agent's brain"
+- Follow with "Now your agent will be able to [capability gained]"
+- Use first person (I/me) to show Ami's active role
+- Be specific about what was learned
+- Show how this knowledge enhances the agent's capabilities
 
-Keep it concise (2-3 sentences maximum).
+Example format:
+"I've added your financial monitoring workflow and Slack integration requirements to your agent's brain. Now your agent will be able to recognize similar automation requests and provide more targeted guidance for financial report processing and alert systems."
+
+Make it as detailed as possible. Write in a confident, helpful copilot tone.
 """
             
             # Get summary from LLM
