@@ -1015,7 +1015,14 @@ Respond with ONLY the JSON array, no additional text.
 
     async def _extract_user_input_knowledge(self, user_query: str, request: 'ToolExecutionRequest') -> List[Dict[str, Any]]:
         """
-        Extract structured, actionable knowledge pieces from user input (for teaching scenarios)
+        Extract structured, actionable knowledge pieces using AI Agent Implementation Reasoning
+        
+        Flow:
+        1. User drops request/shares knowledge
+        2. LLM reasons "How to perform it as an AI Agent"
+        3. Break into smaller implementation parts
+        4. Generate knowledge instructions for each part
+        5. For technical parts: Focus on info collection for Ami, not theory
         
         Args:
             user_query: The user's input to analyze
@@ -1026,35 +1033,184 @@ Respond with ONLY the JSON array, no additional text.
         """
         
         try:
-            logger.info(f"Starting user input knowledge extraction for query: {user_query[:100]}...")
+            logger.info(f"Starting AI Agent implementation reasoning for query: {user_query[:100]}...")
             
-            # Use GPT-4o for knowledge extraction from user input
-            extraction_prompt = f"""
-Analyze this user input and extract discrete, actionable knowledge pieces that represent processes, requirements, or instructions they want to implement.
+            # STEP 1: AI Agent Implementation Reasoning
+            implementation_reasoning_prompt = f"""
+You are Ami, an AI agent builder. A human has shared a request or knowledge with you. Your job is to reason through "How would I implement this as an AI Agent?" and break it down into actionable parts.
 
-User Input to Analyze:
+Human Input:
 "{user_query}"
 
-EXTRACTION CRITERIA:
-Focus on extracting actionable knowledge such as:
-• Specific business processes or workflows they describe
-• Technical requirements or specifications they mention  
-• Step-by-step procedures they outline
-• Integration requirements (APIs, tools, systems)
-• Automation goals and objectives
-• Data processing requirements (spreadsheets, databases)
-• Communication workflows (email, notifications)
-• Business rules or logic they want to implement
-• Tool configurations or settings needed
+REASONING PROCESS:
+1. **UNDERSTAND THE REQUEST**: What does the human want their AI agent to do?
+2. **AGENT IMPLEMENTATION ANALYSIS**: How would an AI agent actually perform this task?
+3. **BREAK DOWN INTO PARTS**: What are the smaller implementation components?
+4. **IDENTIFY TECHNICAL VS BUSINESS LOGIC**: Separate technical integrations from business processes
+5. **AMI'S ROLE CLARITY**: For technical parts, what info does Ami need to collect to help the agent?
 
-For each valuable knowledge piece found, extract:
+RESPONSE FORMAT (JSON):
+{{
+  "agent_goal": "What the AI agent needs to accomplish",
+  "implementation_breakdown": [
+    {{
+      "part_name": "Clear name for this implementation part",
+      "part_type": "business_logic|technical_integration|data_processing|communication|workflow",
+      "agent_actions": "What the AI agent will actually do for this part",
+      "ami_collection_needed": "What info Ami needs to collect from human (for technical parts)",
+      "priority": "high|medium|low"
+    }}
+  ],
+  "technical_dependencies": ["List of technical systems/APIs the agent will need"],
+  "business_logic_requirements": ["List of business rules the agent must follow"]
+}}
 
-Response format (JSON array):
+EXAMPLES:
+
+Input: "I need agent to read financial reports and send alerts"
+Output:
+{{
+  "agent_goal": "Automatically monitor financial reports and send alerts based on findings",
+  "implementation_breakdown": [
+    {{
+      "part_name": "Financial Report Reading",
+      "part_type": "data_processing", 
+      "agent_actions": "Access designated folder, read Excel/PDF files, extract key financial metrics",
+      "ami_collection_needed": "Folder path, file formats, which metrics to monitor, alert thresholds",
+      "priority": "high"
+    }},
+    {{
+      "part_name": "Alert System Integration",
+      "part_type": "technical_integration",
+      "agent_actions": "Send notifications via chosen platform when conditions are met",
+      "ami_collection_needed": "Notification platform (Zalo/Slack), API credentials, message templates",
+      "priority": "high"
+    }}
+  ],
+  "technical_dependencies": ["File system access", "Zalo/Slack API"],
+  "business_logic_requirements": ["Alert threshold rules", "Report analysis criteria"]
+}}
+
+RESPOND WITH ONLY THE JSON OBJECT, NO OTHER TEXT.
+"""
+
+            # Get implementation reasoning
+            logger.info("Getting AI Agent implementation reasoning...")
+            reasoning_response = await self._get_reasoning_llm_response(implementation_reasoning_prompt, request)
+            logger.info(f"Received implementation reasoning: {len(reasoning_response)} chars")
+            
+            # Parse implementation reasoning
+            try:
+                json_match = re.search(r'\{.*\}', reasoning_response, re.DOTALL)
+                if not json_match:
+                    logger.warning("No JSON found in implementation reasoning response")
+                    return []
+                
+                implementation_data = json.loads(json_match.group(0))
+                logger.info(f"Implementation breakdown: {len(implementation_data.get('implementation_breakdown', []))} parts")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parsing error in implementation reasoning: {e}")
+                return []
+            
+            # STEP 2: Retrieve Existing Relevant Knowledge
+            logger.info("Retrieving existing relevant knowledge...")
+            try:
+                # Search for existing knowledge related to the implementation parts
+                search_queries = []
+                
+                # Add the agent goal as a search query
+                if implementation_data.get("agent_goal"):
+                    search_queries.append(implementation_data["agent_goal"])
+                
+                # Add each implementation part as search queries
+                for part in implementation_data.get("implementation_breakdown", []):
+                    search_queries.extend([
+                        part.get("part_name", ""),
+                        part.get("agent_actions", ""),
+                        part.get("ami_collection_needed", "")
+                    ])
+                
+                # Add technical dependencies and business logic requirements
+                search_queries.extend(implementation_data.get("technical_dependencies", []))
+                search_queries.extend(implementation_data.get("business_logic_requirements", []))
+                
+                # Filter out empty queries
+                search_queries = [q.strip() for q in search_queries if q and q.strip()]
+                logger.info(f"Generated {len(search_queries)} search queries for existing knowledge")
+                
+                # Search for existing knowledge using the brain vector tool
+                existing_knowledge_context = ""
+                if hasattr(self, 'brain_vector_tool') and self.brain_vector_tool:
+                    try:
+                        # Use the first few most relevant queries to avoid overwhelming the search
+                        top_queries = search_queries[:3]
+                        for query in top_queries:
+                            knowledge_results = await self.brain_vector_tool.search_knowledge(
+                                query=query,
+                                user_id=getattr(request, 'user_id', 'unknown'),
+                                org_id=getattr(request, 'org_id', 'unknown'),
+                                limit=3
+                            )
+                            
+                            if knowledge_results:
+                                for result in knowledge_results:
+                                    existing_knowledge_context += f"\n--- Existing Knowledge ---\n"
+                                    existing_knowledge_context += f"Title: {result.get('title', 'Unknown')}\n"
+                                    existing_knowledge_context += f"Content: {result.get('content', result.get('raw', ''))}\n"
+                                    existing_knowledge_context += f"Relevance Score: {result.get('score', 0.0):.3f}\n"
+                        
+                        logger.info(f"Retrieved existing knowledge context: {len(existing_knowledge_context)} chars")
+                        
+                    except Exception as e:
+                        logger.warning(f"Knowledge retrieval failed, continuing without existing knowledge: {e}")
+                        existing_knowledge_context = ""
+                else:
+                    logger.info("Brain vector tool not available, proceeding without existing knowledge")
+                    
+            except Exception as e:
+                logger.error(f"Error during knowledge retrieval: {e}")
+                existing_knowledge_context = ""
+            
+            # STEP 3: Generate Knowledge Instructions for Each Part
+            knowledge_generation_prompt = f"""
+Based on the AI Agent implementation breakdown, generate specific knowledge instructions for each part.
+
+IMPLEMENTATION DATA:
+{json.dumps(implementation_data, indent=2)}
+
+ORIGINAL USER INPUT:
+"{user_query}"
+
+EXISTING RELEVANT KNOWLEDGE:
+{existing_knowledge_context if existing_knowledge_context else "No existing relevant knowledge found."}
+
+KNOWLEDGE GENERATION RULES:
+1. **BUSINESS LOGIC PARTS**: Create direct instructions for the agent's decision-making
+2. **TECHNICAL PARTS**: Create info collection instructions for Ami (not theory/academic)  
+3. **DATA PROCESSING PARTS**: Create specific data handling instructions
+4. **COMMUNICATION PARTS**: Create message templates and trigger conditions
+5. **WORKFLOW PARTS**: Create step-by-step process instructions
+
+EXISTING KNOWLEDGE INTEGRATION:
+- **BUILD UPON EXISTING**: If existing knowledge covers similar topics, enhance/extend rather than duplicate
+- **REFERENCE EXISTING**: When relevant existing knowledge exists, reference it in new knowledge pieces
+- **FILL GAPS**: Focus on generating knowledge for areas NOT covered by existing knowledge
+- **AVOID DUPLICATION**: Don't create knowledge pieces that essentially repeat existing knowledge
+
+TECHNICAL PARTS FOCUS:
+- DON'T generate theoretical knowledge like "Google Drive API documentation"
+- DO generate: "Ami needs to collect: Google Drive folder path, authentication method, file types to monitor"
+- The knowledge should help Ami know WHAT INFO TO COLLECT, not how to code
+
+RESPONSE FORMAT (JSON array):
 [
   {{
     "title": "Concise, descriptive title (max 60 chars)",
-    "content": "The actual actionable knowledge/instruction",
-    "category": "process|requirement|automation|integration|workflow|configuration",
+    "content": "Specific instruction for the agent OR info collection task for Ami",
+    "category": "agent_instruction|ami_collection|business_rule|workflow_step|message_template",
+    "implementation_part": "Which part from breakdown this relates to",
+    "builds_upon_existing": "Reference to existing knowledge this builds upon (if any)",
     "quality_score": 0.0-1.0,
     "actionability": "high|medium|low",
     "reusability": "high|medium|low",
@@ -1062,25 +1218,50 @@ Response format (JSON array):
   }}
 ]
 
-If no actionable knowledge pieces are found, return an empty array: []
+EXAMPLES:
+
+For "Financial Report Reading" part with existing knowledge about file processing:
+{{
+  "title": "Daily Report Folder Access",
+  "content": "Building on existing file processing knowledge: Ami needs to collect specific folder path for financial reports, file naming pattern, and which columns to check for empty values",
+  "category": "ami_collection",
+  "implementation_part": "Financial Report Reading",
+  "builds_upon_existing": "File processing workflow knowledge",
+  "quality_score": 0.9,
+  "actionability": "high",
+  "reusability": "high", 
+  "specificity": "high"
+}}
+
+For "Alert System" part with no existing knowledge:
+{{
+  "title": "Zalo Alert Message Template",
+  "content": "When empty cells found, send: '⚠️ [File Name] có ô trống ở cột [Column] - cần kiểm tra ngay'",
+  "category": "message_template",
+  "implementation_part": "Alert System Integration",
+  "builds_upon_existing": null,
+  "quality_score": 0.85,
+  "actionability": "high",
+  "reusability": "medium",
+  "specificity": "high"
+}}
 
 RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
 """
 
-            # Get LLM response
-            logger.info("Calling _get_reasoning_llm_response for knowledge extraction...")
-            llm_response = await self._get_reasoning_llm_response(extraction_prompt, request)
-            logger.info(f"Received LLM response for knowledge extraction: {len(llm_response)} chars")
+            # Generate knowledge instructions
+            logger.info("Generating knowledge instructions from implementation breakdown with existing knowledge context...")
+            knowledge_response = await self._get_reasoning_llm_response(knowledge_generation_prompt, request)
+            logger.info(f"Received knowledge instructions: {len(knowledge_response)} chars")
             
-            # Parse JSON response
+            # Parse and validate knowledge instructions
             try:
-                # Extract JSON from response (handling cases where LLM adds extra text)
-                json_match = re.search(r'\[.*\]', llm_response, re.DOTALL)
+                json_match = re.search(r'\[.*\]', knowledge_response, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
                     knowledge_data = json.loads(json_str)
                 else:
-                    logger.warning("No JSON array found in knowledge extraction response")
+                    logger.warning("No JSON array found in knowledge generation response")
                     return []
                 
                 # Validate and structure the knowledge pieces
@@ -1090,22 +1271,24 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
                         validated_pieces.append({
                             "title": piece.get("title", "")[:60],  # Limit title length
                             "content": piece.get("content", ""),
-                            "category": piece.get("category", "process"),
+                            "category": piece.get("category", "agent_instruction"),
+                            "implementation_part": piece.get("implementation_part", "unknown"),
+                            "builds_upon_existing": piece.get("builds_upon_existing"),
                             "quality_score": float(piece.get("quality_score", 0.7)),
                             "actionability": piece.get("actionability", "medium"),
                             "reusability": piece.get("reusability", "medium"),
                             "specificity": piece.get("specificity", "medium")
                         })
                 
-                logger.info(f"User input knowledge extraction: Found {len(knowledge_data)} pieces, {len(validated_pieces)} passed validation")
+                logger.info(f"AI Agent knowledge extraction: Found {len(knowledge_data)} pieces, {len(validated_pieces)} passed validation")
                 return validated_pieces
                 
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse user input knowledge extraction JSON: {e}")
+                logger.error(f"JSON parsing error in knowledge generation: {e}")
                 return []
                 
         except Exception as e:
-            logger.error(f"User input knowledge extraction error: {e}")
+            logger.error(f"Error in AI Agent implementation knowledge extraction: {e}")
             return []
 
     async def _stream_knowledge_approval_request(self, knowledge_pieces: List[Dict[str, Any]], request: 'ToolExecutionRequest') -> AsyncGenerator[Dict[str, Any], None]:
