@@ -1174,7 +1174,7 @@ RESPOND WITH ONLY THE JSON OBJECT, NO OTHER TEXT.
             
             # STEP 3: Generate Knowledge Instructions for Each Part
             knowledge_generation_prompt = f"""
-Based on the AI Agent implementation breakdown, generate specific knowledge instructions for each part.
+Based on the AI Agent implementation breakdown, generate specific RUNTIME INSTRUCTIONS for the AI Agent to execute.
 
 IMPLEMENTATION DATA:
 {json.dumps(implementation_data, indent=2)}
@@ -1185,12 +1185,22 @@ ORIGINAL USER INPUT:
 EXISTING RELEVANT KNOWLEDGE:
 {existing_knowledge_context if existing_knowledge_context else "No existing relevant knowledge found."}
 
+CRITICAL: These knowledge pieces are RUNTIME INSTRUCTIONS for the AI AGENT, not tasks for Ami!
+
 KNOWLEDGE GENERATION RULES:
-1. **BUSINESS LOGIC PARTS**: Create direct instructions for the agent's decision-making
-2. **TECHNICAL PARTS**: Create info collection instructions for Ami (not theory/academic)  
-3. **DATA PROCESSING PARTS**: Create specific data handling instructions
-4. **COMMUNICATION PARTS**: Create message templates and trigger conditions
-5. **WORKFLOW PARTS**: Create step-by-step process instructions
+1. **AGENT INSTRUCTIONS**: Direct commands the AI Agent will execute at runtime
+2. **RUNTIME PROMPTS**: Each piece should be a complete instruction the Agent can follow
+3. **BUSINESS RULES**: Clear decision-making criteria for the Agent
+4. **WORKFLOW STEPS**: Step-by-step processes the Agent will perform
+5. **MESSAGE TEMPLATES**: Exact templates the Agent will use for communication
+6. **INFORMATION COLLECTION**: What data the Agent needs and how to get it
+
+INSTRUCTION CLARITY:
+- Write as direct commands to the Agent: "You will...", "When you encounter...", "Your task is to..."
+- Make each instruction self-contained and actionable
+- Include specific criteria, thresholds, and decision points
+- Provide exact templates, formats, and examples
+- Specify error handling and edge cases
 
 EXISTING KNOWLEDGE INTEGRATION:
 - **BUILD UPON EXISTING**: If existing knowledge covers similar topics, enhance/extend rather than duplicate
@@ -1198,17 +1208,12 @@ EXISTING KNOWLEDGE INTEGRATION:
 - **FILL GAPS**: Focus on generating knowledge for areas NOT covered by existing knowledge
 - **AVOID DUPLICATION**: Don't create knowledge pieces that essentially repeat existing knowledge
 
-TECHNICAL PARTS FOCUS:
-- DON'T generate theoretical knowledge like "Google Drive API documentation"
-- DO generate: "Ami needs to collect: Google Drive folder path, authentication method, file types to monitor"
-- The knowledge should help Ami know WHAT INFO TO COLLECT, not how to code
-
-RESPONSE FORMAT (JSON array):
+RESPONSE FORMAT (JSON array) - GENERATE ALL RELEVANT PIECES, NO TRUNCATION:
 [
   {{
-    "title": "Concise, descriptive title (max 60 chars)",
-    "content": "Specific instruction for the agent OR info collection task for Ami",
-    "category": "agent_instruction|ami_collection|business_rule|workflow_step|message_template",
+    "title": "Clear, descriptive title for the Agent instruction (max 60 chars)",
+    "content": "Complete runtime instruction for the AI Agent - detailed and actionable",
+    "category": "agent_instruction|business_rule|workflow_step|message_template|data_collection",
     "implementation_part": "Which part from breakdown this relates to",
     "builds_upon_existing": "Reference to existing knowledge this builds upon (if any)",
     "quality_score": 0.0-1.0,
@@ -1220,31 +1225,34 @@ RESPONSE FORMAT (JSON array):
 
 EXAMPLES:
 
-For "Financial Report Reading" part with existing knowledge about file processing:
+WRONG (Task for Ami):
 {{
-  "title": "Daily Report Folder Access",
-  "content": "Building on existing file processing knowledge: Ami needs to collect specific folder path for financial reports, file naming pattern, and which columns to check for empty values",
-  "category": "ami_collection",
-  "implementation_part": "Financial Report Reading",
-  "builds_upon_existing": "File processing workflow knowledge",
-  "quality_score": 0.9,
-  "actionability": "high",
-  "reusability": "high", 
-  "specificity": "high"
+  "title": "Product Data Access",
+  "content": "Ami needs to collect: location of product lists, data format details",
+  "category": "ami_collection"
 }}
 
-For "Alert System" part with no existing knowledge:
+RIGHT (Runtime instruction for Agent):
 {{
-  "title": "Zalo Alert Message Template",
-  "content": "When empty cells found, send: '⚠️ [File Name] có ô trống ở cột [Column] - cần kiểm tra ngay'",
-  "category": "message_template",
-  "implementation_part": "Alert System Integration",
-  "builds_upon_existing": null,
-  "quality_score": 0.85,
-  "actionability": "high",
-  "reusability": "medium",
-  "specificity": "high"
+  "title": "Product Data Access Protocol",
+  "content": "You will access product data from the designated database/file location. When connecting, use the provided credentials and query for products matching these attributes: category, price_range, availability_status. If connection fails, retry 3 times with 5-second intervals, then log error and notify admin.",
+  "category": "agent_instruction"
 }}
+
+WRONG (Vague instruction):
+{{
+  "title": "Develop Matching Algorithm", 
+  "content": "Create an algorithm that matches products to customers"
+}}
+
+RIGHT (Specific runtime instruction):
+{{
+  "title": "Product-Customer Matching Logic",
+  "content": "When matching products to customers, you will: 1) Filter products by customer's preferred categories, 2) Apply price range filter (customer budget ± 20%), 3) Score products based on: category match (40%), price fit (30%), ratings (20%), availability (10%), 4) Return top 5 matches sorted by total score. If no matches found, suggest similar categories.",
+  "category": "business_rule"
+}}
+
+Generate comprehensive runtime instructions for the Agent. Include ALL necessary details for autonomous execution.
 
 RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
 """
@@ -1423,7 +1431,7 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
             # Generate copilot-style summary
             yield f"data: {json.dumps({
                 'type': 'thinking',
-                'content': '🤖 Generating copilot-style summary based on your request and approved knowledge...',
+                'content': '🤖 Summarizing what we've done...',
                 'thought_type': 'summary_generation',
                 'timestamp': datetime.now().isoformat()
             })}\n\n"
@@ -1435,24 +1443,51 @@ RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT.
             ])
             
             summary_prompt = f"""
-Generate a copilot-style summary that shows Ami's role as an AI assistant who has just completed a task from the user.
+Generate a Cursor-style copilot summary in markdown format that shows what was accomplished.
 
 User Request: "{request.user_query}"
 
 Approved Knowledge Pieces:
 {approved_knowledge_text}
 
-Write a summary in this copilot style:
-- Start with "I've added [knowledge description] to your agent's brain"
-- Follow with "Now your agent will be able to [capability gained]"
-- Use first person (I/me) to show Ami's active role
-- Be specific about what was learned
-- Show how this knowledge enhances the agent's capabilities
+CURSOR-STYLE REQUIREMENTS:
+- Use markdown formatting with clear sections
+- Present information as key points, not paragraphs
+- Focus on what the Agent learned (runtime instructions)
+- Make it scannable and easy to track
+- Use bullet points and clear headers
 
-Example format:
-"I've added your financial monitoring workflow and Slack integration requirements to your agent's brain. Now your agent will be able to recognize similar automation requests and provide more targeted guidance for financial report processing and alert systems."
+RESPONSE FORMAT:
+```markdown
+## ✅ Agent Knowledge Updated
 
-Make it as detailed as possible. Write in a confident, helpful copilot tone.
+**{len(approved_pieces)} runtime instructions added to your agent's brain**
+
+### 🤖 Your Agent Now Knows How To:
+- [Specific capability 1 from knowledge]
+- [Specific capability 2 from knowledge]  
+- [Specific capability 3 from knowledge]
+
+### 📋 Key Instructions Added:
+- **[Knowledge Title 1]**: [Brief description of what agent will do]
+- **[Knowledge Title 2]**: [Brief description of what agent will do]
+- **[Knowledge Title 3]**: [Brief description of what agent will do]
+
+### 🎯 Next Steps:
+- [ ] Test the agent with sample data
+- [ ] Configure any required API connections
+- [ ] Set up monitoring and alerts
+
+*Your agent is now ready to handle these tasks autonomously.*
+```
+
+IMPORTANT: 
+- Focus on AGENT CAPABILITIES, not Ami's actions
+- Use action-oriented language ("Your agent will...")
+- Keep it concise and scannable
+- Make each point specific and actionable
+
+Generate the markdown summary now:
 """
             
             # Get summary from LLM
