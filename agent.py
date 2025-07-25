@@ -545,13 +545,13 @@ class AgentOrchestrator:
 
     async def execute_agent_task_stream(self, request: AgentExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Stream agent task execution (different from Ami's execute_tool_stream)
+        Stream agent task execution with simplified flow
         
         Args:
             request: AgentExecutionRequest containing task parameters
             
         Yields:
-            Dict containing streaming response data focused on task execution
+            Dict containing streaming response data with simplified flow
         """
         start_time = datetime.now()
         
@@ -567,25 +567,20 @@ class AgentOrchestrator:
                 }
                 return
             
-            # Yield initial processing status
+            # Simple status - no redundant analysis
             yield {
                 "type": "status",
-                "content": f"Agent {request.agent_id} ({request.agent_type}) starting task execution...",
+                "content": f"🤖 {request.agent_id} processing your request...",
                 "provider": request.llm_provider,
                 "agent_id": request.agent_id,
                 "agent_type": request.agent_type,
                 "status": "processing"
             }
             
-            # Analyze the task (different from Ami's request analysis)
-            task_analysis, thinking_steps = await self._analyze_agent_task(request)
-            
-            # Generate agent-focused thoughts
-            async for thought in self._generate_agent_thoughts(request, task_analysis, thinking_steps):
-                yield thought
-            
-            # Execute task with streaming using provider-specific executor (shared infrastructure)
+            # Convert to tool request with simplified approach
             tool_request = self._convert_to_tool_request(request)
+            
+            # Execute directly with LLM - let LLM decide tools and handle everything
             if request.llm_provider.lower() == "anthropic":
                 async for chunk in self.anthropic_executor.execute_stream(tool_request):
                     # Add agent context to chunks
@@ -599,28 +594,21 @@ class AgentOrchestrator:
                     chunk["agent_type"] = request.agent_type
                     yield chunk
             
-            # Yield completion status
+            # Simple completion status
             execution_time = (datetime.now() - start_time).total_seconds()
             yield {
                 "type": "complete",
-                "content": f"Agent {request.agent_id} task execution completed successfully",
+                "content": f"✅ {request.agent_id} completed successfully",
                 "provider": request.llm_provider,
                 "agent_id": request.agent_id,
                 "agent_type": request.agent_type,
                 "execution_time": execution_time,
-                "success": True,
-                "metadata": {
-                    "org_id": request.org_id,
-                    "user_id": request.user_id,
-                    "tools_used": list(self.available_tools.keys()),
-                    "specialized_domains": request.specialized_knowledge_domains
-                }
+                "success": True
             }
             
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Agent task execution failed: {str(e)}"
-            traceback.print_exc()
+            error_msg = f"Agent execution failed: {str(e)}"
             
             yield {
                 "type": "error",
@@ -632,23 +620,20 @@ class AgentOrchestrator:
                 "success": False
             }
 
+
+
     def _convert_to_tool_request(self, agent_request: AgentExecutionRequest):
-        """Convert AgentExecutionRequest to ToolExecutionRequest for shared executors"""
+        """Convert AgentExecutionRequest to ToolExecutionRequest with simplified approach"""
         from exec_tool import ToolExecutionRequest
         
-        # Create agent-specific system prompt
-        agent_system_prompt = f"""You are {agent_request.agent_id}, a specialized {agent_request.agent_type} with deep reasoning capabilities.
+        # Create focused agent system prompt
+        agent_system_prompt = f"""You are {agent_request.agent_id}, a specialized {agent_request.agent_type}.
 
 Your specialization areas: {', '.join(agent_request.specialized_knowledge_domains or ['general'])}
 
-Your role is to execute tasks efficiently using your specialized knowledge and available tools. You should:
-1. Use deep reasoning to understand and approach tasks
-2. Leverage your specialized knowledge domains
-3. Use available tools when needed to gather additional information
-4. Provide thorough, actionable responses focused on task completion
+You have access to tools when needed. Use them naturally as part of your reasoning process to provide helpful, accurate responses.
 
-Task Focus: {agent_request.task_focus}
-Reasoning Depth: {agent_request.reasoning_depth}"""
+Task Focus: {agent_request.task_focus}"""
         
         return ToolExecutionRequest(
             llm_provider=agent_request.llm_provider,
@@ -664,13 +649,15 @@ Reasoning Depth: {agent_request.reasoning_depth}"""
             conversation_history=agent_request.conversation_history,
             max_history_messages=agent_request.max_history_messages,
             max_history_tokens=agent_request.max_history_tokens,
-            # Disable complex features for agents to avoid missing method calls
-            enable_deep_reasoning=False,  # Agents use simpler reasoning
-            reasoning_depth="light",      # Keep it simple
-            enable_intent_classification=False,  # Skip complex intent analysis
-            enable_request_analysis=False,      # Skip request analysis
-            cursor_mode=False                   # Disable cursor mode to avoid complex method calls
+            # Simplified settings - let LLM handle reasoning
+            enable_deep_reasoning=False,  
+            reasoning_depth="light",      
+            enable_intent_classification=False,  
+            enable_request_analysis=False,      
+            cursor_mode=False  # Disable complex cursor mode for clean flow
         )
+
+
 
     async def _detect_language_and_create_prompt(self, request, user_query: str, base_prompt: str) -> str:
         """
@@ -910,32 +897,28 @@ async def execute_agent_stream(
     model: Optional[str] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
-    enable_deep_reasoning: bool = True,
-    reasoning_depth: str = "standard",
     task_focus: str = "execution",
     specialized_knowledge_domains: Optional[List[str]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    Stream agent task execution
+    Stream agent task execution with simplified flow
     
     Args:
         llm_provider: 'anthropic' or 'openai'
         user_request: The task to execute
         agent_id: Specific agent instance ID
         agent_type: Type of agent
-        system_prompt: Optional custom system prompt
+        system_prompt: Optional custom system prompt (not used in simplified flow)
         model: Optional custom model name
         org_id: Organization ID
         user_id: User ID
-        enable_deep_reasoning: Enable deep reasoning
-        reasoning_depth: Depth of reasoning
         task_focus: Focus area for task execution
         specialized_knowledge_domains: Agent's specialization areas
         conversation_history: Previous conversation messages
         
     Yields:
-        Dict containing streaming response data
+        Dict containing streaming response data with simplified flow
     """
     orchestrator = AgentOrchestrator()
     request = AgentExecutionRequest(
@@ -943,15 +926,17 @@ async def execute_agent_stream(
         user_request=user_request,
         agent_id=agent_id,
         agent_type=agent_type,
-        system_prompt=system_prompt,
+        system_prompt=system_prompt,  # Will be overridden by simplified flow
         model=model,
         org_id=org_id,
         user_id=user_id,
-        enable_deep_reasoning=enable_deep_reasoning,
-        reasoning_depth=reasoning_depth,
+        enable_deep_reasoning=False,  # Simplified
+        reasoning_depth="light",      # Simplified
         task_focus=task_focus,
+        enable_tools=True,            # Always enable tools
         specialized_knowledge_domains=specialized_knowledge_domains,
         conversation_history=conversation_history
     )
     async for chunk in orchestrator.execute_agent_task_stream(request):
         yield chunk 
+

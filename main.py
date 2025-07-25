@@ -1494,9 +1494,9 @@ async def execute_agent_options():
 @app.post('/api/tool/agent/stream')
 async def execute_agent_stream_endpoint(request: AgentAPIRequest, background_tasks: BackgroundTasks):
     """
-    Stream agent execution with dynamic system prompts and parameters.
+    Stream agent execution with simplified flow - no redundant analysis phases.
+    LLM handles tool decisions directly like ChatGPT/Claude.
     Supports both Anthropic Claude and OpenAI GPT-4 with real-time streaming.
-    Default: tools enabled, deep reasoning enabled, search optional.
     """
     start_time = datetime.now()
     request_id = str(uuid4())[:8]
@@ -1593,6 +1593,8 @@ async def generate_agent_sse_stream(request: AgentAPIRequest, thread_lock: async
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[REQUEST:{request_id}] === END agent SSE request - total time: {elapsed:.2f}s ===")
+
+
 
 # Organization Integration endpoints
 class OrganizationIntegrationRequest(BaseModel):
