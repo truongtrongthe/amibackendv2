@@ -56,7 +56,7 @@ credentials.json
 
 # Google Drive API credentials (security sensitive)
 google_drive_credentials.json
-amiai-468-*.json
+amiai-*.json
 *-credentials.json
 service-account-*.json
 
