@@ -744,7 +744,9 @@ SPECIAL INSTRUCTIONS:
 - EXAMPLE: If user says "analyse this: https://docs.google.com/document/d/ABC123/edit", call read_gdrive_link_docx with drive_link="https://docs.google.com/document/d/ABC123/edit"
 - FORCE: You MUST provide the drive_link parameter when calling these functions. The parameter cannot be empty.
 - If the user asks for analysis of a document, ALWAYS read the document content before providing any analysis
-- Use the sale_summarize tool for business document analysis when appropriate
+- Use the analyze_document or process_with_knowledge tool for business document analysis when appropriate
+- CRITICAL: When calling process_with_knowledge, you MUST include user_id="{agent_request.user_id}" and org_id="{agent_request.org_id}" parameters
+- EXAMPLE: process_with_knowledge(document_content="...", knowledge_query="how to analyze business plans", user_id="{agent_request.user_id}", org_id="{agent_request.org_id}")
 - Respond in English unless the user specifically requests another language
 - DO NOT use search tools when a Google Drive link is provided - read the document directly
 
