@@ -123,11 +123,21 @@ class OpenAITool:
                 # Check if tool has get_tool_description method (dynamic tool definitions)
                 if hasattr(tool, 'get_tool_description'):
                     try:
-                        tool_def = tool.get_tool_description()
-                        functions.append({
-                            "type": "function",
-                            "function": tool_def
-                        })
+                        tool_defs = tool.get_tool_description()
+                        # Handle both single tool definition and list of tool definitions
+                        if isinstance(tool_defs, list):
+                            for tool_def in tool_defs:
+                                functions.append({
+                                    "type": "function",
+                                    "function": tool_def
+                                })
+                        else:
+                            # Single tool definition
+                            functions.append({
+                                "type": "function",
+                                "function": tool_defs
+                            })
+                        print(f"DEBUG: Added {len(tool_defs) if isinstance(tool_defs, list) else 1} functions from {type(tool).__name__}")
                     except Exception as e:
                         print(f"Warning: Could not get tool description for {tool}: {e}")
                         continue
@@ -373,6 +383,9 @@ class OpenAITool:
         if functions:
             api_params["tools"] = functions
             api_params["tool_choice"] = tool_choice
+            print(f"DEBUG: API call with {len(functions)} functions, tool_choice={tool_choice}, force_tools={force_tools}")
+        else:
+            print(f"DEBUG: No functions available for API call")
 
 
         try:
@@ -381,6 +394,8 @@ class OpenAITool:
             
             content_buffer = ""
             tool_calls_detected = False
+            collected_tool_calls = []  # Collect tool calls from streaming
+            current_tool_calls = {}  # Track current tool calls being built
             
             # Process streaming response
             for chunk in response_stream:
@@ -401,14 +416,36 @@ class OpenAITool:
                     if delta.tool_calls:
                         tool_calls_detected = True
                         for tool_call in delta.tool_calls:
-                            if tool_call.function and tool_call.function.name:
-                                yield {
-                                    "type": "response_chunk",
-                                    "content": f"[Using tool: {tool_call.function.name}]",
-                                    "complete": False
-                                }
+                            if tool_call.function:
+                                # Get or create tool call ID
+                                tool_call_id = tool_call.index if hasattr(tool_call, 'index') else len(current_tool_calls)
+                                
+                                # Initialize tool call if not exists
+                                if tool_call_id not in current_tool_calls:
+                                    current_tool_calls[tool_call_id] = {
+                                        'id': tool_call.id if hasattr(tool_call, 'id') else f"call_{tool_call_id}",
+                                        'function': {'name': '', 'arguments': ''}
+                                    }
+                                
+                                # Update tool call with streaming data
+                                if tool_call.function.name:
+                                    current_tool_calls[tool_call_id]['function']['name'] = tool_call.function.name
+                                    print(f"DEBUG: Tool call {tool_call_id} name: {tool_call.function.name}")
+                                
+                                if tool_call.function.arguments:
+                                    current_tool_calls[tool_call_id]['function']['arguments'] += tool_call.function.arguments
+                                    print(f"DEBUG: Tool call {tool_call_id} arguments chunk: '{tool_call.function.arguments}'")
+                                
+                                # Yield tool usage message
+                                if tool_call.function.name:
+                                    yield {
+                                        "type": "response_chunk",
+                                        "content": f"[Using tool: {tool_call.function.name}]",
+                                        "complete": False
+                                    }
                     
                     # Check if response is finished
+                    print(f"DEBUG: finish_reason = {choice.finish_reason}")
                     if choice.finish_reason == "stop":
                         yield {
                             "type": "response_complete",
@@ -417,20 +454,175 @@ class OpenAITool:
                         }
                         break
                     elif choice.finish_reason == "tool_calls":
-                        # Handle tool calls with TRUE STREAMING like Cursor
-                        yield {
-                            "type": "response_chunk",
-                            "content": "\n[Processing tool results...]",
-                            "complete": False
-                        }
-                        
-                        # Stream the tool execution and final response using the simple approach
-                        async for final_chunk in self._stream_tool_execution(
-                            user_query, available_tools, system_prompt,
-                            conversation_history, max_history_messages, max_history_tokens
-                        ):
-                            yield final_chunk
-                        break
+                        print(f"DEBUG: ENTERING tool_calls branch")
+                        try:
+                            # Handle tool calls with TRUE STREAMING like Cursor
+                            yield {
+                                "type": "response_chunk",
+                                "content": "\n[Processing tool results...]",
+                                "complete": False
+                            }
+                            
+                            # Use the collected tool calls from streaming
+                            print(f"DEBUG: Processing {len(current_tool_calls)} collected tool calls")
+                            print(f"DEBUG: Current tool calls: {current_tool_calls}")
+                            
+                            if not current_tool_calls:
+                                print(f"DEBUG: No tool calls were collected during streaming")
+                                break
+                            
+                            # Handle the actual tool calls from the LLM
+                            print(f"DEBUG: About to execute tool calls")
+                            
+                            # Execute the tool calls directly
+                            print(f"DEBUG: Executing {len(current_tool_calls)} tool calls")
+                            
+                            # Store tool results for second API call
+                            tool_results_cache = {}
+                            
+                            for tool_call_data in current_tool_calls.values():
+                                function_name = tool_call_data['function']['name']
+                                function_args_str = tool_call_data['function']['arguments']
+                                tool_call_id = tool_call_data['id']
+                                
+                                print(f"DEBUG: Executing {function_name} with args: {function_args_str}")
+                                
+                                try:
+                                    # Parse arguments
+                                    function_args = json.loads(function_args_str)
+                                    
+                                    # Find and execute the tool
+                                    tool_executed = False
+                                    for tool in available_tools:
+                                        if hasattr(tool, function_name):
+                                            method = getattr(tool, function_name)
+                                            if callable(method):
+                                                result = method(**function_args)
+                                                print(f"DEBUG: Tool {function_name} executed successfully")
+                                                
+                                                # Store result for second API call
+                                                tool_results_cache[function_name] = result
+                                                
+                                                # Yield the result
+                                                yield {
+                                                    "type": "response_chunk",
+                                                    "content": f"\n[Tool Result: {function_name}]\n{result[:200]}{'...' if len(result) > 200 else ''}",
+                                                    "complete": False
+                                                }
+                                                
+                                                tool_executed = True
+                                                break
+                                    
+                                    if not tool_executed:
+                                        print(f"DEBUG: Tool {function_name} not found")
+                                        yield {
+                                            "type": "response_chunk",
+                                            "content": f"\n[Error: Tool {function_name} not found]",
+                                            "complete": False
+                                        }
+                                
+                                except json.JSONDecodeError as e:
+                                    print(f"DEBUG: JSON decode error for {function_name}: {e}")
+                                    yield {
+                                        "type": "response_chunk",
+                                        "content": f"\n[Error: Invalid arguments for {function_name}]",
+                                        "complete": False
+                                    }
+                                except Exception as e:
+                                    print(f"DEBUG: Error executing {function_name}: {e}")
+                                    yield {
+                                        "type": "response_chunk",
+                                        "content": f"\n[Error executing {function_name}: {str(e)}]",
+                                        "complete": False
+                                    }
+                            
+                            print(f"DEBUG: Finished executing tool calls")
+                            print(f"DEBUG: EXITING tool_calls branch")
+                            
+                            # After tool execution, make a second API call with tool results
+                            print(f"DEBUG: Making second API call with tool results")
+                            
+                            # Prepare tool results for the second call using cached results
+                            tool_results_messages = []
+                            
+                            for tool_call_data in current_tool_calls.values():
+                                function_name = tool_call_data['function']['name']
+                                tool_call_id = tool_call_data['id']
+                                
+                                # Use cached result from first execution
+                                if function_name in tool_results_cache:
+                                    tool_result = tool_results_cache[function_name]
+                                    tool_results_messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "content": tool_result
+                                    })
+                            
+                            # Make second API call with tool results
+                            if tool_results_messages:
+                                print(f"DEBUG: Making second API call with {len(tool_results_messages)} tool results")
+                                
+                                # Create the original message with tool_calls
+                                original_tool_calls = []
+                                for tool_call_data in current_tool_calls.values():
+                                    original_tool_calls.append({
+                                        "id": tool_call_data['id'],
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_call_data['function']['name'],
+                                            "arguments": tool_call_data['function']['arguments']
+                                        }
+                                    })
+                                
+                                # Prepare messages for second call with proper structure
+                                second_messages = messages + [
+                                    {
+                                        "role": "assistant",
+                                        "content": None,
+                                        "tool_calls": original_tool_calls
+                                    }
+                                ] + tool_results_messages + [
+                                    {"role": "user", "content": "Please analyze the document content and provide a comprehensive summary and analysis."}
+                                ]
+                                
+                                # Ensure model_params is not None
+                                safe_model_params = model_params or {}
+                                
+                                # Make the second API call
+                                second_response = self.client.chat.completions.create(
+                                    model=self.model,
+                                    messages=second_messages,
+                                    stream=True,
+                                    **safe_model_params
+                                )
+                                
+                                # Stream the final response
+                                for chunk in second_response:
+                                    if chunk.choices and len(chunk.choices) > 0:
+                                        choice = chunk.choices[0]
+                                        delta = choice.delta
+                                        
+                                        if delta.content:
+                                            yield {
+                                                "type": "response_chunk",
+                                                "content": delta.content,
+                                                "complete": False
+                                            }
+                                        
+                                        if choice.finish_reason == "stop":
+                                            yield {
+                                                "type": "response_complete",
+                                                "content": "",
+                                                "complete": True
+                                            }
+                                            break
+                            
+                            break
+                        except Exception as e:
+                            print(f"DEBUG: Exception in tool_calls branch: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            break
                     
         except Exception as e:
             yield {
@@ -510,6 +702,13 @@ class OpenAITool:
                             "status": "error",
                             "execution_time": tool_execution_time
                         }
+                
+                # Execute dynamic tools (file_access, business_logic, etc.) if available
+                for tool in available_tools:
+                    if hasattr(tool, 'get_tool_description'):
+                        # This is a dynamic tool - we need to let the LLM decide which specific method to call
+                        # Skip automatic execution for dynamic tools
+                        continue
                 
                 # Execute learning tools if available
                 learning_search_tool = next((tool for tool in available_tools if hasattr(tool, 'search_learning_context')), None)
@@ -903,6 +1102,10 @@ class OpenAITool:
             Dict containing streaming response data
         """
         
+        print(f"DEBUG: _handle_tool_calls_streaming called with {len(available_tools)} tools")
+        print(f"DEBUG: Message tool calls: {len(message.tool_calls) if message.tool_calls else 0}")
+        print(f"DEBUG: METHOD START - About to process tool calls")
+        
         messages = [
             {
                 "role": "system",
@@ -918,7 +1121,22 @@ class OpenAITool:
         # Execute each tool call
         for tool_call in message.tool_calls:
             function_name = tool_call.function.name
-            function_args = json.loads(tool_call.function.arguments)
+            print(f"DEBUG: Processing tool call: {function_name}")
+            print(f"DEBUG: Arguments string: '{tool_call.function.arguments}'")
+            print(f"DEBUG: Arguments type: {type(tool_call.function.arguments)}")
+            
+            try:
+                function_args = json.loads(tool_call.function.arguments)
+                print(f"DEBUG: Parsed arguments: {function_args}")
+            except json.JSONDecodeError as e:
+                print(f"DEBUG: JSON decode error: {e}")
+                print(f"DEBUG: Raw arguments: {repr(tool_call.function.arguments)}")
+                # Try to handle empty or malformed arguments
+                if not tool_call.function.arguments or tool_call.function.arguments.strip() == "":
+                    function_args = {}
+                else:
+                    # Skip this tool call if we can't parse it
+                    continue
             
             # Find the appropriate tool and execute it
             tool_executed = False

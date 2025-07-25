@@ -986,6 +986,30 @@ Examples:
                             "provider": request.llm_provider,
                             "force_tools": True
                         }
+            
+            # Add file access tools if available and whitelisted
+            if "file_access" in self.executive_tool.available_tools:
+                if request.tools_whitelist is None or "file_access" in request.tools_whitelist:
+                    tools_to_use.append(self.executive_tool.available_tools["file_access"])
+                    if request.cursor_mode:
+                        yield {
+                            "type": "tools_loaded",
+                            "content": "📁 File access tools loaded - ready to read local and Google Drive files",
+                            "provider": request.llm_provider,
+                            "file_access": True
+                        }
+            
+            # Add business logic tools if available and whitelisted
+            if "business_logic" in self.executive_tool.available_tools:
+                if request.tools_whitelist is None or "business_logic" in request.tools_whitelist:
+                    tools_to_use.append(self.executive_tool.available_tools["business_logic"])
+                    if request.cursor_mode:
+                        yield {
+                            "type": "tools_loaded",
+                            "content": "💼 Business logic tools loaded - ready for domain-specific analysis",
+                            "provider": request.llm_provider,
+                            "business_logic": True
+                        }
         
         # Set custom system prompt if provided, otherwise use appropriate default
         if request.system_prompt and request.system_prompt != "general":

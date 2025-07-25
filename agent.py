@@ -28,9 +28,18 @@ agent_logger = logging.getLogger("agent_runtime")
 agent_logger.setLevel(logging.INFO)
 if not agent_logger.handlers:
     handler = logging.StreamHandler()
-    formatter = logging.Formatter('🤖 [AGENT] %(asctime)s - %(message)s', datefmt='%H:%M:%S')
+    formatter = logging.Formatter('🤖 [AGENT] %(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
     handler.setFormatter(formatter)
     agent_logger.addHandler(handler)
+
+# Configure detailed execution logging
+execution_logger = logging.getLogger("agent_execution")
+execution_logger.setLevel(logging.INFO)
+if not execution_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('🔍 [EXEC] %(asctime)s - %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    execution_logger.addHandler(handler)
 
 # Import language detection (shared with Ami)
 try:
@@ -168,6 +177,11 @@ class AgentExecutionResponse:
     metadata: Optional[Dict[str, Any]] = None
 
 
+
+    
+
+
+
 class AgentOrchestrator:
     """Agent orchestration engine - different from Ami's ExecutiveTool"""
     
@@ -226,6 +240,24 @@ class AgentOrchestrator:
             logger.info("Learning tools factory initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize learning tools factory: {e}")
+    
+        # Add file access tools (local and Google Drive)
+        try:
+            from file_access_tool import FileAccessTool
+            file_access = FileAccessTool()
+            tools["file_access"] = file_access
+            logger.info("File access tools (local + Google Drive) initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize file access tools: {e}")
+        
+        # Add business logic tools
+        try:
+            from business_logic_tool import BusinessLogicTool
+            business_logic = BusinessLogicTool()
+            tools["business_logic"] = business_logic
+            logger.info("Business logic tools initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize business logic tools: {e}")
         
         return tools
     
@@ -554,10 +586,22 @@ class AgentOrchestrator:
             Dict containing streaming response data with simplified flow
         """
         start_time = datetime.now()
+        execution_id = f"{request.agent_id}-{start_time.strftime('%H%M%S')}"
+        
+        # Enhanced logging - execution start
+        execution_logger.info(f"[{execution_id}] === AGENT EXECUTION START ===")
+        execution_logger.info(f"[{execution_id}] Agent: {request.agent_id} ({request.agent_type})")
+        execution_logger.info(f"[{execution_id}] Provider: {request.llm_provider}")
+        execution_logger.info(f"[{execution_id}] Model: {request.model or 'default'}")
+        execution_logger.info(f"[{execution_id}] User Request: '{request.user_request[:100]}{'...' if len(request.user_request) > 100 else ''}'")
+        execution_logger.info(f"[{execution_id}] Specialized Domains: {request.specialized_knowledge_domains}")
+        execution_logger.info(f"[{execution_id}] Tools Enabled: {request.enable_tools}")
+        execution_logger.info(f"[{execution_id}] Org ID: {request.org_id}, User ID: {request.user_id}")
         
         try:
             # Validate provider
             if request.llm_provider.lower() not in ["anthropic", "openai"]:
+                execution_logger.error(f"[{execution_id}] VALIDATION FAILED - Unsupported provider: {request.llm_provider}")
                 yield {
                     "type": "error",
                     "content": f"Unsupported LLM provider: {request.llm_provider}",
@@ -567,7 +611,10 @@ class AgentOrchestrator:
                 }
                 return
             
+            execution_logger.info(f"[{execution_id}] VALIDATION PASSED - Provider {request.llm_provider} supported")
+            
             # Simple status - no redundant analysis
+            execution_logger.info(f"[{execution_id}] STREAMING STATUS - Initial processing message")
             yield {
                 "type": "status",
                 "content": f"🤖 {request.agent_id} processing your request...",
@@ -578,17 +625,59 @@ class AgentOrchestrator:
             }
             
             # Convert to tool request with simplified approach
+            execution_logger.info(f"[{execution_id}] TOOL CONVERSION - Converting agent request to tool request")
             tool_request = self._convert_to_tool_request(request)
+            execution_logger.info(f"[{execution_id}] TOOL CONVERSION COMPLETE - Available tools: {list(self.available_tools.keys())}")
+            
+            # Log system prompt (truncated for readability)
+            system_prompt_preview = tool_request.system_prompt[:200] + "..." if len(tool_request.system_prompt) > 200 else tool_request.system_prompt
+            execution_logger.info(f"[{execution_id}] SYSTEM PROMPT: {system_prompt_preview}")
             
             # Execute directly with LLM - let LLM decide tools and handle everything
+            execution_logger.info(f"[{execution_id}] LLM EXECUTION START - Provider: {request.llm_provider}")
+            
+            chunk_count = 0
+            tool_calls_detected = 0
+            response_chunks = 0
+            
             if request.llm_provider.lower() == "anthropic":
                 async for chunk in self.anthropic_executor.execute_stream(tool_request):
+                    chunk_count += 1
+                    
+                    # Log different chunk types
+                    chunk_type = chunk.get("type", "unknown")
+                    if chunk_type == "tool_execution":
+                        tool_calls_detected += 1
+                        tool_name = chunk.get("tool_name", "unknown")
+                        execution_logger.info(f"[{execution_id}] TOOL CALL #{tool_calls_detected} - {tool_name}: {chunk.get('content', '')}")
+                    elif chunk_type == "response_chunk":
+                        response_chunks += 1
+                        if response_chunks <= 5:  # Log first 5 response chunks
+                            execution_logger.info(f"[{execution_id}] RESPONSE CHUNK #{response_chunks}: '{chunk.get('content', '')[:50]}{'...' if len(chunk.get('content', '')) > 50 else ''}'")
+                    elif chunk_type in ["thinking", "analysis", "status"]:
+                        execution_logger.info(f"[{execution_id}] {chunk_type.upper()}: {chunk.get('content', '')[:100]}{'...' if len(chunk.get('content', '')) > 100 else ''}")
+                    
                     # Add agent context to chunks
                     chunk["agent_id"] = request.agent_id
                     chunk["agent_type"] = request.agent_type
                     yield chunk
             else:
                 async for chunk in self.openai_executor.execute_stream(tool_request):
+                    chunk_count += 1
+                    
+                    # Log different chunk types
+                    chunk_type = chunk.get("type", "unknown")
+                    if chunk_type == "tool_execution":
+                        tool_calls_detected += 1
+                        tool_name = chunk.get("tool_name", "unknown")
+                        execution_logger.info(f"[{execution_id}] TOOL CALL #{tool_calls_detected} - {tool_name}: {chunk.get('content', '')}")
+                    elif chunk_type == "response_chunk":
+                        response_chunks += 1
+                        if response_chunks <= 5:  # Log first 5 response chunks
+                            execution_logger.info(f"[{execution_id}] RESPONSE CHUNK #{response_chunks}: '{chunk.get('content', '')[:50]}{'...' if len(chunk.get('content', '')) > 50 else ''}'")
+                    elif chunk_type in ["thinking", "analysis", "status"]:
+                        execution_logger.info(f"[{execution_id}] {chunk_type.upper()}: {chunk.get('content', '')[:100]}{'...' if len(chunk.get('content', '')) > 100 else ''}")
+                    
                     # Add agent context to chunks
                     chunk["agent_id"] = request.agent_id
                     chunk["agent_type"] = request.agent_type
@@ -596,6 +685,14 @@ class AgentOrchestrator:
             
             # Simple completion status
             execution_time = (datetime.now() - start_time).total_seconds()
+            execution_logger.info(f"[{execution_id}] LLM EXECUTION COMPLETE - Processed {chunk_count} chunks")
+            execution_logger.info(f"[{execution_id}] EXECUTION SUMMARY:")
+            execution_logger.info(f"[{execution_id}] - Total chunks: {chunk_count}")
+            execution_logger.info(f"[{execution_id}] - Tool calls: {tool_calls_detected}")
+            execution_logger.info(f"[{execution_id}] - Response chunks: {response_chunks}")
+            execution_logger.info(f"[{execution_id}] - Execution time: {execution_time:.2f}s")
+            execution_logger.info(f"[{execution_id}] === AGENT EXECUTION SUCCESS ===")
+            
             yield {
                 "type": "complete",
                 "content": f"✅ {request.agent_id} completed successfully",
@@ -609,6 +706,13 @@ class AgentOrchestrator:
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             error_msg = f"Agent execution failed: {str(e)}"
+            
+            execution_logger.error(f"[{execution_id}] === AGENT EXECUTION FAILED ===")
+            execution_logger.error(f"[{execution_id}] Error: {error_msg}")
+            execution_logger.error(f"[{execution_id}] Execution time: {execution_time:.2f}s")
+            execution_logger.error(f"[{execution_id}] Exception details: {str(e)}")
+            import traceback
+            execution_logger.error(f"[{execution_id}] Traceback: {traceback.format_exc()}")
             
             yield {
                 "type": "error",
@@ -631,9 +735,31 @@ class AgentOrchestrator:
 
 Your specialization areas: {', '.join(agent_request.specialized_knowledge_domains or ['general'])}
 
-You have access to tools when needed. Use them naturally as part of your reasoning process to provide helpful, accurate responses.
+IMPORTANT: You have access to tools when needed. Use them naturally as part of your reasoning process to provide helpful, accurate responses.
+
+SPECIAL INSTRUCTIONS:
+- PRIORITY: If the user provides a Google Drive link (docs.google.com), ALWAYS use the read_gdrive_link_docx or read_gdrive_link_pdf tool FIRST to read the document content
+- SPECIFICALLY: When you see URLs like "https://docs.google.com/document/d/..." or "https://drive.google.com/file/d/...", use read_gdrive_link_docx or read_gdrive_link_pdf immediately
+- CRITICAL: When calling read_gdrive_link_docx or read_gdrive_link_pdf, you MUST extract the full URL from the user's request and pass it as the drive_link parameter
+- EXAMPLE: If user says "analyse this: https://docs.google.com/document/d/ABC123/edit", call read_gdrive_link_docx with drive_link="https://docs.google.com/document/d/ABC123/edit"
+- FORCE: You MUST provide the drive_link parameter when calling these functions. The parameter cannot be empty.
+- If the user asks for analysis of a document, ALWAYS read the document content before providing any analysis
+- Use the sale_summarize tool for business document analysis when appropriate
+- Respond in English unless the user specifically requests another language
+- DO NOT use search tools when a Google Drive link is provided - read the document directly
 
 Task Focus: {agent_request.task_focus}"""
+        
+        # Check if this is a Google Drive document analysis request
+        is_gdrive_request = 'docs.google.com' in agent_request.user_request.lower() or 'drive.google.com' in agent_request.user_request.lower()
+        
+        # If it's a Google Drive request, whitelist only the relevant tools and force tool usage
+        tools_whitelist = None
+        force_tools = False
+        if is_gdrive_request:
+            tools_whitelist = ['file_access', 'business_logic']
+            force_tools = True  # Force the LLM to use tools
+            execution_logger.info(f"[{agent_request.agent_id}] DETECTED Google Drive request - restricting tools to: {tools_whitelist} and forcing tool usage")
         
         return ToolExecutionRequest(
             llm_provider=agent_request.llm_provider,
@@ -644,8 +770,8 @@ Task Focus: {agent_request.task_focus}"""
             org_id=agent_request.org_id,
             user_id=agent_request.user_id,
             enable_tools=agent_request.enable_tools,
-            force_tools=agent_request.force_tools,
-            tools_whitelist=agent_request.tools_whitelist,
+            force_tools=force_tools,  # Use our force_tools setting for Google Drive requests
+            tools_whitelist=tools_whitelist,  # Use our whitelist for Google Drive requests
             conversation_history=agent_request.conversation_history,
             max_history_messages=agent_request.max_history_messages,
             max_history_tokens=agent_request.max_history_tokens,
@@ -704,9 +830,14 @@ Remember to:
                 logger.info("Enhanced prompt with Vietnamese language guidance")
                 return enhanced_prompt
             
-            # Check for French
+            # Check for French (but be more careful about URLs and technical terms)
             french_matches = sum(1 for pattern in french_patterns if pattern in user_query_lower)
-            if french_matches >= 2:
+            
+            # Don't trigger French mode if the query contains URLs or technical terms
+            has_url = 'http' in user_query_lower or 'docs.google.com' in user_query_lower
+            has_technical_terms = any(term in user_query_lower for term in ['analyse', 'analyze', 'document', 'file', 'link', 'url'])
+            
+            if french_matches >= 2 and not has_url and not has_technical_terms:
                 enhanced_prompt = f"""{base_prompt}
 
 IMPORTANT LANGUAGE INSTRUCTION:
@@ -897,6 +1028,8 @@ async def execute_agent_stream(
     model: Optional[str] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
+    enable_deep_reasoning: bool = True,  # Deep reasoning enabled by default for agents
+    reasoning_depth: str = "standard",
     task_focus: str = "execution",
     specialized_knowledge_domains: Optional[List[str]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None
@@ -913,6 +1046,8 @@ async def execute_agent_stream(
         model: Optional custom model name
         org_id: Organization ID
         user_id: User ID
+        enable_deep_reasoning: Enable deep reasoning (default True for agents)
+        reasoning_depth: Depth of reasoning (standard, deep, comprehensive)
         task_focus: Focus area for task execution
         specialized_knowledge_domains: Agent's specialization areas
         conversation_history: Previous conversation messages
@@ -930,8 +1065,8 @@ async def execute_agent_stream(
         model=model,
         org_id=org_id,
         user_id=user_id,
-        enable_deep_reasoning=False,  # Simplified
-        reasoning_depth="light",      # Simplified
+        enable_deep_reasoning=enable_deep_reasoning,  # Use passed parameter (default True)
+        reasoning_depth=reasoning_depth,              # Use passed parameter (default "standard")
         task_focus=task_focus,
         enable_tools=True,            # Always enable tools
         specialized_knowledge_domains=specialized_knowledge_domains,
