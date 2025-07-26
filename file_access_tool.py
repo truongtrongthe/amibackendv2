@@ -655,7 +655,7 @@ class FileAccessTool:
         except Exception as e:
             return f"Error finding file: {str(e)}"
     
-    def read_gdrive_folder(self, folder_id: str = None, folder_name: str = None, file_types: List[str] = None) -> str:
+    def read_gdrive_folder(self, folder_id: str = None, folder_name: str = None, file_types: List[str] = None, max_chars: int = 50000) -> str:
         """
         Read all supported files from a Google Drive folder
         
@@ -663,6 +663,7 @@ class FileAccessTool:
             folder_id: Google Drive folder ID (optional)
             folder_name: Folder name to search for (optional)
             file_types: List of file types to read (default: ['docx', 'pdf'])
+            max_chars: Maximum characters to return (default: 50000 to avoid token limits)
             
         Returns:
             Combined text content of all supported files in the folder
@@ -736,6 +737,10 @@ class FileAccessTool:
             folder_content.append(f"=== FOLDER CONTENTS ===\n")
             folder_content.append(f"Reading {len(supported_files)} supported files:\n")
             
+            total_chars = 0
+            files_read = 0
+            files_truncated = 0
+            
             for i, file in enumerate(supported_files, 1):
                 file_id = file['id']
                 file_name = file['name']
@@ -751,6 +756,21 @@ class FileAccessTool:
                         
                         content = self.read_gdrive_docx(file_id=file_id)
                         if not content.startswith("Error:"):
+                            files_read += 1
+                            content_length = len(content)
+                            total_chars += content_length
+                            
+                            # Check if we need to truncate this file
+                            if total_chars > max_chars:
+                                # Truncate this file to fit within limits
+                                remaining_chars = max_chars - (total_chars - content_length)
+                                if remaining_chars > 100:  # Only include if we have meaningful content
+                                    content = content[:remaining_chars] + "\n\n[CONTENT TRUNCATED - File too large for complete analysis]"
+                                    files_truncated += 1
+                                else:
+                                    folder_content.append(f"[FILE TOO LARGE - Skipped to avoid token limits]")
+                                    continue
+                            
                             folder_content.append(content)
                         else:
                             folder_content.append(f"Error reading file: {content}")
@@ -760,6 +780,21 @@ class FileAccessTool:
                         
                         content = self.read_gdrive_pdf(file_id=file_id)
                         if not content.startswith("Error:"):
+                            files_read += 1
+                            content_length = len(content)
+                            total_chars += content_length
+                            
+                            # Check if we need to truncate this file
+                            if total_chars > max_chars:
+                                # Truncate this file to fit within limits
+                                remaining_chars = max_chars - (total_chars - content_length)
+                                if remaining_chars > 100:  # Only include if we have meaningful content
+                                    content = content[:remaining_chars] + "\n\n[CONTENT TRUNCATED - File too large for complete analysis]"
+                                    files_truncated += 1
+                                else:
+                                    folder_content.append(f"[FILE TOO LARGE - Skipped to avoid token limits]")
+                                    continue
+                            
                             folder_content.append(content)
                         else:
                             folder_content.append(f"Error reading file: {content}")
@@ -769,6 +804,18 @@ class FileAccessTool:
                 
                 except Exception as e:
                     folder_content.append(f"Error reading {file_name}: {str(e)}")
+            
+            # Add summary information
+            summary = f"\n\n=== FOLDER READING SUMMARY ===\n"
+            summary += f"Files successfully read: {files_read}\n"
+            summary += f"Files truncated due to size: {files_truncated}\n"
+            summary += f"Total characters processed: {total_chars:,}\n"
+            summary += f"Character limit: {max_chars:,}\n"
+            
+            if files_truncated > 0:
+                summary += f"⚠️  Some files were truncated to avoid token limits. Consider reading individual files for complete analysis.\n"
+            
+            folder_content.append(summary)
             
             return "\n".join(folder_content)
             
@@ -974,6 +1021,10 @@ class FileAccessTool:
                                 "description": "List of file types to read (e.g., ['docx', 'pdf'])"
                             },
                             "description": "List of file types to read (default: ['docx', 'pdf'])"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "Maximum characters to return (default: 50000 to avoid token limits)"
                         }
                     }
                 }

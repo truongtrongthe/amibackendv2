@@ -750,6 +750,8 @@ SPECIAL INSTRUCTIONS:
   * "analyze all PDFs in the Sales folder" → use read_gdrive_folder(folder_name="Sales", file_types=["pdf"])
   * "read all files from folder ID 1ABC123..." → use read_gdrive_folder(folder_id="1ABC123...")
 - FOLDER BENEFITS: read_gdrive_folder reads all supported files (DOCX, PDF) and returns combined content for comprehensive analysis
+- TOKEN LIMITS: If folder content is too large, use max_chars parameter to limit content size and avoid token limit errors
+- EXAMPLE: read_gdrive_folder(folder_name="Large Reports", max_chars=30000) for smaller content
 
 - If the user asks for analysis of a document, ALWAYS read the document content before providing any analysis
 - Use the analyze_document or process_with_knowledge tool for business document analysis when appropriate

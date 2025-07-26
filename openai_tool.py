@@ -620,6 +620,53 @@ class OpenAITool:
                             break
                         except Exception as e:
                             print(f"DEBUG: Exception in tool_calls branch: {e}")
+                            
+                            # Handle token limit exceeded errors
+                            if "429" in str(e) and ("tokens per min" in str(e) or "Request too large" in str(e)):
+                                print(f"Token limit exceeded, attempting to reduce content size and retry")
+                                
+                                # Reduce the size of tool results
+                                reduced_messages = [
+                                    {"role": "system", "content": system_prompt or "You are a helpful assistant."},
+                                    {"role": "user", "content": f"Please analyze this content (truncated due to size limits):\n\n{str(tool_results)[:15000]}..."}
+                                ]
+                                
+                                try:
+                                    # Retry with reduced content
+                                    second_response = self.client.chat.completions.create(
+                                        model=self.model,
+                                        messages=reduced_messages,
+                                        stream=True,
+                                        **safe_model_params
+                                    )
+                                    
+                                    # Stream the reduced response
+                                    for chunk in second_response:
+                                        if chunk.choices and len(chunk.choices) > 0:
+                                            choice = chunk.choices[0]
+                                            delta = choice.delta
+                                            
+                                            if delta.content:
+                                                yield {
+                                                    "type": "response_chunk",
+                                                    "content": delta.content,
+                                                    "complete": False
+                                                }
+                                            
+                                            if choice.finish_reason == "stop":
+                                                yield {
+                                                    "type": "response_complete",
+                                                    "content": "",
+                                                    "complete": True
+                                                }
+                                                break
+                                    
+                                    return  # Success with reduced content
+                                    
+                                except Exception as retry_error:
+                                    print(f"Retry with reduced content also failed: {retry_error}")
+                                    # Fall through to original error handling
+                            
                             import traceback
                             traceback.print_exc()
                             break
