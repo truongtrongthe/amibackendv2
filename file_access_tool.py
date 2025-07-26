@@ -339,16 +339,24 @@ class FileAccessTool:
                             row_text.append(cell.text.strip())
                         content.append(" | ".join(row_text))
                 
-                logger.info(f"READ_GDRIVE_DOCX - Successfully read {len(content)} characters from file")
-                return "\n".join(content)
+                content_text = "\n".join(content)
+                logger.info(f"READ_GDRIVE_DOCX - Successfully read {len(content_text)} characters from file")
+                return content_text
                 
             finally:
                 # Clean up temp file
-                os.unlink(temp_file_path)
+                try:
+                    os.unlink(temp_file_path)
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup temp file {temp_file_path}: {cleanup_error}")
             
         except ImportError:
             return "Error: python-docx library not installed. Run: pip install python-docx"
         except Exception as e:
+            logger.error(f"READ_GDRIVE_DOCX - Exception occurred: {str(e)}")
+            logger.error(f"READ_GDRIVE_DOCX - Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"READ_GDRIVE_DOCX - Traceback: {traceback.format_exc()}")
             return f"Error reading Google Drive DOCX file: {str(e)}"
     
     def read_gdrive_pdf(self, file_id: str = None, file_name: str = None, folder_id: str = None) -> str:
@@ -462,6 +470,9 @@ class FileAccessTool:
             
         except Exception as e:
             file_logger.error(f"READ_GDRIVE_LINK_DOCX - Exception: {str(e)}")
+            file_logger.error(f"READ_GDRIVE_LINK_DOCX - Exception type: {type(e).__name__}")
+            import traceback
+            file_logger.error(f"READ_GDRIVE_LINK_DOCX - Traceback: {traceback.format_exc()}")
             return f"Error reading Google Drive DOCX from link: {str(e)}"
     
     def read_gdrive_link_pdf(self, drive_link: str) -> str:
