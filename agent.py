@@ -743,6 +743,14 @@ SPECIAL INSTRUCTIONS:
 - CRITICAL: When calling read_gdrive_link_docx or read_gdrive_link_pdf, you MUST extract the full URL from the user's request and pass it as the drive_link parameter
 - EXAMPLE: If user says "analyse this: https://docs.google.com/document/d/ABC123/edit", call read_gdrive_link_docx with drive_link="https://docs.google.com/document/d/ABC123/edit"
 - FORCE: You MUST provide the drive_link parameter when calling these functions. The parameter cannot be empty.
+
+- FOLDER READING: If the user asks to read or analyze an entire Google Drive folder, use the read_gdrive_folder tool
+- FOLDER EXAMPLES: 
+  * "read all documents in the Reports folder" → use read_gdrive_folder(folder_name="Reports")
+  * "analyze all PDFs in the Sales folder" → use read_gdrive_folder(folder_name="Sales", file_types=["pdf"])
+  * "read all files from folder ID 1ABC123..." → use read_gdrive_folder(folder_id="1ABC123...")
+- FOLDER BENEFITS: read_gdrive_folder reads all supported files (DOCX, PDF) and returns combined content for comprehensive analysis
+
 - If the user asks for analysis of a document, ALWAYS read the document content before providing any analysis
 - Use the analyze_document or process_with_knowledge tool for business document analysis when appropriate
 - CRITICAL: When calling process_with_knowledge, you MUST include user_id="{agent_request.user_id}" and org_id="{agent_request.org_id}" parameters
@@ -753,7 +761,14 @@ SPECIAL INSTRUCTIONS:
 Task Focus: {agent_request.task_focus}"""
         
         # Check if this is a Google Drive document analysis request
-        is_gdrive_request = 'docs.google.com' in agent_request.user_request.lower() or 'drive.google.com' in agent_request.user_request.lower()
+        user_request_lower = agent_request.user_request.lower()
+        is_gdrive_request = (
+            'docs.google.com' in user_request_lower or 
+            'drive.google.com' in user_request_lower or
+            'google drive' in user_request_lower or
+            'gdrive' in user_request_lower or
+            any(keyword in user_request_lower for keyword in ['folder', 'folders', 'directory', 'documents in', 'files in'])
+        )
         
         # If it's a Google Drive request, whitelist only the relevant tools and force tool usage
         tools_whitelist = None

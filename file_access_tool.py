@@ -644,6 +644,126 @@ class FileAccessTool:
         except Exception as e:
             return f"Error finding file: {str(e)}"
     
+    def read_gdrive_folder(self, folder_id: str = None, folder_name: str = None, file_types: List[str] = None) -> str:
+        """
+        Read all supported files from a Google Drive folder
+        
+        Args:
+            folder_id: Google Drive folder ID (optional)
+            folder_name: Folder name to search for (optional)
+            file_types: List of file types to read (default: ['docx', 'pdf'])
+            
+        Returns:
+            Combined text content of all supported files in the folder
+        """
+        if not self.google_drive_service:
+            return "Error: Google Drive service not initialized. Check credentials."
+        
+        # Default file types to read
+        if file_types is None:
+            file_types = ['docx', 'pdf']
+        
+        try:
+            # If folder_name provided, find the folder ID first
+            if folder_name and not folder_id:
+                folder_query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+                folder_results = self.google_drive_service.files().list(
+                    q=folder_query,
+                    fields="files(id, name)"
+                ).execute()
+                
+                folders = folder_results.get('files', [])
+                if not folders:
+                    return f"Error: Folder '{folder_name}' not found in Google Drive"
+                
+                folder_id = folders[0]['id']
+                logger.info(f"Found folder '{folder_name}' with ID: {folder_id}")
+            
+            if not folder_id:
+                return "Error: Either folder_id or folder_name must be provided"
+            
+            # List all files in the folder
+            query = f"'{folder_id}' in parents and trashed=false"
+            results = self.google_drive_service.files().list(
+                q=query,
+                fields="files(id, name, mimeType)",
+                orderBy="name"
+            ).execute()
+            
+            files = results.get('files', [])
+            
+            if not files:
+                return "No files found in Google Drive folder"
+            
+            # Filter files by supported types
+            supported_files = []
+            for file in files:
+                mime_type = file.get('mimeType', '')
+                file_name = file.get('name', '').lower()
+                
+                # Check if file type is supported
+                is_supported = False
+                if 'docx' in file_types:
+                    if (mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or
+                        mime_type == 'application/vnd.google-apps.document' or
+                        file_name.endswith('.docx')):
+                        is_supported = True
+                
+                if 'pdf' in file_types:
+                    if (mime_type == 'application/pdf' or
+                        file_name.endswith('.pdf')):
+                        is_supported = True
+                
+                if is_supported:
+                    supported_files.append(file)
+            
+            if not supported_files:
+                return f"No supported files found in folder. Supported types: {', '.join(file_types)}"
+            
+            # Read content from all supported files
+            folder_content = []
+            folder_content.append(f"=== FOLDER CONTENTS ===\n")
+            folder_content.append(f"Reading {len(supported_files)} supported files:\n")
+            
+            for i, file in enumerate(supported_files, 1):
+                file_id = file['id']
+                file_name = file['name']
+                mime_type = file.get('mimeType', '')
+                
+                folder_content.append(f"\n--- FILE {i}: {file_name} ---")
+                
+                try:
+                    # Determine file type and read accordingly
+                    if (mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or
+                        mime_type == 'application/vnd.google-apps.document' or
+                        file_name.lower().endswith('.docx')):
+                        
+                        content = self.read_gdrive_docx(file_id=file_id)
+                        if not content.startswith("Error:"):
+                            folder_content.append(content)
+                        else:
+                            folder_content.append(f"Error reading file: {content}")
+                    
+                    elif (mime_type == 'application/pdf' or
+                          file_name.lower().endswith('.pdf')):
+                        
+                        content = self.read_gdrive_pdf(file_id=file_id)
+                        if not content.startswith("Error:"):
+                            folder_content.append(content)
+                        else:
+                            folder_content.append(f"Error reading file: {content}")
+                    
+                    else:
+                        folder_content.append(f"Unsupported file type: {mime_type}")
+                
+                except Exception as e:
+                    folder_content.append(f"Error reading {file_name}: {str(e)}")
+            
+            return "\n".join(folder_content)
+            
+        except Exception as e:
+            return f"Error reading Google Drive folder: {str(e)}"
+    
     # UTILITY METHODS
     
     def _format_file_size(self, size_bytes: int) -> str:
@@ -820,6 +940,31 @@ class FileAccessTool:
                         }
                     },
                     "required": ["file_name"]
+                }
+            },
+            {
+                "name": "read_gdrive_folder",
+                "description": "Read all supported files (DOCX, PDF) from a Google Drive folder. Use this when you need to analyze multiple files from a folder.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "folder_id": {
+                            "type": "string",
+                            "description": "Google Drive folder ID (optional)"
+                        },
+                        "folder_name": {
+                            "type": "string",
+                            "description": "Folder name to search for (optional)"
+                        },
+                        "file_types": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "description": "List of file types to read (e.g., ['docx', 'pdf'])"
+                            },
+                            "description": "List of file types to read (default: ['docx', 'pdf'])"
+                        }
+                    }
                 }
             }
         ] 
