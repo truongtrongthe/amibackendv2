@@ -752,6 +752,8 @@ SPECIAL INSTRUCTIONS:
 - FOLDER BENEFITS: read_gdrive_folder reads all supported files (DOCX, PDF) and returns combined content for comprehensive analysis
 - TOKEN LIMITS: If folder content is too large, use max_chars parameter to limit content size and avoid token limit errors
 - EXAMPLE: read_gdrive_folder(folder_name="Large Reports", max_chars=30000) for smaller content
+- PERMISSION ISSUES: If you get "File not found" or "Access denied" errors, use check_file_access tool to diagnose the issue
+- EXAMPLE: check_file_access(drive_link="https://docs.google.com/document/d/ABC123/edit") to check file permissions
 
 - If the user asks for analysis of a document, ALWAYS read the document content before providing any analysis
 - Use the analyze_document or process_with_knowledge tool for business document analysis when appropriate

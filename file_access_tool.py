@@ -355,6 +355,15 @@ class FileAccessTool:
         except Exception as e:
             logger.error(f"READ_GDRIVE_DOCX - Exception occurred: {str(e)}")
             logger.error(f"READ_GDRIVE_DOCX - Exception type: {type(e).__name__}")
+            
+            # Handle specific Google Drive errors
+            if "404" in str(e) and "File not found" in str(e):
+                return f"Error: File not found or access denied. Please ensure the file is shared with the service account. File ID: {file_id}"
+            elif "403" in str(e) and "Forbidden" in str(e):
+                return f"Error: Access denied. Please check file sharing permissions for file ID: {file_id}"
+            elif "401" in str(e) and "Unauthorized" in str(e):
+                return f"Error: Authentication failed. Please check Google Drive credentials."
+            
             import traceback
             logger.error(f"READ_GDRIVE_DOCX - Traceback: {traceback.format_exc()}")
             return f"Error reading Google Drive DOCX file: {str(e)}"
@@ -822,6 +831,70 @@ class FileAccessTool:
         except Exception as e:
             return f"Error reading Google Drive folder: {str(e)}"
     
+    def check_file_access(self, file_id: str = None, drive_link: str = None) -> str:
+        """
+        Check if a file is accessible and get basic information
+        
+        Args:
+            file_id: Google Drive file ID (optional)
+            drive_link: Google Drive sharing link (optional)
+            
+        Returns:
+            File access status and information
+        """
+        if not self.google_drive_service:
+            return "Error: Google Drive service not initialized. Check credentials."
+        
+        try:
+            # Extract file ID from link if provided
+            if drive_link and not file_id:
+                file_id = self._extract_file_id_from_link(drive_link)
+                if not file_id:
+                    return f"Error: Could not extract file ID from link: {drive_link}"
+            
+            if not file_id:
+                return "Error: Either file_id or drive_link must be provided"
+            
+            # Try to get file metadata
+            try:
+                file_metadata = self.google_drive_service.files().get(
+                    fileId=file_id,
+                    fields="id,name,mimeType,size,owners,permissions"
+                ).execute()
+                
+                # File is accessible
+                info_parts = []
+                info_parts.append(f"✅ File Access: SUCCESS")
+                info_parts.append(f"📄 File Information:")
+                info_parts.append(f"   Name: {file_metadata.get('name', 'Unknown')}")
+                info_parts.append(f"   ID: {file_metadata.get('id', 'Unknown')}")
+                info_parts.append(f"   Type: {file_metadata.get('mimeType', 'Unknown')}")
+                
+                if 'size' in file_metadata:
+                    size = int(file_metadata['size'])
+                    info_parts.append(f"   Size: {self._format_file_size(size)}")
+                
+                if 'owners' in file_metadata and file_metadata['owners']:
+                    owner = file_metadata['owners'][0]
+                    info_parts.append(f"   Owner: {owner.get('displayName', 'Unknown')}")
+                
+                info_parts.append(f"   Status: File is accessible and ready to read")
+                
+                return "\n".join(info_parts)
+                
+            except Exception as e:
+                if "404" in str(e) and "File not found" in str(e):
+                    return f"❌ File Access: DENIED\n\nError: File not found or access denied.\nFile ID: {file_id}\n\nTo fix this:\n1. Ensure the file exists\n2. Share the file with the service account\n3. Check file permissions"
+                elif "403" in str(e) and "Forbidden" in str(e):
+                    return f"❌ File Access: DENIED\n\nError: Access forbidden.\nFile ID: {file_id}\n\nTo fix this:\n1. Share the file with the service account\n2. Grant 'Viewer' permissions\n3. Check if file is in shared drive with proper access"
+                elif "401" in str(e) and "Unauthorized" in str(e):
+                    return f"❌ File Access: DENIED\n\nError: Authentication failed.\n\nTo fix this:\n1. Check Google Drive credentials\n2. Verify service account setup\n3. Ensure API is enabled"
+                else:
+                    return f"❌ File Access: ERROR\n\nUnexpected error: {str(e)}\nFile ID: {file_id}"
+                    
+        except Exception as e:
+            return f"Error checking file access: {str(e)}"
+    
     # UTILITY METHODS
     
     def _format_file_size(self, size_bytes: int) -> str:
@@ -1025,6 +1098,23 @@ class FileAccessTool:
                         "max_chars": {
                             "type": "integer",
                             "description": "Maximum characters to return (default: 50000 to avoid token limits)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "check_file_access",
+                "description": "Check if a Google Drive file is accessible and get file information. Use this to diagnose permission issues before reading files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {
+                            "type": "string",
+                            "description": "Google Drive file ID (optional)"
+                        },
+                        "drive_link": {
+                            "type": "string",
+                            "description": "Google Drive sharing link (optional)"
                         }
                     }
                 }
