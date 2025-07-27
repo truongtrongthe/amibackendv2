@@ -46,3 +46,10 @@ anthropic
 # Google Drive content extraction dependencies
 PyPDF2==3.0.1
 python-docx==0.8.11
+
+# LlamaIndex for advanced spreadsheet processing
+llama-index==0.12.52
+llama-index-readers-file==0.4.11
+llama-index-experimental==0.5.6
+pandas>=2.0.0
+openpyxl>=3.1.0
