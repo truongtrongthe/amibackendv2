@@ -33,7 +33,7 @@ from braingraph import (
 )
 from supabase import create_client, Client
 from utilities import logger
-from enrich_profile import ProfileEnricher
+
 
 # Load inbox mapping for Chatwoot
 INBOX_MAPPING = {}
@@ -114,27 +114,30 @@ async def pilot(request: PilotRequest, background_tasks: BackgroundTasks):
         """Process the stream and return all items."""
         try:
             # Import directly here to ensure fresh imports
-            from ami import convo_stream
+            # from ami import convo_stream  # Archived
             
-            # Get the stream
-            stream = convo_stream(
-                user_input=request.user_input, 
-                user_id=request.user_id, 
-                thread_id=request.thread_id, 
-                mode="pilot"
-            )
+            # Get the stream - Archived functionality
+            # stream = convo_stream(
+            #     user_input=request.user_input, 
+            #     user_id=request.user_id, 
+            #     thread_id=request.thread_id, 
+            #     mode="pilot"
+            # )
             
-            # Process and yield each result
-            async for item in stream:
-                if isinstance(item, str) and item.startswith("data: "):
-                    # Already formatted for SSE
-                    yield item + "\n"
-                elif isinstance(item, dict):
-                    # Format JSON for SSE
-                    yield f"data: {json.dumps(item)}\n\n"
-                else:
-                    # For string responses without SSE format
-                    yield f"data: {json.dumps({'message': item})}\n\n"
+            # Process and yield each result - Archived functionality
+            # async for item in stream:
+            #     if isinstance(item, str) and item.startswith("data: "):
+            #         # Already formatted for SSE
+            #         yield item + "\n"
+            #     elif isinstance(item, dict):
+            #         # Format JSON for SSE
+            #         yield f"data: {json.dumps(item)}\n\n"
+            #     else:
+            #         # For string responses without SSE format
+            #         yield f"data: {json.dumps({'message': item})}\n\n"
+            
+            # Return archived message
+            yield f"data: {json.dumps({'message': 'This endpoint has been archived. Please use the new tool endpoints instead.'})}\n\n"
                     
         except Exception as e:
             error_msg = f"Error processing stream: {str(e)}"

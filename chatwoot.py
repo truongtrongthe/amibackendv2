@@ -523,8 +523,8 @@ def ai_process_function(request_queue, response_queue):
         response_queue: Queue to send responses back to the main process
     """
     try:
-        # Import here to ensure clean environment in subprocess
-        from ami import convo_stream
+        # Import here to ensure clean environment in subprocess - Archived
+        # from ami import convo_stream
         import json
         import time
         import os
@@ -581,21 +581,25 @@ def ai_process_function(request_queue, response_queue):
                     def process_with_timeout():
                         try:
                             chunks = []
-                            for chunk in convo_stream(
-                                user_input=message,
-                                user_id=user_id,
-                                thread_id=thread_id,
-                                graph_version_id=graph_version_id,
-                                mode="mc"
-                            ):
-                                # Process the chunk
-                                if chunk.startswith('data: '):
-                                    try:
-                                        data_json = json.loads(chunk[6:])
-                                        if 'message' in data_json:
-                                            chunks.append(data_json['message'])
-                                    except Exception as e:
-                                        print(f"Error processing chunk: {str(e)}")
+                            # for chunk in convo_stream(  # Archived
+                            #     user_input=message,
+                            #     user_id=user_id,
+                            #     thread_id=thread_id,
+                            #     graph_version_id=graph_version_id,
+                            #     mode="mc"
+                            # ):
+                            #     # Process the chunk
+                            #     if chunk.startswith('data: '):
+                            #         try:
+                            #             data_json = json.loads(chunk[6:])
+                            #             if 'message' in data_json:
+                            #                 chunks.append(data_json['message'])
+                            #         except Exception as e:
+                            #             print(f"Error processing chunk: {str(e)}")
+                            # result_queue.put(chunks)
+                            
+                            # Return archived message
+                            chunks.append("This functionality has been archived. Please use the new tool endpoints instead.")
                             result_queue.put(chunks)
                         except Exception as e:
                             result_queue.put(f"Error: {str(e)}")
@@ -811,37 +815,40 @@ async def generate_ai_response(message_text: str, user_id: str = None, thread_id
 
 # Add a new helper function for AI response processing
 def process_ai_response(message, user_id, thread_id, graph_version_id):
-    """Helper function to process AI response in a separate thread"""
-    from ami import convo_stream
+    """Helper function to process AI response in a separate thread - Archived"""
+    # from ami import convo_stream  # Archived
     import json
     import asyncio
     
     response_chunks = []
-    # This will be run in a thread, so we need to run the async generator in a new event loop
-    async def process_stream():
-        async for chunk in convo_stream(
-            user_input=message,
-            user_id=user_id,
-            thread_id=thread_id,
-            graph_version_id=graph_version_id,
-            mode="mc"
-        ):
-            # Process the chunk
-            if chunk.startswith('data: '):
-                try:
-                    data_json = json.loads(chunk[6:])
-                    if 'message' in data_json:
-                        message_content = data_json['message']
-                        response_chunks.append(message_content)
-                        print(f"Received chunk: {message_content[:50]}...")
-                except json.JSONDecodeError:
-                    print(f"Error parsing chunk: {chunk}")
+    # This will be run in a thread, so we need to run the async generator in a new event loop - Archived
+    # async def process_stream():
+    #     async for chunk in convo_stream(
+    #         user_input=message,
+    #         user_id=user_id,
+    #         thread_id=thread_id,
+    #         graph_version_id=graph_version_id,
+    #         mode="mc"
+    #     ):
+    #         # Process the chunk
+    #         if chunk.startswith('data: '):
+    #             try:
+    #                 data_json = json.loads(chunk[6:])
+    #                 if 'message' in data_json:
+    #                         message_content = data_json['message']
+    #                         response_chunks.append(message_content)
+    #                         print(f"Received chunk: {message_content[:50]}...")
+    #             except json.JSONDecodeError:
+    #                 print(f"Error parsing chunk: {chunk}")
     
-    # Create a new event loop and run the coroutine
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(process_stream())
-    loop.close()
+    # Create a new event loop and run the coroutine - Archived
+    # loop = asyncio.new_event_loop()
+    # asyncio.set_event_loop(loop)
+    # loop.run_until_complete(process_stream())
+    # loop.close()
+    
+    # Return archived message
+    response_chunks.append("This functionality has been archived. Please use the new tool endpoints instead.")
     
     return response_chunks
 

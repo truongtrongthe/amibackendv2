@@ -193,24 +193,27 @@ def pilot():
         """Generate streaming response items synchronously."""
         try:
             # Import directly here to ensure fresh imports
-            from ami import convo_stream
+            # from ami import convo_stream  # Archived
             
             # Define the async process function
             async def process_stream():
                 """Process the stream and return all items."""
                 outputs = []
                 try:
-                    # Get the stream
-                    stream = convo_stream(
-                        user_input=user_input, 
-                        user_id=user_id, 
-                        thread_id=thread_id, 
-                        mode="pilot"
-                    )
+                    # Get the stream - Archived functionality
+                    # stream = convo_stream(
+                    #     user_input=user_input, 
+                    #     user_id=user_id, 
+                    #     thread_id=thread_id, 
+                    #     mode="pilot"
+                    # )
                     
-                    # Process all the output
-                    async for item in stream:
-                        outputs.append(item)
+                    # Process all the output - Archived functionality
+                    # async for item in stream:
+                    #     outputs.append(item)
+                    
+                    # Return archived message
+                    outputs.append(f"data: {json.dumps({'message': 'This endpoint has been archived. Please use the new tool endpoints instead.'})}\n\n")
                 except Exception as e:
                     error_msg = f"Error processing stream: {str(e)}"
                     logger.error(error_msg)
