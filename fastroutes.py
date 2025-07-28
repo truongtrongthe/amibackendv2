@@ -2,6 +2,7 @@
 
 # Then other imports
 from flask import Flask, Response, request, jsonify, g, copy_current_request_context, current_app, Blueprint
+from flask_cors import CORS
 import json
 from uuid import UUID, uuid4
 from datetime import datetime
@@ -23,7 +24,7 @@ recent_requests = deque(maxlen=1000)
 from database import get_all_labels, get_raw_data_by_label, clean_text
 #from docuhandler import process_document,summarize_document
 
-from braindb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
+from orgdb import get_brains,get_brain_details,update_brain,create_brain,get_organization, create_organization, update_organization
 from contactconvo import ConversationManager
 from chatwoot import handle_message_created, handle_message_updated, handle_conversation_created
 from braingraph import (
@@ -34,7 +35,7 @@ from braingraph import (
 from supabase import create_client, Client
 import os
 from utilities import logger
-from enrich_profile import ProfileEnricher
+
 
 # Add a dictionary to store locks for each thread_id
 thread_locks = {}
@@ -80,9 +81,8 @@ import json
 # Simple CORS configuration that was working before
 CORS(api_bp, resources={r"/*": {"origins": "*"}})  # Enable CORS for all routes, all origins
 
-cm = ContactManager()
 convo_mgr = ConversationManager()
-contact_analyzer = ContactAnalyzer()
+
 
 
 def handle_options():
@@ -336,6 +336,12 @@ def get_org_detail(orgid):
 import os
 VERIFY_TOKEN = os.getenv("CALLBACK_V_TOKEN")
 
+def verify_webhook_token(token, org_id=None):
+    """Verify Facebook webhook token"""
+    if not token:
+        return False
+    return token == VERIFY_TOKEN
+
 @api_bp.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -475,6 +481,8 @@ def chatwoot_webhook():
         logger.error(f"→ STACK TRACE: {trace}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@api_bp.route('/create-brain-graph', methods=['POST', 'OPTIONS'])
+def create_brain_graph_endpoint():
     if request.method == 'OPTIONS':
         return handle_options()
     

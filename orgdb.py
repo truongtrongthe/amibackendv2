@@ -41,6 +41,23 @@ class Brain:
         self.summary = summary
         self.created_date = created_date
 
+class Agent:
+    def __init__(self, id: str, agent_id: int, org_id: str, name: str, description: Optional[str],
+                 system_prompt: dict, tools_list: list, knowledge_list: list, status: str,
+                 created_by: str, created_date: datetime, updated_date: datetime):
+        self.id = id  # UUID
+        self.agent_id = agent_id  # INT
+        self.org_id = org_id  # UUID
+        self.name = name
+        self.description = description
+        self.system_prompt = system_prompt  # JSONB field
+        self.tools_list = tools_list  # JSONB field
+        self.knowledge_list = knowledge_list  # JSONB field
+        self.status = status  # 'active', 'deactive', 'delete'
+        self.created_by = created_by  # User ID
+        self.created_date = created_date
+        self.updated_date = updated_date
+
 def create_organization(name: str, description: Optional[str] = None, 
                         email: Optional[str] = None, phone: Optional[str] = None, 
                         address: Optional[str] = None) -> Organization:
@@ -602,4 +619,287 @@ def get_organization_members(org_id: str) -> List[Dict]:
         return members
     except Exception as e:
         logger.error(f"Error getting organization members: {str(e)}")
+        return []
+
+# Agent CRUD Functions
+
+def create_agent(org_id: str, created_by: str, name: str, description: Optional[str] = None,
+                 system_prompt: dict = None, tools_list: list = None, knowledge_list: list = None) -> Agent:
+    """
+    Create a new agent for an organization
+    
+    Args:
+        org_id: Organization UUID
+        created_by: User ID who created the agent
+        name: Agent name
+        description: Optional description
+        system_prompt: JSON object for system prompt
+        tools_list: List of tool names/IDs
+        knowledge_list: List of knowledge base names/IDs
+    
+    Returns:
+        Agent object
+    """
+    try:
+        # Validate organization exists
+        org = get_organization(org_id)
+        if not org:
+            raise ValueError(f"Organization with id {org_id} does not exist")
+        
+        data = {
+            "org_id": org_id,
+            "created_by": created_by,
+            "name": name,
+            "description": description,
+            "system_prompt": system_prompt or {},
+            "tools_list": tools_list or [],
+            "knowledge_list": knowledge_list or [],
+            "status": "active",
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat()
+        }
+        
+        response = supabase.table("org_agents").insert(data).execute()
+        
+        if response.data:
+            agent_data = response.data[0]
+            return Agent(
+                id=agent_data["id"],
+                agent_id=agent_data["agent_id"],
+                org_id=agent_data["org_id"],
+                name=agent_data["name"],
+                description=agent_data.get("description"),
+                system_prompt=agent_data.get("system_prompt", {}),
+                tools_list=agent_data.get("tools_list", []),
+                knowledge_list=agent_data.get("knowledge_list", []),
+                status=agent_data["status"],
+                created_by=agent_data["created_by"],
+                created_date=datetime.fromisoformat(agent_data["created_at"].replace("Z", "+00:00")),
+                updated_date=datetime.fromisoformat(agent_data["updated_at"].replace("Z", "+00:00"))
+            )
+        raise Exception("Failed to create agent")
+        
+    except Exception as e:
+        logger.error(f"Error creating agent: {str(e)}")
+        raise
+
+def get_agents(org_id: str, status: str = "active") -> List[Agent]:
+    """
+    Get all agents for an organization with optional status filter
+    
+    Args:
+        org_id: Organization UUID
+        status: Status filter ('active', 'deactive', 'delete', or None for all)
+    
+    Returns:
+        List of Agent objects
+    """
+    try:
+        # Validate org_id format
+        try:
+            UUID(org_id)
+        except ValueError:
+            logger.error(f"Invalid org_id format: {org_id}")
+            raise ValueError("Invalid org_id format - must be a valid UUID")
+        
+        query = supabase.table("org_agents").select("*").eq("org_id", org_id)
+        
+        if status:
+            query = query.eq("status", status)
+        
+        response = query.execute()
+        
+        agents = []
+        if response.data:
+            for agent_data in response.data:
+                try:
+                    agents.append(Agent(
+                        id=agent_data["id"],
+                        agent_id=agent_data["agent_id"],
+                        org_id=agent_data["org_id"],
+                        name=agent_data["name"],
+                        description=agent_data.get("description"),
+                        system_prompt=agent_data.get("system_prompt", {}),
+                        tools_list=agent_data.get("tools_list", []),
+                        knowledge_list=agent_data.get("knowledge_list", []),
+                        status=agent_data["status"],
+                        created_by=agent_data["created_by"],
+                        created_date=datetime.fromisoformat(agent_data["created_at"].replace("Z", "+00:00")),
+                        updated_date=datetime.fromisoformat(agent_data["updated_at"].replace("Z", "+00:00"))
+                    ))
+                except Exception as e:
+                    logger.error(f"Error processing agent data: {e}")
+                    continue
+        
+        logger.info(f"Successfully fetched {len(agents)} agents for org_id: {org_id}")
+        return agents
+        
+    except Exception as e:
+        logger.error(f"Error in get_agents: {str(e)}")
+        raise
+
+def get_agent(agent_id: str) -> Optional[Agent]:
+    """
+    Get a specific agent by ID
+    
+    Args:
+        agent_id: Agent UUID
+    
+    Returns:
+        Agent object if found, None otherwise
+    """
+    try:
+        response = supabase.table("org_agents").select("*").eq("id", agent_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            agent_data = response.data[0]
+            return Agent(
+                id=agent_data["id"],
+                agent_id=agent_data["agent_id"],
+                org_id=agent_data["org_id"],
+                name=agent_data["name"],
+                description=agent_data.get("description"),
+                system_prompt=agent_data.get("system_prompt", {}),
+                tools_list=agent_data.get("tools_list", []),
+                knowledge_list=agent_data.get("knowledge_list", []),
+                status=agent_data["status"],
+                created_by=agent_data["created_by"],
+                created_date=datetime.fromisoformat(agent_data["created_at"].replace("Z", "+00:00")),
+                updated_date=datetime.fromisoformat(agent_data["updated_at"].replace("Z", "+00:00"))
+            )
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting agent: {str(e)}")
+        return None
+
+def update_agent(agent_id: str, name: Optional[str] = None, description: Optional[str] = None,
+                 system_prompt: Optional[dict] = None, tools_list: Optional[list] = None,
+                 knowledge_list: Optional[list] = None, status: Optional[str] = None) -> Optional[Agent]:
+    """
+    Update an agent's information
+    
+    Args:
+        agent_id: Agent UUID
+        name: New name
+        description: New description
+        system_prompt: New system prompt
+        tools_list: New tools list
+        knowledge_list: New knowledge list
+        status: New status
+    
+    Returns:
+        Updated Agent object if successful, None otherwise
+    """
+    try:
+        update_data = {}
+        
+        if name is not None:
+            update_data["name"] = name
+        if description is not None:
+            update_data["description"] = description
+        if system_prompt is not None:
+            update_data["system_prompt"] = system_prompt
+        if tools_list is not None:
+            update_data["tools_list"] = tools_list
+        if knowledge_list is not None:
+            update_data["knowledge_list"] = knowledge_list
+        if status is not None:
+            if status not in ["active", "deactive", "delete"]:
+                raise ValueError("Status must be 'active', 'deactive', or 'delete'")
+            update_data["status"] = status
+        
+        if not update_data:
+            raise ValueError("No fields to update")
+        
+        update_data["updated_at"] = datetime.now(UTC).isoformat()
+        
+        response = supabase.table("org_agents").update(update_data).eq("id", agent_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            agent_data = response.data[0]
+            return Agent(
+                id=agent_data["id"],
+                agent_id=agent_data["agent_id"],
+                org_id=agent_data["org_id"],
+                name=agent_data["name"],
+                description=agent_data.get("description"),
+                system_prompt=agent_data.get("system_prompt", {}),
+                tools_list=agent_data.get("tools_list", []),
+                knowledge_list=agent_data.get("knowledge_list", []),
+                status=agent_data["status"],
+                created_by=agent_data["created_by"],
+                created_date=datetime.fromisoformat(agent_data["created_at"].replace("Z", "+00:00")),
+                updated_date=datetime.fromisoformat(agent_data["updated_at"].replace("Z", "+00:00"))
+            )
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error updating agent: {str(e)}")
+        raise
+
+def delete_agent(agent_id: str) -> bool:
+    """
+    Soft delete an agent by setting status to 'delete'
+    
+    Args:
+        agent_id: Agent UUID
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        response = supabase.table("org_agents").update({
+            "status": "delete",
+            "updated_at": datetime.now(UTC).isoformat()
+        }).eq("id", agent_id).execute()
+        
+        return bool(response.data)
+        
+    except Exception as e:
+        logger.error(f"Error deleting agent: {str(e)}")
+        return False
+
+def search_agents(org_id: str, query: str, limit: int = 10) -> List[Agent]:
+    """
+    Search agents by name within an organization
+    
+    Args:
+        org_id: Organization UUID
+        query: Search query
+        limit: Maximum number of results
+    
+    Returns:
+        List of matching Agent objects
+    """
+    try:
+        response = supabase.table("org_agents")\
+            .select("*")\
+            .eq("org_id", org_id)\
+            .neq("status", "delete")\
+            .ilike("name", f"%{query}%")\
+            .limit(limit)\
+            .execute()
+        
+        agents = []
+        if response.data:
+            for agent_data in response.data:
+                agents.append(Agent(
+                    id=agent_data["id"],
+                    agent_id=agent_data["agent_id"],
+                    org_id=agent_data["org_id"],
+                    name=agent_data["name"],
+                    description=agent_data.get("description"),
+                    system_prompt=agent_data.get("system_prompt", {}),
+                    tools_list=agent_data.get("tools_list", []),
+                    knowledge_list=agent_data.get("knowledge_list", []),
+                    status=agent_data["status"],
+                    created_by=agent_data["created_by"],
+                    created_date=datetime.fromisoformat(agent_data["created_at"].replace("Z", "+00:00")),
+                    updated_date=datetime.fromisoformat(agent_data["updated_at"].replace("Z", "+00:00"))
+                ))
+        return agents
+        
+    except Exception as e:
+        logger.error(f"Error searching agents: {str(e)}")
         return []

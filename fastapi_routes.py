@@ -22,7 +22,7 @@ recent_requests = deque(maxlen=1000)
 
 # Import dependencies
 
-from braindb import get_brains, get_brain_details, update_brain, create_brain
+from orgdb import get_brains, get_brain_details, update_brain, create_brain
 from contactconvo import ConversationManager
 # Import the router from chatwoot instead of individual functions
 from chatwoot import router as chatwoot_router
