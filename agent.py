@@ -147,6 +147,9 @@ class AgentExecutionRequest:
     org_id: Optional[str] = "default"
     user_id: Optional[str] = "anonymous"
     
+    # Agent operational mode
+    agent_mode: Optional[str] = "execute"  # "collaborate" or "execute"
+    
     # Agent-specific parameters (different focus from Ami)
     enable_deep_reasoning: Optional[bool] = True  # Deep reasoning enabled by default for agents
     reasoning_depth: Optional[str] = "standard"  # "light", "standard", "deep"
@@ -183,7 +186,7 @@ class AgentExecutionResponse:
 
 
 class AgentOrchestrator:
-    """Agent orchestration engine - different from Ami's ExecutiveTool"""
+    """Agent orchestration engine with dynamic configuration loading"""
     
     def __init__(self):
         """Initialize the agent orchestrator"""
@@ -193,17 +196,17 @@ class AgentOrchestrator:
         self.anthropic_executor = AnthropicExecutor(self)
         self.openai_executor = OpenAIExecutor(self)
         
-        # Agent-specific system prompts (different from Ami's teaching/building role)
-        self.agent_system_prompts = {
-            "anthropic": "You are a specialized AI agent with deep reasoning capabilities. Your role is to execute tasks efficiently using your specialized knowledge and available tools.",
-            "openai": "You are a specialized AI agent with deep reasoning capabilities. Your role is to execute tasks efficiently using your specialized knowledge and available tools."
-        }
+        # Dynamic agent configuration cache
+        self.agent_config_cache = {}
+        self.cache_ttl = 300  # 5 minutes cache TTL
         
         # Initialize language detection (shared with Ami)
         if LANGUAGE_DETECTION_AVAILABLE:
             self.language_detector = LanguageDetector()
         else:
             self.language_detector = None
+            
+        agent_logger.info("Agent Orchestrator initialized with dynamic configuration support")
     
     def _initialize_shared_tools(self) -> Dict[str, Any]:
         """Initialize tools shared with Ami"""
@@ -273,6 +276,367 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.error(f"Failed to create fallback search tool: {e}")
                 return None
+    
+    async def load_agent_config(self, agent_id: str, org_id: str) -> Dict[str, Any]:
+        """
+        Load agent configuration from database with caching
+        
+        Args:
+            agent_id: Agent UUID or name
+            org_id: Organization ID
+            
+        Returns:
+            Agent configuration dictionary
+        """
+        cache_key = f"{org_id}:{agent_id}"
+        
+        # Check cache first
+        if cache_key in self.agent_config_cache:
+            cached_config, cached_time = self.agent_config_cache[cache_key]
+            if (datetime.now() - cached_time).seconds < self.cache_ttl:
+                agent_logger.info(f"Using cached config for agent {agent_id}")
+                return cached_config
+        
+        try:
+            from orgdb import get_agent, get_agents
+            
+            # Try to get agent by ID first
+            agent = get_agent(agent_id)
+            
+            # If not found by ID, try to find by name within the organization
+            if not agent:
+                agents = get_agents(org_id, status="active")
+                agent = next((a for a in agents if a.name.lower() == agent_id.lower()), None)
+            
+            if not agent:
+                raise ValueError(f"Agent '{agent_id}' not found in organization {org_id}")
+            
+            if agent.org_id != org_id:
+                raise ValueError(f"Agent '{agent_id}' not accessible for organization {org_id}")
+            
+            if agent.status != "active":
+                raise ValueError(f"Agent '{agent_id}' is not active (status: {agent.status})")
+            
+            # Build configuration dictionary
+            config = {
+                "id": agent.id,
+                "agent_id": agent.agent_id,
+                "name": agent.name,
+                "description": agent.description,
+                "system_prompt": agent.system_prompt,
+                "tools_list": agent.tools_list,
+                "knowledge_list": agent.knowledge_list,
+                "created_by": agent.created_by,
+                "created_date": agent.created_date,
+                "updated_date": agent.updated_date
+            }
+            
+            # Cache the configuration
+            self.agent_config_cache[cache_key] = (config, datetime.now())
+            
+            agent_logger.info(f"Loaded config for agent: {agent.name} (ID: {agent.id})")
+            return config
+            
+        except Exception as e:
+            agent_logger.error(f"Failed to load agent config for {agent_id}: {str(e)}")
+            raise Exception(f"Failed to load agent configuration: {str(e)}")
+    
+    async def resolve_agent_identifier(self, agent_identifier: str, org_id: str) -> str:
+        """
+        Resolve agent identifier (ID, name, or description) to agent ID
+        
+        Args:
+            agent_identifier: Agent ID, name, or description
+            org_id: Organization ID
+            
+        Returns:
+            Resolved agent ID
+        """
+        try:
+            from orgdb import get_agent, get_agents
+            
+            # Try direct ID lookup first
+            agent = get_agent(agent_identifier)
+            if agent and agent.org_id == org_id and agent.status == "active":
+                return agent.id
+            
+            # Try name-based lookup
+            agents = get_agents(org_id, status="active")
+            
+            # Exact name match
+            exact_match = next((a for a in agents if a.name.lower() == agent_identifier.lower()), None)
+            if exact_match:
+                return exact_match.id
+            
+            # Partial name match
+            partial_match = next((a for a in agents if agent_identifier.lower() in a.name.lower()), None)
+            if partial_match:
+                return partial_match.id
+            
+            # Description-based match
+            desc_match = next((a for a in agents if agent_identifier.lower() in a.description.lower()), None)
+            if desc_match:
+                return desc_match.id
+            
+            raise ValueError(f"No agent found matching '{agent_identifier}'")
+            
+        except Exception as e:
+            agent_logger.error(f"Agent resolution failed for '{agent_identifier}': {str(e)}")
+            raise
+    
+    def _build_collaborate_prompt(self, agent_config: Dict[str, Any], user_request: str) -> str:
+        """
+        Build system prompt for COLLABORATE mode - interactive, discussion-focused
+        
+        Args:
+            agent_config: Loaded agent configuration
+            user_request: User's request for context
+            
+        Returns:
+            Collaborate mode system prompt
+        """
+        try:
+            system_prompt_data = agent_config.get("system_prompt", {})
+            
+            # Extract prompt components
+            base_instruction = system_prompt_data.get("base_instruction", "")
+            agent_type = system_prompt_data.get("agent_type", "general")
+            language = system_prompt_data.get("language", "english")
+            specialization = system_prompt_data.get("specialization", [])
+            personality = system_prompt_data.get("personality", {})
+            
+            # Build collaborate-focused prompt
+            collaborate_prompt = f"""You are {agent_config['name']}, operating in COLLABORATE mode.
+
+{base_instruction}
+
+AGENT PROFILE:
+- Type: {agent_type.replace('_', ' ').title()} Agent
+- Specialization: {', '.join(specialization) if specialization else 'General assistance'}
+- Language: {language.title()}
+- Personality: {personality.get('tone', 'professional')}, {personality.get('style', 'helpful')}, {personality.get('approach', 'solution-oriented')}
+
+COLLABORATION APPROACH:
+You are designed to work WITH the user in an interactive, collaborative manner:
+
+🤝 COLLABORATION PRINCIPLES:
+- Ask clarifying questions to better understand their needs
+- Discuss options and alternatives before proceeding
+- Explain your reasoning and approach
+- Seek feedback and confirmation before taking major steps
+- Be conversational and engage in back-and-forth dialogue
+- Offer suggestions and recommendations, not just direct answers
+- Help users think through problems step by step
+
+AVAILABLE TOOLS:
+You have access to these tools: {', '.join(agent_config.get('tools_list', []))}
+Use tools to gather information and explore options, but DISCUSS findings with the user before drawing conclusions.
+
+KNOWLEDGE ACCESS:
+You can access these knowledge domains: {', '.join(agent_config.get('knowledge_list', [])) if agent_config.get('knowledge_list') else 'General knowledge base'}
+
+INTERACTION STYLE:
+- Start by understanding their current situation and goals
+- Ask "What if..." and "Have you considered..." questions  
+- Present multiple options when possible
+- Explain trade-offs and implications
+- Use phrases like "Let's explore...", "What do you think about...", "Would it help if..."
+- Encourage the user to share their thoughts and preferences
+
+CURRENT COLLABORATION:
+The user has started this collaboration: "{user_request[:200]}{'...' if len(user_request) > 200 else ''}"
+
+Let's work together to explore this thoroughly and find the best approach!"""
+
+            agent_logger.info(f"Built collaborate mode prompt for {agent_config['name']} ({len(collaborate_prompt)} chars)")
+            return collaborate_prompt
+            
+        except Exception as e:
+            agent_logger.error(f"Failed to build collaborate prompt: {e}")
+            return f"You are {agent_config.get('name', 'AI Agent')} in collaborative mode. Work with the user to explore their request: {user_request}"
+    
+    def _build_execute_prompt(self, agent_config: Dict[str, Any], user_request: str) -> str:
+        """
+        Build system prompt for EXECUTE mode - task-focused, efficient completion
+        
+        Args:
+            agent_config: Loaded agent configuration
+            user_request: User's request for context
+            
+        Returns:
+            Execute mode system prompt
+        """
+        try:
+            system_prompt_data = agent_config.get("system_prompt", {})
+            
+            # Extract prompt components
+            base_instruction = system_prompt_data.get("base_instruction", "")
+            agent_type = system_prompt_data.get("agent_type", "general")
+            language = system_prompt_data.get("language", "english")
+            specialization = system_prompt_data.get("specialization", [])
+            personality = system_prompt_data.get("personality", {})
+            
+            # Build execution-focused prompt
+            execute_prompt = f"""You are {agent_config['name']}, operating in EXECUTE mode.
+
+{base_instruction}
+
+AGENT PROFILE:
+- Type: {agent_type.replace('_', ' ').title()} Agent
+- Specialization: {', '.join(specialization) if specialization else 'General assistance'}
+- Language: {language.title()}
+- Personality: {personality.get('tone', 'professional')}, {personality.get('style', 'helpful')}, {personality.get('approach', 'solution-oriented')}
+
+EXECUTION APPROACH:
+You are designed to efficiently complete tasks and provide comprehensive results:
+
+⚡ EXECUTION PRINCIPLES:
+- Focus on completing the requested task efficiently
+- Use tools directly when needed without extensive explanation
+- Provide thorough, actionable results
+- Minimize unnecessary back-and-forth questions
+- Be direct and solution-focused
+- Deliver comprehensive outputs that address the full request
+- Take initiative to gather needed information
+
+AVAILABLE TOOLS:
+You have access to these tools: {', '.join(agent_config.get('tools_list', []))}
+Use them efficiently to gather information, analyze data, and complete tasks.
+
+KNOWLEDGE ACCESS:
+You can access these knowledge domains: {', '.join(agent_config.get('knowledge_list', [])) if agent_config.get('knowledge_list') else 'General knowledge base'}
+
+SPECIAL INSTRUCTIONS:
+- PRIORITY: If the user provides a Google Drive link (docs.google.com), ALWAYS use the read_gdrive_link_docx or read_gdrive_link_pdf tool FIRST
+- SPECIFICALLY: When you see URLs like "https://docs.google.com/document/d/..." or "https://drive.google.com/file/d/...", use read_gdrive_link_docx or read_gdrive_link_pdf immediately
+- CRITICAL: When calling read_gdrive_link_docx or read_gdrive_link_pdf, you MUST extract the full URL from the user's request and pass it as the drive_link parameter
+- FORCE: You MUST provide the drive_link parameter when calling these functions. The parameter cannot be empty.
+
+- FOLDER READING: If the user asks to read or analyze an entire Google Drive folder, use the read_gdrive_folder tool
+- PERMISSION ISSUES: If you get "File not found" or "Access denied" errors, use check_file_access tool to diagnose the issue
+
+- If the user asks for analysis of a document, ALWAYS read the document content before providing any analysis
+- Use the analyze_document or process_with_knowledge tool for business document analysis when appropriate
+- CRITICAL: When calling process_with_knowledge, you MUST include user_id and org_id parameters
+- Respond in {language} unless the user specifically requests another language
+- DO NOT use search tools when a Google Drive link is provided - read the document directly
+
+CURRENT TASK:
+Execute this request efficiently: "{user_request[:200]}{'...' if len(user_request) > 200 else ''}"
+
+Focus on delivering comprehensive, actionable results."""
+
+            agent_logger.info(f"Built execute mode prompt for {agent_config['name']} ({len(execute_prompt)} chars)")
+            return execute_prompt
+            
+        except Exception as e:
+            agent_logger.error(f"Failed to build execute prompt: {e}")
+            return f"You are {agent_config.get('name', 'AI Agent')} in execution mode. Complete this task: {user_request}"
+
+    def _build_dynamic_system_prompt(self, agent_config: Dict[str, Any], user_request: str, agent_mode: str = "execute") -> str:
+        """
+        Build dynamic system prompt from agent configuration with mode support
+        
+        Args:
+            agent_config: Loaded agent configuration
+            user_request: User's request for context
+            agent_mode: "collaborate" or "execute" mode
+            
+        Returns:
+            Mode-specific system prompt string
+        """
+        try:
+            if agent_mode.lower() == "collaborate":
+                return self._build_collaborate_prompt(agent_config, user_request)
+            else:
+                return self._build_execute_prompt(agent_config, user_request)
+                
+        except Exception as e:
+            agent_logger.error(f"Failed to build dynamic system prompt: {e}")
+            # Fallback to basic prompt
+            return f"You are {agent_config.get('name', 'AI Agent')}, a specialized AI assistant. {agent_config.get('description', 'I help with various tasks.')} Use your available tools to provide helpful assistance."
+    
+    def _determine_dynamic_tools(self, agent_config: Dict[str, Any], user_request: str) -> tuple[List[str], bool]:
+        """
+        Determine tools and force_tools setting based on agent config and request
+        
+        Args:
+            agent_config: Loaded agent configuration
+            user_request: User's request
+            
+        Returns:
+            Tuple of (tools_whitelist, force_tools)
+        """
+        tools_list = agent_config.get("tools_list", [])
+        
+        # Check if this is a Google Drive request
+        user_request_lower = user_request.lower()
+        is_gdrive_request = (
+            'docs.google.com' in user_request_lower or 
+            'drive.google.com' in user_request_lower or
+            'google drive' in user_request_lower or
+            'gdrive' in user_request_lower or
+            any(keyword in user_request_lower for keyword in ['folder', 'folders', 'directory', 'documents in', 'files in'])
+        )
+        
+        # For Google Drive requests, ensure file_access tools are available
+        if is_gdrive_request:
+            if 'file_access' not in tools_list:
+                tools_list = tools_list + ['file_access']
+            if 'business_logic' not in tools_list:
+                tools_list = tools_list + ['business_logic']
+            force_tools = True
+            agent_logger.info(f"Google Drive request detected - enhanced tools: {tools_list}")
+        else:
+            force_tools = False
+        
+        return tools_list, force_tools
+    
+    async def _load_knowledge_context(self, knowledge_list: List[str], user_request: str, user_id: str, org_id: str) -> str:
+        """
+        Load relevant knowledge context based on agent's knowledge list
+        
+        Args:
+            knowledge_list: List of knowledge domains the agent has access to
+            user_request: User's request for context
+            user_id: User ID
+            org_id: Organization ID
+            
+        Returns:
+            Knowledge context string
+        """
+        if not knowledge_list:
+            return ""
+        
+        try:
+            # Use brain vector tool to search for relevant knowledge
+            if "brain_vector" in self.available_tools:
+                knowledge_context = ""
+                for knowledge_domain in knowledge_list[:3]:  # Limit to first 3 domains to avoid token limit
+                    try:
+                        search_query = f"{user_request} {knowledge_domain}"
+                        knowledge_results = await asyncio.to_thread(
+                            self.available_tools["brain_vector"].query_knowledge,
+                            user_id=user_id,
+                            org_id=org_id,
+                            query=search_query,
+                            limit=5
+                        )
+                        
+                        if knowledge_results:
+                            knowledge_context += f"\n--- {knowledge_domain.replace('_', ' ').title()} Knowledge ---\n"
+                            for result in knowledge_results[:2]:  # Top 2 results per domain
+                                content = result.get('content', result.get('raw', ''))[:300]  # Truncate to avoid token limit
+                                knowledge_context += f"• {content}...\n"
+                    except Exception as e:
+                        agent_logger.warning(f"Failed to load knowledge for domain {knowledge_domain}: {e}")
+                        continue
+                
+                return knowledge_context
+        except Exception as e:
+            agent_logger.warning(f"Knowledge context loading failed: {e}")
+        
+        return ""
     
     async def _analyze_agent_task(self, request: AgentExecutionRequest) -> tuple[Dict[str, Any], list[str]]:
         """
@@ -577,25 +941,23 @@ class AgentOrchestrator:
 
     async def execute_agent_task_stream(self, request: AgentExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Stream agent task execution with simplified flow
+        Stream agent task execution with dynamic configuration loading
         
         Args:
             request: AgentExecutionRequest containing task parameters
             
         Yields:
-            Dict containing streaming response data with simplified flow
+            Dict containing streaming response data with dynamic agent behavior
         """
         start_time = datetime.now()
         execution_id = f"{request.agent_id}-{start_time.strftime('%H%M%S')}"
         
         # Enhanced logging - execution start
-        execution_logger.info(f"[{execution_id}] === AGENT EXECUTION START ===")
-        execution_logger.info(f"[{execution_id}] Agent: {request.agent_id} ({request.agent_type})")
+        execution_logger.info(f"[{execution_id}] === DYNAMIC AGENT EXECUTION START ===")
+        execution_logger.info(f"[{execution_id}] Agent Identifier: {request.agent_id} ({request.agent_type})")
         execution_logger.info(f"[{execution_id}] Provider: {request.llm_provider}")
         execution_logger.info(f"[{execution_id}] Model: {request.model or 'default'}")
         execution_logger.info(f"[{execution_id}] User Request: '{request.user_request[:100]}{'...' if len(request.user_request) > 100 else ''}'")
-        execution_logger.info(f"[{execution_id}] Specialized Domains: {request.specialized_knowledge_domains}")
-        execution_logger.info(f"[{execution_id}] Tools Enabled: {request.enable_tools}")
         execution_logger.info(f"[{execution_id}] Org ID: {request.org_id}, User ID: {request.user_id}")
         
         try:
@@ -613,27 +975,62 @@ class AgentOrchestrator:
             
             execution_logger.info(f"[{execution_id}] VALIDATION PASSED - Provider {request.llm_provider} supported")
             
-            # Simple status - no redundant analysis
-            execution_logger.info(f"[{execution_id}] STREAMING STATUS - Initial processing message")
+            # NEW: Load dynamic agent configuration
+            execution_logger.info(f"[{execution_id}] LOADING AGENT CONFIG - Resolving agent identifier...")
             yield {
                 "type": "status",
-                "content": f"🤖 {request.agent_id} processing your request...",
+                "content": f"🔍 Loading configuration for {request.agent_id}...",
                 "provider": request.llm_provider,
                 "agent_id": request.agent_id,
-                "agent_type": request.agent_type,
-                "status": "processing"
+                "status": "loading_config"
             }
             
-            # Convert to tool request with simplified approach
-            execution_logger.info(f"[{execution_id}] TOOL CONVERSION - Converting agent request to tool request")
-            tool_request = self._convert_to_tool_request(request)
-            execution_logger.info(f"[{execution_id}] TOOL CONVERSION COMPLETE - Available tools: {list(self.available_tools.keys())}")
+            try:
+                # Resolve agent identifier to actual agent ID
+                resolved_agent_id = await self.resolve_agent_identifier(request.agent_id, request.org_id)
+                execution_logger.info(f"[{execution_id}] AGENT RESOLVED - {request.agent_id} -> {resolved_agent_id}")
+                
+                # Load agent configuration from database
+                agent_config = await self.load_agent_config(resolved_agent_id, request.org_id)
+                execution_logger.info(f"[{execution_id}] CONFIG LOADED - Agent: {agent_config['name']}")
+                execution_logger.info(f"[{execution_id}] CONFIG DETAILS - Tools: {agent_config.get('tools_list', [])}")
+                execution_logger.info(f"[{execution_id}] CONFIG DETAILS - Knowledge: {agent_config.get('knowledge_list', [])}")
+                
+                # Update request with resolved agent ID and loaded config
+                request.agent_id = resolved_agent_id
+                # Store agent config for use in conversion
+                self._current_agent_config = agent_config
+                
+                yield {
+                    "type": "status", 
+                    "content": f"✅ Loaded {agent_config['name']} - ready to assist!",
+                    "provider": request.llm_provider,
+                    "agent_id": resolved_agent_id,
+                    "agent_name": agent_config['name'],
+                    "status": "config_loaded"
+                }
+                
+            except Exception as e:
+                execution_logger.error(f"[{execution_id}] CONFIG LOADING FAILED - {str(e)}")
+                yield {
+                    "type": "error",
+                    "content": f"❌ Failed to load agent configuration: {str(e)}",
+                    "provider": request.llm_provider,
+                    "agent_id": request.agent_id,
+                    "success": False
+                }
+                return
             
-            # Log system prompt (truncated for readability)
+            # Convert to tool request with dynamic configuration
+            execution_logger.info(f"[{execution_id}] TOOL CONVERSION - Converting with dynamic config")
+            tool_request = self._convert_to_tool_request_dynamic(request, agent_config)
+            execution_logger.info(f"[{execution_id}] DYNAMIC CONVERSION COMPLETE - Tools: {tool_request.tools_whitelist}")
+            
+            # Log dynamic system prompt (truncated for readability)
             system_prompt_preview = tool_request.system_prompt[:200] + "..." if len(tool_request.system_prompt) > 200 else tool_request.system_prompt
-            execution_logger.info(f"[{execution_id}] SYSTEM PROMPT: {system_prompt_preview}")
+            execution_logger.info(f"[{execution_id}] DYNAMIC SYSTEM PROMPT: {system_prompt_preview}")
             
-            # Execute directly with LLM - let LLM decide tools and handle everything
+            # Execute with dynamic configuration
             execution_logger.info(f"[{execution_id}] LLM EXECUTION START - Provider: {request.llm_provider}")
             
             chunk_count = 0
@@ -726,11 +1123,54 @@ class AgentOrchestrator:
 
 
 
-    def _convert_to_tool_request(self, agent_request: AgentExecutionRequest):
-        """Convert AgentExecutionRequest to ToolExecutionRequest with simplified approach"""
+    def _convert_to_tool_request_dynamic(self, agent_request: AgentExecutionRequest, agent_config: Dict[str, Any]):
+        """Convert AgentExecutionRequest to ToolExecutionRequest with dynamic configuration"""
         from exec_tool import ToolExecutionRequest
         
-        # Create focused agent system prompt
+        # Build dynamic system prompt from agent configuration with mode support
+        dynamic_system_prompt = self._build_dynamic_system_prompt(agent_config, agent_request.user_request, agent_request.agent_mode)
+        
+        # Determine dynamic tool settings
+        tools_whitelist, force_tools = self._determine_dynamic_tools(agent_config, agent_request.user_request)
+        
+        execution_logger.info(f"[{agent_request.agent_id}] DYNAMIC CONFIG APPLIED:")
+        execution_logger.info(f"[{agent_request.agent_id}] - Agent Name: {agent_config['name']}")
+        execution_logger.info(f"[{agent_request.agent_id}] - Tools: {tools_whitelist}")
+        execution_logger.info(f"[{agent_request.agent_id}] - Force Tools: {force_tools}")
+        execution_logger.info(f"[{agent_request.agent_id}] - Knowledge Domains: {agent_config.get('knowledge_list', [])}")
+        
+        return ToolExecutionRequest(
+            llm_provider=agent_request.llm_provider,
+            user_query=agent_request.user_request,
+            system_prompt=dynamic_system_prompt,
+            model=agent_request.model,
+            model_params=agent_request.model_params,
+            org_id=agent_request.org_id,
+            user_id=agent_request.user_id,
+            enable_tools=agent_request.enable_tools,
+            force_tools=force_tools,
+            tools_whitelist=tools_whitelist,
+            conversation_history=agent_request.conversation_history,
+            max_history_messages=agent_request.max_history_messages,
+            max_history_tokens=agent_request.max_history_tokens,
+            # Simplified settings for clean agent execution
+            enable_deep_reasoning=False,  
+            reasoning_depth="light",      
+            enable_intent_classification=False,  
+            enable_request_analysis=False,      
+            cursor_mode=False
+        )
+    
+    def _convert_to_tool_request(self, agent_request: AgentExecutionRequest):
+        """Legacy method - kept for backward compatibility"""
+        # If agent config is available, use dynamic conversion
+        if hasattr(self, '_current_agent_config') and self._current_agent_config:
+            return self._convert_to_tool_request_dynamic(agent_request, self._current_agent_config)
+        
+        # Fallback to original implementation for backward compatibility
+        from exec_tool import ToolExecutionRequest
+        
+        # Create basic agent system prompt
         agent_system_prompt = f"""You are {agent_request.agent_id}, a specialized {agent_request.agent_type}.
 
 Your specialization areas: {', '.join(agent_request.specialized_knowledge_domains or ['general'])}
@@ -954,6 +1394,7 @@ def create_agent_request(
     model_params: Optional[Dict[str, Any]] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
+    agent_mode: str = "execute",
     enable_deep_reasoning: bool = True,
     reasoning_depth: str = "standard",
     task_focus: str = "execution",
@@ -989,6 +1430,7 @@ def create_agent_request(
         user_request=user_request,
         agent_id=agent_id,
         agent_type=agent_type,
+        agent_mode=agent_mode,
         system_prompt=system_prompt,
         model=model,
         model_params=model_params,
@@ -1012,6 +1454,7 @@ async def execute_agent_async(
     model: Optional[str] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
+    agent_mode: str = "execute",
     specialized_knowledge_domains: Optional[List[str]] = None
 ) -> AgentExecutionResponse:
     """
@@ -1034,7 +1477,7 @@ async def execute_agent_async(
     orchestrator = AgentOrchestrator()
     request = create_agent_request(
         llm_provider, user_request, agent_id, agent_type, system_prompt, model, 
-        None, org_id, user_id, True, "standard", "execution", True, 
+        None, org_id, user_id, agent_mode, True, "standard", "execution", True, 
         specialized_knowledge_domains, None
     )
     return await orchestrator.execute_agent_task_async(request)
@@ -1049,6 +1492,7 @@ async def execute_agent_stream(
     model: Optional[str] = None,
     org_id: str = "default",
     user_id: str = "anonymous",
+    agent_mode: str = "execute",
     enable_deep_reasoning: bool = True,  # Deep reasoning enabled by default for agents
     reasoning_depth: str = "standard",
     task_focus: str = "execution",
@@ -1082,6 +1526,7 @@ async def execute_agent_stream(
         user_request=user_request,
         agent_id=agent_id,
         agent_type=agent_type,
+        agent_mode=agent_mode,
         system_prompt=system_prompt,  # Will be overridden by simplified flow
         model=model,
         org_id=org_id,

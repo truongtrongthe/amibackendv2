@@ -12,10 +12,12 @@ from collections import deque
 
 import socketio
 import uvicorn
-from fastapi import FastAPI, BackgroundTasks, Request, Response, HTTPException
+from fastapi import FastAPI, BackgroundTasks, Request, Response, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional
+from login import get_current_user
 
 # Import router from fastapi_routes
 from fastapi_routes import router as api_router
@@ -375,6 +377,9 @@ class AgentAPIRequest(BaseModel):
     org_id: str = "default"
     user_id: str = "anonymous"
     
+    # Agent operational mode
+    agent_mode: Optional[str] = "execute"  # "collaborate" or "execute"
+    
     # Agent-specific parameters (tools enabled & deep reasoning by default)
     enable_tools: Optional[bool] = True  # Tools enabled by default for agents
     enable_deep_reasoning: Optional[bool] = True  # Deep reasoning enabled by default
@@ -393,6 +398,28 @@ class AgentAPIRequest(BaseModel):
     
     # Backward compatibility for frontend
     enable_search: Optional[bool] = None  # Deprecated: use enable_tools instead
+
+
+class SimpleChatRequest(BaseModel):
+    """Simple chat request for direct Ami interaction"""
+    message: str = Field(..., description="Message to send", min_length=1, max_length=2000)
+    llm_provider: str = Field("anthropic", description="LLM provider to use")
+    model: Optional[str] = Field(None, description="Specific model to use")
+    system_prompt: Optional[str] = Field(None, description="Custom system prompt")
+
+class CreateAgentAPIRequest(BaseModel):
+    """API request for direct agent creation via Ami (legacy)"""
+    user_request: str = Field(..., description="Description of what kind of agent is needed", min_length=10, max_length=1000)
+    llm_provider: str = Field("anthropic", description="LLM provider to use")
+    model: Optional[str] = Field(None, description="Specific model to use")
+
+class CollaborativeAgentAPIRequest(BaseModel):
+    """API request for collaborative agent creation"""
+    user_input: str = Field(..., description="Human input at any stage of conversation", min_length=5, max_length=2000)
+    conversation_id: Optional[str] = Field(None, description="Existing conversation ID (for continuing conversations)")
+    current_state: Optional[str] = Field("initial_idea", description="Current conversation state")
+    llm_provider: str = Field("anthropic", description="LLM provider to use")
+    model: Optional[str] = Field(None, description="Specific model to use")
 
 
 
@@ -901,6 +928,298 @@ async def generate_agent_sse_stream(request: AgentAPIRequest, thread_lock: async
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
         logger.info(f"[REQUEST:{request_id}] === END agent SSE request - total time: {elapsed:.2f}s ===")
+
+# ADD NEW SIMPLIFIED ENDPOINTS - Replace exec_tool complexity
+
+# NEW: Direct Agent Creation Endpoint (Legacy - Simple but less precise)
+@app.post('/ami/create-agent')
+async def create_agent_endpoint(request: CreateAgentAPIRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Create a new AI agent directly - fast but basic
+    Replaces complex exec_tool agent building with simple approach
+    """
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Create agent via Ami (simple and fast)
+        from ami import create_agent_via_api
+        result = await create_agent_via_api(
+            api_request=request,
+            org_id=org_response.id,
+            user_id=current_user["id"]
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Agent creation endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent creation failed: {str(e)}")
+
+@app.options('/ami/create-agent')
+async def create_agent_options():
+    return handle_options()
+
+
+# NEW: Collaborative Agent Creation Endpoint (Chief Product Officer approach)
+@app.post('/ami/collaborate')
+async def collaborate_agent_endpoint(request: CollaborativeAgentAPIRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Collaborate with Ami like a Chief Product Officer to build precise agents
+    Multi-step conversation flow: idea → skeleton → feedback → approval → build
+    """
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Collaborate with Ami on agent creation
+        from ami import collaborate_on_agent_via_api
+        result = await collaborate_on_agent_via_api(
+            api_request=request,
+            org_id=org_response.id,
+            user_id=current_user["id"]
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Collaborative agent endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Collaborative agent creation failed: {str(e)}")
+
+@app.options('/ami/collaborate')
+async def collaborate_agent_options():
+    return handle_options()
+
+
+# NEW: Direct Agent Execution Endpoint (replaces complex exec_tool execution)
+@app.post('/agent/execute')
+async def execute_agent_endpoint(request: AgentAPIRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Execute a specific agent with dynamic configuration - replaces exec_tool complexity
+    Simple, fast agent execution with database-driven configuration
+    """
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Execute agent with dynamic configuration
+        from agent import execute_agent_async
+        result = await execute_agent_async(
+            llm_provider=request.llm_provider,
+            user_request=request.user_request,
+            agent_id=request.agent_id,
+            agent_type=request.agent_type or "general",
+            model=request.model,
+            org_id=org_response.id,
+            user_id=current_user["id"],
+            agent_mode=request.agent_mode,
+            specialized_knowledge_domains=request.specialized_knowledge_domains
+        )
+        
+        return {
+            "success": result.success,
+            "result": result.result,
+            "agent_id": result.agent_id,
+            "agent_type": result.agent_type,
+            "execution_time": result.execution_time,
+            "tasks_completed": result.tasks_completed,
+            "error": result.error,
+            "metadata": result.metadata
+        }
+        
+    except Exception as e:
+        logger.error(f"Agent execution endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+
+@app.options('/agent/execute')
+async def execute_agent_options():
+    return handle_options()
+
+
+# NEW: Agent Streaming Endpoint (replaces complex exec_tool streaming)
+@app.post('/agent/stream')
+async def stream_agent_endpoint(request: AgentAPIRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Stream agent execution with dynamic configuration - replaces exec_tool streaming complexity
+    Clean, fast streaming with database-driven agent behavior
+    """
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Stream agent execution with dynamic configuration
+        from agent import execute_agent_stream
+        
+        async def generate_agent_stream():
+            try:
+                async for chunk in execute_agent_stream(
+                    llm_provider=request.llm_provider,
+                    user_request=request.user_request,
+                    agent_id=request.agent_id,
+                    agent_type=request.agent_type or "general",
+                    model=request.model,
+                    org_id=org_response.id,
+                    user_id=current_user["id"],
+                    agent_mode=request.agent_mode,
+                    specialized_knowledge_domains=request.specialized_knowledge_domains,
+                    conversation_history=request.conversation_history
+                ):
+                    # Format for SSE
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    
+            except Exception as e:
+                logger.error(f"Agent streaming error: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+        
+        return StreamingResponse(
+            generate_agent_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive", 
+                "Access-Control-Allow-Origin": "*",
+                "X-Accel-Buffering": "no"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Agent streaming endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent streaming failed: {str(e)}")
+
+@app.options('/agent/stream')
+async def stream_agent_options():
+    return handle_options()
+
+
+# NEW: Agent Collaboration Endpoint (Interactive mode)
+@app.post('/agent/collaborate')
+async def collaborate_agent_endpoint(request: AgentAPIRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Collaborate with a specific agent in interactive mode
+    Agent will ask questions, discuss options, and work WITH the user
+    """
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Force collaborate mode for this endpoint
+        request.agent_mode = "collaborate"
+        
+        # Execute agent in collaborate mode
+        from agent import execute_agent_async
+        result = await execute_agent_async(
+            llm_provider=request.llm_provider,
+            user_request=request.user_request,
+            agent_id=request.agent_id,
+            agent_type=request.agent_type or "general",
+            model=request.model,
+            org_id=org_response.id,
+            user_id=current_user["id"],
+            agent_mode="collaborate",  # Force collaborate mode
+            specialized_knowledge_domains=request.specialized_knowledge_domains
+        )
+        
+        return {
+            "success": result.success,
+            "result": result.result,
+            "agent_id": result.agent_id,
+            "agent_type": result.agent_type,
+            "execution_time": result.execution_time,
+            "tasks_completed": result.tasks_completed,
+            "error": result.error,
+            "metadata": result.metadata,
+            "mode": "collaborate"
+        }
+        
+    except Exception as e:
+        logger.error(f"Agent collaboration endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Agent collaboration failed: {str(e)}")
+
+@app.options('/agent/collaborate')
+async def collaborate_agent_options():
+    return handle_options()
+
+
+# NEW: Simple Direct Chat Endpoint (for non-agent interactions)
+@app.post('/ami/chat')
+async def ami_chat_endpoint(request: SimpleChatRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Simple direct chat with Ami - for general conversations that don't need agent creation
+    Replaces simple exec_tool interactions
+    """
+    try:
+        # Get user's organization for context
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Simple LLM call without complex exec_tool pipeline
+        if request.llm_provider.lower() == "anthropic":
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            
+            response = await client.messages.create(
+                model=request.model or "claude-3-5-sonnet-20241022",
+                max_tokens=2000,
+                messages=[{"role": "user", "content": request.message}],
+                system=request.system_prompt or "You are Ami, a helpful AI assistant."
+            )
+            
+            return {
+                "success": True,
+                "response": response.content[0].text,
+                "provider": "anthropic",
+                "model": request.model or "claude-3-5-sonnet-20241022"
+            }
+            
+        elif request.llm_provider.lower() == "openai":
+            import openai
+            client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            
+            response = await client.chat.completions.create(
+                model=request.model or "gpt-4",
+                max_tokens=2000,
+                messages=[
+                    {"role": "system", "content": request.system_prompt or "You are Ami, a helpful AI assistant."},
+                    {"role": "user", "content": request.message}
+                ]
+            )
+            
+            return {
+                "success": True,
+                "response": response.choices[0].message.content,
+                "provider": "openai", 
+                "model": request.model or "gpt-4"
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported provider: {request.llm_provider}")
+            
+    except Exception as e:
+        logger.error(f"Ami chat endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+@app.options('/ami/chat')
+async def ami_chat_options():
+    return handle_options()
+
+
+class AgentAPIRequest(BaseModel):
+    """API request for agent execution"""
+    agent_id: str = Field(..., description="Agent ID or name to execute")
+    user_request: str = Field(..., description="Task for the agent to perform")
+    agent_mode: str = Field("execute", description="Agent operational mode: 'collaborate' or 'execute'")
+    llm_provider: str = Field("anthropic", description="LLM provider to use")
+    model: Optional[str] = Field(None, description="Specific model to use")
+    agent_type: Optional[str] = Field(None, description="Agent type hint")
+    specialized_knowledge_domains: Optional[List[str]] = Field(None, description="Knowledge domains")
+    conversation_history: Optional[List[Dict[str, Any]]] = Field(None, description="Previous conversation")
+
+
+
 # Run the application
 if __name__ == "__main__":
     uvicorn.run(socket_app, host="0.0.0.0", port=5001) 
