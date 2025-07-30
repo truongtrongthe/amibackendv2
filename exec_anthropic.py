@@ -813,6 +813,48 @@ Examples:
             tools_to_use.append(search_tool)
         
         return anthropic_tool.process_with_tools(enhanced_query, tools_to_use, enable_web_search=True)
+
+    async def call_anthropic_direct(self, model: str, messages: List[Dict[str, str]], 
+                                  max_tokens: int = 1000, temperature: float = 0.7) -> Any:
+        """
+        Direct call to Anthropic API with specified parameters
+        
+        Args:
+            model: The Anthropic model to use
+            messages: List of message dictionaries with 'role' and 'content' keys
+            max_tokens: Maximum tokens to generate
+            temperature: Temperature for randomness (0.0 - 1.0)
+            
+        Returns:
+            Anthropic API response object
+        """
+        try:
+            # Initialize Anthropic client
+            client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            
+            # Format messages for Anthropic API
+            formatted_messages = []
+            for msg in messages:
+                formatted_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # Make direct API call with retry logic
+            async def make_api_call():
+                return await client.messages.create(
+                    model=model,
+                    messages=formatted_messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+            
+            response = await anthropic_api_call_with_retry(make_api_call)
+            return response
+            
+        except Exception as e:
+            logger.error(f"Direct Anthropic API call failed: {e}")
+            raise Exception(f"Anthropic API call failed: {str(e)}")
     
     async def execute_stream(self, request) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute using Anthropic Claude with streaming"""

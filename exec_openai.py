@@ -758,6 +758,48 @@ Examples:
             system_prompt,
             request.model_params
         )
+
+    async def call_openai_direct(self, model: str, messages: List[Dict[str, str]], 
+                               max_tokens: int = 1000, temperature: float = 0.7) -> Any:
+        """
+        Direct call to OpenAI API with specified parameters
+        
+        Args:
+            model: The OpenAI model to use
+            messages: List of message dictionaries with 'role' and 'content' keys
+            max_tokens: Maximum tokens to generate
+            temperature: Temperature for randomness (0.0 - 1.0)
+            
+        Returns:
+            OpenAI API response object
+        """
+        try:
+            import openai
+            
+            # Initialize OpenAI client
+            client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            
+            # Format messages for OpenAI API
+            formatted_messages = []
+            for msg in messages:
+                formatted_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # Make direct API call
+            response = await client.chat.completions.create(
+                model=model,
+                messages=formatted_messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Direct OpenAI API call failed: {e}")
+            raise Exception(f"OpenAI API call failed: {str(e)}")
     
     async def execute_stream(self, request) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute using OpenAI with streaming"""
