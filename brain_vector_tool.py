@@ -390,6 +390,49 @@ class BrainVectorTool:
             logger.error(f"Error getting brain status: {e}")
             return {"error": str(e), "available": False}
 
+    async def query_knowledge(self, user_id: str, org_id: str, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Query knowledge from the brain vector system
+        
+        This method provides compatibility with the skill discovery system
+        by exposing the pccontroller.query_knowledge function as a class method.
+        
+        Args:
+            user_id: User identifier
+            org_id: Organization identifier  
+            query: Search query string
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of knowledge results with content and metadata
+        """
+        try:
+            if not self.pccontroller or 'query_knowledge' not in self.pccontroller:
+                logger.warning("BrainVectorTool not properly initialized - pccontroller missing")
+                return []
+                
+            # Call the actual async query_knowledge function
+            results = await self.pccontroller['query_knowledge'](
+                user_id=user_id,
+                org_id=org_id,
+                query=query,
+                limit=limit
+            )
+            
+            # Ensure we return a list
+            if isinstance(results, dict):
+                return results.get('results', [])
+            elif isinstance(results, list):
+                return results
+            else:
+                logger.warning(f"Unexpected query_knowledge response type: {type(results)}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error in query_knowledge: {e}")
+            logger.error(traceback.format_exc())
+            return []
+
 
 # Tool interface functions for LLM integration
 def search_brain_knowledge(query: str, user_id: str = "unknown", org_id: str = "unknown", conversation_context: str = "") -> str:

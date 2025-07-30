@@ -656,6 +656,8 @@ Respond with ONLY a JSON object:
 Examples:
 - "I need an agent to read files" → {{"contains_teaching": true, "confidence": 0.95, "reasoning": "User wants to build new file reading capability", "type": "teaching_new_capability"}}
 - "Based on the AI agent's knowledge vectors, generate a list" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "User wants analysis of existing knowledge, not adding new knowledge", "type": "analysis_request"}}
+- "Analyze the automotive industry" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "User wants industry analysis using existing capabilities, not teaching new skills", "type": "analysis_request"}}
+- "Phan tich nganh o to" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "User wants analysis of automotive industry using existing knowledge, not adding new capabilities", "type": "analysis_request"}}
 - "Also send via Zalo" → {{"contains_teaching": true, "confidence": 0.90, "reasoning": "Adding new communication requirement to existing agent", "type": "adding_requirement"}}
 - "What can this agent do?" → {{"contains_teaching": false, "confidence": 0.95, "reasoning": "Querying existing capabilities, not teaching new ones", "type": "information_query"}}
 """

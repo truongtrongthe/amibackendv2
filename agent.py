@@ -51,6 +51,63 @@ except Exception as e:
     LANGUAGE_DETECTION_AVAILABLE = False
 
 
+# NEW: Multi-Step Planning Data Structures
+@dataclass
+class TaskComplexityAnalysis:
+    """Analysis of task complexity for multi-step planning"""
+    complexity_score: int  # 1-10 scale
+    complexity_level: str  # "simple", "standard", "complex"
+    task_type: str  # "information_retrieval", "problem_solving", etc.
+    required_steps: int  # Number of execution steps needed
+    estimated_duration: str  # "short", "medium", "long"
+    key_challenges: List[str]  # Identified challenges
+    recommended_approach: str  # Execution approach
+    confidence: float  # 0.0-1.0 confidence in analysis
+
+
+@dataclass
+class ExecutionStep:
+    """Single step in multi-step execution plan"""
+    step_number: int
+    name: str
+    description: str
+    action: str
+    tools_needed: List[str]
+    success_criteria: str
+    deliverable: str
+    dependencies: List[int]  # Step numbers this depends on
+    estimated_time: str
+    validation_checkpoints: List[str]
+
+
+@dataclass
+class MultiStepExecutionPlan:
+    """Complete multi-step execution plan"""
+    plan_id: str
+    task_description: str
+    complexity_analysis: TaskComplexityAnalysis
+    execution_steps: List[ExecutionStep]
+    quality_checkpoints: List[Dict[str, Any]]
+    success_metrics: List[str]
+    risk_mitigation: List[str]
+    total_estimated_time: str
+    created_at: datetime
+
+
+@dataclass
+class StepExecutionResult:
+    """Result of executing a single step"""
+    step_number: int
+    status: str  # "completed", "failed", "skipped"
+    deliverable: Dict[str, Any]
+    tools_used: List[str]
+    execution_time: float
+    success_criteria_met: bool
+    validation_results: List[Dict[str, Any]]
+    next_actions: List[str]
+    error_details: Optional[str] = None
+
+
 @dataclass
 class AgentTask:
     """Single task in the agent's execution chain"""
@@ -200,13 +257,17 @@ class AgentOrchestrator:
         self.agent_config_cache = {}
         self.cache_ttl = 300  # 5 minutes cache TTL
         
+        # NEW: Multi-step execution tracking
+        self.active_execution_plans = {}  # Track active execution plans
+        self.execution_history = {}  # Track completed executions
+        
         # Initialize language detection (shared with Ami)
         if LANGUAGE_DETECTION_AVAILABLE:
             self.language_detector = LanguageDetector()
         else:
             self.language_detector = None
             
-        agent_logger.info("Agent Orchestrator initialized with dynamic configuration support")
+        agent_logger.info("Agent Orchestrator initialized with multi-step planning support")
     
     def _initialize_shared_tools(self) -> Dict[str, Any]:
         """Initialize tools shared with Ami"""
@@ -941,13 +1002,13 @@ Focus on delivering comprehensive, actionable results."""
 
     async def execute_agent_task_stream(self, request: AgentExecutionRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Stream agent task execution with dynamic configuration loading
+        Stream agent task execution with dynamic configuration loading and multi-step planning
         
         Args:
             request: AgentExecutionRequest containing task parameters
             
         Yields:
-            Dict containing streaming response data with dynamic agent behavior
+            Dict containing streaming response data with dynamic agent behavior and multi-step execution
         """
         start_time = datetime.now()
         execution_id = f"{request.agent_id}-{start_time.strftime('%H%M%S')}"
@@ -1001,12 +1062,17 @@ Focus on delivering comprehensive, actionable results."""
                 # Store agent config for use in conversion
                 self._current_agent_config = agent_config
                 
+                # NEW: Store current execution context for skill discovery
+                self._current_user_id = request.user_id
+                self._current_org_id = request.org_id
+                agent_config["org_id"] = request.org_id  # Ensure org_id is in config
+                
                 yield {
                     "type": "status", 
                     "content": f"✅ Loaded {agent_config['name']} - ready to assist!",
                     "provider": request.llm_provider,
                     "agent_id": resolved_agent_id,
-                    "agent_name": agent_config['name'],
+                    "agent_name": agent_config['name'],  
                     "status": "config_loaded"
                 }
                 
@@ -1021,7 +1087,131 @@ Focus on delivering comprehensive, actionable results."""
                 }
                 return
             
-            # Convert to tool request with dynamic configuration
+            # NEW: Analyze task complexity for multi-step planning
+            execution_logger.info(f"[{execution_id}] COMPLEXITY ANALYSIS - Analyzing task complexity...")
+            yield {
+                "type": "status",
+                "content": "🧠 Analyzing task complexity...",
+                "provider": request.llm_provider,
+                "agent_id": request.agent_id,
+                "status": "complexity_analysis"
+            }
+            
+            try:
+                complexity_analysis = await self.analyze_task_complexity(
+                    request.user_request, agent_config, request.llm_provider, request.model
+                )
+                
+                execution_logger.info(f"[{execution_id}] COMPLEXITY ANALYSIS - Score: {complexity_analysis.complexity_score}/10 ({complexity_analysis.complexity_level})")
+                execution_logger.info(f"[{execution_id}] COMPLEXITY ANALYSIS - Required Steps: {complexity_analysis.required_steps}")
+                execution_logger.info(f"[{execution_id}] COMPLEXITY ANALYSIS - Task Type: {complexity_analysis.task_type}")
+                
+                yield {
+                    "type": "analysis",
+                    "content": f"📊 Task Complexity: {complexity_analysis.complexity_score}/10 ({complexity_analysis.complexity_level}) - {complexity_analysis.required_steps} steps planned",
+                    "provider": request.llm_provider,
+                    "agent_id": request.agent_id,
+                    "complexity_analysis": {
+                        "score": complexity_analysis.complexity_score,
+                        "level": complexity_analysis.complexity_level,
+                        "steps": complexity_analysis.required_steps,
+                        "task_type": complexity_analysis.task_type,
+                        "confidence": complexity_analysis.confidence
+                    }
+                }
+                
+                # NEW: Multi-step execution for complex tasks
+                system_prompt_data = agent_config.get("system_prompt", {})
+                execution_capabilities = system_prompt_data.get("execution_capabilities", {})
+                multi_step_threshold = execution_capabilities.get("multi_step_threshold", 4)
+                supports_multi_step = execution_capabilities.get("supports_multi_step", True)
+                
+                if (complexity_analysis.complexity_score >= multi_step_threshold and 
+                    supports_multi_step and 
+                    complexity_analysis.complexity_level in ["standard", "complex"]):
+                    
+                    execution_logger.info(f"[{execution_id}] MULTI-STEP EXECUTION - Complexity {complexity_analysis.complexity_score} >= threshold {multi_step_threshold}")
+                    
+                    # Generate execution plan
+                    yield {
+                        "type": "status",
+                        "content": f"📋 Generating {complexity_analysis.required_steps}-step execution plan...",
+                        "provider": request.llm_provider,
+                        "agent_id": request.agent_id,
+                        "status": "planning"
+                    }
+                    
+                    execution_plan = await self.generate_execution_plan(
+                        complexity_analysis, request.user_request, agent_config, 
+                        request.llm_provider, request.model
+                    )
+                    
+                    # Store active execution plan
+                    self.active_execution_plans[execution_id] = execution_plan
+                    
+                    yield {
+                        "type": "plan",
+                        "content": f"✅ Execution plan generated: {len(execution_plan.execution_steps)} steps, estimated time: {execution_plan.total_estimated_time}",
+                        "provider": request.llm_provider,
+                        "agent_id": request.agent_id,
+                        "execution_plan": {
+                            "plan_id": execution_plan.plan_id,
+                            "total_steps": len(execution_plan.execution_steps),
+                            "estimated_time": execution_plan.total_estimated_time,
+                            "steps": [
+                                {
+                                    "step": step.step_number,
+                                    "name": step.name,
+                                    "estimated_time": step.estimated_time
+                                } for step in execution_plan.execution_steps
+                            ]
+                        }
+                    }
+                    
+                    # Execute multi-step plan
+                    execution_logger.info(f"[{execution_id}] MULTI-STEP EXECUTION - Starting step-by-step execution")
+                    
+                    async for step_result in self._execute_multi_step_plan(execution_plan, request, agent_config):
+                        yield step_result
+                    
+                    # Multi-step execution complete
+                    execution_time = (datetime.now() - start_time).total_seconds()
+                    execution_logger.info(f"[{execution_id}] MULTI-STEP EXECUTION COMPLETE - {execution_time:.2f}s")
+                    
+                    yield {
+                        "type": "complete",
+                        "content": f"✅ Multi-step execution completed successfully ({len(execution_plan.execution_steps)} steps)",
+                        "provider": request.llm_provider,
+                        "agent_id": request.agent_id,
+                        "agent_type": request.agent_type,
+                        "execution_time": execution_time,
+                        "execution_mode": "multi_step",
+                        "success": True
+                    }
+                    
+                    return
+                    
+                else:
+                    execution_logger.info(f"[{execution_id}] SINGLE-STEP EXECUTION - Complexity {complexity_analysis.complexity_score} < threshold {multi_step_threshold} or multi-step disabled")
+                    yield {
+                        "type": "status",
+                        "content": f"⚡ Executing with single-step approach (complexity: {complexity_analysis.complexity_level})",
+                        "provider": request.llm_provider,
+                        "agent_id": request.agent_id,
+                        "status": "single_step_execution"
+                    }
+                
+            except Exception as e:
+                execution_logger.warning(f"[{execution_id}] COMPLEXITY ANALYSIS FAILED - {str(e)}, proceeding with standard execution")
+                yield {
+                    "type": "status",
+                    "content": "⚠️ Complexity analysis failed, proceeding with standard execution",
+                    "provider": request.llm_provider,
+                    "agent_id": request.agent_id,
+                    "status": "fallback_execution"
+                }
+            
+            # Convert to tool request with dynamic configuration (existing logic)
             execution_logger.info(f"[{execution_id}] TOOL CONVERSION - Converting with dynamic config")
             tool_request = self._convert_to_tool_request_dynamic(request, agent_config)
             execution_logger.info(f"[{execution_id}] DYNAMIC CONVERSION COMPLETE - Tools: {tool_request.tools_whitelist}")
@@ -1030,7 +1220,7 @@ Focus on delivering comprehensive, actionable results."""
             system_prompt_preview = tool_request.system_prompt[:200] + "..." if len(tool_request.system_prompt) > 200 else tool_request.system_prompt
             execution_logger.info(f"[{execution_id}] DYNAMIC SYSTEM PROMPT: {system_prompt_preview}")
             
-            # Execute with dynamic configuration
+            # Execute with dynamic configuration (existing logic)
             execution_logger.info(f"[{execution_id}] LLM EXECUTION START - Provider: {request.llm_provider}")
             
             chunk_count = 0
@@ -1097,6 +1287,7 @@ Focus on delivering comprehensive, actionable results."""
                 "agent_id": request.agent_id,
                 "agent_type": request.agent_type,
                 "execution_time": execution_time,
+                "execution_mode": "single_step",
                 "success": True
             }
             
@@ -1381,6 +1572,1036 @@ Remember to:
     def get_available_tools(self) -> List[str]:
         """Get list of available tools (shared with Ami)"""
         return list(self.available_tools.keys())
+
+    # NEW: Multi-Step Planning Methods
+    async def analyze_task_complexity(self, user_request: str, agent_config: Dict[str, Any], 
+                                        llm_provider: str, model: str = None) -> TaskComplexityAnalysis:
+        """
+        Analyze task complexity to determine if multi-step planning is needed
+        WITH skill discovery and knowledge-aware enhancement
+        
+        Args:
+            user_request: The user's task request
+            agent_config: Agent configuration with capabilities
+            llm_provider: LLM provider for analysis
+            model: Optional model name
+            
+        Returns:
+            TaskComplexityAnalysis with complexity scoring and recommendations enhanced by discovered skills
+        """
+        
+        # Get agent's execution capabilities
+        system_prompt_data = agent_config.get("system_prompt", {})
+        execution_capabilities = system_prompt_data.get("execution_capabilities", {})
+        max_complexity = execution_capabilities.get("max_complexity_score", 10)
+        complexity_thresholds = execution_capabilities.get("complexity_thresholds", {
+            "simple": {"min": 1, "max": 3, "steps": 3},
+            "standard": {"min": 4, "max": 7, "steps": 5},
+            "complex": {"min": 8, "max": 10, "steps": 7}
+        })
+        
+        # NEW: Discover relevant skills from agent's knowledge base
+        discovered_skills = {}
+        try:
+            # Extract user_id and org_id from current context or agent config
+            user_id = getattr(self, '_current_user_id', 'anonymous')
+            org_id = agent_config.get("org_id", "default")
+            
+            discovered_skills = await self.discover_agent_skills(
+                user_request, agent_config, user_id, org_id
+            )
+            
+            # Log discovered skills
+            if discovered_skills.get("skills") or discovered_skills.get("methodologies"):
+                agent_logger.info(f"Discovered {len(discovered_skills.get('skills', []))} skills, {len(discovered_skills.get('methodologies', []))} methodologies")
+                
+        except Exception as e:
+            agent_logger.warning(f"Skill discovery failed during complexity analysis: {e}")
+            discovered_skills = {"skills": [], "methodologies": [], "experience": [], "capabilities_enhancement": {}}
+        
+        # Create complexity analysis prompt enhanced with discovered skills
+        skills_context = ""
+        if discovered_skills.get("skills") or discovered_skills.get("methodologies") or discovered_skills.get("frameworks"):
+            skills_context = f"""
+DISCOVERED AGENT SKILLS & EXPERIENCE:
+- Skills: {', '.join(discovered_skills.get('skills', [])[:3])}
+- Methodologies: {', '.join(discovered_skills.get('methodologies', [])[:3])}
+- Frameworks: {', '.join(discovered_skills.get('frameworks', [])[:3])}
+- Best Practices: {', '.join(discovered_skills.get('best_practices', [])[:2])}
+
+CAPABILITY ENHANCEMENT:
+- Complexity Boost: +{discovered_skills.get('capabilities_enhancement', {}).get('complexity_boost', 0)} points
+- Additional Capabilities: {len(discovered_skills.get('capabilities_enhancement', {}).get('additional_steps', []))} specialized steps available
+"""
+        
+        analysis_prompt = f"""
+        You are an expert task complexity analyzer with access to the agent's specific knowledge and skills. 
+        Analyze this task request and determine its complexity level, considering the agent's discovered capabilities.
+
+        AGENT CAPABILITIES:
+        - Agent Name: {agent_config.get('name', 'Unknown')}
+        - Agent Type: {system_prompt_data.get('agent_type', 'general')}
+        - Available Tools: {', '.join(agent_config.get('tools_list', []))}
+        - Knowledge Domains: {', '.join(agent_config.get('knowledge_list', []))}
+        - Max Complexity Score: {max_complexity}
+        - Domain Specialization: {system_prompt_data.get('domain_specialization', ['general'])}
+
+        {skills_context}
+
+        TASK REQUEST: "{user_request}"
+
+        COMPLEXITY SCORING CRITERIA (Enhanced with Skills):
+        1-3 (Simple): Single tool usage, direct information retrieval, straightforward Q&A
+        4-7 (Standard): Multiple tool coordination, analysis tasks, document processing
+        8-10 (Complex): Multi-step reasoning, cross-domain analysis, complex problem solving
+        
+        SKILL-BASED ADJUSTMENTS:
+        - If agent has relevant methodologies/frameworks: +1-2 complexity points (can handle more complex tasks)
+        - If agent has specific experience: More sophisticated execution steps
+        - If agent has best practices: Enhanced quality standards
+
+        Consider the agent's discovered skills when scoring. An agent with relevant experience can handle 
+        more complex approaches to tasks that might otherwise be simpler.
+
+        Provide your analysis in this EXACT JSON format:
+        {{
+            "complexity_score": 6,
+            "complexity_level": "standard",
+            "task_type": "information_retrieval|problem_solving|analysis|communication|automation",
+            "required_steps": 5,
+            "estimated_duration": "short|medium|long",
+            "key_challenges": ["challenge1", "challenge2"],
+            "recommended_approach": "Detailed description of recommended execution approach incorporating discovered skills",
+            "confidence": 0.85,
+            "skill_integration": "How discovered skills enhance the execution approach",
+            "reasoning": "Explanation of complexity scoring including skill-based adjustments"
+        }}
+        """
+        
+        try:
+            # Get complexity analysis from LLM
+            if llm_provider.lower() == "anthropic":
+                analysis_response = await self.anthropic_executor._analyze_with_anthropic(analysis_prompt, model)
+            else:
+                analysis_response = await self.openai_executor._analyze_with_openai(analysis_prompt, model)
+            
+            # Parse JSON response
+            import json
+            import re
+            json_match = re.search(r'\{.*\}', analysis_response, re.DOTALL)
+            if json_match:
+                analysis_data = json.loads(json_match.group(0))
+                
+                # Apply skill-based complexity boost
+                base_complexity_score = analysis_data.get("complexity_score", 5)
+                skill_boost = discovered_skills.get("capabilities_enhancement", {}).get("complexity_boost", 0)
+                complexity_score = min(base_complexity_score + skill_boost, max_complexity)
+                
+                # Determine complexity level based on thresholds (with skill enhancement)
+                complexity_level = "standard"
+                required_steps = 5
+                
+                for level, threshold in complexity_thresholds.items():
+                    if threshold["min"] <= complexity_score <= threshold["max"]:
+                        complexity_level = level
+                        required_steps = threshold["steps"]
+                        break
+                
+                # Add skill-based additional steps
+                additional_steps = len(discovered_skills.get("capabilities_enhancement", {}).get("additional_steps", []))
+                if additional_steps > 0:
+                    required_steps += additional_steps
+                
+                # Enhanced recommended approach
+                base_approach = analysis_data.get("recommended_approach", "Standard execution approach")
+                if discovered_skills.get("methodologies"):
+                    base_approach += f" Enhanced with discovered methodologies: {', '.join(discovered_skills['methodologies'][:2])}"
+                
+                return TaskComplexityAnalysis(
+                    complexity_score=complexity_score,
+                    complexity_level=complexity_level,
+                    task_type=analysis_data.get("task_type", "general"),
+                    required_steps=required_steps,
+                    estimated_duration=analysis_data.get("estimated_duration", "medium"),
+                    key_challenges=analysis_data.get("key_challenges", []),
+                    recommended_approach=base_approach,
+                    confidence=analysis_data.get("confidence", 0.7)
+                )
+            else:
+                # Fallback to heuristic-based analysis with skill enhancement
+                return self._heuristic_complexity_analysis_with_skills(user_request, agent_config, discovered_skills)
+                
+        except Exception as e:
+            agent_logger.warning(f"LLM complexity analysis failed: {e}, using heuristic analysis")
+            return self._heuristic_complexity_analysis_with_skills(user_request, agent_config, discovered_skills)
+    
+    def _heuristic_complexity_analysis_with_skills(self, user_request: str, agent_config: Dict[str, Any], 
+                                                 discovered_skills: Dict[str, Any]) -> TaskComplexityAnalysis:
+        """Fallback heuristic-based complexity analysis enhanced with discovered skills"""
+        
+        request_lower = user_request.lower()
+        complexity_indicators = {
+            'simple': ['what', 'who', 'when', 'where', 'define', 'explain', 'list'],
+            'standard': ['analyze', 'compare', 'evaluate', 'process', 'review', 'optimize'],
+            'complex': ['integrate', 'coordinate', 'transform', 'redesign', 'implement', 'multiple', 'comprehensive']
+        }
+        
+        # Count indicators
+        simple_count = sum(1 for indicator in complexity_indicators['simple'] if indicator in request_lower)
+        standard_count = sum(1 for indicator in complexity_indicators['standard'] if indicator in request_lower)
+        complex_count = sum(1 for indicator in complexity_indicators['complex'] if indicator in request_lower)
+        
+        # Determine base complexity
+        if complex_count >= 2 or len(user_request) > 200:
+            complexity_score = 8
+            complexity_level = "complex"
+            required_steps = 7
+        elif standard_count >= 1 or simple_count == 0:
+            complexity_score = 5
+            complexity_level = "standard"
+            required_steps = 5
+        else:
+            complexity_score = 3
+            complexity_level = "simple"
+            required_steps = 3
+        
+        # Apply skill-based enhancements
+        skill_boost = discovered_skills.get("capabilities_enhancement", {}).get("complexity_boost", 0)
+        complexity_score = min(complexity_score + skill_boost, 10)
+        
+        # Add skill-based steps
+        additional_steps = len(discovered_skills.get("capabilities_enhancement", {}).get("additional_steps", []))
+        required_steps += additional_steps
+        
+        # Update complexity level based on enhanced score
+        if complexity_score >= 8:
+            complexity_level = "complex"
+        elif complexity_score >= 4:
+            complexity_level = "standard"
+        
+        # Enhanced approach description
+        approach = "Standard execution with complexity-appropriate steps"
+        if discovered_skills.get("methodologies"):
+            approach += f" enhanced with {len(discovered_skills['methodologies'])} discovered methodologies"
+        
+        return TaskComplexityAnalysis(
+            complexity_score=complexity_score,
+            complexity_level=complexity_level,
+            task_type="general",
+            required_steps=required_steps,
+            estimated_duration="medium",
+            key_challenges=["Heuristic analysis - enhanced with discovered skills"],
+            recommended_approach=approach,
+            confidence=0.7
+        )
+    
+    async def generate_execution_plan(self, complexity_analysis: TaskComplexityAnalysis, 
+                                    user_request: str, agent_config: Dict[str, Any],
+                                    llm_provider: str, model: str = None) -> MultiStepExecutionPlan:
+        """
+        Generate detailed multi-step execution plan based on complexity analysis
+        WITH discovered skills and knowledge integration
+        
+        Args:
+            complexity_analysis: Task complexity analysis
+            user_request: Original user request
+            agent_config: Agent configuration
+            llm_provider: LLM provider
+            model: Optional model name
+            
+        Returns:
+            MultiStepExecutionPlan with detailed execution steps enhanced by agent's discovered skills
+        """
+        
+        plan_id = f"plan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # NEW: Re-discover skills for detailed planning (with caching potential)
+        discovered_skills = {}
+        try:
+            user_id = getattr(self, '_current_user_id', 'anonymous')
+            org_id = agent_config.get("org_id", "default")
+            
+            discovered_skills = await self.discover_agent_skills(
+                user_request, agent_config, user_id, org_id
+            )
+        except Exception as e:
+            agent_logger.warning(f"Skill discovery failed during planning: {e}")
+            discovered_skills = {"skills": [], "methodologies": [], "experience": [], "capabilities_enhancement": {}}
+        
+        # Create execution plan generation prompt enhanced with skills
+        system_prompt_data = agent_config.get("system_prompt", {})
+        available_tools = agent_config.get("tools_list", [])
+        knowledge_domains = agent_config.get("knowledge_list", [])
+        
+        # Build skill-aware planning context
+        skills_planning_context = ""
+        if discovered_skills.get("skills") or discovered_skills.get("methodologies"):
+            skills_planning_context = f"""
+AGENT'S DISCOVERED SKILLS & METHODOLOGIES TO INTEGRATE:
+
+SPECIFIC SKILLS:
+{chr(10).join(f"- {skill}" for skill in discovered_skills.get('skills', [])[:5])}
+
+METHODOLOGIES & FRAMEWORKS:
+{chr(10).join(f"- {method}" for method in discovered_skills.get('methodologies', [])[:5])}
+
+ORGANIZATIONAL EXPERIENCE:
+{chr(10).join(f"- {exp}" for exp in discovered_skills.get('experience', [])[:3])}
+
+AVAILABLE FRAMEWORKS:
+{chr(10).join(f"- {framework}" for framework in discovered_skills.get('frameworks', [])[:3])}
+
+BEST PRACTICES TO APPLY:
+{chr(10).join(f"- {practice}" for practice in discovered_skills.get('best_practices', [])[:3])}
+
+SKILL-BASED ENHANCEMENTS:
+- Additional specialized steps: {len(discovered_skills.get('capabilities_enhancement', {}).get('additional_steps', []))}
+- Enhanced quality standards: {len(discovered_skills.get('capabilities_enhancement', {}).get('quality_standards', []))}
+"""
+        
+        planning_prompt = f"""
+        You are an expert execution planner for AI agents with access to the agent's specific skills and organizational knowledge.
+        Create a detailed multi-step execution plan that leverages the agent's discovered capabilities.
+
+        AGENT CONTEXT:
+        - Agent: {agent_config.get('name')} ({system_prompt_data.get('agent_type', 'general')})
+        - Available Tools: {', '.join(available_tools)}
+        - Knowledge Domains: {', '.join(knowledge_domains)}
+        - Domain Specialization: {system_prompt_data.get('domain_specialization', ['general'])}
+
+        {skills_planning_context}
+
+        TASK REQUEST: "{user_request}"
+
+        COMPLEXITY ANALYSIS:
+        - Score: {complexity_analysis.complexity_score}/10 ({complexity_analysis.complexity_level})
+        - Required Steps: {complexity_analysis.required_steps}
+        - Task Type: {complexity_analysis.task_type}
+        - Key Challenges: {', '.join(complexity_analysis.key_challenges)}
+        - Recommended Approach: {complexity_analysis.recommended_approach}
+
+        SKILL-AWARE EXECUTION FRAMEWORK:
+        Create {complexity_analysis.required_steps} detailed execution steps following this enhanced pattern:
+        1. Context Analysis & Knowledge Activation (activate relevant agent knowledge)
+        2. Information Gathering with Skill Application (use discovered methodologies)
+        3. Analysis & Processing with Best Practices (apply organizational experience)
+        4. Framework-Based Solution Generation (use discovered frameworks)
+        5. Experience-Validated Synthesis (validate against organizational lessons learned)
+        (+ additional specialized steps based on discovered capabilities)
+
+        IMPORTANT: Incorporate the agent's discovered skills and methodologies into specific steps.
+        For example:
+        - If agent has "Lean methodology" → include "Apply Lean principles to eliminate waste"
+        - If agent has "Risk assessment experience" → include "Conduct risk assessment using organizational experience"
+        - If agent has "Quality frameworks" → include "Apply quality validation frameworks"
+
+        Provide your plan in this EXACT JSON format:
+        {{
+            "execution_steps": [
+                {{
+                    "step_number": 1,
+                    "name": "Context Analysis & Knowledge Activation",
+                    "description": "Detailed description incorporating agent's skills",
+                    "action": "Specific action that leverages discovered capabilities",
+                    "tools_needed": ["tool1", "tool2"],
+                    "success_criteria": "How to measure success including skill application",
+                    "deliverable": "What this step produces enhanced by agent knowledge",
+                    "dependencies": [],
+                    "estimated_time": "short|medium|long",
+                    "validation_checkpoints": ["checkpoint1", "checkpoint2"],
+                    "skills_applied": ["skill1", "methodology1"]
+                }}
+            ],
+            "quality_checkpoints": [
+                {{
+                    "checkpoint_name": "Knowledge-Based Quality Check",
+                    "trigger_after_step": 2,
+                    "validation_criteria": "Validate using agent's experience and best practices",
+                    "success_threshold": "Success criteria enhanced by discovered knowledge"
+                }}
+            ],
+            "success_metrics": ["metric1", "metric2"],
+            "risk_mitigation": ["risk1_mitigation", "risk2_mitigation"],
+            "total_estimated_time": "short|medium|long",
+            "skills_integration_summary": "How agent's skills enhance the execution plan"
+        }}
+        """
+        
+        try:
+            # Generate execution plan
+            if llm_provider.lower() == "anthropic":
+                plan_response = await self.anthropic_executor._analyze_with_anthropic(planning_prompt, model)
+            else:
+                plan_response = await self.openai_executor._analyze_with_openai(planning_prompt, model)
+            
+            # Parse JSON response
+            import json
+            import re
+            json_match = re.search(r'\{.*\}', plan_response, re.DOTALL)
+            if json_match:
+                plan_data = json.loads(json_match.group(0))
+                
+                # Create ExecutionStep objects with skill information
+                execution_steps = []
+                for step_data in plan_data.get("execution_steps", []):
+                    step = ExecutionStep(
+                        step_number=step_data.get("step_number", 1),
+                        name=step_data.get("name", "Execution Step"),
+                        description=step_data.get("description", ""),
+                        action=step_data.get("action", ""),
+                        tools_needed=step_data.get("tools_needed", []),
+                        success_criteria=step_data.get("success_criteria", ""),
+                        deliverable=step_data.get("deliverable", ""),
+                        dependencies=step_data.get("dependencies", []),
+                        estimated_time=step_data.get("estimated_time", "medium"),
+                        validation_checkpoints=step_data.get("validation_checkpoints", [])
+                    )
+                    execution_steps.append(step)
+                
+                # Add skill-based additional steps if any
+                additional_steps = discovered_skills.get("capabilities_enhancement", {}).get("additional_steps", [])
+                for i, additional_step in enumerate(additional_steps):
+                    step_number = len(execution_steps) + 1
+                    step = ExecutionStep(
+                        step_number=step_number,
+                        name=additional_step["name"],
+                        description=additional_step["description"],
+                        action=f"Apply discovered capabilities: {additional_step['description']}",
+                        tools_needed=additional_step.get("tools_needed", ["brain_vector"]),
+                        success_criteria="Successfully integrate agent's specialized knowledge",
+                        deliverable=f"Enhanced output using agent's {additional_step['name'].lower()} capabilities",
+                        dependencies=[step_number - 1] if execution_steps else [],
+                        estimated_time="medium",
+                        validation_checkpoints=["Knowledge integration verified", "Quality standards met"]
+                    )
+                    execution_steps.append(step)
+                
+                # Enhance quality checkpoints with skill-based validation
+                quality_checkpoints = plan_data.get("quality_checkpoints", [])
+                if discovered_skills.get("experience"):
+                    quality_checkpoints.append({
+                        "checkpoint_name": "Experience-Based Validation",
+                        "trigger_after_step": len(execution_steps) - 1,
+                        "validation_criteria": "Validate against organizational experience and lessons learned",
+                        "success_threshold": "Meets historical success patterns and quality standards"
+                    })
+                
+                # Enhance success metrics with skill-specific measures
+                success_metrics = plan_data.get("success_metrics", [])
+                if discovered_skills.get("methodologies"):
+                    success_metrics.append("Methodology application effectiveness")
+                if discovered_skills.get("best_practices"):
+                    success_metrics.append("Best practices integration completeness")
+                
+                return MultiStepExecutionPlan(
+                    plan_id=plan_id,
+                    task_description=user_request,
+                    complexity_analysis=complexity_analysis,
+                    execution_steps=execution_steps,
+                    quality_checkpoints=quality_checkpoints,
+                    success_metrics=success_metrics,
+                    risk_mitigation=plan_data.get("risk_mitigation", []),
+                    total_estimated_time=plan_data.get("total_estimated_time", "medium"),
+                    created_at=datetime.now()
+                )
+            else:
+                # Fallback to skill-enhanced default plan
+                return self._create_skill_enhanced_execution_plan(plan_id, user_request, complexity_analysis, discovered_skills)
+                
+        except Exception as e:
+            agent_logger.warning(f"LLM execution planning failed: {e}, using skill-enhanced default plan")
+            return self._create_skill_enhanced_execution_plan(plan_id, user_request, complexity_analysis, discovered_skills)
+    
+    def _create_skill_enhanced_execution_plan(self, plan_id: str, user_request: str, 
+                                            complexity_analysis: TaskComplexityAnalysis,
+                                            discovered_skills: Dict[str, Any]) -> MultiStepExecutionPlan:
+        """Create a default execution plan enhanced with discovered skills"""
+        
+        # Create basic execution steps based on complexity
+        base_steps = [
+            ExecutionStep(
+                step_number=1,
+                name="Context Analysis & Knowledge Activation",
+                description="Analyze the request and activate relevant agent knowledge and skills",
+                action="Understand task requirements and identify applicable methodologies from knowledge base",
+                tools_needed=["context", "brain_vector"],
+                success_criteria="Clear understanding of task objectives with relevant skills identified",
+                deliverable="Task analysis with activated agent knowledge context",
+                dependencies=[],
+                estimated_time="short",
+                validation_checkpoints=["Requirements clear", "Relevant skills identified", "Context established"]
+            ),
+            ExecutionStep(
+                step_number=2,
+                name="Information Gathering with Skill Application",
+                description="Gather necessary information using agent's specialized approaches",
+                action="Use available tools and apply discovered methodologies to collect relevant information",
+                tools_needed=["search_factory", "brain_vector"],
+                success_criteria="Sufficient information collected using best practices",
+                deliverable="Gathered information enhanced by agent's specialized knowledge",
+                dependencies=[1],
+                estimated_time="medium",
+                validation_checkpoints=["Information quality validated", "Methodology application verified", "Completeness check"]
+            ),
+            ExecutionStep(
+                step_number=3,
+                name="Analysis & Processing with Best Practices",
+                description="Analyze gathered information using organizational best practices and experience",
+                action="Process and analyze collected information applying discovered frameworks",
+                tools_needed=["business_logic", "brain_vector"],
+                success_criteria="Analysis completed using agent's specialized knowledge",
+                deliverable="Processed analysis results enhanced by organizational experience",
+                dependencies=[2],
+                estimated_time="medium",
+                validation_checkpoints=["Analysis accuracy verified", "Best practices applied", "Results validity confirmed"]
+            )
+        ]
+        
+        # Add skill-specific steps based on discovered capabilities
+        if discovered_skills.get("methodologies"):
+            methodology_step = ExecutionStep(
+                step_number=len(base_steps) + 1,
+                name="Methodology Application",
+                description=f"Apply discovered methodologies: {', '.join(discovered_skills['methodologies'][:2])}",
+                action="Integrate organizational methodologies and frameworks into solution approach",
+                tools_needed=["brain_vector", "business_logic"],
+                success_criteria="Methodologies successfully applied to enhance solution quality",
+                deliverable="Solution approach enhanced by organizational methodologies",
+                dependencies=[len(base_steps)],
+                estimated_time="medium",
+                validation_checkpoints=["Methodology integration verified", "Framework application confirmed"]
+            )
+            base_steps.append(methodology_step)
+        
+        # Add additional steps for higher complexity
+        if complexity_analysis.complexity_level in ["standard", "complex"]:
+            solution_step = ExecutionStep(
+                step_number=len(base_steps) + 1,
+                name="Framework-Based Solution Generation",
+                description="Generate solutions using agent's discovered frameworks and experience",
+                action="Create actionable solutions leveraging organizational knowledge and best practices",
+                tools_needed=["business_logic", "brain_vector"],
+                success_criteria="Solutions are practical, actionable, and incorporate agent's specialized knowledge",
+                deliverable="Generated solutions enhanced by organizational frameworks",
+                dependencies=[len(base_steps)],
+                estimated_time="medium",
+                validation_checkpoints=["Solution feasibility confirmed", "Framework integration verified", "Quality standards met"]
+            )
+            base_steps.append(solution_step)
+        
+        if complexity_analysis.complexity_level == "complex":
+            validation_step = ExecutionStep(
+                step_number=len(base_steps) + 1,
+                name="Experience-Based Integration & Validation",
+                description="Integrate solutions and validate using organizational experience",
+                action="Ensure all components work together effectively using lessons learned",
+                tools_needed=["business_logic", "context", "brain_vector"],
+                success_criteria="Integrated solution validated against organizational experience",
+                deliverable="Validated integrated solution enhanced by historical success patterns",
+                dependencies=[len(base_steps)],
+                estimated_time="medium",
+                validation_checkpoints=["Integration success verified", "Experience validation complete", "Quality assurance passed"]
+            )
+            base_steps.append(validation_step)
+        
+        # Final synthesis step enhanced with skills
+        final_step_number = len(base_steps) + 1
+        synthesis_step = ExecutionStep(
+            step_number=final_step_number,
+            name="Knowledge-Enhanced Response Synthesis",
+            description="Synthesize all results into final response using agent's complete knowledge",
+            action="Create comprehensive final response incorporating all discovered capabilities",
+            tools_needed=[],
+            success_criteria="Complete, coherent response that demonstrates agent's specialized knowledge",
+            deliverable="Final comprehensive response enhanced by agent's full knowledge base",
+            dependencies=[final_step_number - 1],
+            estimated_time="short",
+            validation_checkpoints=["Response completeness verified", "Knowledge integration confirmed", "Quality standards exceeded"]
+        )
+        base_steps.append(synthesis_step)
+        
+        # Create enhanced quality checkpoints
+        quality_checkpoints = [
+            {
+                "checkpoint_name": "Knowledge Integration Quality Check",
+                "trigger_after_step": len(base_steps) // 2,
+                "validation_criteria": "Verify effective integration of agent's knowledge and skills",
+                "success_threshold": "All discovered capabilities are being effectively applied"
+            }
+        ]
+        
+        # Add experience-based checkpoint if available
+        if discovered_skills.get("experience"):
+            quality_checkpoints.append({
+                "checkpoint_name": "Experience-Based Validation",
+                "trigger_after_step": len(base_steps) - 1,
+                "validation_criteria": "Validate outputs against organizational experience and lessons learned",
+                "success_threshold": "Meets or exceeds historical success patterns"
+            })
+        
+        # Enhanced success metrics
+        success_metrics = ["Task completion", "Quality standards met", "User satisfaction"]
+        if discovered_skills.get("methodologies"):
+            success_metrics.append("Methodology application effectiveness")
+        if discovered_skills.get("best_practices"):
+            success_metrics.append("Best practices integration success")
+        if discovered_skills.get("frameworks"):
+            success_metrics.append("Framework utilization quality")
+        
+        # Enhanced risk mitigation
+        risk_mitigation = ["Fallback to simpler approach if needed", "Error handling at each step"]
+        if discovered_skills.get("experience"):
+            risk_mitigation.append("Apply lessons learned to avoid historical pitfalls")
+        
+        return MultiStepExecutionPlan(
+            plan_id=plan_id,
+            task_description=user_request,
+            complexity_analysis=complexity_analysis,
+            execution_steps=base_steps,
+            quality_checkpoints=quality_checkpoints,
+            success_metrics=success_metrics,
+            risk_mitigation=risk_mitigation,
+            total_estimated_time=complexity_analysis.estimated_duration,
+            created_at=datetime.now()
+        )
+
+    async def _execute_multi_step_plan(self, execution_plan: MultiStepExecutionPlan, 
+                                     request: AgentExecutionRequest, 
+                                     agent_config: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Execute multi-step plan with step-by-step progress tracking
+        
+        Args:
+            execution_plan: The multi-step execution plan
+            request: Original execution request
+            agent_config: Agent configuration
+            
+        Yields:
+            Dict containing step execution results and progress updates
+        """
+        
+        step_results = {}
+        
+        for step in execution_plan.execution_steps:
+            step_start_time = datetime.now()
+            
+            # Yield step start notification
+            yield {
+                "type": "step_start",
+                "content": f"🔄 Step {step.step_number}/{len(execution_plan.execution_steps)}: {step.name}",
+                "provider": request.llm_provider,
+                "agent_id": request.agent_id,
+                "step_info": {
+                    "step_number": step.step_number,
+                    "name": step.name,
+                    "description": step.description,
+                    "estimated_time": step.estimated_time,
+                    "tools_needed": step.tools_needed
+                }
+            }
+            
+            try:
+                # Check dependencies
+                for dep_step in step.dependencies:
+                    if dep_step not in step_results or step_results[dep_step].status != "completed":
+                        yield {
+                            "type": "error",
+                            "content": f"❌ Step {step.step_number} dependency not met: Step {dep_step} must complete first",
+                            "provider": request.llm_provider,
+                            "agent_id": request.agent_id,
+                            "step_number": step.step_number
+                        }
+                        return
+                
+                # Build step-specific prompt
+                step_prompt = self._build_step_execution_prompt(
+                    step, execution_plan, step_results, agent_config, request.user_request
+                )
+                
+                # Execute step using tool request
+                step_tool_request = self._create_step_tool_request(
+                    request, agent_config, step_prompt, step.tools_needed
+                )
+                
+                # Execute and collect results
+                step_response_chunks = []
+                tool_calls_made = []
+                
+                if request.llm_provider.lower() == "anthropic":
+                    async for chunk in self.anthropic_executor.execute_stream(step_tool_request):
+                        # Track tool calls
+                        if chunk.get("type") == "tool_execution":
+                            tool_calls_made.append(chunk.get("tool_name"))
+                        
+                        # Forward chunk with step context
+                        chunk["step_number"] = step.step_number
+                        chunk["step_name"] = step.name
+                        yield chunk
+                        
+                        # Collect response chunks
+                        if chunk.get("type") == "response_chunk":
+                            step_response_chunks.append(chunk.get("content", ""))
+                else:
+                    async for chunk in self.openai_executor.execute_stream(step_tool_request):
+                        # Track tool calls
+                        if chunk.get("type") == "tool_execution":
+                            tool_calls_made.append(chunk.get("tool_name"))
+                        
+                        # Forward chunk with step context
+                        chunk["step_number"] = step.step_number
+                        chunk["step_name"] = step.name
+                        yield chunk
+                        
+                        # Collect response chunks
+                        if chunk.get("type") == "response_chunk":
+                            step_response_chunks.append(chunk.get("content", ""))
+                
+                # Combine response
+                step_response = "".join(step_response_chunks)
+                step_execution_time = (datetime.now() - step_start_time).total_seconds()
+                
+                # Create step result
+                step_result = StepExecutionResult(
+                    step_number=step.step_number,
+                    status="completed",
+                    deliverable={
+                        "response": step_response,
+                        "summary": f"Step {step.step_number} completed: {step.name}"
+                    },
+                    tools_used=list(set(tool_calls_made)),
+                    execution_time=step_execution_time,
+                    success_criteria_met=True,  # TODO: Add validation logic
+                    validation_results=[],
+                    next_actions=[]
+                )
+                
+                step_results[step.step_number] = step_result
+                
+                # Yield step completion
+                yield {
+                    "type": "step_complete",
+                    "content": f"✅ Step {step.step_number} completed: {step.name} ({step_execution_time:.1f}s)",
+                    "provider": request.llm_provider,
+                    "agent_id": request.agent_id,
+                    "step_result": {
+                        "step_number": step.step_number,
+                        "name": step.name,
+                        "status": "completed",
+                        "execution_time": step_execution_time,
+                        "tools_used": step_result.tools_used,
+                        "success_criteria_met": step_result.success_criteria_met
+                    }
+                }
+                
+                # Check for quality checkpoints
+                for checkpoint in execution_plan.quality_checkpoints:
+                    if checkpoint.get("trigger_after_step") == step.step_number:
+                        yield {
+                            "type": "checkpoint",
+                            "content": f"🔍 Quality Checkpoint: {checkpoint['checkpoint_name']}",
+                            "provider": request.llm_provider,
+                            "agent_id": request.agent_id,
+                            "checkpoint": checkpoint
+                        }
+                
+            except Exception as e:
+                step_execution_time = (datetime.now() - step_start_time).total_seconds()
+                
+                # Create failed step result
+                step_result = StepExecutionResult(
+                    step_number=step.step_number,
+                    status="failed",
+                    deliverable={"error": str(e)},
+                    tools_used=[],
+                    execution_time=step_execution_time,
+                    success_criteria_met=False,
+                    validation_results=[],
+                    next_actions=["Retry step", "Skip to next step", "Abort execution"],
+                    error_details=str(e)
+                )
+                
+                step_results[step.step_number] = step_result
+                
+                yield {
+                    "type": "step_error",
+                    "content": f"❌ Step {step.step_number} failed: {step.name} - {str(e)}",
+                    "provider": request.llm_provider,
+                    "agent_id": request.agent_id,
+                    "step_result": {
+                        "step_number": step.step_number,
+                        "name": step.name,
+                        "status": "failed",
+                        "error": str(e),
+                        "execution_time": step_execution_time
+                    }
+                }
+                
+                # For now, continue with next step (could add retry logic here)
+                continue
+        
+        # Multi-step execution summary
+        completed_steps = sum(1 for result in step_results.values() if result.status == "completed")
+        failed_steps = sum(1 for result in step_results.values() if result.status == "failed")
+        total_execution_time = sum(result.execution_time for result in step_results.values())
+        
+        yield {
+            "type": "execution_summary",
+            "content": f"📋 Multi-step execution summary: {completed_steps}/{len(execution_plan.execution_steps)} steps completed, {failed_steps} failed, {total_execution_time:.1f}s total",
+            "provider": request.llm_provider,
+            "agent_id": request.agent_id,
+            "summary": {
+                "total_steps": len(execution_plan.execution_steps),
+                "completed_steps": completed_steps,
+                "failed_steps": failed_steps,
+                "total_execution_time": total_execution_time,
+                "success_rate": completed_steps / len(execution_plan.execution_steps) if execution_plan.execution_steps else 0
+            }
+        }
+    
+    def _build_step_execution_prompt(self, step: ExecutionStep, execution_plan: MultiStepExecutionPlan,
+                                   step_results: Dict[int, StepExecutionResult], agent_config: Dict[str, Any],
+                                   original_request: str) -> str:
+        """Build step-specific execution prompt"""
+        
+        # Get previous step context
+        previous_context = ""
+        if step_results:
+            previous_context = "\nPREVIOUS STEPS COMPLETED:\n"
+            for step_num, result in step_results.items():
+                if result.status == "completed":
+                    previous_context += f"- Step {step_num}: {result.deliverable.get('summary', 'Completed')}\n"
+        
+        step_prompt = f"""
+You are executing Step {step.step_number} of a {len(execution_plan.execution_steps)}-step plan.
+
+ORIGINAL REQUEST: "{original_request}"
+
+CURRENT STEP:
+- Step Number: {step.step_number}/{len(execution_plan.execution_steps)}
+- Name: {step.name}
+- Description: {step.description}
+- Action: {step.action}
+- Success Criteria: {step.success_criteria}
+- Expected Deliverable: {step.deliverable}
+
+AVAILABLE TOOLS FOR THIS STEP: {', '.join(step.tools_needed)}
+
+{previous_context}
+
+EXECUTION INSTRUCTIONS:
+1. Focus specifically on completing this step's objectives
+2. Use the available tools as needed to accomplish the step action
+3. Ensure your output meets the success criteria
+4. Provide the deliverable as described
+
+Complete this step now:
+"""
+        
+        return step_prompt
+    
+    def _create_step_tool_request(self, request: AgentExecutionRequest, agent_config: Dict[str, Any], 
+                                step_prompt: str, step_tools: List[str]):
+        """Create tool request for a specific step"""
+        from exec_tool import ToolExecutionRequest
+        
+        # Determine tools for this step
+        tools_whitelist = step_tools if step_tools else None
+        force_tools = bool(step_tools)  # Force tools if specific tools are needed
+        
+        return ToolExecutionRequest(
+            llm_provider=request.llm_provider,
+            user_query=request.user_request,
+            system_prompt=step_prompt,
+            model=request.model,
+            model_params=request.model_params,
+            org_id=request.org_id,
+            user_id=request.user_id,
+            enable_tools=True,
+            force_tools=force_tools,
+            tools_whitelist=tools_whitelist,
+            conversation_history=None,  # Don't pass history for individual steps
+            max_history_messages=0,
+            max_history_tokens=0,
+            # Simplified settings for step execution
+            enable_deep_reasoning=False,
+            reasoning_depth="light",
+            enable_intent_classification=False,
+            enable_request_analysis=False,
+            cursor_mode=False
+        )
+
+    # NEW: Enhanced Knowledge Discovery for Skill-Aware Execution
+    async def discover_agent_skills(self, user_request: str, agent_config: Dict[str, Any], 
+                                  user_id: str, org_id: str) -> Dict[str, Any]:
+        """
+        Discover relevant agent skills and experience from knowledge base for the current task
+        
+        Args:
+            user_request: The user's task request
+            agent_config: Agent configuration
+            user_id: User ID  
+            org_id: Organization ID
+            
+        Returns:
+            Dict containing discovered skills, methodologies, and experience relevant to the task
+        """
+        
+        knowledge_list = agent_config.get("knowledge_list", [])
+        if not knowledge_list or "brain_vector" not in self.available_tools:
+            return {"skills": [], "methodologies": [], "experience": [], "capabilities_enhancement": {}}
+        
+        discovered_skills = {
+            "skills": [],
+            "methodologies": [], 
+            "experience": [],
+            "frameworks": [],
+            "best_practices": [],
+            "capabilities_enhancement": {}
+        }
+        
+        try:
+            # Query for specific skill types related to the task
+            skill_queries = [
+                f"{user_request} methodology framework approach",
+                f"{user_request} best practices experience lessons learned", 
+                f"{user_request} skills expertise capabilities",
+                f"{user_request} process workflow procedures",
+                f"{user_request} tools techniques methods"
+            ]
+            
+            for query in skill_queries:
+                try:
+                    # Search across all knowledge domains
+                    knowledge_results = await asyncio.to_thread(
+                        self.available_tools["brain_vector"].query_knowledge,
+                        user_id=user_id,
+                        org_id=org_id,
+                        query=query,
+                        limit=10  # More results for skill discovery
+                    )
+                    
+                    if knowledge_results:
+                        for result in knowledge_results:
+                            content = result.get('content', result.get('raw', ''))
+                            
+                            # Extract different types of knowledge
+                            self._extract_skills_from_content(content, discovered_skills)
+                            
+                except Exception as e:
+                    agent_logger.warning(f"Failed to discover skills with query '{query}': {e}")
+                    continue
+            
+            # Analyze discovered skills for capability enhancement
+            discovered_skills["capabilities_enhancement"] = self._analyze_skill_based_capabilities(
+                discovered_skills, user_request
+            )
+            
+            agent_logger.info(f"Discovered {len(discovered_skills['skills'])} skills, {len(discovered_skills['methodologies'])} methodologies for task")
+            
+            return discovered_skills
+            
+        except Exception as e:
+            agent_logger.warning(f"Skill discovery failed: {e}")
+            return {"skills": [], "methodologies": [], "experience": [], "capabilities_enhancement": {}}
+    
+    def _extract_skills_from_content(self, content: str, discovered_skills: Dict[str, List]):
+        """Extract skills, methodologies, and experience from knowledge content"""
+        
+        content_lower = content.lower()
+        
+        # Skill indicators
+        skill_indicators = [
+            'expertise in', 'skilled at', 'proficient in', 'experienced with', 'specializes in',
+            'competent in', 'adept at', 'capable of', 'trained in', 'knowledgeable about'
+        ]
+        
+        # Methodology indicators  
+        methodology_indicators = [
+            'methodology', 'framework', 'approach', 'process', 'procedure', 'workflow',
+            'system', 'method', 'technique', 'strategy', 'protocol'
+        ]
+        
+        # Experience indicators
+        experience_indicators = [
+            'lessons learned', 'best practices', 'experience shows', 'proven approach',
+            'successful implementation', 'case study', 'practical experience', 'field experience'
+        ]
+        
+        # Framework indicators
+        framework_indicators = [
+            'lean', 'agile', 'six sigma', 'kaizen', 'scrum', 'kanban', 'design thinking',
+            'waterfall', 'devops', 'continuous improvement', 'quality management'
+        ]
+        
+        # Extract and categorize content
+        sentences = content.split('.')
+        
+        for sentence in sentences[:5]:  # Limit to first 5 sentences to avoid noise
+            sentence_lower = sentence.lower().strip()
+            
+            if any(indicator in sentence_lower for indicator in skill_indicators):
+                if len(sentence) < 200:  # Avoid overly long extractions
+                    discovered_skills["skills"].append(sentence.strip())
+            
+            elif any(indicator in sentence_lower for indicator in methodology_indicators):
+                if len(sentence) < 200:
+                    discovered_skills["methodologies"].append(sentence.strip())
+                    
+            elif any(indicator in sentence_lower for indicator in experience_indicators):
+                if len(sentence) < 200:
+                    discovered_skills["experience"].append(sentence.strip())
+                    
+            elif any(framework in sentence_lower for framework in framework_indicators):
+                if len(sentence) < 200:
+                    discovered_skills["frameworks"].append(sentence.strip())
+        
+        # Extract best practices
+        if 'best practice' in content_lower or 'recommended approach' in content_lower:
+            practice_sentences = [s.strip() for s in sentences if 'best practice' in s.lower() or 'recommended' in s.lower()]
+            discovered_skills["best_practices"].extend(practice_sentences[:3])
+    
+    def _analyze_skill_based_capabilities(self, discovered_skills: Dict[str, List], user_request: str) -> Dict[str, Any]:
+        """Analyze discovered skills to enhance agent capabilities"""
+        
+        capabilities_enhancement = {
+            "complexity_boost": 0,
+            "additional_steps": [],
+            "specialized_approaches": [],
+            "quality_standards": [],
+            "risk_mitigation": []
+        }
+        
+        # Boost complexity handling if agent has relevant methodologies
+        methodology_count = len(discovered_skills.get("methodologies", []))
+        framework_count = len(discovered_skills.get("frameworks", []))
+        
+        if methodology_count >= 2 or framework_count >= 1:
+            capabilities_enhancement["complexity_boost"] = min(2, methodology_count)  # Up to +2 complexity points
+        
+        # Add specialized execution steps based on discovered skills
+        if discovered_skills.get("frameworks"):
+            capabilities_enhancement["additional_steps"].append({
+                "name": "Framework Application",
+                "description": "Apply relevant frameworks and methodologies from knowledge base",
+                "tools_needed": ["brain_vector", "business_logic"]
+            })
+        
+        if discovered_skills.get("best_practices"):
+            capabilities_enhancement["additional_steps"].append({
+                "name": "Best Practices Integration", 
+                "description": "Integrate organizational best practices and lessons learned",
+                "tools_needed": ["brain_vector"]
+            })
+        
+        # Enhance quality standards based on experience
+        if discovered_skills.get("experience"):
+            capabilities_enhancement["quality_standards"].extend([
+                "Apply lessons learned from previous implementations",
+                "Validate against organizational experience",
+                "Consider historical success patterns"
+            ])
+        
+        return capabilities_enhancement
 
 
 # Convenience functions for agent execution
