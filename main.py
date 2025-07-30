@@ -27,7 +27,6 @@ from waitlist import router as waitlist_router
 from login import router as login_router
 from organization import router as organization_router
 from org_agent import router as org_agent_router
-from aibrain import router as brain_router
 from google_drive_routes import router as google_drive_router
 from chat_routes import router as chat_router
 from supabase import create_client, Client
@@ -80,7 +79,6 @@ app.include_router(waitlist_router)
 app.include_router(login_router)
 app.include_router(organization_router)
 app.include_router(org_agent_router)
-app.include_router(brain_router)
 app.include_router(google_drive_router)
 app.include_router(chat_router)
 
@@ -410,19 +408,8 @@ class SimpleChatRequest(BaseModel):
     model: Optional[str] = Field(None, description="Specific model to use")
     system_prompt: Optional[str] = Field(None, description="Custom system prompt")
 
-class CreateAgentAPIRequest(BaseModel):
-    """API request for direct agent creation via Ami (legacy)"""
-    user_request: str = Field(..., description="Description of what kind of agent is needed", min_length=10, max_length=1000)
-    llm_provider: str = Field("anthropic", description="LLM provider to use")
-    model: Optional[str] = Field(None, description="Specific model to use")
-
-class CollaborativeAgentAPIRequest(BaseModel):
-    """API request for collaborative agent creation"""
-    user_input: str = Field(..., description="Human input at any stage of conversation", min_length=5, max_length=2000)
-    conversation_id: Optional[str] = Field(None, description="Existing conversation ID (for continuing conversations)")
-    current_state: Optional[str] = Field("initial_idea", description="Current conversation state")
-    llm_provider: str = Field("anthropic", description="LLM provider to use")
-    model: Optional[str] = Field(None, description="Specific model to use")
+# Import API models from the new modular ami structure
+from ami import CreateAgentAPIRequest, CollaborativeAgentAPIRequest, CreateAgentAPIResponse, CollaborativeAgentAPIResponse
 
 
 
@@ -946,7 +933,7 @@ async def create_agent_endpoint(request: CreateAgentAPIRequest, current_user: di
         from organization import get_my_organization
         org_response = await get_my_organization(current_user)
         
-        # Create agent via Ami (simple and fast)
+        # Create agent via Ami (simple and fast) - using new modular structure
         from ami import create_agent_via_api
         result = await create_agent_via_api(
             api_request=request,
@@ -977,7 +964,7 @@ async def collaborate_agent_endpoint(request: CollaborativeAgentAPIRequest, curr
         from organization import get_my_organization
         org_response = await get_my_organization(current_user)
         
-        # Collaborate with Ami on agent creation
+        # Collaborate with Ami on agent creation - using new modular structure
         from ami import collaborate_on_agent_via_api
         result = await collaborate_on_agent_via_api(
             api_request=request,

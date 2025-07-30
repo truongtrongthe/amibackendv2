@@ -741,7 +741,13 @@ async def generate_ai_response(message_text: str, user_id: str = None, thread_id
         print(f"\n🔄 Starting AI response generation with thread_id: {thread_id}")
         
         try:
-            from ami import convo_stream
+            # Note: convo_stream function has been removed from ami module during refactoring
+            # This appears to be old functionality that's no longer available
+            from ami import create_agent_simple
+            
+            # TODO: Implement proper agent conversation streaming using the new ami module
+            print("⚠️ convo_stream function no longer available - using placeholder")
+            convo_stream = None
             
             # Process the response directly with async/await and implement timeout handling
             loop = asyncio.get_event_loop()

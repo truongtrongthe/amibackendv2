@@ -1,0 +1,160 @@
+"""
+Ami Agent Creator - Models and Data Classes
+===========================================
+
+Contains all dataclasses, enums, and type definitions used throughout the Ami system.
+Following the same pattern as agent/models.py for consistency.
+"""
+
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from pydantic import BaseModel, Field
+
+
+class ConversationState(Enum):
+    """States in the collaborative agent creation process"""
+    INITIAL_IDEA = "initial_idea"           # Human provides initial idea
+    UNDERSTANDING = "understanding"         # Ami analyzes and refines
+    SKELETON_REVIEW = "skeleton_review"     # Human reviews skeleton plan
+    REFINEMENT = "refinement"              # Ami refines based on feedback
+    APPROVED = "approved"                  # Human approves, ready to build
+    BUILDING = "building"                  # Ami is building the agent
+    COMPLETED = "completed"                # Agent creation completed
+
+
+@dataclass
+class AgentIdea:
+    """Initial human idea for an agent"""
+    raw_idea: str                          # Original human input
+    conversation_id: str                   # Unique conversation ID
+    org_id: str
+    user_id: str
+    created_at: datetime
+    state: ConversationState = ConversationState.INITIAL_IDEA
+
+
+@dataclass
+class AgentSkeleton:
+    """Refined agent plan for human review"""
+    conversation_id: str
+    
+    # Refined understanding
+    agent_name: str
+    agent_purpose: str
+    target_users: str
+    use_cases: List[str]
+    
+    # Technical specs
+    agent_type: str
+    language: str
+    personality_traits: Dict[str, str]
+    
+    # Capabilities
+    key_capabilities: List[str]
+    required_tools: List[str]
+    knowledge_domains: List[str]
+    
+    # Implementation details
+    success_criteria: List[str]
+    potential_challenges: List[str]
+    
+    # Conversation context
+    created_at: datetime
+    state: ConversationState = ConversationState.SKELETON_REVIEW
+
+
+@dataclass
+class CollaborativeAgentRequest:
+    """Request for collaborative agent creation"""
+    user_input: str                        # Human input at any stage
+    conversation_id: Optional[str] = None  # Existing conversation ID
+    org_id: str = ""
+    user_id: str = ""
+    llm_provider: str = "anthropic"
+    model: Optional[str] = None
+    current_state: ConversationState = ConversationState.INITIAL_IDEA
+
+
+@dataclass
+class CollaborativeAgentResponse:
+    """Response from collaborative agent creation"""
+    success: bool
+    conversation_id: str
+    current_state: ConversationState
+    ami_message: str                       # Ami's response to human
+    data: Optional[Dict[str, Any]] = None  # State-specific data
+    next_actions: List[str] = None         # What human can do next
+    error: Optional[str] = None
+
+
+# Legacy models for backward compatibility
+@dataclass
+class AgentCreationRequest:
+    """Request model for direct agent creation (legacy)"""
+    user_request: str           # "Create a sales agent for Vietnamese market"
+    org_id: str
+    user_id: str
+    llm_provider: str = "anthropic"
+    model: Optional[str] = None
+
+
+@dataclass
+class AgentCreationResult:
+    """Response model for agent creation"""
+    success: bool
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    message: str = ""
+    error: Optional[str] = None
+    agent_config: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class SimpleAgentConfig:
+    """Internal config model - keep simple"""
+    name: str
+    description: str
+    agent_type: str             # "sales", "support", "analyst", "document_analysis", "general"
+    tools_needed: List[str]
+    language: str = "english"
+    specialization: List[str] = None
+
+
+# FastAPI Integration Models
+class CreateAgentAPIRequest(BaseModel):
+    """API request model for direct agent creation (legacy)"""
+    user_request: str = Field(..., description="Description of what kind of agent is needed", min_length=10, max_length=1000)
+    llm_provider: str = Field("anthropic", description="LLM provider to use for agent creation")
+    model: Optional[str] = Field(None, description="Specific model to use (optional)")
+
+
+class CollaborativeAgentAPIRequest(BaseModel):
+    """API request model for collaborative agent creation"""
+    user_input: str = Field(..., description="Human input at any stage of conversation", min_length=5, max_length=2000)
+    conversation_id: Optional[str] = Field(None, description="Existing conversation ID (for continuing conversations)")
+    current_state: Optional[str] = Field("initial_idea", description="Current conversation state")
+    llm_provider: str = Field("anthropic", description="LLM provider to use")
+    model: Optional[str] = Field(None, description="Specific model to use")
+
+
+class CollaborativeAgentAPIResponse(BaseModel):
+    """API response model for collaborative agent creation"""
+    success: bool
+    conversation_id: str
+    current_state: str
+    ami_message: str
+    data: Optional[Dict[str, Any]] = None
+    next_actions: Optional[List[str]] = None
+    error: Optional[str] = None
+
+
+class CreateAgentAPIResponse(BaseModel):
+    """API response model for agent creation"""
+    success: bool
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    message: str
+    error: Optional[str] = None
+    agent_config: Optional[Dict[str, Any]] = None
