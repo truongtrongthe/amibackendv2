@@ -1,7 +1,8 @@
 from supabase import create_client, Client
 from typing import List, Dict, Optional
 import os
-from datetime import datetime, UTC
+import json
+from datetime import datetime, timezone
 from utilities import logger
 from uuid import UUID
 
@@ -106,7 +107,7 @@ def create_organization(name: str, description: Optional[str] = None,
         "email": email,
         "phone": phone,
         "address": address,
-        "created_date": datetime.now(UTC).isoformat()
+        "created_date": datetime.now(timezone.utc).isoformat()
     }
     
     response = supabase.table("organization").insert(data).execute()
@@ -217,7 +218,7 @@ def create_brain(org_id: str, user_id: str, name: str,summary: str) -> Brain:
         "status": "training",
         "bank_name": temp_bank_name,
         "summary": summary,
-        "created_date": datetime.now(UTC).isoformat()
+        "created_date": datetime.now(timezone.utc).isoformat()
     }
     
     response = supabase.table("brain").insert(data).execute()
@@ -454,7 +455,7 @@ def add_user_to_organization(user_id: str, org_id: str, role: str = "member") ->
             "user_id": user_id,
             "org_id": org_id,
             "role": role,
-            "joined_at": datetime.now(UTC).isoformat()
+            "joined_at": datetime.now(timezone.utc).isoformat()
         }
         
         response = supabase.table("user_organizations").insert(data).execute()
@@ -674,8 +675,8 @@ def create_agent(org_id: str, created_by: str, name: str, description: Optional[
             "name": name,
             "description": description,
             "status": "active",
-            "created_at": datetime.now(UTC).isoformat(),
-            "updated_at": datetime.now(UTC).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         
         response = supabase.table("org_agents").insert(data).execute()
@@ -848,7 +849,7 @@ def update_agent(agent_id: str, name: Optional[str] = None, description: Optiona
         if not update_data:
             raise ValueError("No fields to update")
         
-        update_data["updated_at"] = datetime.now(UTC).isoformat()
+        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         response = supabase.table("org_agents").update(update_data).eq("id", agent_id).execute()
         
@@ -886,7 +887,7 @@ def update_agent_current_blueprint(agent_id: str, blueprint_id: str) -> Optional
     try:
         update_data = {
             "current_blueprint_id": blueprint_id,
-            "updated_at": datetime.now(UTC).isoformat()
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
         
         response = supabase.table("org_agents").update(update_data).eq("id", agent_id).execute()
@@ -924,7 +925,7 @@ def delete_agent(agent_id: str) -> bool:
     try:
         response = supabase.table("org_agents").update({
             "status": "delete",
-            "updated_at": datetime.now(UTC).isoformat()
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", agent_id).execute()
         
         return bool(response.data)
@@ -1017,7 +1018,7 @@ def create_blueprint(agent_id: str, blueprint_data: dict, created_by: str,
             "agent_blueprint": blueprint_data,
             "created_by": created_by,
             "conversation_id": conversation_id,
-            "created_at": datetime.now(UTC).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
         
         response = supabase.table("agent_blueprints").insert(data).execute()
@@ -1244,7 +1245,7 @@ def compile_blueprint(blueprint_id: str, compiled_by: str) -> Optional[AgentBlue
         # Update blueprint with compiled prompt
         response = supabase.table("agent_blueprints").update({
             "compiled_system_prompt": compiled_prompt,
-            "compiled_at": datetime.now(UTC).isoformat(),
+            "compiled_at": datetime.now(timezone.utc).isoformat(),
             "compiled_by": compiled_by,
             "compilation_status": "compiled"
         }).eq("id", blueprint_id).execute()
@@ -1271,7 +1272,7 @@ def compile_blueprint(blueprint_id: str, compiled_by: str) -> Optional[AgentBlue
         # Mark compilation as failed
         try:
             supabase.table("agent_blueprints").update({
-                "compiled_at": datetime.now(UTC).isoformat(),
+                "compiled_at": datetime.now(timezone.utc).isoformat(),
                 "compiled_by": compiled_by,
                 "compilation_status": "failed"
             }).eq("id", blueprint_id).execute()
@@ -1546,7 +1547,7 @@ def generate_implementation_todos(blueprint_id: str, generated_by: str) -> Optio
         update_data = {
             "implementation_todos": todos,
             "todos_completion_status": "generated",
-            "todos_generated_at": datetime.now(UTC).isoformat(),
+            "todos_generated_at": datetime.now(timezone.utc).isoformat(),
             "todos_generated_by": generated_by,
             "compilation_status": "todos_pending"
         }
@@ -1670,7 +1671,7 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
             # Add metadata to each todo
             from datetime import datetime, timezone as UTC
             for i, todo in enumerate(todos):
-                todo['created_at'] = datetime.now(UTC).isoformat()
+                todo['created_at'] = datetime.now(timezone.utc).isoformat()
                 todo['collected_inputs'] = {}
                 if 'id' not in todo:
                     todo['id'] = f"todo_{i+1}"
@@ -1725,7 +1726,7 @@ def _generate_basic_todos_fallback(blueprint_data: dict) -> list:
             "priority": base_todo["priority"],
             "estimated_effort": "1-2 hours",
             "status": "pending",
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "collected_inputs": {},
             "input_required": {
                 "type": "manual_configuration",
@@ -1765,7 +1766,7 @@ def update_todo_status(blueprint_id: str, todo_id: str, new_status: str, updated
         for todo in blueprint.implementation_todos:
             if todo.get("id") == todo_id:
                 todo["status"] = new_status
-                todo["updated_at"] = datetime.now(UTC).isoformat()
+                todo["updated_at"] = datetime.now(timezone.utc).isoformat()
                 todo["updated_by"] = updated_by
                 
                 # Store collected inputs if provided
@@ -2061,7 +2062,7 @@ def check_todos_completion_and_update_status(blueprint_id: str) -> bool:
             response = supabase.table("agent_blueprints")\
                 .update({
                     "todos_completion_status": "completed",
-                    "todos_completed_at": datetime.now(UTC).isoformat(),
+                    "todos_completed_at": datetime.now(timezone.utc).isoformat(),
                     "compilation_status": "ready_for_compilation"
                 })\
                 .eq("id", blueprint_id)\

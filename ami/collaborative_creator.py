@@ -273,17 +273,20 @@ class CollaborativeCreator:
                     data={
                         "understanding": data.get("understanding", ""),
                         "clarifying_questions": data.get("clarifying_questions", []),
-                        "agent_skeleton": {
+                        "agent_blueprint": {
                             "agent_name": skeleton.agent_name,
                             "agent_purpose": skeleton.agent_purpose,
                             "target_users": skeleton.target_users,
-                            "use_cases": skeleton.use_cases,
                             "agent_type": skeleton.agent_type,
                             "language": skeleton.language,
-                            "personality_traits": skeleton.personality_traits,
-                            "key_capabilities": skeleton.key_capabilities,
-                            "required_tools": skeleton.required_tools,
-                            "knowledge_domains": skeleton.knowledge_domains,
+                            "meet_me": skeleton.meet_me,
+                            "what_i_do": skeleton.what_i_do,
+                            "knowledge_sources": skeleton.knowledge_sources,
+                            "integrations": skeleton.integrations,
+                            "monitoring": skeleton.monitoring,
+                            "test_scenarios": skeleton.test_scenarios,
+                            "workflow_steps": skeleton.workflow_steps,
+                            "visual_flow": skeleton.visual_flow,
                             "success_criteria": skeleton.success_criteria,
                             "potential_challenges": skeleton.potential_challenges
                         }

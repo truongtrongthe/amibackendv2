@@ -177,23 +177,23 @@ AGENT EXPERTISE PROFILE: {skeleton.agent_name}
 PURPOSE & MISSION:
 {skeleton.agent_purpose}
 
-CORE SPECIALIZATIONS:
-{chr(10).join(f"• {capability}" for capability in skeleton.key_capabilities)}
+PRIMARY TASKS & CAPABILITIES:
+{chr(10).join(f"• {task.get('task', '')}: {task.get('description', '')}" for task in skeleton.what_i_do.get('primary_tasks', []))}
 
 TARGET USERS & AUDIENCE:
 {skeleton.target_users}
 
 SPECIALIZED USE CASES:
-{chr(10).join(f"• {use_case}" for use_case in skeleton.use_cases)}
+{chr(10).join(f"• {task.get('task', '')}" for task in skeleton.what_i_do.get('primary_tasks', []))}
 
-REQUIRED TOOLS & CAPABILITIES:
-{chr(10).join(f"• {tool}" for tool in skeleton.required_tools)}
+INTEGRATION CAPABILITIES:
+{chr(10).join(f"• {integration.get('app_name', '')}: {integration.get('action', '')}" for integration in skeleton.integrations)}
 
-KNOWLEDGE DOMAINS:
-{chr(10).join(f"• {domain}" for domain in skeleton.knowledge_domains)}
+KNOWLEDGE SOURCES:
+{chr(10).join(f"• {source.get('source', '')}" for source in skeleton.knowledge_sources)}
 
 PERSONALITY & APPROACH:
-{chr(10).join(f"• {trait}: {value}" for trait, value in skeleton.personality_traits.items())}
+{chr(10).join(f"• {trait}: {value}" for trait, value in skeleton.what_i_do.get('personality', {}).items())}
 
 SUCCESS CRITERIA:
 {chr(10).join(f"• {criteria}" for criteria in skeleton.success_criteria)}
@@ -205,10 +205,10 @@ AGENT TYPE: {skeleton.agent_type}
 LANGUAGE: {skeleton.language}
 
 EXPERTISE SUMMARY:
-This agent excels at {skeleton.agent_purpose.lower()} with deep specialization in {', '.join(skeleton.key_capabilities)}. 
-Designed specifically for {skeleton.target_users} with focus on {', '.join(skeleton.use_cases[:3])}. 
-The agent combines {skeleton.personality_traits.get('tone', 'professional')} communication style with 
-{skeleton.personality_traits.get('approach', 'solution-oriented')} problem-solving approach.
+This agent excels at {skeleton.agent_purpose.lower()} with deep specialization in {', '.join([task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])])}. 
+Designed specifically for {skeleton.target_users} with focus on {', '.join([task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])][:3])}. 
+The agent combines {skeleton.what_i_do.get('personality', {}).get('tone', 'professional')} communication style with 
+{skeleton.what_i_do.get('personality', {}).get('style', 'solution-oriented')} problem-solving approach.
 
 This expertise profile was created through collaborative planning and represents the agent's 
 core competencies and specialized knowledge areas.
@@ -229,20 +229,20 @@ Agent Type: {skeleton.agent_type if skeleton else 'Unknown'}
 
 COLLABORATION PATTERNS:
 • User requested agent for: {skeleton.agent_purpose if skeleton else 'Not specified'}
-• Primary focus areas: {', '.join(skeleton.key_capabilities) if skeleton else 'Not specified'}
+• Primary focus areas: {', '.join([task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])]) if skeleton else 'Not specified'}
 • Target audience: {skeleton.target_users if skeleton else 'Not specified'}
 
 USER PREFERENCES OBSERVED:
 • Preferred agent type: {skeleton.agent_type if skeleton else 'Unknown'}
-• Communication style: {skeleton.personality_traits.get('tone', 'Not specified') if skeleton else 'Unknown'}
-• Tool preferences: {', '.join(skeleton.required_tools) if skeleton else 'Not specified'}
+• Communication style: {skeleton.what_i_do.get('personality', {}).get('tone', 'Not specified') if skeleton else 'Unknown'}
+• Integration preferences: {', '.join([integration.get('app_name', '') for integration in skeleton.integrations]) if skeleton else 'Not specified'}
 
 SESSION INSIGHTS:
 This collaborative session demonstrates user preferences for {skeleton.agent_type if skeleton else 'specialized'} agents
-with focus on {', '.join(skeleton.key_capabilities[:2]) if skeleton else 'various capabilities'}.
+with focus on {', '.join([task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])][:2]) if skeleton else 'various capabilities'}.
 
-The user showed interest in agents that can handle {', '.join(skeleton.use_cases[:2]) if skeleton else 'diverse tasks'}
-with {skeleton.personality_traits.get('approach', 'professional') if skeleton else 'effective'} approach.
+The user showed interest in agents that can handle {', '.join([task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])][:2]) if skeleton else 'diverse tasks'}
+with {skeleton.what_i_do.get('personality', {}).get('style', 'professional') if skeleton else 'effective'} approach.
 
 These patterns can inform future agent recommendations and collaborative sessions.
 """

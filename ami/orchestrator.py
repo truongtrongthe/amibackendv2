@@ -168,9 +168,9 @@ class AmiOrchestrator:
                             "description": skeleton.agent_purpose,
                             "agent_type": skeleton.agent_type,
                             "language": skeleton.language,
-                            "capabilities": skeleton.key_capabilities,
-                            "tools": skeleton.required_tools,
-                            "knowledge_domains": skeleton.knowledge_domains
+                            "capabilities": [task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])],
+                            "integrations": [integration.get('app_name', '') for integration in skeleton.integrations],
+                            "knowledge_sources": [source.get('source', '') for source in skeleton.knowledge_sources]
                         },
                         "implementation_todos": todos_result.get('todos', [])
                     }
@@ -200,15 +200,15 @@ class AmiOrchestrator:
         prompt_generation_request = f"""
         Create a comprehensive system prompt for this AI agent based on the detailed plan:
         
-        Agent Skeleton:
+        Agent Blueprint:
         - Name: {skeleton.agent_name}
         - Purpose: {skeleton.agent_purpose}
         - Target Users: {skeleton.target_users}
-        - Use Cases: {skeleton.use_cases}
+        - Primary Tasks: {[task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])]}
         - Agent Type: {skeleton.agent_type}
         - Language: {skeleton.language}
-        - Personality: {skeleton.personality_traits}
-        - Key Capabilities: {skeleton.key_capabilities}
+        - Personality: {skeleton.what_i_do.get('personality', {})}
+        - Workflow Steps: {skeleton.workflow_steps}
         - Success Criteria: {skeleton.success_criteria}
         
         Create a system prompt that:
@@ -229,17 +229,18 @@ class AmiOrchestrator:
             system_prompt_text = system_prompt_text.strip()
             
             # Create comprehensive prompt data structure
+            primary_tasks = [task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])]
             prompt_data = {
                 "base_instruction": system_prompt_text,
                 "agent_type": skeleton.agent_type,
                 "language": skeleton.language,
-                "specialization": skeleton.key_capabilities,
-                "personality": skeleton.personality_traits,
+                "specialization": primary_tasks,
+                "personality": skeleton.what_i_do.get('personality', {}),
                 "target_users": skeleton.target_users,
-                "use_cases": skeleton.use_cases,
+                "use_cases": primary_tasks,
                 "success_criteria": skeleton.success_criteria,
                 "created_at": datetime.now().isoformat(),
-                "created_from": "collaborative_skeleton"
+                "created_from": "collaborative_blueprint"
             }
             
             return prompt_data
@@ -247,16 +248,18 @@ class AmiOrchestrator:
         except Exception as e:
             ami_logger.error(f"System prompt generation from skeleton failed: {e}")
             # Fallback prompt structure
-            fallback_prompt = f"You are {skeleton.agent_name}. {skeleton.agent_purpose} You specialize in {', '.join(skeleton.key_capabilities)}. Your target users are {skeleton.target_users}. Be {skeleton.personality_traits.get('tone', 'professional')} and {skeleton.personality_traits.get('style', 'helpful')}."
+            primary_tasks = [task.get('task', '') for task in skeleton.what_i_do.get('primary_tasks', [])]
+            personality = skeleton.what_i_do.get('personality', {})
+            fallback_prompt = f"You are {skeleton.agent_name}. {skeleton.agent_purpose} You specialize in {', '.join(primary_tasks)}. Your target users are {skeleton.target_users}. Be {personality.get('tone', 'professional')} and {personality.get('style', 'helpful')}."
             
             return {
                 "base_instruction": fallback_prompt,
                 "agent_type": skeleton.agent_type,
                 "language": skeleton.language,
-                "specialization": skeleton.key_capabilities,
-                "personality": skeleton.personality_traits,
+                "specialization": primary_tasks,
+                "personality": personality,
                 "created_at": datetime.now().isoformat(),
-                "created_from": "collaborative_skeleton_fallback"
+                "created_from": "collaborative_blueprint_fallback"
             }
     
     async def _save_to_database(self, config: dict, org_id: str, user_id: str) -> str:
