@@ -104,25 +104,23 @@ class AmiOrchestrator:
         skeleton = conversation["skeleton"]
         
         try:
-            # Generate comprehensive system prompt from skeleton
-            system_prompt_data = await self._generate_system_prompt_from_skeleton(skeleton, request.llm_provider)
+            # Convert skeleton to blueprint format
+            blueprint_data = await self._convert_skeleton_to_blueprint(skeleton)
             
-            # Select tools based on skeleton requirements
-            tools_list = skeleton.required_tools
-            
-            # Set up knowledge domains
-            knowledge_list = skeleton.knowledge_domains
-            
-            # Save to database
-            agent_id = await self._save_to_database(
-                config={
-                    "name": skeleton.agent_name,
-                    "description": skeleton.agent_purpose,
-                    "system_prompt": system_prompt_data,
-                    "tools_list": tools_list,
-                    "knowledge_list": knowledge_list
-                },
+            # Create agent with blueprint using new architecture
+            agent_id, blueprint_id = await self._create_agent_with_blueprint(
+                name=skeleton.agent_name,
+                description=skeleton.agent_purpose,
+                blueprint_data=blueprint_data,
                 org_id=conversation["org_id"],
+                user_id=conversation["user_id"],
+                conversation_id=request.conversation_id
+            )
+            
+            # 🆕 STEP 7: Generate Implementation Todos based on blueprint analysis
+            ami_logger.info("🔧 Analyzing blueprint and generating implementation todos...")
+            todos_result = await self._generate_implementation_todos(
+                blueprint_id=blueprint_id,
                 user_id=conversation["user_id"]
             )
             
@@ -152,30 +150,36 @@ class AmiOrchestrator:
                 final_agent_id=agent_id
             )
             
-            ami_logger.info(f"Successfully built agent: {skeleton.agent_name} (ID: {agent_id})")
+            ami_logger.info(f"Successfully created agent with blueprint and todos: {skeleton.agent_name} (ID: {agent_id})")
             
             return CollaborativeAgentResponse(
                 success=True,
                 conversation_id=request.conversation_id,
                 current_state=ConversationState.COMPLETED,
-                ami_message=f"🎉 Perfect! I've successfully created '{skeleton.agent_name}' and saved its expertise to the knowledge base!\n\nYour agent is now ready to use with specialized capabilities for {skeleton.agent_purpose.lower()}. The agent's expertise has been preserved so it can discover and apply its capabilities during task execution. You can start using it right away!",
+                ami_message=f"🎉 Perfect! I've successfully created '{skeleton.agent_name}' with a comprehensive Agent Architecture!\n\n**What I've built for you:**\n✅ Agent Blueprint with detailed specifications\n✅ {todos_result.get('todos_generated', 0)} Implementation Todos for proper setup\n✅ Knowledge base integration\n\n**Next Steps:**\n1. Complete the implementation todos to ensure your agent works optimally\n2. Once todos are done, compile the blueprint to activate the agent\n3. Your agent will then be ready for production use!\n\nThe todos will guide you through setting up integrations, configurations, and testing to make sure '{skeleton.agent_name}' achieves its goals effectively.",
                 data={
                     "agent_id": agent_id,
+                    "blueprint_id": blueprint_id,
                     "agent_name": skeleton.agent_name,
-                    "agent_config": {
-                        "name": skeleton.agent_name,
-                        "description": skeleton.agent_purpose,
-                        "agent_type": skeleton.agent_type,
-                        "language": skeleton.language,
-                        "capabilities": skeleton.key_capabilities,
-                        "tools": tools_list,
-                        "knowledge": knowledge_list
+                    "todos_generated": todos_result.get('todos_generated', 0),
+                    "agent_architecture": {
+                        "blueprint": {
+                            "name": skeleton.agent_name,
+                            "description": skeleton.agent_purpose,
+                            "agent_type": skeleton.agent_type,
+                            "language": skeleton.language,
+                            "capabilities": skeleton.key_capabilities,
+                            "tools": skeleton.required_tools,
+                            "knowledge_domains": skeleton.knowledge_domains
+                        },
+                        "implementation_todos": todos_result.get('todos', [])
                     }
                 },
                 next_actions=[
-                    f"Start using '{skeleton.agent_name}' for your tasks",
+                    f"View and complete implementation todos for '{skeleton.agent_name}'",
+                    "Compile blueprint once todos are completed",
                     "Create another agent",
-                    "Test the agent with a sample task"
+                    "Test the agent architecture"
                 ]
             )
             
@@ -307,6 +311,111 @@ class AmiOrchestrator:
         except Exception as e:
             ami_logger.error(f"LLM call failed: {e}")
             raise Exception(f"LLM call failed: {str(e)}")
+    
+    async def _convert_skeleton_to_blueprint(self, skeleton: AgentSkeleton) -> dict:
+        """
+        Convert complete 7-part agent blueprint to internal format for the new architecture
+        """
+        blueprint_data = {
+            "identity": {
+                "name": skeleton.agent_name,
+                "role": skeleton.agent_purpose,
+                "primary_purpose": skeleton.agent_purpose,
+                "language": skeleton.language,
+                "introduction": skeleton.meet_me.get("introduction", f"Hi, I'm {skeleton.agent_name}!"),
+                "value_proposition": skeleton.meet_me.get("value_proposition", "I'm here to help you succeed.")
+            },
+            "capabilities": [
+                {
+                    "task": task.get("task", "General assistance"),
+                    "description": task.get("description", "Handle tasks efficiently"),
+                    "examples": []
+                }
+                for task in skeleton.what_i_do.get("primary_tasks", [])
+            ],
+            "personality": skeleton.what_i_do.get("personality", {
+                "tone": "professional",
+                "style": "helpful",
+                "analogy": "helpful assistant"
+            }),
+            "sample_conversation": skeleton.what_i_do.get("sample_conversation", {}),
+            "knowledge_sources": skeleton.knowledge_sources,
+            "tools": [
+                {
+                    "name": integration.get("app_name", "Unknown Tool"),
+                    "purpose": f"Integration with {integration.get('app_name', 'external service')}",
+                    "trigger": integration.get("trigger", "When needed"),
+                    "action": integration.get("action", "Perform action")
+                }
+                for integration in skeleton.integrations
+            ],
+            "monitoring": skeleton.monitoring,
+            "test_scenarios": skeleton.test_scenarios,
+            "workflow": {
+                "steps": skeleton.workflow_steps,
+                "visual_flow": skeleton.visual_flow
+            },
+            "success_criteria": skeleton.success_criteria,
+            "potential_challenges": skeleton.potential_challenges,
+            "agent_type": skeleton.agent_type,
+            "target_users": skeleton.target_users
+        }
+        
+        return blueprint_data
+    
+    async def _create_agent_with_blueprint(self, name: str, description: str, blueprint_data: dict, 
+                                         org_id: str, user_id: str, conversation_id: str) -> tuple[str, str]:
+        """
+        Create agent with blueprint using the new architecture
+        """
+        try:
+            from orgdb import create_agent_with_blueprint
+            
+            agent, blueprint = create_agent_with_blueprint(
+                org_id=org_id,
+                created_by=user_id,
+                name=name,
+                blueprint_data=blueprint_data,
+                description=description,
+                conversation_id=conversation_id
+            )
+            
+            ami_logger.info(f"Agent with blueprint created: {agent.name} (Agent ID: {agent.id}, Blueprint ID: {blueprint.id})")
+            return agent.id, blueprint.id
+            
+        except Exception as e:
+            ami_logger.error(f"Failed to create agent with blueprint: {e}")
+            raise Exception(f"Failed to create agent with blueprint: {str(e)}")
+    
+    async def _generate_implementation_todos(self, blueprint_id: str, user_id: str) -> dict:
+        """
+        Generate implementation todos for the blueprint using Ami's analysis
+        """
+        try:
+            from orgdb import generate_implementation_todos
+            
+            updated_blueprint = generate_implementation_todos(blueprint_id, user_id)
+            if not updated_blueprint:
+                raise Exception("Failed to generate implementation todos")
+            
+            todos_count = len(updated_blueprint.implementation_todos)
+            ami_logger.info(f"Generated {todos_count} implementation todos for blueprint {blueprint_id}")
+            
+            return {
+                "success": True,
+                "todos_generated": todos_count,
+                "todos": updated_blueprint.implementation_todos,
+                "blueprint_id": blueprint_id
+            }
+            
+        except Exception as e:
+            ami_logger.error(f"Failed to generate todos: {e}")
+            return {
+                "success": False,
+                "todos_generated": 0,
+                "todos": [],
+                "error": str(e)
+            }
 
 
 # Global orchestrator instance (singleton pattern)

@@ -11,13 +11,27 @@ from pydantic import BaseModel, Field
 from utilities import logger
 from orgdb import (
     create_agent,
+    create_agent_with_blueprint,
     get_agents,
     get_agent,
     update_agent,
     delete_agent,
     search_agents,
     get_user_role_in_organization,
-    get_organization
+    get_organization,
+    # Blueprint functions
+    create_blueprint,
+    get_blueprint,
+    get_agent_blueprints,
+    get_current_blueprint,
+    activate_blueprint,
+    get_agent_with_current_blueprint,
+    # Compilation functions
+    compile_blueprint,
+    get_blueprint_compilation_status,
+    get_compiled_blueprints_for_agent,
+    # Model classes
+    AgentBlueprint
 )
 
 # Initialize Supabase client
@@ -31,20 +45,20 @@ security = HTTPBearer()
 # Create router
 router = APIRouter(prefix="/org-agents", tags=["organization-agents"])
 
-# Request/Response Models
+# Request/Response Models for Agents
 class CreateAgentRequest(BaseModel):
     name: str = Field(..., description="Agent name", min_length=1, max_length=255)
     description: Optional[str] = Field(None, description="Agent description")
-    system_prompt: Optional[Dict[str, Any]] = Field(default_factory=dict, description="System prompt as JSON")
-    tools_list: Optional[List[str]] = Field(default_factory=list, description="List of tool names/IDs")
-    knowledge_list: Optional[List[str]] = Field(default_factory=list, description="List of knowledge base names/IDs")
+
+class CreateAgentWithBlueprintRequest(BaseModel):
+    name: str = Field(..., description="Agent name", min_length=1, max_length=255)
+    description: Optional[str] = Field(None, description="Agent description")
+    agent_blueprint: Dict[str, Any] = Field(..., description="Complete agent blueprint JSON")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID that created this agent")
 
 class UpdateAgentRequest(BaseModel):
     name: Optional[str] = Field(None, description="Agent name", min_length=1, max_length=255)
     description: Optional[str] = Field(None, description="Agent description")
-    system_prompt: Optional[Dict[str, Any]] = Field(None, description="System prompt as JSON")
-    tools_list: Optional[List[str]] = Field(None, description="List of tool names/IDs")
-    knowledge_list: Optional[List[str]] = Field(None, description="List of knowledge base names/IDs")
     status: Optional[str] = Field(None, description="Agent status", pattern="^(active|deactive|delete)$")
 
 class SearchAgentsRequest(BaseModel):
@@ -57,13 +71,112 @@ class AgentResponse(BaseModel):
     org_id: str
     name: str
     description: Optional[str] = None
-    system_prompt: Dict[str, Any]
-    tools_list: List[str]
-    knowledge_list: List[str]
     status: str
     created_by: str
     created_date: datetime
     updated_date: datetime
+    current_blueprint_id: Optional[str] = None
+
+# Request/Response Models for Blueprints
+class CreateBlueprintRequest(BaseModel):
+    agent_blueprint: Dict[str, Any] = Field(..., description="Complete agent blueprint JSON")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID that created this blueprint")
+
+class AgentBlueprintResponse(BaseModel):
+    id: str
+    agent_id: str
+    version: int
+    agent_blueprint: Dict[str, Any]
+    created_date: datetime
+    created_by: str
+    conversation_id: Optional[str] = None
+    compiled_system_prompt: Optional[str] = None
+    compiled_at: Optional[datetime] = None
+    compiled_by: Optional[str] = None
+    compilation_status: str = "draft"
+    # Todo-related fields
+    implementation_todos: Optional[List[Dict[str, Any]]] = None
+    todos_completion_status: str = "not_generated"
+    todos_generated_at: Optional[datetime] = None
+    todos_generated_by: Optional[str] = None
+    todos_completed_at: Optional[datetime] = None
+    todos_completed_by: Optional[str] = None
+
+class AgentWithBlueprintResponse(BaseModel):
+    agent: AgentResponse
+    blueprint: Optional[AgentBlueprintResponse] = None
+
+# Request/Response Models for Compilation
+class CompilationStatusResponse(BaseModel):
+    status: str
+    compiled_at: Optional[datetime] = None
+    compiled_by: Optional[str] = None
+
+class CompilationResultResponse(BaseModel):
+    blueprint: AgentBlueprintResponse
+    compilation_status: str
+    compiled_system_prompt: Optional[str] = None
+    message: str
+
+# Request/Response Models for Todos
+class UpdateTodoStatusRequest(BaseModel):
+    todo_id: str = Field(..., description="Todo ID to update")
+    new_status: str = Field(..., description="New status: pending, in_progress, completed, cancelled")
+
+class CollectTodoInputsRequest(BaseModel):
+    collected_inputs: Dict[str, Any] = Field(..., description="Collected inputs for the todo")
+
+class ValidateTodoInputsRequest(BaseModel):
+    provided_inputs: Dict[str, Any] = Field(..., description="Inputs to validate")
+
+class TodoInputValidationResponse(BaseModel):
+    valid: bool
+    errors: List[str]
+    todo_id: str
+
+class TodoStatistics(BaseModel):
+    total: int
+    completed: int
+    in_progress: int
+    pending: int
+    completion_percentage: float
+
+class BlueprintTodosResponse(BaseModel):
+    blueprint_id: str
+    todos: List[Dict[str, Any]]
+    completion_status: str
+    statistics: TodoStatistics
+    generated_at: Optional[datetime] = None
+    generated_by: Optional[str] = None
+
+class GenerateTodosResponse(BaseModel):
+    blueprint: AgentBlueprintResponse
+    todos_generated: int
+    message: str
+
+# Helper function to convert blueprint to response
+def blueprint_to_response(blueprint: AgentBlueprint) -> AgentBlueprintResponse:
+    """Convert AgentBlueprint to AgentBlueprintResponse"""
+    return AgentBlueprintResponse(
+        id=blueprint.id,
+        agent_id=blueprint.agent_id,
+        version=blueprint.version,
+        agent_blueprint=blueprint.agent_blueprint,
+        created_date=blueprint.created_date,
+        created_by=blueprint.created_by,
+        conversation_id=blueprint.conversation_id,
+        compiled_system_prompt=blueprint.compiled_system_prompt,
+        compiled_at=blueprint.compiled_at,
+        compiled_by=blueprint.compiled_by,
+        compilation_status=blueprint.compilation_status,
+        # Todo-related fields
+        implementation_todos=blueprint.implementation_todos,
+        todos_completion_status=blueprint.todos_completion_status,
+        todos_generated_at=blueprint.todos_generated_at,
+        todos_generated_by=blueprint.todos_generated_by,
+        todos_completed_at=blueprint.todos_completed_at,
+        todos_completed_by=blueprint.todos_completed_by
+    )
 
 # Helper function to get current user (imported from login.py)
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -90,11 +203,11 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         logger.error(f"Error getting current user: {str(e)}")
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# Organization Agent Management Endpoints
+# Agent Management Endpoints
 
 @router.post("/", response_model=AgentResponse)
 async def create_agent_endpoint(request: CreateAgentRequest, current_user: dict = Depends(get_current_user)):
-    """Create a new agent for the current user's organization"""
+    """Create a new agent (without blueprint) for the current user's organization"""
     try:
         # Get user's organization
         from organization import get_my_organization
@@ -111,10 +224,7 @@ async def create_agent_endpoint(request: CreateAgentRequest, current_user: dict 
             org_id=org_id,
             created_by=current_user["id"],
             name=request.name,
-            description=request.description,
-            system_prompt=request.system_prompt,
-            tools_list=request.tools_list,
-            knowledge_list=request.knowledge_list
+            description=request.description
         )
         
         return AgentResponse(
@@ -123,13 +233,11 @@ async def create_agent_endpoint(request: CreateAgentRequest, current_user: dict 
             org_id=agent.org_id,
             name=agent.name,
             description=agent.description,
-            system_prompt=agent.system_prompt,
-            tools_list=agent.tools_list,
-            knowledge_list=agent.knowledge_list,
             status=agent.status,
             created_by=agent.created_by,
             created_date=agent.created_date,
-            updated_date=agent.updated_date
+            updated_date=agent.updated_date,
+            current_blueprint_id=agent.current_blueprint_id
         )
     
     except HTTPException:
@@ -137,6 +245,55 @@ async def create_agent_endpoint(request: CreateAgentRequest, current_user: dict 
     except Exception as e:
         logger.error(f"Error creating agent: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to create agent")
+
+@router.post("/with-blueprint", response_model=AgentWithBlueprintResponse)
+async def create_agent_with_blueprint_endpoint(
+    request: CreateAgentWithBlueprintRequest, 
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new agent with its initial blueprint"""
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        org_id = org_response.id
+        
+        # Check if user has permission to create agents
+        user_role = get_user_role_in_organization(current_user["id"], org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You must be a member of an organization to create agents")
+        
+        # Create agent with blueprint
+        agent, blueprint = create_agent_with_blueprint(
+            org_id=org_id,
+            created_by=current_user["id"],
+            name=request.name,
+            blueprint_data=request.agent_blueprint,
+            description=request.description,
+            conversation_id=request.conversation_id
+        )
+        
+        return AgentWithBlueprintResponse(
+            agent=AgentResponse(
+                id=agent.id,
+                agent_id=agent.agent_id,
+                org_id=agent.org_id,
+                name=agent.name,
+                description=agent.description,
+                status=agent.status,
+                created_by=agent.created_by,
+                created_date=agent.created_date,
+                updated_date=agent.updated_date,
+                current_blueprint_id=agent.current_blueprint_id
+            ),
+            blueprint=blueprint_to_response(blueprint)
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating agent with blueprint: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create agent with blueprint")
 
 @router.get("/", response_model=List[AgentResponse])
 async def get_agents_endpoint(
@@ -171,13 +328,11 @@ async def get_agents_endpoint(
                 org_id=agent.org_id,
                 name=agent.name,
                 description=agent.description,
-                system_prompt=agent.system_prompt,
-                tools_list=agent.tools_list,
-                knowledge_list=agent.knowledge_list,
                 status=agent.status,
                 created_by=agent.created_by,
                 created_date=agent.created_date,
-                updated_date=agent.updated_date
+                updated_date=agent.updated_date,
+                current_blueprint_id=agent.current_blueprint_id
             ))
         
         return agent_responses
@@ -188,34 +343,40 @@ async def get_agents_endpoint(
         logger.error(f"Error getting agents: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get agents")
 
-@router.get("/{agent_id}", response_model=AgentResponse)
+@router.get("/{agent_id}", response_model=AgentWithBlueprintResponse)
 async def get_agent_endpoint(agent_id: str, current_user: dict = Depends(get_current_user)):
-    """Get a specific agent by ID"""
+    """Get a specific agent by ID with its current blueprint"""
     try:
-        # Get the agent
-        agent = get_agent(agent_id)
-        if not agent:
+        # Get the agent with blueprint
+        result = get_agent_with_current_blueprint(agent_id)
+        if not result:
             raise HTTPException(status_code=404, detail="Agent not found")
+        
+        agent, blueprint = result
         
         # Check if user has permission to view this agent
         user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
         if not user_role:
             raise HTTPException(status_code=403, detail="You don't have permission to view this agent")
         
-        return AgentResponse(
+        agent_response = AgentResponse(
             id=agent.id,
             agent_id=agent.agent_id,
             org_id=agent.org_id,
             name=agent.name,
             description=agent.description,
-            system_prompt=agent.system_prompt,
-            tools_list=agent.tools_list,
-            knowledge_list=agent.knowledge_list,
             status=agent.status,
             created_by=agent.created_by,
             created_date=agent.created_date,
-            updated_date=agent.updated_date
+            updated_date=agent.updated_date,
+            current_blueprint_id=agent.current_blueprint_id
         )
+        
+        blueprint_response = None
+        if blueprint:
+            blueprint_response = blueprint_to_response(blueprint)
+        
+        return AgentWithBlueprintResponse(agent=agent_response, blueprint=blueprint_response)
     
     except HTTPException:
         raise
@@ -229,7 +390,7 @@ async def update_agent_endpoint(
     request: UpdateAgentRequest, 
     current_user: dict = Depends(get_current_user)
 ):
-    """Update an agent's information"""
+    """Update an agent's basic information (not blueprint)"""
     try:
         # Get the agent
         agent = get_agent(agent_id)
@@ -250,9 +411,6 @@ async def update_agent_endpoint(
             agent_id=agent_id,
             name=request.name,
             description=request.description,
-            system_prompt=request.system_prompt,
-            tools_list=request.tools_list,
-            knowledge_list=request.knowledge_list,
             status=request.status
         )
         
@@ -265,13 +423,11 @@ async def update_agent_endpoint(
             org_id=updated_agent.org_id,
             name=updated_agent.name,
             description=updated_agent.description,
-            system_prompt=updated_agent.system_prompt,
-            tools_list=updated_agent.tools_list,
-            knowledge_list=updated_agent.knowledge_list,
             status=updated_agent.status,
             created_by=updated_agent.created_by,
             created_date=updated_agent.created_date,
-            updated_date=updated_agent.updated_date
+            updated_date=updated_agent.updated_date,
+            current_blueprint_id=updated_agent.current_blueprint_id
         )
     
     except HTTPException:
@@ -311,6 +467,141 @@ async def delete_agent_endpoint(agent_id: str, current_user: dict = Depends(get_
         logger.error(f"Error deleting agent: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to delete agent")
 
+# Blueprint Management Endpoints
+
+@router.post("/{agent_id}/blueprints", response_model=AgentBlueprintResponse)
+async def create_blueprint_endpoint(
+    agent_id: str,
+    request: CreateBlueprintRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new blueprint version for an agent"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to create blueprints for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to create blueprints for this agent")
+        
+        # Create blueprint
+        blueprint = create_blueprint(
+            agent_id=agent_id,
+            blueprint_data=request.agent_blueprint,
+            created_by=current_user["id"],
+            conversation_id=request.conversation_id
+        )
+        
+        return blueprint_to_response(blueprint)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating blueprint: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create blueprint")
+
+@router.get("/{agent_id}/blueprints", response_model=List[AgentBlueprintResponse])
+async def get_agent_blueprints_endpoint(
+    agent_id: str,
+    limit: int = 10,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all blueprint versions for an agent"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to view blueprints for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to view blueprints for this agent")
+        
+        # Get blueprints
+        blueprints = get_agent_blueprints(agent_id, limit)
+        
+        blueprint_responses = []
+        for blueprint in blueprints:
+            blueprint_responses.append(blueprint_to_response(blueprint))
+        
+        return blueprint_responses
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting agent blueprints: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get agent blueprints")
+
+@router.get("/{agent_id}/blueprints/{blueprint_id}", response_model=AgentBlueprintResponse)
+async def get_blueprint_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get a specific blueprint by ID"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to view blueprints for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to view blueprints for this agent")
+        
+        # Get blueprint
+        blueprint = get_blueprint(blueprint_id)
+        if not blueprint or blueprint.agent_id != agent_id:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+        
+        return blueprint_to_response(blueprint)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting blueprint: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get blueprint")
+
+@router.post("/{agent_id}/blueprints/{blueprint_id}/activate")
+async def activate_blueprint_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Activate a blueprint version as the current blueprint for an agent"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to activate blueprints for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to activate blueprints for this agent")
+        
+        # Only owners and admins can activate blueprints
+        if user_role not in ["owner", "admin"]:
+            raise HTTPException(status_code=403, detail="Only organization owners and admins can activate blueprints")
+        
+        # Activate blueprint
+        success = activate_blueprint(agent_id, blueprint_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to activate blueprint")
+        
+        return {"message": "Blueprint activated successfully"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error activating blueprint: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to activate blueprint")
+
 @router.post("/search", response_model=List[AgentResponse])
 async def search_agents_endpoint(
     request: SearchAgentsRequest, 
@@ -340,13 +631,11 @@ async def search_agents_endpoint(
                 org_id=agent.org_id,
                 name=agent.name,
                 description=agent.description,
-                system_prompt=agent.system_prompt,
-                tools_list=agent.tools_list,
-                knowledge_list=agent.knowledge_list,
                 status=agent.status,
                 created_by=agent.created_by,
                 created_date=agent.created_date,
-                updated_date=agent.updated_date
+                updated_date=agent.updated_date,
+                current_blueprint_id=agent.current_blueprint_id
             ))
         
         return agent_responses
@@ -356,6 +645,118 @@ async def search_agents_endpoint(
     except Exception as e:
         logger.error(f"Error searching agents: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to search agents")
+
+# Blueprint Compilation Endpoints
+
+@router.post("/{agent_id}/blueprints/{blueprint_id}/compile", response_model=CompilationResultResponse)
+async def compile_blueprint_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Compile a blueprint into a system prompt"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to compile blueprints for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to compile blueprints for this agent")
+        
+        # Only owners and admins can compile blueprints
+        if user_role not in ["owner", "admin"]:
+            raise HTTPException(status_code=403, detail="Only organization owners and admins can compile blueprints")
+        
+        # Compile blueprint
+        compiled_blueprint = compile_blueprint(blueprint_id, current_user["id"])
+        if not compiled_blueprint:
+            raise HTTPException(status_code=500, detail="Failed to compile blueprint")
+        
+        return CompilationResultResponse(
+            blueprint=blueprint_to_response(compiled_blueprint),
+            compilation_status=compiled_blueprint.compilation_status,
+            compiled_system_prompt=compiled_blueprint.compiled_system_prompt,
+            message="Blueprint compiled successfully"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error compiling blueprint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to compile blueprint: {str(e)}")
+
+@router.get("/{agent_id}/blueprints/{blueprint_id}/compilation-status", response_model=CompilationStatusResponse)
+async def get_compilation_status_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get compilation status for a specific blueprint"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to view compilation status
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to view compilation status for this agent")
+        
+        # Get compilation status
+        status_info = get_blueprint_compilation_status(blueprint_id)
+        if not status_info:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+        
+        return CompilationStatusResponse(
+            status=status_info["status"],
+            compiled_at=datetime.fromisoformat(status_info["compiled_at"].replace("Z", "+00:00")) if status_info.get("compiled_at") else None,
+            compiled_by=status_info.get("compiled_by")
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting compilation status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get compilation status")
+
+@router.get("/{agent_id}/compiled-blueprints", response_model=List[AgentBlueprintResponse])
+async def get_compiled_blueprints_endpoint(
+    agent_id: str,
+    limit: int = 10,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all compiled blueprint versions for an agent"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to view compiled blueprints
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to view compiled blueprints for this agent")
+        
+        # Get compiled blueprints
+        compiled_blueprints = get_compiled_blueprints_for_agent(agent_id, limit)
+        
+        blueprint_responses = []
+        for blueprint in compiled_blueprints:
+            blueprint_responses.append(blueprint_to_response(blueprint))
+        
+        return blueprint_responses
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting compiled blueprints: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get compiled blueprints")
+
+# Status Management Endpoints (activate/deactivate shortcuts)
 
 @router.post("/{agent_id}/activate")
 async def activate_agent_endpoint(agent_id: str, current_user: dict = Depends(get_current_user)):
@@ -417,4 +818,273 @@ async def deactivate_agent_endpoint(agent_id: str, current_user: dict = Depends(
         raise
     except Exception as e:
         logger.error(f"Error deactivating agent: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to deactivate agent") 
+        raise HTTPException(status_code=500, detail="Failed to deactivate agent")
+
+# Blueprint Implementation Todos Endpoints
+
+@router.post("/{agent_id}/blueprints/{blueprint_id}/generate-todos", response_model=GenerateTodosResponse)
+async def generate_todos_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Generate implementation todos for a blueprint based on Ami's analysis"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to generate todos for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to generate todos for this agent")
+        
+        # Import the function
+        from orgdb import generate_implementation_todos
+        
+        # Generate todos
+        updated_blueprint = generate_implementation_todos(blueprint_id, current_user["id"])
+        if not updated_blueprint:
+            raise HTTPException(status_code=500, detail="Failed to generate todos")
+        
+        return GenerateTodosResponse(
+            blueprint=blueprint_to_response(updated_blueprint),
+            todos_generated=len(updated_blueprint.implementation_todos),
+            message=f"Generated {len(updated_blueprint.implementation_todos)} implementation todos for the blueprint"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating todos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate todos: {str(e)}")
+
+@router.get("/{agent_id}/blueprints/{blueprint_id}/todos", response_model=BlueprintTodosResponse)
+async def get_blueprint_todos_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get todos for a blueprint with completion statistics"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to view todos for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to view todos for this agent")
+        
+        # Import the function
+        from orgdb import get_blueprint_todos
+        
+        # Get todos
+        todos_info = get_blueprint_todos(blueprint_id)
+        if not todos_info:
+            raise HTTPException(status_code=404, detail="Blueprint not found or no todos generated")
+        
+        return BlueprintTodosResponse(
+            blueprint_id=todos_info["blueprint_id"],
+            todos=todos_info["todos"],
+            completion_status=todos_info["completion_status"],
+            statistics=TodoStatistics(**todos_info["statistics"]),
+            generated_at=todos_info["generated_at"],
+            generated_by=todos_info["generated_by"]
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting blueprint todos: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get blueprint todos")
+
+@router.put("/{agent_id}/blueprints/{blueprint_id}/todos/{todo_id}", response_model=dict)
+async def update_todo_status_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    todo_id: str,
+    request: UpdateTodoStatusRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update the status of a specific todo"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to update todos for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to update todos for this agent")
+        
+        # Validate status
+        valid_statuses = ["pending", "in_progress", "completed", "cancelled"]
+        if request.new_status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+        
+        # Import the function
+        from orgdb import update_todo_status, check_todos_completion_and_update_status
+        
+        # Update todo status (without collected inputs for this endpoint)
+        success = update_todo_status(blueprint_id, request.todo_id, request.new_status, current_user["id"])
+        if not success:
+            raise HTTPException(status_code=404, detail="Todo not found or update failed")
+        
+        # Check if all todos are completed and update blueprint status
+        all_completed = check_todos_completion_and_update_status(blueprint_id)
+        
+        message = f"Todo status updated to '{request.new_status}'"
+        if all_completed:
+            message += ". All todos completed! Blueprint is now ready for compilation."
+        
+        return {
+            "message": message,
+            "todo_id": request.todo_id,
+            "new_status": request.new_status,
+            "all_todos_completed": all_completed
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating todo status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update todo status")
+
+@router.post("/{agent_id}/blueprints/{blueprint_id}/todos/{todo_id}/validate-inputs", response_model=TodoInputValidationResponse)
+async def validate_todo_inputs_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    todo_id: str,
+    request: ValidateTodoInputsRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Validate inputs for a specific todo before collection"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to validate inputs for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to validate inputs for this agent")
+        
+        # Import the function
+        from orgdb import validate_todo_inputs
+        
+        # Validate inputs
+        validation_result = validate_todo_inputs(blueprint_id, todo_id, request.provided_inputs)
+        
+        return TodoInputValidationResponse(
+            valid=validation_result["valid"],
+            errors=validation_result["errors"],
+            todo_id=todo_id
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating todo inputs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to validate todo inputs")
+
+@router.post("/{agent_id}/blueprints/{blueprint_id}/todos/{todo_id}/collect-inputs", response_model=dict)
+async def collect_todo_inputs_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    todo_id: str,
+    request: CollectTodoInputsRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Collect and store inputs for a specific todo"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to collect inputs for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to collect inputs for this agent")
+        
+        # Import the functions
+        from orgdb import validate_todo_inputs, update_todo_status, check_todos_completion_and_update_status
+        
+        # Validate inputs first
+        validation_result = validate_todo_inputs(blueprint_id, todo_id, request.collected_inputs)
+        if not validation_result["valid"]:
+            raise HTTPException(status_code=400, detail=f"Input validation failed: {', '.join(validation_result['errors'])}")
+        
+        # Store inputs and mark todo as completed
+        success = update_todo_status(
+            blueprint_id=blueprint_id,
+            todo_id=todo_id,
+            new_status="completed",
+            updated_by=current_user["id"],
+            collected_inputs=request.collected_inputs
+        )
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Todo not found or update failed")
+        
+        # Check if all todos are completed and update blueprint status
+        all_completed = check_todos_completion_and_update_status(blueprint_id)
+        
+        message = f"Inputs collected and todo completed successfully"
+        if all_completed:
+            message += ". All todos completed! Blueprint is now ready for compilation."
+        
+        return {
+            "message": message,
+            "todo_id": todo_id,
+            "status": "completed",
+            "inputs_collected": len(request.collected_inputs),
+            "all_todos_completed": all_completed
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error collecting todo inputs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to collect todo inputs")
+
+@router.get("/{agent_id}/blueprints/{blueprint_id}/collected-inputs", response_model=dict)
+async def get_collected_inputs_endpoint(
+    agent_id: str,
+    blueprint_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all collected inputs from completed todos for compilation preview"""
+    try:
+        # Get the agent
+        agent = get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        
+        # Check if user has permission to view collected inputs for this agent
+        user_role = get_user_role_in_organization(current_user["id"], agent.org_id)
+        if not user_role:
+            raise HTTPException(status_code=403, detail="You don't have permission to view collected inputs for this agent")
+        
+        # Import the function
+        from orgdb import get_all_collected_inputs
+        
+        # Get all collected inputs
+        collected_inputs = get_all_collected_inputs(blueprint_id)
+        
+        return {
+            "blueprint_id": blueprint_id,
+            "collected_inputs": collected_inputs,
+            "message": "All collected inputs retrieved successfully"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting collected inputs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get collected inputs")

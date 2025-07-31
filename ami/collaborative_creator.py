@@ -114,16 +114,18 @@ class CollaborativeCreator:
         1. UNDERSTAND their vision deeply
         2. ASK CLARIFYING QUESTIONS 
         3. REFINE the idea into a concrete plan
-        4. CREATE a detailed agent skeleton
+        4. CREATE a complete human-friendly agent blueprint following the 7-part structure
 
         Human's Initial Idea: "{request.user_input}"
 
-        Act like an experienced product manager. Think through:
-        - What problem are they trying to solve?
-        - Who will use this agent? 
-        - What should it actually DO?
-        - What are the success criteria?
-        - What challenges might we face?
+        Create a blueprint that follows the 7-part Agent Pitch structure:
+        1. Meet Me: Personal introduction in agent's voice
+        2. What I Can Do: Specific tasks with conversation examples
+        3. Where I Get My Smarts: Specific data sources and update frequency
+        4. Apps I Team Up With: Tool integrations with triggers/actions
+        5. How I Keep You in the Loop: Monitoring and fallback behaviors
+        6. Try Me Out: Test questions with expected responses
+        7. How I Work: Step-by-step workflow process
 
         Respond with this EXACT JSON format:
         {{
@@ -133,28 +135,71 @@ class CollaborativeCreator:
                 "Question 2 about usage scenarios?", 
                 "Question 3 about constraints?"
             ],
-            "agent_skeleton": {{
+            "agent_blueprint": {{
                 "agent_name": "Descriptive Agent Name",
                 "agent_purpose": "Clear purpose statement",
+                "meet_me": {{
+                    "introduction": "Hi, I'm [Agent Name]! My main job is [role]. I'm here to [benefit].",
+                    "value_proposition": "Think of me as your [analogy] that [key benefit]."
+                }},
+                "what_i_do": {{
+                    "primary_tasks": [
+                        {{"task": "Task name", "description": "What I do for this task"}},
+                        {{"task": "Task name", "description": "What I do for this task"}}
+                    ],
+                    "personality": {{
+                        "tone": "professional|friendly|authoritative|consultative", 
+                        "style": "concise|detailed|conversational|technical",
+                        "analogy": "like a helpful pal, cheerful receptionist, etc."
+                    }},
+                    "sample_conversation": {{
+                        "user_question": "Sample question a user might ask",
+                        "agent_response": "How I would respond in my voice"
+                    }}
+                }},
+                "knowledge_sources": [
+                    {{
+                        "source": "Specific source name (e.g., 'Customer Database', 'Product Catalog Google Sheet')",
+                        "type": "spreadsheet|database|api|website",
+                        "update_frequency": "hourly|daily|weekly|real-time",
+                        "content_examples": ["Example data 1", "Example data 2"]
+                    }}
+                ],
+                "integrations": [
+                    {{
+                        "app_name": "Specific app (e.g., Slack, Gmail)",
+                        "trigger": "When this happens",
+                        "action": "I do this specific action"
+                    }}
+                ],
+                "monitoring": {{
+                    "reporting_method": "How I report progress (e.g., weekly email, dashboard)",
+                    "metrics_tracked": ["Metric 1", "Metric 2"],
+                    "fallback_response": "What I say when unsure",
+                    "escalation_method": "How I get help (e.g., email team, Slack alert)"
+                }},
+                "test_scenarios": [
+                    {{
+                        "question": "Test question users can ask",
+                        "expected_response": "Exactly how I should respond"
+                    }}
+                ],
+                "workflow_steps": [
+                    "Step 1: What happens first",
+                    "Step 2: What I do next", 
+                    "Step 3: How I complete the task"
+                ],
+                "visual_flow": "Simple text description for workflow diagram",
                 "target_users": "Who will use this agent",
-                "use_cases": ["Use case 1", "Use case 2", "Use case 3"],
                 "agent_type": "sales|support|analyst|document_analysis|research|automation|general",
                 "language": "english|vietnamese|french|spanish",
-                "personality_traits": {{
-                    "tone": "professional|friendly|authoritative|consultative",
-                    "style": "concise|detailed|conversational|technical",
-                    "approach": "proactive|reactive|analytical|creative"
-                }},
-                "key_capabilities": ["Capability 1", "Capability 2", "Capability 3"],
-                "required_tools": ["tool1", "tool2", "tool3"],
-                "knowledge_domains": ["domain1", "domain2"],
                 "success_criteria": ["Success measure 1", "Success measure 2"],
                 "potential_challenges": ["Challenge 1", "Challenge 2"]
             }},
             "ami_message": "Here's what I understand... [natural explanation of the plan and questions]"
         }}
 
-        Be conversational, helpful, and thorough. Ask smart questions that show you understand their business context.
+        Make the blueprint human-friendly, avoid technical jargon, and ensure it reads like the agent is introducing itself to a human user.
         """
         
         try:
@@ -175,22 +220,37 @@ class CollaborativeCreator:
             if json_match:
                 data = json.loads(json_match.group(0))
                 
-                # Create agent skeleton object
-                skeleton_data = data.get("agent_skeleton", {})
+                # Create agent blueprint object
+                blueprint_data = data.get("agent_blueprint", {})
                 skeleton = AgentSkeleton(
                     conversation_id=request.conversation_id,
-                    agent_name=skeleton_data.get("agent_name", "Custom Agent"),
-                    agent_purpose=skeleton_data.get("agent_purpose", "Specialized AI assistant"),
-                    target_users=skeleton_data.get("target_users", "General users"),
-                    use_cases=skeleton_data.get("use_cases", ["General assistance"]),
-                    agent_type=skeleton_data.get("agent_type", "general"),
-                    language=skeleton_data.get("language", "english"),
-                    personality_traits=skeleton_data.get("personality_traits", {"tone": "professional"}),
-                    key_capabilities=skeleton_data.get("key_capabilities", ["General assistance"]),
-                    required_tools=skeleton_data.get("required_tools", ["search", "context"]),
-                    knowledge_domains=skeleton_data.get("knowledge_domains", []),
-                    success_criteria=skeleton_data.get("success_criteria", ["User satisfaction"]),
-                    potential_challenges=skeleton_data.get("potential_challenges", ["None identified"]),
+                    agent_name=blueprint_data.get("agent_name", "Custom Agent"),
+                    agent_purpose=blueprint_data.get("agent_purpose", "Specialized AI assistant"),
+                    target_users=blueprint_data.get("target_users", "General users"),
+                    agent_type=blueprint_data.get("agent_type", "general"),
+                    language=blueprint_data.get("language", "english"),
+                    meet_me=blueprint_data.get("meet_me", {
+                        "introduction": f"Hi, I'm {blueprint_data.get('agent_name', 'Custom Agent')}!",
+                        "value_proposition": "I'm here to help you succeed."
+                    }),
+                    what_i_do=blueprint_data.get("what_i_do", {
+                        "primary_tasks": [],
+                        "personality": {"tone": "professional", "style": "helpful"},
+                        "sample_conversation": {"user_question": "", "agent_response": ""}
+                    }),
+                    knowledge_sources=blueprint_data.get("knowledge_sources", []),
+                    integrations=blueprint_data.get("integrations", []),
+                    monitoring=blueprint_data.get("monitoring", {
+                        "reporting_method": "Weekly updates",
+                        "metrics_tracked": ["User satisfaction"],
+                        "fallback_response": "Let me help you with that",
+                        "escalation_method": "I'll get help from the team"
+                    }),
+                    test_scenarios=blueprint_data.get("test_scenarios", []),
+                    workflow_steps=blueprint_data.get("workflow_steps", []),
+                    visual_flow=blueprint_data.get("visual_flow", "User asks → I analyze → I respond"),
+                    success_criteria=blueprint_data.get("success_criteria", ["User satisfaction"]),
+                    potential_challenges=blueprint_data.get("potential_challenges", ["None identified"]),
                     created_at=datetime.now()
                 )
                 
@@ -290,23 +350,22 @@ class CollaborativeCreator:
         
         # Handle refinement request
         refinement_prompt = f"""
-        You are Ami, a Chief Product Officer. The human is providing feedback on an agent plan. Your job is to:
+        You are Ami, a Chief Product Officer. The human is providing feedback on an agent blueprint. Your job is to:
 
         1. UNDERSTAND their feedback and concerns
-        2. REFINE the agent skeleton based on their input
+        2. REFINE the complete 7-part agent blueprint based on their input
         3. EXPLAIN the changes you're making
         4. ASK if they need any other adjustments
 
-        Original Agent Skeleton:
+        Original Agent Blueprint:
         - Name: {skeleton.agent_name}
         - Purpose: {skeleton.agent_purpose}
-        - Target Users: {skeleton.target_users}
-        - Use Cases: {skeleton.use_cases}
-        - Agent Type: {skeleton.agent_type}
-        - Language: {skeleton.language}
-        - Capabilities: {skeleton.key_capabilities}
-        - Tools: {skeleton.required_tools}
-        - Success Criteria: {skeleton.success_criteria}
+        - Meet Me: {skeleton.meet_me}
+        - What I Do: {skeleton.what_i_do}
+        - Knowledge Sources: {skeleton.knowledge_sources}
+        - Integrations: {skeleton.integrations}
+        - Test Scenarios: {skeleton.test_scenarios}
+        - Workflow: {skeleton.workflow_steps}
 
         Human Feedback: "{request.user_input}"
 
@@ -314,28 +373,66 @@ class CollaborativeCreator:
         {{
             "feedback_understanding": "What I understand from your feedback...",
             "changes_made": ["Change 1", "Change 2", "Change 3"],
-            "updated_skeleton": {{
+            "updated_blueprint": {{
                 "agent_name": "Updated Agent Name",
                 "agent_purpose": "Updated purpose statement",
                 "target_users": "Updated target users",
-                "use_cases": ["Updated use case 1", "Updated use case 2"],
                 "agent_type": "sales|support|analyst|document_analysis|research|automation|general",
                 "language": "english|vietnamese|french|spanish",
-                "personality_traits": {{
-                    "tone": "professional|friendly|authoritative|consultative",
-                    "style": "concise|detailed|conversational|technical",
-                    "approach": "proactive|reactive|analytical|creative"
+                "meet_me": {{
+                    "introduction": "Hi, I'm [Agent Name]! My main job is [role]. I'm here to [benefit].",
+                    "value_proposition": "Think of me as your [analogy] that [key benefit]."
                 }},
-                "key_capabilities": ["Updated capability 1", "Updated capability 2"],
-                "required_tools": ["tool1", "tool2", "tool3"],
-                "knowledge_domains": ["domain1", "domain2"],
-                "success_criteria": ["Updated success measure 1", "Updated success measure 2"],
-                "potential_challenges": ["Updated challenge 1", "Updated challenge 2"]
+                "what_i_do": {{
+                    "primary_tasks": [
+                        {{"task": "Task name", "description": "What I do for this task"}}
+                    ],
+                    "personality": {{
+                        "tone": "professional|friendly|authoritative|consultative", 
+                        "style": "concise|detailed|conversational|technical",
+                        "analogy": "like a helpful pal, cheerful receptionist, etc."
+                    }},
+                    "sample_conversation": {{
+                        "user_question": "Sample question a user might ask",
+                        "agent_response": "How I would respond in my voice"
+                    }}
+                }},
+                "knowledge_sources": [
+                    {{
+                        "source": "Specific source name",
+                        "type": "spreadsheet|database|api|website",
+                        "update_frequency": "hourly|daily|weekly|real-time",
+                        "content_examples": ["Example data 1", "Example data 2"]
+                    }}
+                ],
+                "integrations": [
+                    {{
+                        "app_name": "Specific app name",
+                        "trigger": "When this happens",
+                        "action": "I do this specific action"
+                    }}
+                ],
+                "monitoring": {{
+                    "reporting_method": "How I report progress",
+                    "metrics_tracked": ["Metric 1", "Metric 2"],
+                    "fallback_response": "What I say when unsure",
+                    "escalation_method": "How I get help"
+                }},
+                "test_scenarios": [
+                    {{
+                        "question": "Test question users can ask",
+                        "expected_response": "Exactly how I should respond"
+                    }}
+                ],
+                "workflow_steps": ["Step 1", "Step 2", "Step 3"],
+                "visual_flow": "Simple workflow description",
+                "success_criteria": ["Success measure 1", "Success measure 2"],
+                "potential_challenges": ["Challenge 1", "Challenge 2"]
             }},
-            "ami_message": "I've updated the plan based on your feedback... [explanation of changes and questions]"
+            "ami_message": "I've updated the blueprint based on your feedback... [explanation of changes and questions]"
         }}
 
-        Be responsive to their specific concerns and explain your reasoning.
+        Be responsive to their specific concerns and explain your reasoning. Keep the blueprint human-friendly and avoid technical jargon.
         """
         
         try:
@@ -346,22 +443,25 @@ class CollaborativeCreator:
             if json_match:
                 data = json.loads(json_match.group(0))
                 
-                # Update skeleton with refined data
-                updated_skeleton_data = data.get("updated_skeleton", {})
+                # Update blueprint with refined data
+                updated_blueprint_data = data.get("updated_blueprint", {})
                 refined_skeleton = AgentSkeleton(
                     conversation_id=request.conversation_id,
-                    agent_name=updated_skeleton_data.get("agent_name", skeleton.agent_name),
-                    agent_purpose=updated_skeleton_data.get("agent_purpose", skeleton.agent_purpose),
-                    target_users=updated_skeleton_data.get("target_users", skeleton.target_users),
-                    use_cases=updated_skeleton_data.get("use_cases", skeleton.use_cases),
-                    agent_type=updated_skeleton_data.get("agent_type", skeleton.agent_type),
-                    language=updated_skeleton_data.get("language", skeleton.language),
-                    personality_traits=updated_skeleton_data.get("personality_traits", skeleton.personality_traits),
-                    key_capabilities=updated_skeleton_data.get("key_capabilities", skeleton.key_capabilities),
-                    required_tools=updated_skeleton_data.get("required_tools", skeleton.required_tools),
-                    knowledge_domains=updated_skeleton_data.get("knowledge_domains", skeleton.knowledge_domains),
-                    success_criteria=updated_skeleton_data.get("success_criteria", skeleton.success_criteria),
-                    potential_challenges=updated_skeleton_data.get("potential_challenges", skeleton.potential_challenges),
+                    agent_name=updated_blueprint_data.get("agent_name", skeleton.agent_name),
+                    agent_purpose=updated_blueprint_data.get("agent_purpose", skeleton.agent_purpose),
+                    target_users=updated_blueprint_data.get("target_users", skeleton.target_users),
+                    agent_type=updated_blueprint_data.get("agent_type", skeleton.agent_type),
+                    language=updated_blueprint_data.get("language", skeleton.language),
+                    meet_me=updated_blueprint_data.get("meet_me", skeleton.meet_me),
+                    what_i_do=updated_blueprint_data.get("what_i_do", skeleton.what_i_do),
+                    knowledge_sources=updated_blueprint_data.get("knowledge_sources", skeleton.knowledge_sources),
+                    integrations=updated_blueprint_data.get("integrations", skeleton.integrations),
+                    monitoring=updated_blueprint_data.get("monitoring", skeleton.monitoring),
+                    test_scenarios=updated_blueprint_data.get("test_scenarios", skeleton.test_scenarios),
+                    workflow_steps=updated_blueprint_data.get("workflow_steps", skeleton.workflow_steps),
+                    visual_flow=updated_blueprint_data.get("visual_flow", skeleton.visual_flow),
+                    success_criteria=updated_blueprint_data.get("success_criteria", skeleton.success_criteria),
+                    potential_challenges=updated_blueprint_data.get("potential_challenges", skeleton.potential_challenges),
                     created_at=datetime.now()
                 )
                 
@@ -379,17 +479,20 @@ class CollaborativeCreator:
                     data={
                         "feedback_understanding": data.get("feedback_understanding", ""),
                         "changes_made": data.get("changes_made", []),
-                        "updated_skeleton": {
+                        "updated_blueprint": {
                             "agent_name": refined_skeleton.agent_name,
                             "agent_purpose": refined_skeleton.agent_purpose,
                             "target_users": refined_skeleton.target_users,
-                            "use_cases": refined_skeleton.use_cases,
                             "agent_type": refined_skeleton.agent_type,
                             "language": refined_skeleton.language,
-                            "personality_traits": refined_skeleton.personality_traits,
-                            "key_capabilities": refined_skeleton.key_capabilities,
-                            "required_tools": refined_skeleton.required_tools,
-                            "knowledge_domains": refined_skeleton.knowledge_domains,
+                            "meet_me": refined_skeleton.meet_me,
+                            "what_i_do": refined_skeleton.what_i_do,
+                            "knowledge_sources": refined_skeleton.knowledge_sources,
+                            "integrations": refined_skeleton.integrations,
+                            "monitoring": refined_skeleton.monitoring,
+                            "test_scenarios": refined_skeleton.test_scenarios,
+                            "workflow_steps": refined_skeleton.workflow_steps,
+                            "visual_flow": refined_skeleton.visual_flow,
                             "success_criteria": refined_skeleton.success_criteria,
                             "potential_challenges": refined_skeleton.potential_challenges
                         }

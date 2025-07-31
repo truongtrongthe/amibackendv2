@@ -37,26 +37,39 @@ class AgentIdea:
 
 @dataclass
 class AgentSkeleton:
-    """Refined agent plan for human review"""
+    """Complete 7-part agent blueprint for human review"""
     conversation_id: str
     
-    # Refined understanding
+    # Basic info
     agent_name: str
     agent_purpose: str
     target_users: str
-    use_cases: List[str]
-    
-    # Technical specs
     agent_type: str
     language: str
-    personality_traits: Dict[str, str]
     
-    # Capabilities
-    key_capabilities: List[str]
-    required_tools: List[str]
-    knowledge_domains: List[str]
+    # 1. Meet Me: Personal introduction
+    meet_me: Dict[str, str]  # introduction, value_proposition
     
-    # Implementation details
+    # 2. What I Can Do: Tasks and personality
+    what_i_do: Dict[str, Any]  # primary_tasks, personality, sample_conversation
+    
+    # 3. Where I Get My Smarts: Knowledge sources
+    knowledge_sources: List[Dict[str, Any]]  # source, type, update_frequency, content_examples
+    
+    # 4. Apps I Team Up With: Integrations
+    integrations: List[Dict[str, str]]  # app_name, trigger, action
+    
+    # 5. How I Keep You in the Loop: Monitoring
+    monitoring: Dict[str, Any]  # reporting_method, metrics_tracked, fallback_response, escalation_method
+    
+    # 6. Try Me Out: Test scenarios
+    test_scenarios: List[Dict[str, str]]  # question, expected_response
+    
+    # 7. How I Work: Workflow
+    workflow_steps: List[str]
+    visual_flow: str
+    
+    # Implementation metadata
     success_criteria: List[str]
     potential_challenges: List[str]
     
