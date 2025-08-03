@@ -37,11 +37,12 @@ class CollaborativeCreator:
     Guides humans through iterative refinement before building agents
     """
     
-    def __init__(self, anthropic_executor, openai_executor, knowledge_manager: AmiKnowledgeManager):
+    def __init__(self, anthropic_executor, openai_executor, knowledge_manager: AmiKnowledgeManager, orchestrator=None):
         """Initialize collaborative creator with required dependencies"""
         self.anthropic_executor = anthropic_executor
         self.openai_executor = openai_executor
         self.knowledge_manager = knowledge_manager
+        self.orchestrator = orchestrator
         
         # Conversation state storage (in production, use Redis or database)
         self.conversations: Dict[str, Dict[str, Any]] = {}
@@ -322,6 +323,7 @@ class CollaborativeCreator:
         # Get conversation state
         conversation = self.conversations.get(request.conversation_id)
         if not conversation:
+            collab_logger.error(f"Conversation not found for ID: {request.conversation_id}")
             return CollaborativeAgentResponse(
                 success=False,
                 conversation_id=request.conversation_id,
@@ -331,25 +333,74 @@ class CollaborativeCreator:
                 next_actions=["Start a new agent creation conversation"]
             )
         
+        collab_logger.info(f"Found conversation for {request.conversation_id}")
         skeleton = conversation["skeleton"]
+        collab_logger.info(f"Got skeleton: {skeleton.agent_name if skeleton else 'None'}")
         
-        # Check if this is approval
-        approval_keywords = ["approve", "approved", "looks good", "build it", "proceed", "yes", "perfect", "go ahead", "create it"]
-        is_approval = any(keyword in request.user_input.lower() for keyword in approval_keywords)
+        # Check if this is approval (smarter contextual detection)
+        user_input_lower = request.user_input.lower().strip()
+        
+        # Explicit approval keywords (strong signals)
+        strong_approval_keywords = [
+            "approve", "approved", "looks good", "build it", "proceed", "perfect", "go ahead", "create it",
+            "build đi", "xây dựng đi", "làm đi", "tiến hành", "đồng ý", "được", "hoàn hảo",
+            "build nó đi", "tạo đi", "thực hiện đi"
+        ]
+        
+        # Simple affirmatives (only count if message is short and direct)
+        simple_affirmatives = ["yes", "ok", "được", "tốt"]
+        
+        # Check for strong approval keywords
+        has_strong_approval = any(keyword in user_input_lower for keyword in strong_approval_keywords)
+        
+        # Check for simple affirmatives (only if message is short and doesn't contain additional requirements)
+        has_simple_approval = False
+        if any(keyword in user_input_lower for keyword in simple_affirmatives):
+            # Only count as approval if:
+            # 1. Message is short (< 50 characters)
+            # 2. Doesn't contain requirement indicators
+            requirement_indicators = ["cần", "phải", "thêm", "need", "should", "add", "also", "và", "then", "sau khi"]
+            message_is_short = len(request.user_input) < 50
+            has_requirements = any(indicator in user_input_lower for indicator in requirement_indicators)
+            
+            has_simple_approval = message_is_short and not has_requirements
+        
+        is_approval = has_strong_approval or has_simple_approval
+        
+        collab_logger.info(f"Checking approval for input: '{request.user_input}' → is_approval: {is_approval}")
         
         if is_approval:
             # Update state to approved
             conversation["state"] = ConversationState.APPROVED
             self.conversations[request.conversation_id] = conversation
             
-            return CollaborativeAgentResponse(
-                success=True,
+            collab_logger.info(f"Agent approved! Triggering build process for '{skeleton.agent_name}'")
+            
+            # Create an approved request to trigger the actual building
+            approved_request = CollaborativeAgentRequest(
+                user_input=request.user_input,
                 conversation_id=request.conversation_id,
-                current_state=ConversationState.APPROVED,
-                ami_message=f"Perfect! I'll now build '{skeleton.agent_name}' exactly as planned. This will take a moment...",
-                data={"approved_skeleton": skeleton.__dict__},
-                next_actions=["Wait for agent creation to complete"]
+                org_id=request.org_id,
+                user_id=request.user_id,
+                llm_provider=request.llm_provider,
+                model=request.model,
+                current_state=ConversationState.APPROVED
             )
+            
+            # Trigger the actual agent building process using the orchestrator instance
+            if self.orchestrator:
+                return await self.orchestrator._build_approved_agent(approved_request)
+            else:
+                # Fallback if orchestrator not available
+                collab_logger.error("Orchestrator not available for building agent")
+                return CollaborativeAgentResponse(
+                    success=False,
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.APPROVED,
+                    ami_message="I had trouble building the agent. Please try again.",
+                    error="Orchestrator not available",
+                    next_actions=["Try again", "Start a new conversation"]
+                )
         
         # Handle refinement request
         refinement_prompt = f"""
@@ -357,8 +408,9 @@ class CollaborativeCreator:
 
         1. UNDERSTAND their feedback and concerns
         2. REFINE the complete 7-part agent blueprint based on their input
-        3. EXPLAIN the changes you're making
-        4. ASK if they need any other adjustments
+        3. TRACK DETAILED CHANGES for collaborative review
+        4. EXPLAIN the changes you're making with specific field-level tracking
+        5. ASK if they need any other adjustments
 
         Original Agent Blueprint:
         - Name: {skeleton.agent_name}
@@ -372,10 +424,35 @@ class CollaborativeCreator:
 
         Human Feedback: "{request.user_input}"
 
-        Respond with this EXACT JSON format:
+        Respond with this EXACT JSON format with DETAILED change tracking:
         {{
             "feedback_understanding": "What I understand from your feedback...",
-            "changes_made": ["Change 1", "Change 2", "Change 3"],
+            "tracked_changes": {{
+                "summary": {{
+                    "total_changes": 2,
+                    "modified_sections": ["integrations", "knowledge_sources"]
+                }},
+                "changes": [
+                    {{
+                        "change_id": "change_1",
+                        "type": "addition|modification|deletion",
+                        "section": "integrations|knowledge_sources|what_i_do|meet_me|test_scenarios|workflow_steps|monitoring",
+                        "field_path": "specific.field.path (e.g., integrations[0].action)",
+                        "change_description": "Human-readable description of what changed",
+                        "before": "previous value or null if addition",
+                        "after": "new value or null if deletion",
+                        "reasoning": "Why this change was made based on user feedback"
+                    }}
+                ]
+            }},
+            "blueprint_diff": {{
+                "previous_version": {{
+                    "note": "Include ONLY the sections that changed, with their original values"
+                }},
+                "updated_version": {{
+                    "note": "Include ONLY the sections that changed, with their new values"
+                }}
+            }},
             "updated_blueprint": {{
                 "agent_name": "Updated Agent Name",
                 "agent_purpose": "Updated purpose statement",
@@ -432,83 +509,113 @@ class CollaborativeCreator:
                 "success_criteria": ["Success measure 1", "Success measure 2"],
                 "potential_challenges": ["Challenge 1", "Challenge 2"]
             }},
+            "ui_hints": {{
+                "highlight_sections": ["list of sections that changed"],
+                "changed_fields": ["list of specific field paths that changed"],
+                "animation_sequence": ["order of sections to animate/highlight"]
+            }},
             "ami_message": "I've updated the blueprint based on your feedback... [explanation of changes and questions]"
         }}
 
-        Be responsive to their specific concerns and explain your reasoning. Keep the blueprint human-friendly and avoid technical jargon.
+        IMPORTANT: Be very specific about changes. Compare the original blueprint with your updates and track every single modification in the tracked_changes array. Include the exact before/after values and clear reasoning for each change.
         """
         
         try:
             refinement_response = await self._call_llm(refinement_prompt, request.llm_provider)
             
-            # Parse the refinement response
-            json_match = re.search(r'\{.*\}', refinement_response, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(0))
+            # Parse the refinement response with robust JSON extraction
+            data = self._extract_and_parse_json(refinement_response, "skeleton_refinement")
+            if not data:
+                raise ValueError("Failed to extract valid JSON from LLM response")
+            
+            collab_logger.info(f"Successfully extracted JSON with keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
                 
-                # Update blueprint with refined data
-                updated_blueprint_data = data.get("updated_blueprint", {})
-                refined_skeleton = AgentSkeleton(
-                    conversation_id=request.conversation_id,
-                    agent_name=updated_blueprint_data.get("agent_name", skeleton.agent_name),
-                    agent_purpose=updated_blueprint_data.get("agent_purpose", skeleton.agent_purpose),
-                    target_users=updated_blueprint_data.get("target_users", skeleton.target_users),
-                    agent_type=updated_blueprint_data.get("agent_type", skeleton.agent_type),
-                    language=updated_blueprint_data.get("language", skeleton.language),
-                    meet_me=updated_blueprint_data.get("meet_me", skeleton.meet_me),
-                    what_i_do=updated_blueprint_data.get("what_i_do", skeleton.what_i_do),
-                    knowledge_sources=updated_blueprint_data.get("knowledge_sources", skeleton.knowledge_sources),
-                    integrations=updated_blueprint_data.get("integrations", skeleton.integrations),
-                    monitoring=updated_blueprint_data.get("monitoring", skeleton.monitoring),
-                    test_scenarios=updated_blueprint_data.get("test_scenarios", skeleton.test_scenarios),
-                    workflow_steps=updated_blueprint_data.get("workflow_steps", skeleton.workflow_steps),
-                    visual_flow=updated_blueprint_data.get("visual_flow", skeleton.visual_flow),
-                    success_criteria=updated_blueprint_data.get("success_criteria", skeleton.success_criteria),
-                    potential_challenges=updated_blueprint_data.get("potential_challenges", skeleton.potential_challenges),
-                    created_at=datetime.now()
-                )
+            # Update blueprint with refined data
+            updated_blueprint_data = data.get("updated_blueprint", {})
+            collab_logger.info(f"Creating refined skeleton with data keys: {list(updated_blueprint_data.keys())}")
+            
+            refined_skeleton = AgentSkeleton(
+                conversation_id=request.conversation_id,
+                agent_name=updated_blueprint_data.get("agent_name", skeleton.agent_name),
+                agent_purpose=updated_blueprint_data.get("agent_purpose", skeleton.agent_purpose),
+                target_users=updated_blueprint_data.get("target_users", skeleton.target_users),
+                agent_type=updated_blueprint_data.get("agent_type", skeleton.agent_type),
+                language=updated_blueprint_data.get("language", skeleton.language),
+                meet_me=updated_blueprint_data.get("meet_me", skeleton.meet_me),
+                what_i_do=updated_blueprint_data.get("what_i_do", skeleton.what_i_do),
+                knowledge_sources=updated_blueprint_data.get("knowledge_sources", skeleton.knowledge_sources),
+                integrations=updated_blueprint_data.get("integrations", skeleton.integrations),
+                monitoring=updated_blueprint_data.get("monitoring", skeleton.monitoring),
+                test_scenarios=updated_blueprint_data.get("test_scenarios", skeleton.test_scenarios),
+                workflow_steps=updated_blueprint_data.get("workflow_steps", skeleton.workflow_steps),
+                visual_flow=updated_blueprint_data.get("visual_flow", skeleton.visual_flow),
+                success_criteria=updated_blueprint_data.get("success_criteria", skeleton.success_criteria),
+                potential_challenges=updated_blueprint_data.get("potential_challenges", skeleton.potential_challenges),
+                created_at=datetime.now()
+            )
                 
-                # Update conversation state
-                conversation["skeleton"] = refined_skeleton
-                self.conversations[request.conversation_id] = conversation
+            # Update conversation state
+            conversation["skeleton"] = refined_skeleton
+            self.conversations[request.conversation_id] = conversation
+            
+            collab_logger.info(f"Refined skeleton for {refined_skeleton.agent_name}")
                 
-                collab_logger.info(f"Refined skeleton for {refined_skeleton.agent_name}")
-                
-                return CollaborativeAgentResponse(
-                    success=True,
-                    conversation_id=request.conversation_id,
-                    current_state=ConversationState.SKELETON_REVIEW,
-                    ami_message=data.get("ami_message", "I've updated the plan based on your feedback. How does this look now?"),
-                    data={
-                        "feedback_understanding": data.get("feedback_understanding", ""),
-                        "changes_made": data.get("changes_made", []),
-                        "updated_blueprint": {
-                            "agent_name": refined_skeleton.agent_name,
-                            "agent_purpose": refined_skeleton.agent_purpose,
-                            "target_users": refined_skeleton.target_users,
-                            "agent_type": refined_skeleton.agent_type,
-                            "language": refined_skeleton.language,
-                            "meet_me": refined_skeleton.meet_me,
-                            "what_i_do": refined_skeleton.what_i_do,
-                            "knowledge_sources": refined_skeleton.knowledge_sources,
-                            "integrations": refined_skeleton.integrations,
-                            "monitoring": refined_skeleton.monitoring,
-                            "test_scenarios": refined_skeleton.test_scenarios,
-                            "workflow_steps": refined_skeleton.workflow_steps,
-                            "visual_flow": refined_skeleton.visual_flow,
-                            "success_criteria": refined_skeleton.success_criteria,
-                            "potential_challenges": refined_skeleton.potential_challenges
-                        }
-                    },
-                    next_actions=[
-                        "Approve this updated plan",
-                        "Request further changes",
-                        "Ask questions about the updates"
-                    ]
-                )
+            return CollaborativeAgentResponse(
+                success=True,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.SKELETON_REVIEW,
+                ami_message=data.get("ami_message", "I've updated the plan based on your feedback. How does this look now?"),
+                data={
+                    "feedback_understanding": data.get("feedback_understanding", ""),
+                    # ✅ Enhanced change tracking
+                    "tracked_changes": data.get("tracked_changes", {
+                        "summary": {"total_changes": 0, "modified_sections": []},
+                        "changes": []
+                    }),
+                    "blueprint_diff": data.get("blueprint_diff", {
+                        "previous_version": {},
+                        "updated_version": {}
+                    }),
+                    "ui_hints": data.get("ui_hints", {
+                        "highlight_sections": [],
+                        "changed_fields": [],
+                        "animation_sequence": []
+                    }),
+                    # ✅ Legacy support (backwards compatible)
+                    "changes_made": data.get("changes_made", []),
+                    "updated_blueprint": {
+                        "agent_name": refined_skeleton.agent_name,
+                        "agent_purpose": refined_skeleton.agent_purpose,
+                        "target_users": refined_skeleton.target_users,
+                        "agent_type": refined_skeleton.agent_type,
+                        "language": refined_skeleton.language,
+                        "meet_me": refined_skeleton.meet_me,
+                        "what_i_do": refined_skeleton.what_i_do,
+                        "knowledge_sources": refined_skeleton.knowledge_sources,
+                        "integrations": refined_skeleton.integrations,
+                        "monitoring": refined_skeleton.monitoring,
+                        "test_scenarios": refined_skeleton.test_scenarios,
+                        "workflow_steps": refined_skeleton.workflow_steps,
+                        "visual_flow": refined_skeleton.visual_flow,
+                        "success_criteria": refined_skeleton.success_criteria,
+                        "potential_challenges": refined_skeleton.potential_challenges
+                    }
+                },
+                next_actions=[
+                    "Approve all changes",
+                    "Approve individual changes",
+                    "Request further changes",
+                    "Revert specific changes",
+                    "Ask questions about the updates"
+                ]
+            )
                 
         except Exception as e:
             collab_logger.error(f"Skeleton refinement failed: {e}")
+            collab_logger.error(f"Error type: {type(e).__name__}")
+            collab_logger.error(f"Raw LLM response: {refinement_response[:500] if 'refinement_response' in locals() else 'No response received'}")
+            import traceback
+            collab_logger.error(f"Full traceback: {traceback.format_exc()}")
         
         # Fallback for refinement issues
         return CollaborativeAgentResponse(
@@ -540,7 +647,7 @@ class CollaborativeCreator:
                 response = await self.anthropic_executor.call_anthropic_direct(
                     model="claude-3-5-sonnet-20241022",
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1500,
+                    max_tokens=3000,
                     temperature=0.7
                 )
                 return response.content[0].text
@@ -549,7 +656,7 @@ class CollaborativeCreator:
                 response = await self.openai_executor.call_openai_direct(
                     model="gpt-4",
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1500,
+                    max_tokens=3000,
                     temperature=0.7
                 )
                 return response.choices[0].message.content
@@ -560,3 +667,100 @@ class CollaborativeCreator:
         except Exception as e:
             collab_logger.error(f"LLM call failed: {e}")
             raise Exception(f"LLM call failed: {str(e)}")
+    
+    def _extract_and_parse_json(self, response: str, context: str = "unknown") -> Optional[Dict[str, Any]]:
+        """
+        Robust JSON extraction and parsing from LLM responses
+        """
+        import re
+        import json
+        
+        collab_logger.info(f"[{context}] Starting JSON extraction from response length: {len(response)}")
+        collab_logger.info(f"[{context}] Response preview: {response[:200]}...")
+        
+        try:
+            # Method 1: Try to find JSON block with ```json markers
+            json_block_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+            if json_block_match:
+                json_text = json_block_match.group(1)
+                collab_logger.info(f"[{context}] Found JSON block, attempting to parse...")
+                collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
+                return json.loads(json_text)
+            
+            # Method 2: Find JSON object by balancing braces
+            json_text = self._extract_balanced_json(response)
+            if json_text:
+                collab_logger.info(f"[{context}] Found balanced JSON, attempting to parse...")
+                collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
+                return json.loads(json_text)
+            
+            # Method 3: Try regex extraction (fallback)
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                json_text = json_match.group(0)
+                # Clean up common JSON issues
+                json_text = self._clean_json_text(json_text)
+                collab_logger.info(f"[{context}] Found regex JSON, attempting to parse...")
+                collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
+                return json.loads(json_text)
+            
+            collab_logger.error(f"[{context}] No JSON found in response")
+            return None
+            
+        except json.JSONDecodeError as e:
+            collab_logger.error(f"[{context}] JSON decode error: {e}")
+            collab_logger.error(f"[{context}] Problematic JSON: {json_text[:200] if 'json_text' in locals() else 'N/A'}...")
+            return None
+        except Exception as e:
+            collab_logger.error(f"[{context}] JSON extraction error: {e}")
+            return None
+    
+    def _extract_balanced_json(self, text: str) -> Optional[str]:
+        """Extract JSON by balancing braces"""
+        try:
+            start_idx = text.find('{')
+            if start_idx == -1:
+                return None
+            
+            brace_count = 0
+            in_string = False
+            escape_next = False
+            
+            for i, char in enumerate(text[start_idx:], start_idx):
+                if escape_next:
+                    escape_next = False
+                    continue
+                    
+                if char == '\\':
+                    escape_next = True
+                    continue
+                    
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                    
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            return text[start_idx:i+1]
+            
+            return None
+        except Exception:
+            return None
+    
+    def _clean_json_text(self, json_text: str) -> str:
+        """Clean common JSON formatting issues"""
+        try:
+            # Remove trailing commas before closing braces/brackets
+            json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
+            
+            # Fix unescaped quotes in strings (basic attempt)
+            # This is a simplified approach - more complex cases might need additional handling
+            json_text = re.sub(r'(?<!\\)"(?![,}\]:])(?![^"]*"[,}\]:])', r'\\"', json_text)
+            
+            return json_text
+        except Exception:
+            return json_text

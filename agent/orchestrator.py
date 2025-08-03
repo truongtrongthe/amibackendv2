@@ -163,18 +163,38 @@ class AgentOrchestrator:
                 return cached_config
         
         try:
-            from orgdb import get_agent, get_agents
+            from orgdb import get_agent, get_agents, get_agent_with_current_blueprint, get_current_blueprint
             
             # Try to get agent by ID first
-            agent = get_agent(agent_id)
+            agent_logger.info(f"Attempting to load agent config for: {agent_id} in org: {org_id}")
+            result = get_agent_with_current_blueprint(agent_id)
             
             # If not found by ID, try to find by name within the organization
-            if not agent:
+            if not result:
+                agent_logger.info(f"Agent {agent_id} not found with blueprint, checking basic agent existence...")
+                # Check if agent exists but has no blueprint
+                basic_agent = get_agent(agent_id)
+                if basic_agent:
+                    if basic_agent.org_id != org_id:
+                        raise ValueError(f"Agent '{agent_id}' exists but belongs to different organization")
+                    blueprint = get_current_blueprint(agent_id)
+                    if not blueprint:
+                        raise ValueError(f"Agent '{agent_id}' exists but has no active blueprint configured")
+                
+                # Try name-based lookup within organization
                 agents = get_agents(org_id, status="active")
                 agent = next((a for a in agents if a.name.lower() == agent_id.lower()), None)
+                if agent:
+                    result = get_agent_with_current_blueprint(agent.id)
+                    if not result:
+                        blueprint = get_current_blueprint(agent.id)
+                        if not blueprint:
+                            raise ValueError(f"Agent '{agent.name}' (found by name) exists but has no active blueprint configured")
             
-            if not agent:
+            if not result:
                 raise ValueError(f"Agent '{agent_id}' not found in organization {org_id}")
+            
+            agent, blueprint = result
             
             if agent.org_id != org_id:
                 raise ValueError(f"Agent '{agent_id}' not accessible for organization {org_id}")
@@ -182,15 +202,18 @@ class AgentOrchestrator:
             if agent.status != "active":
                 raise ValueError(f"Agent '{agent_id}' is not active (status: {agent.status})")
             
+            # Extract configuration from blueprint
+            blueprint_data = blueprint.agent_blueprint if blueprint else {}
+            
             # Build configuration dictionary
             config = {
                 "id": agent.id,
                 "agent_id": agent.agent_id,
                 "name": agent.name,
                 "description": agent.description,
-                "system_prompt": agent.system_prompt,
-                "tools_list": agent.tools_list,
-                "knowledge_list": agent.knowledge_list,
+                "system_prompt": blueprint_data.get("system_prompt", {}),
+                "tools_list": blueprint_data.get("tools_list", []),
+                "knowledge_list": blueprint_data.get("knowledge_list", []),
                 "created_by": agent.created_by,
                 "created_date": agent.created_date,
                 "updated_date": agent.updated_date

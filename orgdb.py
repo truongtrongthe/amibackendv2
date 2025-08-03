@@ -1657,9 +1657,9 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
         
         # Parse the structured response
         import re
+        import json
         json_match = re.search(r'\{.*\}', response, re.DOTALL)
         if json_match:
-            import json
             data = json.loads(json_match.group(0))
             
             # Log Ami's reasoning

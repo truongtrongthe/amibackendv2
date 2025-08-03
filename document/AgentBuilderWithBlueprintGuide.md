@@ -477,6 +477,227 @@ while (!approved) {
 }
 ```
 
+#### **🆕 Enhanced Refinement Response Structure**
+
+**⚠️ BREAKING CHANGE:** The refinement response now includes detailed change tracking for collaborative editing.
+
+**New Response Structure:**
+```json
+{
+  "success": true,
+  "conversation_id": "conv_1754137983271_wsqrv8o8s",
+  "current_state": "skeleton_review",
+  "ami_message": "I've updated the blueprint to specifically reference the /Daily Sales Report folder in Google Drive. This makes the agent more precise in knowing exactly where to look for sales reports. Would you like me to make any other adjustments to the folder path or add any specific file naming conventions?",
+  
+  "data": {
+    "feedback_understanding": "I understand that you want to specify the exact Google Drive folder path (/Daily Sales Report) where the sales reports are located. This helps make the agent more precise in knowing where to look for data.",
+    
+    // ✅ NEW: Detailed change tracking
+    "tracked_changes": {
+      "summary": {
+        "total_changes": 2,
+        "modified_sections": ["integrations", "knowledge_sources"]
+      },
+      "changes": [
+        {
+          "change_id": "change_1",
+          "type": "modification",
+          "section": "integrations",
+          "field_path": "integrations[0].action",
+          "change_description": "Added specific Google Drive folder path",
+          "before": "I fetch sales reports from Google Drive",
+          "after": "I fetch sales reports from /Daily Sales Report folder in Google Drive",
+          "reasoning": "User specified exact folder location for precision"
+        },
+        {
+          "change_id": "change_2",
+          "type": "modification", 
+          "section": "knowledge_sources",
+          "field_path": "knowledge_sources[0].content_examples",
+          "change_description": "Updated examples to reflect specific folder",
+          "before": ["sales data", "reports"],
+          "after": ["sales data from /Daily Sales Report", "monthly reports", "quarterly summaries"],
+          "reasoning": "More specific examples matching the folder structure"
+        }
+      ]
+    },
+    
+    // ✅ NEW: Side-by-side comparison view
+    "blueprint_diff": {
+      "previous_version": {
+        "integrations": [
+          {
+            "app_name": "Google Drive",
+            "trigger": "When analyzing sales data",
+            "action": "I fetch sales reports from Google Drive"
+          }
+        ]
+      },
+      "updated_version": {
+        "integrations": [
+          {
+            "app_name": "Google Drive",
+            "trigger": "When analyzing sales data", 
+            "action": "I fetch sales reports from /Daily Sales Report folder in Google Drive"
+          }
+        ]
+      }
+    },
+    
+    // ✅ NEW: UI hints for frontend
+    "ui_hints": {
+      "highlight_sections": ["integrations", "knowledge_sources"],
+      "changed_fields": [
+        "integrations[0].action",
+        "knowledge_sources[0].content_examples"
+      ],
+      "animation_sequence": ["integrations", "knowledge_sources"]
+    },
+    
+    // ✅ LEGACY: Backwards compatibility
+    "changes_made": [
+      "Updated Google Drive integration details with specific folder path"
+    ],
+    
+    // ✅ EXISTING: Complete updated blueprint
+    "updated_blueprint": {
+      "agent_name": "SalesAlly",
+      "agent_purpose": "Sales reporting agent with Google Drive integration",
+      // ... complete blueprint structure
+    }
+  },
+  
+  // ✅ NEW: Enhanced next actions
+  "next_actions": [
+    "Approve all changes",
+    "Approve individual changes",
+    "Request further changes", 
+    "Revert specific changes",
+    "Ask questions about the updates"
+  ],
+  
+  "error": null
+}
+```
+
+#### **Frontend Implementation Guide**
+
+**1. Change Tracking UI Components:**
+```javascript
+// Display change summary
+const ChangesSummary = ({ trackedChanges }) => (
+  <div className="changes-summary">
+    <h4>📝 Changes Made ({trackedChanges.summary.total_changes})</h4>
+    <div className="modified-sections">
+      {trackedChanges.summary.modified_sections.map(section => (
+        <span key={section} className="section-badge">{section}</span>
+      ))}
+    </div>
+  </div>
+);
+
+// Individual change display with before/after
+const ChangeItem = ({ change, onApprove, onRevert }) => (
+  <div className="change-item" data-change-id={change.change_id}>
+    <div className="change-header">
+      <span className="change-type">{change.type}</span>
+      <span className="section-name">{change.section}</span>
+    </div>
+    
+    <p className="change-description">{change.change_description}</p>
+    <p className="reasoning"><em>Why: {change.reasoning}</em></p>
+    
+    <div className="before-after">
+      <div className="before">
+        <strong>Before:</strong>
+        <code>{JSON.stringify(change.before, null, 2)}</code>
+      </div>
+      <div className="after">
+        <strong>After:</strong>
+        <code>{JSON.stringify(change.after, null, 2)}</code>
+      </div>
+    </div>
+    
+    <div className="change-actions">
+      <button onClick={() => onApprove(change.change_id)}>
+        ✅ Approve
+      </button>
+      <button onClick={() => onRevert(change.change_id)}>
+        🔄 Revert
+      </button>
+    </div>
+  </div>
+);
+```
+
+**2. Visual Diff Display:**
+```javascript
+// Highlight changed sections
+const BlueprintDiffView = ({ blueprintDiff, uiHints }) => {
+  useEffect(() => {
+    // Highlight changed sections
+    uiHints.highlight_sections.forEach(section => {
+      const element = document.querySelector(`[data-section="${section}"]`);
+      if (element) {
+        element.classList.add('section-changed');
+      }
+    });
+    
+    // Animate changes in sequence
+    uiHints.animation_sequence.forEach((section, index) => {
+      setTimeout(() => {
+        const element = document.querySelector(`[data-section="${section}"]`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth' });
+          element.classList.add('highlight-animation');
+        }
+      }, index * 500);
+    });
+  }, [uiHints]);
+  
+  return (
+    <div className="blueprint-diff">
+      {/* Render side-by-side comparison */}
+    </div>
+  );
+};
+```
+
+**3. Granular Approval Flow:**
+```javascript
+const handleIndividualApproval = async (changeId) => {
+  const response = await fetch('/ami/collaborate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_input: `Approve change: ${changeId}`,
+      conversation_id: conversationId,
+      current_state: "skeleton_review",
+      // ... other fields
+    })
+  });
+  
+  const result = await response.json();
+  // Update UI with approved changes
+};
+
+const handleRevertChange = async (changeId) => {
+  const response = await fetch('/ami/collaborate', {
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_input: `Revert change: ${changeId}`,
+      conversation_id: conversationId,
+      current_state: "skeleton_review",
+      // ... other fields
+    })
+  });
+  
+  const result = await response.json();
+  // Update UI with reverted changes
+};
+```
+
 #### **Save Approved Blueprint (Step 3)**
 
 **When user approves, the system automatically:**
@@ -540,7 +761,58 @@ const approvalResponse = {
 
 ### **Step 4-5: Todo Management & Input Collection**
 
-#### **Display Todos to User**
+> **🤝 CRITICAL: Frontend-Backend Collaboration Required**
+> 
+> Step 5 is primarily a **frontend responsibility** with backend API support. The frontend must guide users through completing implementation todos before the agent can be compiled and activated.
+
+#### **📋 Frontend-Backend Collaboration Flow**
+
+**Backend Responsibility (Step 4):**
+- ✅ Generate intelligent todos based on agent blueprint
+- ✅ Provide validation endpoints
+- ✅ Store collected inputs securely
+- ✅ Track completion status
+
+**Frontend Responsibility (Step 5):**
+- 🎨 **Display todos in intuitive UI**
+- 🔧 **Create input forms for each todo type**
+- ✅ **Validate inputs before submission**
+- 📊 **Show progress tracking (0% → 100%)**
+- 🎯 **Guide user to completion**
+
+#### **🔄 Complete Step 5 Flow Summary**
+
+```mermaid
+graph TD
+    A[User Arrives at Step 5] --> B[Frontend: Load Todos via API]
+    B --> C[Display Todo Cards with Progress Bar]
+    C --> D[User Fills Input Forms]
+    D --> E[Frontend: Real-time Validation]
+    E --> F{Valid Inputs?}
+    F -->|No| G[Show Validation Errors]
+    G --> D
+    F -->|Yes| H[Submit Todo Inputs to Backend]
+    H --> I[Backend: Store Inputs & Update Status]
+    I --> J[Frontend: Update UI Progress]
+    J --> K{All Todos Complete?}
+    K -->|No| L[Show Next Todo]
+    L --> D
+    K -->|Yes| M[Show Completion Celebration]
+    M --> N[Navigate to Compilation Step]
+```
+
+**Key Frontend Integration Points:**
+1. **Load Phase**: Fetch todos and display progress
+2. **Input Phase**: Dynamic forms with real-time validation  
+3. **Submit Phase**: Validate → Submit → Update UI
+4. **Progress Phase**: Track completion percentage
+5. **Completion Phase**: Celebrate and advance to Step 6-7
+
+---
+
+#### **1. Display Todos to User (Frontend Implementation)**
+
+**Backend API Call:**
 
 **Get todos for a blueprint:**
 
@@ -591,7 +863,103 @@ const todosResponse = {
 };
 ```
 
-#### **Validate User Inputs (Optional but Recommended)**
+**Frontend UI Implementation Guide:**
+
+```javascript
+// Todo List Component Example
+const TodoListComponent = ({ agentId, blueprintId }) => {
+  const [todos, setTodos] = useState([]);
+  const [progress, setProgress] = useState(0);
+  
+  useEffect(() => {
+    loadTodos();
+  }, [agentId, blueprintId]);
+  
+  const loadTodos = async () => {
+    const todosData = await getTodos(agentId, blueprintId);
+    setTodos(todosData.todos);
+    setProgress(todosData.statistics.completion_percentage);
+  };
+  
+  return (
+    <div className="agent-todos">
+      <div className="progress-header">
+        <h2>Complete Setup Requirements</h2>
+        <div className="progress-bar">
+          <div className="progress-fill" style={{width: `${progress}%`}}></div>
+        </div>
+        <span>{progress}% Complete</span>
+      </div>
+      
+      {todos.map(todo => (
+        <TodoCard 
+          key={todo.id}
+          todo={todo}
+          onComplete={handleTodoComplete}
+        />
+      ))}
+    </div>
+  );
+};
+
+// Individual Todo Card with Input Forms
+const TodoCard = ({ todo, onComplete }) => {
+  const [inputs, setInputs] = useState({});
+  const [validationErrors, setValidationErrors] = useState([]);
+  
+  const handleSubmit = async () => {
+    // 1. Validate inputs first
+    const validation = await validateTodoInputs(
+      agentId, blueprintId, todo.id, inputs
+    );
+    
+    if (!validation.valid) {
+      setValidationErrors(validation.errors);
+      return;
+    }
+    
+    // 2. Submit if valid
+    const result = await submitTodoInputs(
+      agentId, blueprintId, todo.id, inputs
+    );
+    
+    if (result.status === 'completed') {
+      onComplete(todo.id);
+    }
+  };
+  
+  return (
+    <div className={`todo-card ${todo.status}`}>
+      <div className="todo-header">
+        <h3>{todo.title}</h3>
+        <span className={`priority ${todo.priority}`}>{todo.priority}</span>
+      </div>
+      
+      <p>{todo.description}</p>
+      
+      {/* Dynamic input form based on todo.input_required */}
+      {todo.input_required && (
+        <InputFormRenderer 
+          fields={todo.input_required.fields}
+          values={inputs}
+          onChange={setInputs}
+          errors={validationErrors}
+        />
+      )}
+      
+      <button 
+        onClick={handleSubmit}
+        disabled={todo.status === 'completed'}
+        className="submit-todo-btn"
+      >
+        {todo.status === 'completed' ? '✅ Completed' : 'Submit Configuration'}
+      </button>
+    </div>
+  );
+};
+```
+
+#### **2. Validate User Inputs (Critical for UX)**
 
 ```javascript
 const validateTodoInputs = async (agentId, blueprintId, todoId, inputs) => {
@@ -631,7 +999,78 @@ const validation = await validateTodoInputs(
 }
 ```
 
-#### **Submit Todo Inputs**
+**Frontend Input Form Renderer:**
+
+```javascript
+// Dynamic Input Form Component
+const InputFormRenderer = ({ fields, values, onChange, errors }) => {
+  const handleFieldChange = (fieldName, value) => {
+    onChange(prev => ({
+      ...prev,
+      [fieldName]: value
+    }));
+  };
+
+  return (
+    <div className="input-form">
+      {fields.map(field => (
+        <div key={field.name} className="form-field">
+          <label className={field.required ? 'required' : ''}>
+            {field.description}
+          </label>
+          
+          {field.type === 'string' && (
+            <input
+              type="text"
+              value={values[field.name] || ''}
+              onChange={(e) => handleFieldChange(field.name, e.target.value)}
+              placeholder={`Enter ${field.name}`}
+              className={errors.find(e => e.field === field.name) ? 'error' : ''}
+            />
+          )}
+          
+          {field.type === 'password' && (
+            <input
+              type="password"
+              value={values[field.name] || ''}
+              onChange={(e) => handleFieldChange(field.name, e.target.value)}
+              placeholder={`Enter ${field.name}`}
+              className={errors.find(e => e.field === field.name) ? 'error' : ''}
+            />
+          )}
+          
+          {field.type === 'select' && (
+            <select
+              value={values[field.name] || ''}
+              onChange={(e) => handleFieldChange(field.name, e.target.value)}
+              className={errors.find(e => e.field === field.name) ? 'error' : ''}
+            >
+              <option value="">Select {field.name}</option>
+              {field.options?.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
+          
+          {/* Display field-specific errors */}
+          {errors
+            .filter(error => error.field === field.name)
+            .map((error, index) => (
+              <span key={index} className="field-error">
+                {error.message}
+              </span>
+            ))
+          }
+        </div>
+      ))}
+    </div>
+  );
+};
+```
+
+#### **3. Submit Todo Inputs**
 
 ```javascript
 const submitTodoInputs = async (agentId, blueprintId, todoId, inputs) => {
@@ -675,7 +1114,66 @@ const result = await submitTodoInputs(
 }
 ```
 
-#### **Track Progress**
+**Frontend Completion Handling:**
+
+```javascript
+// Complete Todo Flow with Success Feedback
+const handleTodoComplete = async (agentId, blueprintId, todoId, inputs) => {
+  try {
+    // 1. Show loading state
+    setSubmitting(true);
+    
+    // 2. Submit inputs
+    const result = await submitTodoInputs(agentId, blueprintId, todoId, inputs);
+    
+    // 3. Handle success
+    if (result.status === 'completed') {
+      // Update UI immediately
+      setTodos(prev => prev.map(todo => 
+        todo.id === todoId 
+          ? { ...todo, status: 'completed' }
+          : todo
+      ));
+      
+      // Show success message
+      showToast(`✅ ${result.message}`, 'success');
+      
+      // 4. Check if all todos completed
+      if (result.all_todos_completed) {
+        // Show completion celebration
+        showCompletionModal({
+          title: "🎉 All Setup Complete!",
+          message: "Your agent is ready for compilation. Proceed to make your agent production-ready!",
+          actions: [
+            {
+              label: "Compile Agent",
+              onClick: () => navigateToCompilation(agentId, blueprintId),
+              primary: true
+            },
+            {
+              label: "Review Setup",
+              onClick: () => scrollToTop()
+            }
+          ]
+        });
+      }
+    }
+    
+  } catch (error) {
+    showToast(`❌ Failed to complete todo: ${error.message}`, 'error');
+  } finally {
+    setSubmitting(false);
+  }
+};
+
+// Navigation to Compilation Step
+const navigateToCompilation = (agentId, blueprintId) => {
+  // Update URL or navigate to compilation page
+  router.push(`/agent-builder/compile?agentId=${agentId}&blueprintId=${blueprintId}`);
+};
+```
+
+#### **4. Track Progress & Completion Status**
 
 ```javascript
 const getProgress = async (agentId, blueprintId) => {
@@ -689,6 +1187,53 @@ const getProgress = async (agentId, blueprintId) => {
   };
 };
 ```
+
+#### **📋 Frontend Implementation Checklist**
+
+**Required UI Components:**
+- [ ] **TodoListComponent** - Main container showing all todos
+- [ ] **ProgressBar** - Visual progress indicator (0% → 100%)
+- [ ] **TodoCard** - Individual todo with input forms
+- [ ] **InputFormRenderer** - Dynamic form based on field types
+- [ ] **ValidationErrors** - Display field-specific errors
+- [ ] **CompletionModal** - Celebration when all todos complete
+- [ ] **LoadingStates** - During submission and validation
+
+**Required API Integration:**
+- [ ] `GET /org-agents/{id}/blueprints/{id}/todos` - Fetch todos
+- [ ] `POST /org-agents/{id}/blueprints/{id}/todos/{id}/validate-inputs` - Validate
+- [ ] `POST /org-agents/{id}/blueprints/{id}/todos/{id}/collect-inputs` - Submit
+- [ ] Error handling for network failures
+- [ ] Loading states for async operations
+
+**Required User Experience:**
+- [ ] **Progressive Disclosure** - Show todos in priority order
+- [ ] **Real-time Validation** - Validate as user types
+- [ ] **Clear Success Feedback** - Toast notifications for completions
+- [ ] **Progress Persistence** - Save progress on page refresh
+- [ ] **Guided Navigation** - Auto-advance to compilation when done
+- [ ] **Responsive Design** - Works on mobile and desktop
+
+**Error Handling Requirements:**
+- [ ] Network failure recovery
+- [ ] Validation error display
+- [ ] Form submission failures
+- [ ] Authentication token expiry
+- [ ] Graceful fallbacks for API errors
+
+**Next Step Integration:**
+- [ ] **Automatic Advancement** - Navigate to Step 6-7 (Compilation) when complete
+- [ ] **Status Persistence** - Remember completion state across sessions
+- [ ] **Deep Linking** - Support direct links to specific todos
+
+---
+
+> **🎯 Success Criteria for Step 5:**
+> 
+> ✅ User completes all todos with valid inputs  
+> ✅ Progress shows 100% completion  
+> ✅ Backend confirms `all_todos_completed: true`  
+> ✅ User guided to Step 6-7 (Compilation)  
 
 ---
 

@@ -53,7 +53,7 @@ class AmiOrchestrator:
         # Initialize modular components
         self.knowledge_manager = AmiKnowledgeManager()
         self.collaborative_creator = CollaborativeCreator(
-            self.anthropic_executor, self.openai_executor, self.knowledge_manager
+            self.anthropic_executor, self.openai_executor, self.knowledge_manager, self
         )
         self.direct_creator = DirectCreator(
             self.anthropic_executor, self.openai_executor

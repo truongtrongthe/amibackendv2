@@ -102,9 +102,18 @@ class AgentBlueprintResponse(BaseModel):
     todos_completed_at: Optional[datetime] = None
     todos_completed_by: Optional[str] = None
 
+class AgentBuildState(BaseModel):
+    current_step: int  # 1-8
+    step_name: str
+    step_description: str
+    is_completed: bool
+    next_actions: List[str]
+    completion_percentage: float
+
 class AgentWithBlueprintResponse(BaseModel):
     agent: AgentResponse
     blueprint: Optional[AgentBlueprintResponse] = None
+    build_state: Optional[AgentBuildState] = None
 
 # Request/Response Models for Compilation
 class CompilationStatusResponse(BaseModel):
@@ -376,7 +385,14 @@ async def get_agent_endpoint(agent_id: str, current_user: dict = Depends(get_cur
         if blueprint:
             blueprint_response = blueprint_to_response(blueprint)
         
-        return AgentWithBlueprintResponse(agent=agent_response, blueprint=blueprint_response)
+        # Calculate current build state
+        build_state = determine_agent_build_state(agent, blueprint)
+        
+        return AgentWithBlueprintResponse(
+            agent=agent_response, 
+            blueprint=blueprint_response,
+            build_state=build_state
+        )
     
     except HTTPException:
         raise
@@ -1088,3 +1104,95 @@ async def get_collected_inputs_endpoint(
     except Exception as e:
         logger.error(f"Error getting collected inputs: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get collected inputs")
+
+def determine_agent_build_state(agent, blueprint) -> AgentBuildState:
+    """
+    Determine the current build state of an agent based on its status and blueprint
+    
+    Returns build state information including current step, completion status, and next actions
+    """
+    if not blueprint:
+        # Agent exists but no blueprint - shouldn't happen in normal flow
+        return AgentBuildState(
+            current_step=1,
+            step_name="Blueprint Creation", 
+            step_description="Agent blueprint needs to be created",
+            is_completed=False,
+            next_actions=["Create agent blueprint"],
+            completion_percentage=0.0
+        )
+    
+    # Import here to avoid circular imports
+    from orgdb import get_blueprint_todos
+    
+    # Step 4: Agent created with blueprint
+    if blueprint.todos_completion_status == "not_generated":
+        return AgentBuildState(
+            current_step=4,
+            step_name="Agent Created",
+            step_description="Agent and blueprint created, todos not yet generated",
+            is_completed=True,
+            next_actions=["Generate implementation todos"],
+            completion_percentage=50.0
+        )
+    
+    # Step 5: Todo completion phase
+    if blueprint.todos_completion_status in ["generated", "in_progress"]:
+        # Get todo statistics
+        todos_info = get_blueprint_todos(blueprint.id)
+        completion_pct = 50.0  # Base for having todos generated
+        
+        if todos_info:
+            stats = todos_info["statistics"]
+            todo_progress = stats["completion_percentage"]
+            completion_pct = 50.0 + (todo_progress * 0.25)  # 50-75% range for todos
+        
+        return AgentBuildState(
+            current_step=5,
+            step_name="Implementation Setup",
+            step_description="Complete setup requirements and configurations",
+            is_completed=False,
+            next_actions=["Complete remaining todos", "Configure integrations", "Provide required credentials"],
+            completion_percentage=completion_pct
+        )
+    
+    # Step 6-7: Compilation phase
+    if blueprint.todos_completion_status == "completed":
+        if blueprint.compilation_status == "ready_for_compilation":
+            return AgentBuildState(
+                current_step=6,
+                step_name="Ready for Compilation",
+                step_description="All setup complete, ready to compile agent",
+                is_completed=False,
+                next_actions=["Compile blueprint to create production-ready agent"],
+                completion_percentage=75.0
+            )
+        elif blueprint.compilation_status == "compiled":
+            # Step 8: Production ready
+            return AgentBuildState(
+                current_step=8,
+                step_name="Production Ready",
+                step_description="Agent is fully configured and ready for use",
+                is_completed=True,
+                next_actions=["Use agent", "Monitor performance", "Create another agent"],
+                completion_percentage=100.0
+            )
+        elif blueprint.compilation_status == "failed":
+            return AgentBuildState(
+                current_step=7,
+                step_name="Compilation Failed", 
+                step_description="Blueprint compilation encountered errors",
+                is_completed=False,
+                next_actions=["Review compilation errors", "Fix configuration issues", "Retry compilation"],
+                completion_percentage=80.0
+            )
+    
+    # Default fallback
+    return AgentBuildState(
+        current_step=4,
+        step_name="Agent Created",
+        step_description="Agent created, determining next steps",
+        is_completed=True,
+        next_actions=["Review agent status"],
+        completion_percentage=50.0
+    )
