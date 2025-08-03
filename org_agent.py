@@ -115,6 +115,19 @@ class AgentWithBlueprintResponse(BaseModel):
     blueprint: Optional[AgentBlueprintResponse] = None
     build_state: Optional[AgentBuildState] = None
 
+class CreateDraftAgentRequest(BaseModel):
+    name: str = Field(..., description="Agent name", min_length=3, max_length=100)
+    initial_idea: str = Field(..., description="Initial agent idea or purpose", min_length=10, max_length=500)
+    language: str = Field("english", description="Primary language for the agent")
+    agent_type: str = Field("support", description="Type of agent (support, sales, etc.)")
+
+class CreateDraftAgentResponse(BaseModel):
+    success: bool
+    agent_id: str
+    blueprint_id: str
+    message: str
+    next_actions: List[str]
+
 # Request/Response Models for Compilation
 class CompilationStatusResponse(BaseModel):
     status: str
@@ -213,6 +226,89 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # Agent Management Endpoints
+
+@router.post("/create-draft", response_model=CreateDraftAgentResponse)
+async def create_draft_agent_endpoint(
+    request: CreateDraftAgentRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a draft agent with initial blueprint for AMI collaboration"""
+    try:
+        # Get user's organization
+        from organization import get_my_organization
+        org_response = await get_my_organization(current_user)
+        
+        # Create initial blueprint structure based on user's idea
+        initial_blueprint = {
+            "agent_name": request.name,
+            "agent_purpose": request.initial_idea,
+            "target_users": "To be defined during collaboration",
+            "agent_type": request.agent_type,
+            "language": request.language,
+            "meet_me": {
+                "introduction": f"I'm {request.name}, ready to be configured!",
+                "value_proposition": "I'll be customized based on your needs."
+            },
+            "what_i_do": {
+                "primary_tasks": [
+                    {
+                        "task": "Initial Task",
+                        "description": "To be defined during collaboration with AMI"
+                    }
+                ],
+                "personality": {
+                    "tone": "professional",
+                    "style": "helpful",
+                    "analogy": "like a helpful assistant"
+                },
+                "sample_conversation": {
+                    "user_question": "To be defined",
+                    "agent_response": "To be defined"
+                }
+            },
+            "knowledge_sources": [],
+            "integrations": [],
+            "monitoring": {
+                "reporting_method": "To be defined",
+                "metrics_tracked": [],
+                "fallback_response": "I need more information to help you properly.",
+                "escalation_method": "To be defined"
+            },
+            "test_scenarios": [],
+            "workflow_steps": ["To be defined during collaboration"],
+            "visual_flow": "To be defined",
+            "success_criteria": ["To be defined"],
+            "potential_challenges": ["To be defined"]
+        }
+        
+        # Create agent with initial blueprint
+        from orgdb import create_agent_with_blueprint
+        agent, blueprint = create_agent_with_blueprint(
+            org_id=org_response.id,
+            created_by=current_user["id"],
+            name=request.name,
+            blueprint_data=initial_blueprint,
+            description=request.initial_idea,
+            conversation_id=None  # Will be set when AMI collaboration starts
+        )
+        
+        logger.info(f"Created draft agent: {agent.name} (ID: {agent.id}, Blueprint: {blueprint.id})")
+        
+        return CreateDraftAgentResponse(
+            success=True,
+            agent_id=agent.id,
+            blueprint_id=blueprint.id,
+            message=f"Draft agent '{request.name}' created successfully! Ready for AMI collaboration.",
+            next_actions=[
+                "Start collaborating with AMI using this agent_id and blueprint_id",
+                "Refine the agent's purpose and capabilities",
+                "Configure integrations and workflows"
+            ]
+        )
+        
+    except Exception as e:
+        logger.error(f"Error creating draft agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create draft agent: {str(e)}")
 
 @router.post("/", response_model=AgentResponse)
 async def create_agent_endpoint(request: CreateAgentRequest, current_user: dict = Depends(get_current_user)):

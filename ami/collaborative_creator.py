@@ -44,51 +44,56 @@ class CollaborativeCreator:
         self.knowledge_manager = knowledge_manager
         self.orchestrator = orchestrator
         
-        # Conversation state storage (in production, use Redis or database)
-        self.conversations: Dict[str, Dict[str, Any]] = {}
-        
-        collab_logger.info("Collaborative Creator initialized")
+        collab_logger.info("Collaborative Creator initialized - now works with database records")
     
     async def handle_collaborative_request(self, request: CollaborativeAgentRequest) -> CollaborativeAgentResponse:
         """
-        Main collaborative method - acts like a Chief Product Officer
-        Guides the human through agent creation with iterative refinement
+        Main collaborative method - now works directly with database blueprint records
+        Guides the human through agent blueprint refinement with iterative improvement
         """
-        collab_logger.info(f"Collaborative session: {request.current_state.value} - '{request.user_input[:100]}...'")
+        collab_logger.info(f"Collaborative session on agent {request.agent_id}: {request.current_state.value} - '{request.user_input[:100]}...'")
         
         try:
+            # Validate that agent and blueprint exist
+            from orgdb import get_agent, get_blueprint
+            agent = get_agent(request.agent_id)
+            blueprint = get_blueprint(request.blueprint_id)
+            
+            if not agent:
+                return CollaborativeAgentResponse(
+                    success=False,
+                    conversation_id=request.conversation_id or "unknown",
+                    current_state=request.current_state,
+                    ami_message="I can't find the agent you're referring to. Please check the agent ID.",
+                    error="Agent not found"
+                )
+            
+            if not blueprint:
+                return CollaborativeAgentResponse(
+                    success=False,
+                    conversation_id=request.conversation_id or "unknown", 
+                    current_state=request.current_state,
+                    ami_message="I can't find the blueprint for this agent. Please check the blueprint ID.",
+                    error="Blueprint not found"
+                )
+            
+            # Ensure the blueprint belongs to the agent
+            if blueprint.agent_id != agent.id:
+                return CollaborativeAgentResponse(
+                    success=False,
+                    conversation_id=request.conversation_id or "unknown",
+                    current_state=request.current_state,
+                    ami_message="The blueprint doesn't belong to this agent. Please check your IDs.",
+                    error="Blueprint-agent mismatch"
+                )
+            
             # Generate conversation ID if new conversation
             if not request.conversation_id:
                 request.conversation_id = str(uuid4())
                 collab_logger.info(f"Started new collaborative session: {request.conversation_id}")
             
-            # Route to appropriate handler based on current state
-            if request.current_state == ConversationState.INITIAL_IDEA:
-                return await self._understand_and_refine_idea(request)
-            
-            elif request.current_state == ConversationState.SKELETON_REVIEW:
-                return await self._handle_skeleton_feedback(request)
-            
-            elif request.current_state == ConversationState.APPROVED:
-                # This will be handled by the orchestrator
-                return CollaborativeAgentResponse(
-                    success=True,
-                    conversation_id=request.conversation_id,
-                    current_state=ConversationState.APPROVED,
-                    ami_message="Ready to build! Please proceed with agent creation.",
-                    data={"ready_for_build": True},
-                    next_actions=["Build the approved agent"]
-                )
-            
-            else:
-                return CollaborativeAgentResponse(
-                    success=False,
-                    conversation_id=request.conversation_id,
-                    current_state=request.current_state,
-                    ami_message="I'm not sure how to handle this state. Let's start over!",
-                    error=f"Unknown state: {request.current_state}",
-                    next_actions=["Start a new conversation"]
-                )
+            # Route to appropriate handler - now always refinement since agent exists
+            return await self._handle_blueprint_refinement(request, agent, blueprint)
                 
         except Exception as e:
             collab_logger.error(f"Collaborative session error: {e}")
@@ -99,6 +104,556 @@ class CollaborativeCreator:
                 ami_message="Something went wrong. Let me help you start fresh!",
                 error=str(e),
                 next_actions=["Try again with a new request"]
+            )
+    
+    async def _handle_blueprint_refinement(self, request: CollaborativeAgentRequest, agent, blueprint) -> CollaborativeAgentResponse:
+        """
+        New unified method for handling blueprint refinement
+        Works directly with database blueprint records - now with rich context awareness
+        """
+        collab_logger.info(f"Refining blueprint {blueprint.id} for agent {agent.name}")
+        
+        # Create rich context for AMI responses
+        context = self._build_rich_context(agent, blueprint)
+        
+        # Get conversation history for this agent/blueprint
+        conversation_history = await self._get_conversation_history(agent.id, blueprint.id)
+        
+        # Check if this is an approval
+        is_approval = self._detect_approval(request.user_input)
+        collab_logger.info(f"Checking approval for input: '{request.user_input}' → is_approval: {is_approval}")
+        
+        if is_approval:
+            # Handle approval - trigger compilation
+            return await self._handle_blueprint_approval(request, agent, blueprint, context, conversation_history)
+        else:
+            # Handle refinement request
+            return await self._refine_blueprint_with_feedback(request, agent, blueprint, context, conversation_history)
+    
+    def _detect_approval(self, user_input: str) -> bool:
+        """Enhanced approval detection with better logic"""
+        user_input_lower = user_input.lower().strip()
+        
+        # Explicit approval keywords (strong signals)
+        strong_approval_keywords = [
+            'approve', 'approved', 'looks good', 'build it', 'proceed', 'perfect', 'go ahead', 'create it',
+            'compile', 'activate', 'ready', 'done', 'finalize', 'complete',
+            'build đi', 'xây dựng đi', 'làm đi', 'tiến hành', 'đồng ý', 'được', 'hoàn hảo',
+            'build nó đi', 'tạo đi', 'thực hiện đi', 'compile đi', 'hoàn thành'
+        ]
+        
+        # Simple affirmatives (only count if message is short and direct)
+        simple_affirmatives = ['yes', 'ok', 'được', 'tốt', 'good']
+        
+        # Check for strong approval keywords
+        has_strong_approval = any(keyword in user_input_lower for keyword in strong_approval_keywords)
+        
+        # Check for simple affirmatives (only if message is short and doesn't contain additional requirements)
+        has_simple_approval = False
+        if any(keyword in user_input_lower for keyword in simple_affirmatives):
+            # Only count as approval if:
+            # 1. Message is short (< 50 characters)
+            # 2. Doesn't contain requirement indicators
+            requirement_indicators = ['cần', 'phải', 'thêm', 'need', 'should', 'add', 'also', 'và', 'then', 'sau khi', 'but', 'however', 'nhưng']
+            message_is_short = len(user_input) < 50
+            has_requirements = any(indicator in user_input_lower for indicator in requirement_indicators)
+            
+            has_simple_approval = message_is_short and not has_requirements
+        
+        return has_strong_approval or has_simple_approval
+    
+    def _build_rich_context(self, agent, blueprint) -> dict:
+        """
+        Build rich context for AMI responses - similar to how Cursor understands source code
+        This makes AMI fully context-aware of the agent and blueprint being worked on
+        """
+        # Get blueprint data
+        blueprint_data = blueprint.agent_blueprint
+        
+        # Extract key information
+        agent_name = blueprint_data.get("agent_name", agent.name)
+        agent_purpose = blueprint_data.get("agent_purpose", agent.description)
+        agent_type = blueprint_data.get("agent_type", "general")
+        language = blueprint_data.get("language", "english")
+        
+        # Get current capabilities
+        primary_tasks = blueprint_data.get("what_i_do", {}).get("primary_tasks", [])
+        personality = blueprint_data.get("what_i_do", {}).get("personality", {})
+        knowledge_sources = blueprint_data.get("knowledge_sources", [])
+        integrations = blueprint_data.get("integrations", [])
+        
+        # Get current challenges and gaps
+        potential_challenges = blueprint_data.get("potential_challenges", [])
+        success_criteria = blueprint_data.get("success_criteria", [])
+        
+        # Build comprehensive context
+        context = {
+            "agent_identity": {
+                "name": agent_name,
+                "purpose": agent_purpose,
+                "type": agent_type,
+                "language": language,
+                "personality": personality
+            },
+            "current_capabilities": {
+                "tasks": primary_tasks,
+                "task_count": len(primary_tasks),
+                "knowledge_sources": knowledge_sources,
+                "knowledge_count": len(knowledge_sources),
+                "integrations": integrations,
+                "integration_count": len(integrations)
+            },
+            "blueprint_status": {
+                "compilation_status": blueprint.compilation_status,
+                "has_system_prompt": bool(blueprint.compiled_system_prompt),
+                "version": blueprint.version,
+                "created_date": blueprint.created_date.strftime("%Y-%m-%d")
+            },
+            "development_context": {
+                "challenges": potential_challenges,
+                "success_criteria": success_criteria,
+                "completeness_score": self._calculate_blueprint_completeness(blueprint_data)
+            },
+            "conversation_hints": {
+                "agent_reference": f"your agent '{agent_name}'",
+                "capability_summary": self._summarize_capabilities(primary_tasks),
+                "next_logical_improvements": self._suggest_improvements(blueprint_data)
+            }
+        }
+        
+        return context
+    
+    def _calculate_blueprint_completeness(self, blueprint_data: dict) -> float:
+        """Calculate how complete the blueprint is (0-100%)"""
+        required_fields = [
+            "agent_name", "agent_purpose", "target_users", "what_i_do", 
+            "knowledge_sources", "integrations", "monitoring", "test_scenarios"
+        ]
+        
+        completed = 0
+        for field in required_fields:
+            if field in blueprint_data and blueprint_data[field]:
+                if isinstance(blueprint_data[field], list) and len(blueprint_data[field]) > 0:
+                    completed += 1
+                elif isinstance(blueprint_data[field], dict) and blueprint_data[field]:
+                    completed += 1
+                elif isinstance(blueprint_data[field], str) and blueprint_data[field].strip():
+                    completed += 1
+        
+        return (completed / len(required_fields)) * 100
+    
+    def _summarize_capabilities(self, tasks: list) -> str:
+        """Create a brief summary of current capabilities"""
+        if not tasks:
+            return "basic capabilities"
+        
+        if len(tasks) == 1:
+            return f"focuses on {tasks[0].get('task', 'general tasks').lower()}"
+        elif len(tasks) <= 3:
+            task_names = [task.get('task', 'task').lower() for task in tasks[:3]]
+            return f"handles {', '.join(task_names[:-1])} and {task_names[-1]}"
+        else:
+            return f"handles {len(tasks)} different capabilities including {tasks[0].get('task', 'various tasks').lower()}"
+    
+    def _suggest_improvements(self, blueprint_data: dict) -> list:
+        """Suggest logical next improvements based on current state"""
+        suggestions = []
+        
+        # Check for missing integrations
+        integrations = blueprint_data.get("integrations", [])
+        if len(integrations) == 0:
+            suggestions.append("add integrations to external tools")
+        
+        # Check for vague knowledge sources
+        knowledge_sources = blueprint_data.get("knowledge_sources", [])
+        if len(knowledge_sources) == 0:
+            suggestions.append("specify knowledge sources and data")
+        
+        # Check for basic personality
+        personality = blueprint_data.get("what_i_do", {}).get("personality", {})
+        if not personality or personality.get("tone") == "professional":
+            suggestions.append("enhance personality and communication style")
+        
+        # Check for test scenarios
+        test_scenarios = blueprint_data.get("test_scenarios", [])
+        if len(test_scenarios) == 0:
+            suggestions.append("add test scenarios for quality assurance")
+        
+        # Check for monitoring
+        monitoring = blueprint_data.get("monitoring", {})
+        if not monitoring or not monitoring.get("metrics_tracked"):
+            suggestions.append("define monitoring and success metrics")
+        
+        return suggestions[:3]  # Return max 3 suggestions
+    
+    async def _get_conversation_history(self, agent_id: str, blueprint_id: str) -> list:
+        """
+        Retrieve conversation history for this agent/blueprint collaboration
+        This maintains conversational context across AMI interactions
+        """
+        try:
+            # Import here to avoid circular imports
+            from orgdb import get_agent_collaboration_history
+            
+            # Get recent conversation history (last 20 messages to keep context manageable)
+            history = get_agent_collaboration_history(agent_id, blueprint_id, limit=20)
+            
+            if not history:
+                return []
+                
+            # Format history for LLM context
+            formatted_history = []
+            for entry in history:
+                formatted_history.append({
+                    "timestamp": entry.get("created_at", ""),
+                    "type": entry.get("message_type", "user"),  # "user" or "ami"
+                    "message": entry.get("message_content", ""),
+                    "context": entry.get("context_data", {})
+                })
+            
+            collab_logger.info(f"Retrieved {len(formatted_history)} conversation history entries for agent {agent_id}")
+            return formatted_history
+            
+        except Exception as e:
+            collab_logger.warning(f"Could not retrieve conversation history: {e}")
+            return []
+    
+    def _format_conversation_history_for_llm(self, conversation_history: list, agent_name: str) -> str:
+        """Format conversation history for inclusion in LLM prompts"""
+        if not conversation_history:
+            return "**CONVERSATION HISTORY:** This is the start of our collaboration on this agent."
+        
+        history_text = f"**CONVERSATION HISTORY for {agent_name}:**\n"
+        for entry in conversation_history[-10:]:  # Use last 10 messages for context
+            timestamp = entry.get("timestamp", "")
+            message_type = entry.get("type", "user")
+            message = entry.get("message", "")
+            
+            if message_type == "user":
+                history_text += f"👤 **Human** ({timestamp}): {message}\n"
+            else:
+                history_text += f"🤖 **AMI** ({timestamp}): {message[:200]}{'...' if len(message) > 200 else ''}\n"
+        
+        history_text += "\n**CURRENT CONVERSATION:**\n"
+        return history_text
+    
+    async def _save_conversation_message(self, agent_id: str, blueprint_id: str, message_type: str, message_content: str, context_data: dict = None):
+        """Save conversation message to maintain history"""
+        try:
+            from orgdb import save_agent_collaboration_message
+            
+            save_agent_collaboration_message(
+                agent_id=agent_id,
+                blueprint_id=blueprint_id,
+                message_type=message_type,  # "user" or "ami"
+                message_content=message_content,
+                context_data=context_data or {}
+            )
+            
+        except Exception as e:
+            collab_logger.warning(f"Could not save conversation message: {e}")
+    
+    async def _handle_blueprint_approval(self, request: CollaborativeAgentRequest, agent, blueprint, context, conversation_history) -> CollaborativeAgentResponse:
+        """Handle blueprint approval and trigger compilation"""
+        collab_logger.info(f"Blueprint approved! Triggering compilation for {agent.name}")
+        
+        # Save user's approval message to conversation history
+        await self._save_conversation_message(
+            agent_id=agent.id,
+            blueprint_id=blueprint.id,
+            message_type="user",
+            message_content=request.user_input,
+            context_data={"action": "approval", "current_state": "refinement"}
+        )
+        
+        # Update blueprint conversation_id if needed
+        if blueprint.conversation_id != request.conversation_id and request.conversation_id:
+            from orgdb import update_blueprint_conversation_id
+            update_blueprint_conversation_id(blueprint.id, request.conversation_id)
+        
+        # Trigger compilation directly (no need to wait for todos in this simplified flow)
+        try:
+            from orgdb import compile_blueprint
+            compiled_blueprint = compile_blueprint(blueprint.id, request.user_id)
+            
+            if compiled_blueprint:
+                # Activate the compiled blueprint
+                from orgdb import activate_blueprint
+                success = activate_blueprint(agent.id, blueprint.id)
+                
+                if success:
+                    # Build context-rich success message
+                    agent_name = context["agent_identity"]["name"]
+                    capability_summary = context["conversation_hints"]["capability_summary"]
+                    completeness_score = context["development_context"]["completeness_score"]
+                    
+                    success_message = f"🎉 Excellent! I've successfully compiled and activated **{agent_name}**!\n\n"
+                    success_message += f"**Your {context['agent_identity']['type']} agent is now production-ready:**\n"
+                    success_message += f"✅ **Identity**: {agent_name} - {context['agent_identity']['purpose']}\n"
+                    success_message += f"✅ **Capabilities**: {capability_summary}\n"
+                    success_message += f"✅ **Knowledge Sources**: {context['current_capabilities']['knowledge_count']} configured\n"
+                    success_message += f"✅ **Integrations**: {context['current_capabilities']['integration_count']} connected\n"
+                    success_message += f"✅ **Blueprint Completeness**: {completeness_score:.0f}%\n"
+                    success_message += f"✅ **System Prompt**: Generated and compiled\n\n"
+                    success_message += f"**{agent_name} is now live and ready to help users!** The compiled blueprint contains all our collaborative refinements and is optimized for {context['agent_identity']['language']} communication."
+                    
+                    # Save AMI's success response to conversation history
+                    await self._save_conversation_message(
+                        agent_id=agent.id,
+                        blueprint_id=blueprint.id,
+                        message_type="ami",
+                        message_content=success_message,
+                        context_data={
+                            "action": "compilation_success", 
+                            "compilation_status": "compiled",
+                            "activation_status": "active",
+                            "context": context
+                        }
+                    )
+                    
+                    return CollaborativeAgentResponse(
+                        success=True,
+                        conversation_id=request.conversation_id,
+                        current_state=ConversationState.COMPLETED,
+                        ami_message=success_message,
+                        data={
+                            "agent_id": agent.id,
+                            "blueprint_id": blueprint.id,
+                            "compilation_status": "compiled",
+                            "activation_status": "active",
+                            "context": context  # Include rich context in response
+                        },
+                        next_actions=[
+                            f"Start using {agent_name}",
+                            "Test agent responses",
+                            "Create another agent",
+                            "Monitor agent performance"
+                        ]
+                    )
+                else:
+                    # Compilation successful but activation failed
+                    return CollaborativeAgentResponse(
+                        success=True,
+                        conversation_id=request.conversation_id,
+                        current_state=ConversationState.COMPLETED,
+                        ami_message=f"✅ Great! I've compiled '{agent.name}' successfully, but there was an issue activating it. The blueprint is ready - you can activate it manually from the agent dashboard.",
+                        data={
+                            "agent_id": agent.id,
+                            "blueprint_id": blueprint.id,
+                            "compilation_status": "compiled",
+                            "activation_status": "pending"
+                        },
+                        next_actions=[
+                            "Activate the agent manually",
+                            "Check agent status",
+                            "Create another agent"
+                        ]
+                    )
+            else:
+                # Compilation failed
+                return CollaborativeAgentResponse(
+                    success=False,
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.SKELETON_REVIEW,
+                    ami_message="I had trouble compiling the blueprint. There might be some configuration issues. Let's review and fix them together.",
+                    error="Blueprint compilation failed",
+                    next_actions=[
+                        "Review blueprint configuration",
+                        "Try a different approach", 
+                        "Start over"
+                    ]
+                )
+                
+        except Exception as e:
+            collab_logger.error(f"Compilation/activation error: {e}")
+            return CollaborativeAgentResponse(
+                success=False,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.SKELETON_REVIEW,
+                ami_message="I encountered an error while compiling the blueprint. Let's refine it further and try again.",
+                error=str(e),
+                next_actions=[
+                    "Refine the blueprint further",
+                    "Try again",
+                    "Start over"
+                ]
+            )
+    
+    async def _refine_blueprint_with_feedback(self, request: CollaborativeAgentRequest, agent, blueprint, context, conversation_history) -> CollaborativeAgentResponse:
+        """Refine the blueprint based on human feedback - now with rich context awareness and conversation history"""
+        collab_logger.info(f"Refining blueprint based on feedback: '{request.user_input[:100]}...'")
+        
+        # Save user's refinement message to conversation history
+        await self._save_conversation_message(
+            agent_id=agent.id,
+            blueprint_id=blueprint.id,
+            message_type="user",
+            message_content=request.user_input,
+            context_data={"action": "refinement_request", "current_state": "refinement"}
+        )
+        
+        # Build context-rich refinement prompt
+        agent_name = context["agent_identity"]["name"]
+        capability_summary = context["conversation_hints"]["capability_summary"] 
+        completeness_score = context["development_context"]["completeness_score"]
+        suggested_improvements = context["conversation_hints"]["next_logical_improvements"]
+        
+        # Format conversation history for LLM context
+        conversation_context = self._format_conversation_history_for_llm(conversation_history, agent_name)
+        
+        refinement_prompt = f"""
+        You are Ami, an expert AI agent designer. You're working with a human to refine {agent_name}, their {context['agent_identity']['type']} agent.
+
+        {conversation_context}
+
+        AGENT CONTEXT (like Cursor's file context):
+        - **Agent**: {agent_name}
+        - **Purpose**: {context['agent_identity']['purpose']}
+        - **Current State**: {capability_summary}
+        - **Completeness**: {completeness_score:.0f}%
+        - **Language**: {context['agent_identity']['language']}
+        - **Knowledge Sources**: {context['current_capabilities']['knowledge_count']} configured
+        - **Integrations**: {context['current_capabilities']['integration_count']} connected
+        
+        CURRENT BLUEPRINT:
+        {json.dumps(blueprint.agent_blueprint, indent=2)}
+        
+        HUMAN FEEDBACK: "{request.user_input}"
+        
+        CONTEXT-AWARE SUGGESTIONS:
+        Based on current state and our conversation, logical improvements might include: {', '.join(suggested_improvements)}
+        
+        Your task:
+        1. Review our conversation history to understand the refinement journey
+        2. Use your deep understanding of {agent_name}'s current state and our discussions
+        3. Analyze the human's feedback in context of previous refinements and agent purpose
+        4. Make intelligent updates that build on existing strengths and previous feedback
+        5. Explain changes using the agent's name, context, and conversation history
+        6. Avoid repeating suggestions or changes we've already discussed
+        
+        Return a JSON response with:
+        {{
+            "updated_blueprint": {{...complete updated blueprint...}},
+            "changes_made": ["list of specific changes with context and history awareness"],  
+            "explanation": "Context-aware explanation mentioning {agent_name}, current capabilities, and how this builds on our conversation",
+            "questions": ["Smart follow-up questions based on agent context and conversation flow"],
+            "suggested_next_steps": ["New contextual suggestions that haven't been covered yet"]
+        }}
+        
+        Be intelligent, context-aware, and conversation-aware like Cursor with source code.
+        """
+        
+        try:
+            # Get LLM response
+            executor = self._get_executor(request.llm_provider)
+            raw_response = await executor.execute(
+                user_query=refinement_prompt,
+                system_prompt="You are an expert agent blueprint designer.",
+                max_tokens=3000,
+                model=request.model
+            )
+            
+            # Parse the response
+            refinement_result = self._extract_and_parse_json(raw_response)
+            
+            if not refinement_result or "updated_blueprint" not in refinement_result:
+                raise ValueError("Invalid refinement response format")
+            
+            # Update the blueprint in the database
+            from orgdb import update_blueprint
+            updated_blueprint_data = refinement_result["updated_blueprint"]
+            updated_blueprint = update_blueprint(blueprint.id, updated_blueprint_data)
+            
+            if updated_blueprint:
+                collab_logger.info(f"Blueprint updated successfully: {blueprint.id}")
+                
+                # Prepare context-rich response
+                changes_made = refinement_result.get("changes_made", [])
+                explanation = refinement_result.get("explanation", f"I've updated {agent_name} based on your feedback.")
+                questions = refinement_result.get("questions", [])
+                suggested_next_steps = refinement_result.get("suggested_next_steps", [])
+                
+                # Calculate new completeness score
+                updated_completeness = self._calculate_blueprint_completeness(updated_blueprint_data)
+                
+                ami_message = f"Perfect! I've enhanced **{agent_name}** based on your feedback.\n\n"
+                ami_message += f"**Changes made to your {context['agent_identity']['type']} agent:**\n"
+                for change in changes_made:
+                    ami_message += f"✅ {change}\n"
+                
+                ami_message += f"\n{explanation}\n"
+                ami_message += f"\n**Updated Status:**\n"
+                ami_message += f"📊 **Blueprint Completeness**: {completeness_score:.0f}% → {updated_completeness:.0f}%\n"
+                ami_message += f"🎯 **Current Focus**: {self._summarize_capabilities(updated_blueprint_data.get('what_i_do', {}).get('primary_tasks', []))}\n"
+                
+                if questions:
+                    ami_message += f"\n**I have some smart questions to make {agent_name} even better:**\n"
+                    for question in questions:
+                        ami_message += f"❓ {question}\n"
+                
+                if suggested_next_steps:
+                    ami_message += f"\n**Contextual suggestions for {agent_name}:**\n"
+                    for step in suggested_next_steps:
+                        ami_message += f"💡 {step}\n"
+                
+                ami_message += f"\nWhat do you think? Ready to compile {agent_name}, or would you like to refine further?"
+                
+                # Save AMI's refinement response to conversation history
+                await self._save_conversation_message(
+                    agent_id=agent.id,
+                    blueprint_id=blueprint.id,
+                    message_type="ami",
+                    message_content=ami_message,
+                    context_data={
+                        "action": "refinement_response",
+                        "changes_made": changes_made,
+                        "completeness_improvement": updated_completeness - completeness_score,
+                        "context": context,
+                        "suggested_next_steps": suggested_next_steps
+                    }
+                )
+                
+                return CollaborativeAgentResponse(
+                    success=True,
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.SKELETON_REVIEW,
+                    ami_message=ami_message,
+                    data={
+                        "agent_id": agent.id,
+                        "blueprint_id": blueprint.id,  
+                        "changes_made": changes_made,
+                        "updated_blueprint": updated_blueprint_data,
+                        "context": context,  # Include rich context
+                        "completeness_improvement": updated_completeness - completeness_score,
+                        "suggested_next_steps": suggested_next_steps,
+                        "conversation_aware": True  # Flag indicating this response is conversation-aware
+                    },
+                    next_actions=[
+                        f"Compile {agent_name}",
+                        "Make more refinements",
+                        "Ask questions about the updates",
+                        "Review agent capabilities"
+                    ]
+                )
+            else:
+                raise ValueError("Failed to update blueprint in database")
+                
+        except Exception as e:
+            collab_logger.error(f"Blueprint refinement failed: {e}")
+            agent_name = context["agent_identity"]["name"]
+            return CollaborativeAgentResponse(
+                success=False,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.SKELETON_REVIEW,
+                ami_message=f"I had trouble updating {agent_name}'s blueprint. This might be due to the complexity of your request or a technical issue. Could you try rephrasing your feedback more specifically about what aspect of {agent_name} you'd like to improve?",
+                error=str(e),
+                data={"context": context},  # Include context even in errors
+                next_actions=[
+                    f"Be more specific about {agent_name}'s changes",
+                    "Try a simpler modification",
+                    "Ask me about current capabilities",
+                    "Start with a fresh approach"
+                ]
             )
     
     async def _understand_and_refine_idea(self, request: CollaborativeAgentRequest) -> CollaborativeAgentResponse:
@@ -393,14 +948,14 @@ class CollaborativeCreator:
             else:
                 # Fallback if orchestrator not available
                 collab_logger.error("Orchestrator not available for building agent")
-                return CollaborativeAgentResponse(
+            return CollaborativeAgentResponse(
                     success=False,
-                    conversation_id=request.conversation_id,
-                    current_state=ConversationState.APPROVED,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.APPROVED,
                     ami_message="I had trouble building the agent. Please try again.",
                     error="Orchestrator not available",
                     next_actions=["Try again", "Start a new conversation"]
-                )
+            )
         
         # Handle refinement request
         refinement_prompt = f"""
@@ -535,80 +1090,80 @@ class CollaborativeCreator:
             collab_logger.info(f"Creating refined skeleton with data keys: {list(updated_blueprint_data.keys())}")
             
             refined_skeleton = AgentSkeleton(
-                conversation_id=request.conversation_id,
-                agent_name=updated_blueprint_data.get("agent_name", skeleton.agent_name),
-                agent_purpose=updated_blueprint_data.get("agent_purpose", skeleton.agent_purpose),
-                target_users=updated_blueprint_data.get("target_users", skeleton.target_users),
-                agent_type=updated_blueprint_data.get("agent_type", skeleton.agent_type),
-                language=updated_blueprint_data.get("language", skeleton.language),
-                meet_me=updated_blueprint_data.get("meet_me", skeleton.meet_me),
-                what_i_do=updated_blueprint_data.get("what_i_do", skeleton.what_i_do),
-                knowledge_sources=updated_blueprint_data.get("knowledge_sources", skeleton.knowledge_sources),
-                integrations=updated_blueprint_data.get("integrations", skeleton.integrations),
-                monitoring=updated_blueprint_data.get("monitoring", skeleton.monitoring),
-                test_scenarios=updated_blueprint_data.get("test_scenarios", skeleton.test_scenarios),
-                workflow_steps=updated_blueprint_data.get("workflow_steps", skeleton.workflow_steps),
-                visual_flow=updated_blueprint_data.get("visual_flow", skeleton.visual_flow),
-                success_criteria=updated_blueprint_data.get("success_criteria", skeleton.success_criteria),
-                potential_challenges=updated_blueprint_data.get("potential_challenges", skeleton.potential_challenges),
-                created_at=datetime.now()
-            )
-                
+                    conversation_id=request.conversation_id,
+                    agent_name=updated_blueprint_data.get("agent_name", skeleton.agent_name),
+                    agent_purpose=updated_blueprint_data.get("agent_purpose", skeleton.agent_purpose),
+                    target_users=updated_blueprint_data.get("target_users", skeleton.target_users),
+                    agent_type=updated_blueprint_data.get("agent_type", skeleton.agent_type),
+                    language=updated_blueprint_data.get("language", skeleton.language),
+                    meet_me=updated_blueprint_data.get("meet_me", skeleton.meet_me),
+                    what_i_do=updated_blueprint_data.get("what_i_do", skeleton.what_i_do),
+                    knowledge_sources=updated_blueprint_data.get("knowledge_sources", skeleton.knowledge_sources),
+                    integrations=updated_blueprint_data.get("integrations", skeleton.integrations),
+                    monitoring=updated_blueprint_data.get("monitoring", skeleton.monitoring),
+                    test_scenarios=updated_blueprint_data.get("test_scenarios", skeleton.test_scenarios),
+                    workflow_steps=updated_blueprint_data.get("workflow_steps", skeleton.workflow_steps),
+                    visual_flow=updated_blueprint_data.get("visual_flow", skeleton.visual_flow),
+                    success_criteria=updated_blueprint_data.get("success_criteria", skeleton.success_criteria),
+                    potential_challenges=updated_blueprint_data.get("potential_challenges", skeleton.potential_challenges),
+                    created_at=datetime.now()
+                )
+            
             # Update conversation state
             conversation["skeleton"] = refined_skeleton
             self.conversations[request.conversation_id] = conversation
             
             collab_logger.info(f"Refined skeleton for {refined_skeleton.agent_name}")
-                
+            
             return CollaborativeAgentResponse(
-                success=True,
-                conversation_id=request.conversation_id,
-                current_state=ConversationState.SKELETON_REVIEW,
-                ami_message=data.get("ami_message", "I've updated the plan based on your feedback. How does this look now?"),
-                data={
-                    "feedback_understanding": data.get("feedback_understanding", ""),
-                    # ✅ Enhanced change tracking
-                    "tracked_changes": data.get("tracked_changes", {
-                        "summary": {"total_changes": 0, "modified_sections": []},
-                        "changes": []
-                    }),
-                    "blueprint_diff": data.get("blueprint_diff", {
-                        "previous_version": {},
-                        "updated_version": {}
-                    }),
-                    "ui_hints": data.get("ui_hints", {
-                        "highlight_sections": [],
-                        "changed_fields": [],
-                        "animation_sequence": []
-                    }),
-                    # ✅ Legacy support (backwards compatible)
-                    "changes_made": data.get("changes_made", []),
-                    "updated_blueprint": {
-                        "agent_name": refined_skeleton.agent_name,
-                        "agent_purpose": refined_skeleton.agent_purpose,
-                        "target_users": refined_skeleton.target_users,
-                        "agent_type": refined_skeleton.agent_type,
-                        "language": refined_skeleton.language,
-                        "meet_me": refined_skeleton.meet_me,
-                        "what_i_do": refined_skeleton.what_i_do,
-                        "knowledge_sources": refined_skeleton.knowledge_sources,
-                        "integrations": refined_skeleton.integrations,
-                        "monitoring": refined_skeleton.monitoring,
-                        "test_scenarios": refined_skeleton.test_scenarios,
-                        "workflow_steps": refined_skeleton.workflow_steps,
-                        "visual_flow": refined_skeleton.visual_flow,
-                        "success_criteria": refined_skeleton.success_criteria,
-                        "potential_challenges": refined_skeleton.potential_challenges
-                    }
-                },
-                next_actions=[
-                    "Approve all changes",
-                    "Approve individual changes",
-                    "Request further changes",
-                    "Revert specific changes",
-                    "Ask questions about the updates"
-                ]
-            )
+                    success=True,
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.SKELETON_REVIEW,
+                    ami_message=data.get("ami_message", "I've updated the plan based on your feedback. How does this look now?"),
+                    data={
+                        "feedback_understanding": data.get("feedback_understanding", ""),
+                        # ✅ Enhanced change tracking
+                        "tracked_changes": data.get("tracked_changes", {
+                            "summary": {"total_changes": 0, "modified_sections": []},
+                            "changes": []
+                        }),
+                        "blueprint_diff": data.get("blueprint_diff", {
+                            "previous_version": {},
+                            "updated_version": {}
+                        }),
+                        "ui_hints": data.get("ui_hints", {
+                            "highlight_sections": [],
+                            "changed_fields": [],
+                            "animation_sequence": []
+                        }),
+                        # ✅ Legacy support (backwards compatible)
+                        "changes_made": data.get("changes_made", []),
+                        "updated_blueprint": {
+                            "agent_name": refined_skeleton.agent_name,
+                            "agent_purpose": refined_skeleton.agent_purpose,
+                            "target_users": refined_skeleton.target_users,
+                            "agent_type": refined_skeleton.agent_type,
+                            "language": refined_skeleton.language,
+                            "meet_me": refined_skeleton.meet_me,
+                            "what_i_do": refined_skeleton.what_i_do,
+                            "knowledge_sources": refined_skeleton.knowledge_sources,
+                            "integrations": refined_skeleton.integrations,
+                            "monitoring": refined_skeleton.monitoring,
+                            "test_scenarios": refined_skeleton.test_scenarios,
+                            "workflow_steps": refined_skeleton.workflow_steps,
+                            "visual_flow": refined_skeleton.visual_flow,
+                            "success_criteria": refined_skeleton.success_criteria,
+                            "potential_challenges": refined_skeleton.potential_challenges
+                        }
+                    },
+                    next_actions=[
+                        "Approve all changes",
+                        "Approve individual changes",
+                        "Request further changes",
+                        "Revert specific changes",
+                        "Ask questions about the updates"
+                    ]
+                )
                 
         except Exception as e:
             collab_logger.error(f"Skeleton refinement failed: {e}")

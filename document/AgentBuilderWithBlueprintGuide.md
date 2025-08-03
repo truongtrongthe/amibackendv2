@@ -4,6 +4,79 @@
 
 This guide provides complete frontend integration documentation for the **8-Step Agent Builder with Blueprint Architecture**. The system enables users to create production-ready AI agents through an intelligent, guided process.
 
+## 🚀 **REVOLUTIONARY UPDATE: Context-Rich AMI Architecture (like Cursor for AI Agents)**
+
+**✨ NEW PARADIGM:** AMI is now fully context-aware of every agent being worked on, making responses intelligent and personalized like Cursor with source code files.
+
+### **🧠 How Context-Rich AMI Works:**
+
+#### **1. Upfront Agent Creation**
+```javascript
+// Step 1: Create draft agent first
+POST /org-agents/create-draft
+{
+  "name": "CustomerBot Pro", 
+  "initial_idea": "Customer service bot for e-commerce",
+  "language": "english",
+  "agent_type": "support"
+}
+
+// Response: agent_id + blueprint_id immediately available
+```
+
+#### **2. Every AMI Interaction is Context-Aware**
+```javascript  
+// Step 2: ALL AMI calls now include agent context
+POST /ami/collaborate
+{
+  "user_input": "Make it handle complaints better",
+  "agent_id": "agent_123",        // ← ALWAYS PRESENT
+  "blueprint_id": "blueprint_456", // ← ALWAYS PRESENT
+  "current_state": "refinement"
+}
+```
+
+#### **3. Rich Context in Every Response**
+AMI now knows everything about your agent:
+- **🎯 Agent Identity**: Name, purpose, type, language, personality
+- **⚡ Current Capabilities**: Tasks, integrations, knowledge sources
+- **📊 Blueprint Status**: Completeness score, compilation status, version
+- **💡 Smart Suggestions**: Context-aware improvements and next steps
+
+#### **4. Intelligent, Personalized Responses**
+Instead of generic responses, AMI now responds like:
+
+> *"Perfect! I've enhanced **CustomerBot Pro** based on your feedback.*
+> 
+> *Changes made to your support agent:*
+> *✅ Enhanced complaint handling with empathy protocols*
+> *✅ Added escalation triggers for complex issues*
+> 
+> *Updated Status:*
+> *📊 Blueprint Completeness: 60% → 85%*
+> *🎯 Current Focus: handles customer support, complaints, and order inquiries*
+> 
+> *What do you think? Ready to compile CustomerBot Pro?"*
+
+### **🎯 Key Benefits (Cursor-Style Context Awareness):**
+
+1. **🧠 Full Agent Awareness**: AMI knows your agent's name, purpose, and current state
+2. **🎯 Intelligent Suggestions**: Context-based recommendations that make sense
+3. **📊 Progress Tracking**: Real-time completeness scores and improvement metrics
+4. **💬 Personalized Communication**: Uses your agent's name and specific context
+5. **🔄 Seamless Continuity**: Resume anywhere without losing context
+6. **⚡ Smarter Refinements**: Builds on existing capabilities intelligently
+
+### **🚀 Frontend Benefits:**
+
+- **No State Management**: Database is single source of truth
+- **Rich Response Data**: Every response includes full context
+- **Better UX**: Users see intelligent, personalized AMI responses
+- **Easy Resume**: Can continue from any point with full context
+- **Debugging**: Clear audit trail in database
+
+---
+
 ## 🚨 **CRITICAL UPDATE: Complete 7-Part Blueprint Structure**
 
 **⚠️ BREAKING CHANGE:** Ami now generates complete human-friendly agent blueprints following the 7-part Agent Pitch structure, not just technical specifications.
@@ -20,19 +93,210 @@ This guide provides complete frontend integration documentation for the **8-Step
 - **Visual workflows:** Clear step-by-step process visualization
 - **Real integrations:** Specific app connections with triggers and actions
 
-### **Complete 8-Step Flow:**
-1. **Idea Stage** - Human shares idea, Ami helps build blueprint
-2. **Refinement** - Human and Ami iterate on blueprint design  
-3. **Approval** - Human decides to save approved blueprint
-4. **Todo Generation** - Ami analyzes blueprint and generates implementation todos
-5. **Input Collection** - Human provides required information and credentials
-6. **Compilation Ready** - System validates all requirements met
-7. **Compilation** - Everything bundled into agent system prompt
-8. **Production Ready** - Agent ready to run with full configuration
+### **NEW Simplified 3-Step Flow:**
+1. **Draft Agent Creation** - Create agent + blueprint upfront with initial idea
+2. **Context-Rich Collaboration** - AMI refines blueprint with full agent awareness
+3. **Approval & Compilation** - Instant compilation and activation when approved
+
+### **Legacy 8-Step Flow (Still Supported):**
+1. ~~**Idea Stage**~~ → **Draft Creation** - Create agent + blueprint immediately  
+2. **Refinement** - Context-aware AMI collaboration with agent knowledge
+3. **Approval** - Human approves with instant compilation and activation
+4. ~~**Todo Generation**~~ → **Simplified** - No separate todo step needed
+5. ~~**Input Collection**~~ → **Optional** - Can be done during refinement
+6. ~~**Compilation Ready**~~ → **Automatic** - Handled during approval
+7. **Compilation** - Automatic when approved
+8. **Production Ready** - Agent immediately ready for use
 
 ---
 
-## 🎨 **Recommended UX Approach: Idea-First with Hybrid Options**
+## 💻 **Frontend Integration for Context-Rich AMI**
+
+### **🚀 New React Component Structure**
+
+```jsx
+const ContextRichAMI = ({ agentId, blueprintId }) => {
+  const [conversation, setConversation] = useState([]);
+  const [userInput, setUserInput] = useState('');
+  const [agentContext, setAgentContext] = useState(null);
+  
+  const sendToAMI = async (input) => {
+    const response = await fetch('/ami/collaborate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_input: input,
+        agent_id: agentId,        // ← Always included
+        blueprint_id: blueprintId, // ← Always included  
+        current_state: 'refinement'
+      })
+    });
+    
+    const data = await response.json();
+    
+    // AMI now returns rich context in every response
+    if (data.data?.context) {
+      setAgentContext(data.data.context);
+    }
+    
+    setConversation(prev => [...prev, {
+      type: 'ami',
+      message: data.ami_message
+    }]);
+  };
+  
+  return (
+    <div className="context-rich-ami">
+      {/* Agent Context Panel */}
+      {agentContext && (
+        <AgentContextPanel context={agentContext} />
+      )}
+      
+      {/* Conversation */}
+      <ConversationDisplay 
+        messages={conversation}
+        agentContext={agentContext} 
+      />
+      
+      {/* Input */}
+      <AMIInput 
+        onSend={sendToAMI}
+        placeholder={`Refine ${agentContext?.agent_identity?.name || 'your agent'}...`}
+      />
+    </div>
+  );
+};
+```
+
+### **🎯 Agent Context Panel Component**
+
+```jsx
+const AgentContextPanel = ({ context }) => {
+  const { agent_identity, current_capabilities, blueprint_status, conversation_hints } = context;
+  
+  return (
+    <div className="agent-context-panel">
+      <div className="agent-header">
+        <h3>{agent_identity.name}</h3>
+        <span className="agent-type">{agent_identity.type}</span>
+        <div className="completeness-score">
+          {blueprint_status.completeness_score?.toFixed(0)}% Complete
+        </div>
+      </div>
+      
+      <div className="context-sections">
+        <div className="purpose">
+          <strong>Purpose:</strong> {agent_identity.purpose}
+        </div>
+        
+        <div className="capabilities">
+          <strong>Current Focus:</strong> {conversation_hints.capability_summary}
+        </div>
+        
+        <div className="status-indicators">
+          <div className="indicator">
+            <span className="count">{current_capabilities.task_count}</span>
+            <span className="label">Tasks</span>
+          </div>
+          <div className="indicator">
+            <span className="count">{current_capabilities.knowledge_count}</span>
+            <span className="label">Knowledge Sources</span>
+          </div>
+          <div className="indicator">
+            <span className="count">{current_capabilities.integration_count}</span>
+            <span className="label">Integrations</span>
+          </div>
+        </div>
+        
+        {conversation_hints.next_logical_improvements.length > 0 && (
+          <div className="suggestions">
+            <strong>Suggested Improvements:</strong>
+            <ul>
+              {conversation_hints.next_logical_improvements.map((suggestion, i) => (
+                <li key={i}>{suggestion}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+```
+
+### **🧠 Context-Aware Message Display**
+
+```jsx
+const ConversationMessage = ({ message, agentContext }) => {
+  const agentName = agentContext?.agent_identity?.name || 'Agent';
+  
+  // Parse context-rich messages for better display
+  const parseContextualMessage = (text) => {
+    return text
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/(?:^|\n)(✅|❓|💡|📊|🎯) (.*?)(?=\n|$)/g, 
+        '<div class="message-item $1">$1 $2</div>');
+  };
+  
+  return (
+    <div className={`message ${message.type}`}>
+      <div className="message-header">
+        <span className="sender">
+          {message.type === 'ami' ? '🤖 AMI' : '👤 You'}
+        </span>
+        {message.type === 'ami' && agentContext && (
+          <span className="context-tag">
+            Working on {agentName}
+          </span>
+        )}
+      </div>
+      <div 
+        className="message-content"
+        dangerouslySetInnerHTML={{ 
+          __html: parseContextualMessage(message.message) 
+        }}
+      />
+    </div>
+  );
+};
+```
+
+### **📊 Enhanced Response Handling**
+
+```javascript
+// AMI responses now include rich context data
+const handleAMIResponse = (response) => {
+  const { success, ami_message, data } = response;
+  
+  if (data?.context) {
+    // Update UI with rich context
+    updateAgentContext(data.context);
+    
+    // Show completeness improvement
+    if (data.completeness_improvement > 0) {
+      showToast(`✅ Blueprint improved by ${data.completeness_improvement.toFixed(0)}%`);
+    }
+    
+    // Display suggested next steps
+    if (data.suggested_next_steps?.length > 0) {
+      showSuggestions(data.suggested_next_steps);
+    }
+  }
+  
+  // Check for compilation success
+  if (data?.compilation_status === 'compiled' && data?.activation_status === 'active') {
+    showSuccessModal({
+      title: `🎉 ${data.context.agent_identity.name} is Ready!`,
+      message: 'Your agent has been compiled and activated successfully.',
+      actions: ['Start Using Agent', 'Create Another', 'Review Performance']
+    });
+  }
+};
+```
+
+---
+
+## 🎨 **Recommended UX Approach: Context-First with Intelligent Guidance**
 
 ### **Primary User Experience (85% of users)**
 **Start with idea → Full Ami collaboration → Production-ready agent**

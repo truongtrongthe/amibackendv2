@@ -72,18 +72,22 @@ def create_agent_request(
 
 def create_collaborative_request(
     user_input: str,
+    agent_id: str,
+    blueprint_id: str,
     org_id: str,
     user_id: str,
     conversation_id: str = None,
-    current_state: str = "initial_idea",
+    current_state: str = "refinement",
     llm_provider: str = "anthropic",
     model: str = None
 ) -> CollaborativeAgentRequest:
     """
-    Create a collaborative agent request (new convenience function)
+    Create a collaborative agent request (updated for agent/blueprint context)
     """
     return CollaborativeAgentRequest(
         user_input=user_input,
+        agent_id=agent_id,
+        blueprint_id=blueprint_id,
         conversation_id=conversation_id,
         org_id=org_id,
         user_id=user_id,
@@ -207,6 +211,8 @@ async def collaborate_on_agent_via_api(
         
         collaboration_request = CollaborativeAgentRequest(
             user_input=api_request.user_input,
+            agent_id=api_request.agent_id,
+            blueprint_id=api_request.blueprint_id,
             conversation_id=api_request.conversation_id,
             org_id=org_id,
             user_id=user_id,

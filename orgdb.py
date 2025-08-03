@@ -2075,3 +2075,141 @@ def check_todos_completion_and_update_status(blueprint_id: str) -> bool:
     except Exception as e:
         logger.error(f"Error checking todos completion: {str(e)}")
         return False
+
+def update_blueprint_conversation_id(blueprint_id: str, conversation_id: str) -> bool:
+    """
+    Update a blueprint's conversation_id
+    
+    Args:
+        blueprint_id: Blueprint UUID
+        conversation_id: Conversation ID to link
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        response = supabase.table("agent_blueprints").update({
+            "conversation_id": conversation_id
+        }).eq("id", blueprint_id).execute()
+        
+        return response.data and len(response.data) > 0
+        
+    except Exception as e:
+        logger.error(f"Error updating blueprint conversation_id: {str(e)}")
+        return False
+
+def update_blueprint(blueprint_id: str, updated_blueprint_data: dict) -> Optional[AgentBlueprint]:
+    """
+    Update a blueprint's agent_blueprint data
+    
+    Args:
+        blueprint_id: Blueprint UUID
+        updated_blueprint_data: New blueprint data
+    
+    Returns:
+        Updated AgentBlueprint object if successful, None otherwise
+    """
+    try:
+        response = supabase.table("agent_blueprints").update({
+            "agent_blueprint": updated_blueprint_data,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", blueprint_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            blueprint_data = response.data[0]
+            return AgentBlueprint(
+                id=blueprint_data["id"],
+                agent_id=blueprint_data["agent_id"],
+                version=blueprint_data["version"],
+                agent_blueprint=blueprint_data["agent_blueprint"],
+                created_date=datetime.fromisoformat(blueprint_data["created_at"].replace("Z", "+00:00")),
+                created_by=blueprint_data["created_by"],
+                conversation_id=blueprint_data.get("conversation_id"),
+                compiled_system_prompt=blueprint_data.get("compiled_system_prompt"),
+                compiled_at=datetime.fromisoformat(blueprint_data["compiled_at"].replace("Z", "+00:00")) if blueprint_data.get("compiled_at") else None,
+                compiled_by=blueprint_data.get("compiled_by"),
+                compilation_status=blueprint_data.get("compilation_status", "draft"),
+                implementation_todos=blueprint_data.get("implementation_todos", []),
+                todos_completion_status=blueprint_data.get("todos_completion_status", "not_generated"),
+                todos_generated_at=datetime.fromisoformat(blueprint_data["todos_generated_at"].replace("Z", "+00:00")) if blueprint_data.get("todos_generated_at") else None,
+                todos_generated_by=blueprint_data.get("todos_generated_by"),
+                todos_completed_at=datetime.fromisoformat(blueprint_data["todos_completed_at"].replace("Z", "+00:00")) if blueprint_data.get("todos_completed_at") else None,
+                todos_completed_by=blueprint_data.get("todos_completed_by")
+            )
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error updating blueprint: {str(e)}")
+        return None
+
+def save_agent_collaboration_message(agent_id: str, blueprint_id: str, message_type: str, message_content: str, context_data: dict = None):
+    """
+    Save conversation message for agent collaboration history
+    
+    Args:
+        agent_id: ID of the agent being collaborated on
+        blueprint_id: ID of the blueprint being refined
+        message_type: "user" or "ami"
+        message_content: The actual message content
+        context_data: Additional context data (optional)
+    """
+    try:
+        data = {
+            "agent_id": agent_id,
+            "blueprint_id": blueprint_id,
+            "message_type": message_type,
+            "message_content": message_content,
+            "context_data": context_data if context_data else {},
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        response = supabase.table("agent_collaboration_history").insert(data).execute()
+        
+        if response.data:
+            logger.info(f"Saved {message_type} message for agent {agent_id}, blueprint {blueprint_id}")
+        else:
+            logger.error(f"Failed to save collaboration message for agent {agent_id}")
+            
+    except Exception as e:
+        logger.error(f"Error saving collaboration message for agent {agent_id}: {e}")
+
+def get_agent_collaboration_history(agent_id: str, blueprint_id: str, limit: int = 20) -> list:
+    """
+    Retrieve conversation history for agent collaboration
+    
+    Args:
+        agent_id: ID of the agent
+        blueprint_id: ID of the blueprint
+        limit: Maximum number of messages to retrieve
+        
+    Returns:
+        List of conversation messages ordered by timestamp
+    """
+    try:
+        response = supabase.table("agent_collaboration_history")\
+            .select("message_type, message_content, context_data, created_at")\
+            .eq("agent_id", agent_id)\
+            .eq("blueprint_id", blueprint_id)\
+            .order("created_at", desc=False)\
+            .limit(limit)\
+            .execute()
+        
+        if not response.data:
+            logger.info(f"No conversation history found for agent {agent_id}")
+            return []
+        
+        history = []
+        for row in response.data:
+            history.append({
+                "message_type": row["message_type"],
+                "message_content": row["message_content"], 
+                "context_data": row.get("context_data", {}),
+                "created_at": row.get("created_at", "")
+            })
+        
+        logger.info(f"Retrieved {len(history)} conversation messages for agent {agent_id}")
+        return history
+        
+    except Exception as e:
+        logger.error(f"Error retrieving collaboration history for agent {agent_id}: {e}")
+        return []

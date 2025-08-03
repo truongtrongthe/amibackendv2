@@ -80,8 +80,10 @@ class AgentSkeleton:
 
 @dataclass
 class CollaborativeAgentRequest:
-    """Request for collaborative agent creation"""
+    """Request for collaborative agent creation - now works with existing agent/blueprint"""
     user_input: str                        # Human input at any stage
+    agent_id: str                          # Agent ID to collaborate on
+    blueprint_id: str                      # Blueprint ID to modify
     conversation_id: Optional[str] = None  # Existing conversation ID
     org_id: str = ""
     user_id: str = ""
@@ -144,10 +146,12 @@ class CreateAgentAPIRequest(BaseModel):
 
 
 class CollaborativeAgentAPIRequest(BaseModel):
-    """API request model for collaborative agent creation"""
+    """API request model for collaborative agent creation - works with existing agent/blueprint"""
     user_input: str = Field(..., description="Human input at any stage of conversation", min_length=5, max_length=2000)
+    agent_id: str = Field(..., description="Agent ID to collaborate on")
+    blueprint_id: str = Field(..., description="Blueprint ID to modify")
     conversation_id: Optional[str] = Field(None, description="Existing conversation ID (for continuing conversations)")
-    current_state: Optional[str] = Field("initial_idea", description="Current conversation state")
+    current_state: Optional[str] = Field("refinement", description="Current conversation state")
     llm_provider: str = Field("anthropic", description="LLM provider to use")
     model: Optional[str] = Field(None, description="Specific model to use")
 
