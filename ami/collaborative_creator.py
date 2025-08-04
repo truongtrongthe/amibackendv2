@@ -545,13 +545,30 @@ class CollaborativeCreator:
         
         try:
             # Get LLM response
-            executor = self._get_executor(request.llm_provider)
-            raw_response = await executor.execute(
-                user_query=refinement_prompt,
-                system_prompt="You are an expert agent blueprint designer.",
-                max_tokens=3000,
-                model=request.model
-            )
+            if request.llm_provider == "anthropic":
+                response = await self.anthropic_executor.call_anthropic_direct(
+                    model=request.model or "claude-3-5-sonnet-20241022",
+                    messages=[
+                        {"role": "system", "content": "You are an expert agent blueprint designer."},
+                        {"role": "user", "content": refinement_prompt}
+                    ],
+                    max_tokens=3000,
+                    temperature=0.7
+                )
+                raw_response = response.content[0].text
+            elif request.llm_provider == "openai":
+                response = await self.openai_executor.call_openai_direct(
+                    model=request.model or "gpt-4",
+                    messages=[
+                        {"role": "system", "content": "You are an expert agent blueprint designer."},
+                        {"role": "user", "content": refinement_prompt}
+                    ],
+                    max_tokens=3000,
+                    temperature=0.7
+                )
+                raw_response = response.choices[0].message.content
+            else:
+                raise Exception(f"Unknown LLM provider: {request.llm_provider}")
             
             # Parse the response
             refinement_result = self._extract_and_parse_json(raw_response)
@@ -1192,6 +1209,8 @@ class CollaborativeCreator:
             self.conversations[conversation_id]["state"] = state
             self.conversations[conversation_id].update(updates)
     
+
+
     async def _call_llm(self, prompt: str, provider: str = "anthropic") -> str:
         """Call LLM through executors"""
         if not self.anthropic_executor and not self.openai_executor:
