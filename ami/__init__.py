@@ -218,7 +218,9 @@ async def collaborate_on_agent_via_api(
             user_id=user_id,
             llm_provider=api_request.llm_provider,
             model=api_request.model,
-            current_state=ConversationState(api_request.current_state)
+            current_state=ConversationState(api_request.current_state),
+            conversation_history=api_request.conversation_history,
+            max_history_messages=api_request.max_history_messages
         )
         
         result = await orchestrator.collaborate_on_agent(collaboration_request)
@@ -228,6 +230,8 @@ async def collaborate_on_agent_via_api(
             conversation_id=result.conversation_id,
             current_state=result.current_state.value,
             ami_message=result.ami_message,
+            agent_id=result.agent_id,
+            blueprint_id=result.blueprint_id,
             data=result.data,
             next_actions=result.next_actions,
             error=result.error

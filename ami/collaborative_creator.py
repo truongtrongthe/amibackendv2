@@ -10,7 +10,7 @@ import json
 import re
 import logging
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from .models import (
@@ -48,13 +48,37 @@ class CollaborativeCreator:
     
     async def handle_collaborative_request(self, request: CollaborativeAgentRequest) -> CollaborativeAgentResponse:
         """
-        Main collaborative method - now works directly with database blueprint records
-        Guides the human through agent blueprint refinement with iterative improvement
+        Main collaborative method - handles conversation, creation, and refinement
+        - No agent/blueprint: Conversation mode (explore ideas, ask questions)
+        - Has agent/blueprint: Refinement mode (refine existing agent)
+        - Conversation + approval detected: Creation mode (create agent from conversation)
         """
-        collab_logger.info(f"Collaborative session on agent {request.agent_id}: {request.current_state.value} - '{request.user_input[:100]}...'")
+        collab_logger.info(f"Collaborative request: {request.current_state.value} - '{request.user_input[:100]}...' (Agent: {request.agent_id or 'CONVERSATION'})")
         
         try:
-            # Validate that agent and blueprint exist
+            # Determine the mode based on request content
+            if not request.agent_id or not request.blueprint_id:
+                # No agent/blueprint - could be conversation or creation time
+                
+                # Get conversation context from frontend-provided history (following exec_tool.py pattern)
+                conversation_context = self._get_conversation_context_from_history(request)
+                
+                # Use LLM to detect if user is ready to create agent
+                is_approval = await self._detect_approval_intent_via_llm(request.user_input, conversation_context, request)
+                collab_logger.info(f"LLM approval detection for: '{request.user_input[:50]}...' → {is_approval}")
+                
+                if is_approval:
+                    # User is ready to create - switch to creation mode
+                    collab_logger.info("Approval detected - creating agent from conversation")
+                    return await self._create_agent_from_conversation(request, conversation_context)
+                else:
+                    # Still in conversation mode - ask questions, explore ideas
+                    collab_logger.info("Conversation mode - exploring ideas and asking questions")
+                    return await self._handle_idea_conversation(request, conversation_context)
+            else:
+                collab_logger.info("Refinement mode - has existing agent/blueprint")
+            
+            # Validate that agent and blueprint exist (should exist now)
             from orgdb import get_agent, get_blueprint
             agent = get_agent(request.agent_id)
             blueprint = get_blueprint(request.blueprint_id)
@@ -93,7 +117,13 @@ class CollaborativeCreator:
                 collab_logger.info(f"Started new collaborative session: {request.conversation_id}")
             
             # Route to appropriate handler - now always refinement since agent exists
-            return await self._handle_blueprint_refinement(request, agent, blueprint)
+            response = await self._handle_blueprint_refinement(request, agent, blueprint)
+            
+            # Always include agent_id and blueprint_id in response for frontend
+            response.agent_id = agent.id
+            response.blueprint_id = blueprint.id
+            
+            return response
                 
         except Exception as e:
             collab_logger.error(f"Collaborative session error: {e}")
@@ -105,6 +135,529 @@ class CollaborativeCreator:
                 error=str(e),
                 next_actions=["Try again with a new request"]
             )
+    
+    async def _create_draft_from_input(self, request: CollaborativeAgentRequest):
+        """
+        Create a draft agent and blueprint from initial user input
+        """
+        try:
+            # Extract agent name from user input using simple heuristics
+            user_input = request.user_input.strip()
+            
+            # Try to extract a meaningful name
+            if "agent" in user_input.lower():
+                # Look for patterns like "sales agent", "customer support agent"
+                words = user_input.split()
+                agent_idx = next(i for i, word in enumerate(words) if "agent" in word.lower())
+                if agent_idx > 0:
+                    agent_name = f"{words[agent_idx-1].title()} Agent"
+                else:
+                    agent_name = "New Agent"
+            elif len(user_input) < 50:
+                # Short input, use as-is with "Agent" suffix
+                agent_name = f"{user_input.title()} Agent"
+            else:
+                # Long input, create generic name
+                agent_name = "New Agent"
+            
+            # Create minimal initial blueprint
+            initial_blueprint = {
+                "identity": {
+                    "name": agent_name,
+                    "purpose": user_input[:200] + "..." if len(user_input) > 200 else user_input,
+                    "type": "custom",
+                    "language": "english",
+                    "personality": {
+                        "tone": "professional",
+                        "style": "helpful",
+                        "analogy": "like a helpful assistant"
+                    }
+                },
+                "capabilities": {
+                    "tasks": [
+                        {
+                            "task": "Initial Task",
+                            "description": "To be defined during collaboration with AMI"
+                        }
+                    ],
+                    "knowledge_sources": [],
+                    "integrations": [],
+                    "tools": []
+                },
+                "configuration": {
+                    "communication_style": "conversational",
+                    "response_length": "appropriate",
+                    "confidence_level": "balanced",
+                    "escalation_method": "To be defined"
+                },
+                "test_scenarios": [],
+                "workflow_steps": ["To be defined during collaboration"],
+                "visual_flow": "To be defined",
+                "success_criteria": ["To be defined"],
+                "potential_challenges": ["To be defined"],
+                "created_from_input": user_input,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Create agent with initial blueprint
+            from orgdb import create_agent_with_blueprint
+            agent, blueprint = create_agent_with_blueprint(
+                org_id=request.org_id,
+                created_by=request.user_id,
+                name=agent_name,
+                blueprint_data=initial_blueprint,
+                description=f"Agent created from: {user_input[:100]}...",
+                conversation_id=request.conversation_id
+            )
+            
+            collab_logger.info(f"Created draft agent from input: {agent.name} (ID: {agent.id})")
+            return agent, blueprint
+            
+        except Exception as e:
+            collab_logger.error(f"Failed to create draft from input: {e}")
+            raise Exception(f"Failed to create draft agent: {str(e)}")
+    
+    def _get_conversation_context_from_history(self, request: CollaborativeAgentRequest) -> list:
+        """Get conversation context from frontend-provided history (following exec_tool.py pattern)"""
+        try:
+            if not request.conversation_history:
+                collab_logger.info("No conversation history provided")
+                return []
+            
+            # Limit history to max_history_messages (default 25)
+            max_messages = request.max_history_messages or 25
+            limited_history = request.conversation_history[-max_messages:] if len(request.conversation_history) > max_messages else request.conversation_history
+            
+            # Format messages for LLM context - frontend should provide in consistent format
+            formatted_messages = []
+            for msg in limited_history:
+                formatted_messages.append({
+                    "role": msg.get("role", msg.get("sender", "user")),  # Support both 'role' and 'sender' keys
+                    "content": msg.get("content", ""),
+                    "timestamp": msg.get("timestamp", msg.get("created_at", ""))
+                })
+            
+            collab_logger.info(f"Using {len(formatted_messages)} messages from frontend conversation history")
+            return formatted_messages
+            
+        except Exception as e:
+            collab_logger.warning(f"Could not process conversation history: {e}")
+            return []
+    
+    async def _detect_approval_intent_via_llm(self, user_input: str, conversation_context: list, request: CollaborativeAgentRequest) -> bool:
+        """Use human-centric logic to detect if user is ready to create an agent"""
+        try:
+            user_input_lower = user_input.lower().strip()
+            
+            # PRIORITY 1: Direct creation commands - always approve these
+            direct_creation_phrases = [
+                "just create", "create agent", "build agent", "make agent", 
+                "just build", "create it", "build it", "make it",
+                "go ahead and create", "please create", "create now"
+            ]
+            
+            if any(phrase in user_input_lower for phrase in direct_creation_phrases):
+                collab_logger.info(f"Direct creation detected: '{user_input[:30]}...' → APPROVED")
+                return True
+            
+            # PRIORITY 2: If conversation history exists, be more permissive
+            has_conversation_context = conversation_context and len(conversation_context) > 1
+            
+            if has_conversation_context:
+                # User has already been discussing the agent - be more permissive
+                permissive_keywords = [
+                    "yes", "ok", "okay", "sure", "sounds good", "perfect", 
+                    "let's do", "proceed", "go ahead", "that works", "approved"
+                ]
+                
+                if any(keyword in user_input_lower for keyword in permissive_keywords):
+                    collab_logger.info(f"Permissive approval with context: '{user_input[:30]}...' → APPROVED")
+                    return True
+            
+            # PRIORITY 3: Use LLM for nuanced cases, but with better prompt
+            conversation_text = ""
+            if conversation_context:
+                recent_messages = conversation_context[-20:]  # Last 4 messages for context
+                conversation_text = "\n".join([
+                    f"{msg['role']}: {msg['content']}" for msg in recent_messages
+                ])
+            
+            approval_prompt = f"""
+CONTEXT: User has been discussing an agent with AMI. Determine if they want to CREATE it now.
+
+Conversation:
+{conversation_text}
+
+User: "{user_input}"
+
+IMPORTANT: If user has already described what they want and now says anything that could mean "create it", return true.
+
+BE PERMISSIVE - err on the side of creating the agent. Users can always refine later.
+
+Return ONLY "true" or "false".
+"""
+
+            if request.llm_provider == "anthropic":
+                response = await self.anthropic_executor.call_anthropic_direct(
+                    model="claude-3-5-sonnet-20241022",
+                    messages=[{"role": "user", "content": approval_prompt}],
+                    max_tokens=10,
+                    temperature=0.1
+                )
+                result = response.content[0].text.strip().lower()
+            else:
+                response = await self.openai_executor.call_openai_direct(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": approval_prompt}],
+                    max_tokens=10,
+                    temperature=0.1
+                )
+                result = response.choices[0].message.content.strip().lower()
+            
+            is_approval = result == "true"
+            collab_logger.info(f"LLM approval detection: '{user_input[:30]}...' → {result} → {is_approval}")
+            return is_approval
+            
+        except Exception as e:
+            collab_logger.error(f"Approval detection failed: {e}")
+            # Fallback: if there's conversation context and any creation intent, approve
+            if conversation_context and len(conversation_context) > 1:
+                creation_keywords = ["create", "build", "make", "yes", "ok", "sure", "go ahead"]
+                if any(keyword in user_input.lower() for keyword in creation_keywords):
+                    collab_logger.info(f"Fallback approval with context: '{user_input[:30]}...' → APPROVED")
+                    return True
+            
+            return False
+    
+    async def _handle_idea_conversation(self, request: CollaborativeAgentRequest, conversation_context: list) -> CollaborativeAgentResponse:
+        """Handle conversation mode - ask questions and explore ideas without creating agent"""
+        try:
+            # Format conversation for LLM context
+            conversation_text = ""
+            if conversation_context:
+                recent_messages = conversation_context[-8:]
+                conversation_text = "\n".join([
+                    f"{msg['role']}: {msg['content']}" for msg in recent_messages
+                ])
+            
+            conversation_prompt = f"""
+You are AMI, an expert AI agent designer. You're having a conversation with a human to understand what kind of agent they want to build.
+
+Your role: Ask thoughtful questions to understand their needs before building anything.
+
+Conversation History:
+{conversation_text}
+
+Human's Latest Input: "{request.user_input}"
+
+GUIDELINES:
+1. **Explore their vision** - Ask about specific tasks, workflows, integrations
+2. **Understand context** - What problem are they solving? Who will use it?
+3. **Clarify requirements** - What tools, data sources, or systems are needed?
+4. **Build excitement** - Help them envision how the agent will work
+5. **Don't create yet** - You're still gathering requirements
+
+RESPONSE FORMAT:
+{{
+    "ami_message": "Your conversational response with 2-3 follow-up questions",
+    "suggestions": ["2-3 specific suggestions or questions"],
+    "agent_concept": "Brief summary of the agent concept so far (if any)"
+}}
+
+Be conversational, curious, and helpful. Focus on understanding their vision deeply.
+"""
+            
+            if request.llm_provider == "anthropic":
+                response = await self.anthropic_executor.call_anthropic_direct(
+                    model="claude-3-5-sonnet-20241022",
+                    messages=[{"role": "user", "content": conversation_prompt}],
+                    max_tokens=800,
+                    temperature=0.7
+                )
+                raw_response = response.content[0].text
+            else:
+                response = await self.openai_executor.call_openai_direct(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": conversation_prompt}],
+                    max_tokens=800,
+                    temperature=0.7
+                )
+                raw_response = response.choices[0].message.content
+            
+            # Parse LLM response
+            conversation_result = self._extract_and_parse_json(raw_response, "conversation")
+            
+            if not conversation_result:
+                # Fallback response
+                conversation_result = {
+                    "ami_message": "I'd love to help you build an agent! Can you tell me more about what specific tasks you'd like it to handle?",
+                    "suggestions": ["What problem should this agent solve?", "Who will be using this agent?"],
+                    "agent_concept": "Exploring agent ideas"
+                }
+            
+            # Log AMI's response (frontend handles saving to chat)
+            self._log_response_for_debugging(request, conversation_result["ami_message"])
+            
+            return CollaborativeAgentResponse(
+                success=True,
+                conversation_id=request.conversation_id or str(uuid4()),
+                current_state=ConversationState.INITIAL_IDEA,
+                ami_message=conversation_result["ami_message"],
+                data={
+                    "mode": "conversation",
+                    "suggestions": conversation_result.get("suggestions", []),
+                    "agent_concept": conversation_result.get("agent_concept", ""),
+                    "context": "exploring_ideas"
+                },
+                next_actions=[
+                    "Answer AMI's questions",
+                    "Provide more details about your needs", 
+                    "Say 'let's build this' when ready to create"
+                ]
+            )
+            
+        except Exception as e:
+            collab_logger.error(f"Conversation handling failed: {e}")
+            return CollaborativeAgentResponse(
+                success=False,
+                conversation_id=request.conversation_id or "unknown",
+                current_state=ConversationState.INITIAL_IDEA,
+                ami_message="I'm having trouble processing that. Could you tell me more about what kind of agent you'd like to build?",
+                error=str(e)
+            )
+    
+    async def _create_agent_from_conversation(self, request: CollaborativeAgentRequest, conversation_context: list) -> CollaborativeAgentResponse:
+        """Create agent when user approves after conversation"""
+        try:
+            collab_logger.info("Creating agent from conversation context")
+            
+            # Analyze conversation to extract agent requirements  
+            agent_requirements = await self._analyze_conversation_for_agent_creation(conversation_context, request.user_input, request)
+            
+            # Create agent and blueprint with conversation insights
+            agent, blueprint = await self._create_agent_from_requirements(agent_requirements, request)
+            
+            # Creation message (frontend handles saving to chat)
+            creation_message = f"Great! I've created '{agent.name}' based on our conversation. The agent is ready to use, and you can refine any details as needed. What would you like to adjust?"
+            
+            # Generate contextual suggestions based on what was created
+            contextual_suggestions = self._generate_contextual_refinement_suggestions(agent_requirements, agent.name)
+            
+            return CollaborativeAgentResponse(
+                success=True,
+                conversation_id=request.conversation_id or str(uuid4()),
+                current_state=ConversationState.SKELETON_REVIEW,
+                ami_message=creation_message,
+                agent_id=agent.id,
+                blueprint_id=blueprint.id,
+                data={
+                    "mode": "created",
+                    "agent_name": agent.name,
+                    "agent_type": agent_requirements.get("agent_type", "assistant"),
+                    "agent_concept": agent_requirements.get("concept", ""),
+                    "agent_purpose": agent_requirements.get("purpose", ""),
+                    "key_tasks": agent_requirements.get("key_tasks", []),
+                    "integrations": agent_requirements.get("integrations", []),
+                    "target_users": agent_requirements.get("target_users", ""),
+                    "next_phase": "refinement",
+                    "blueprint_summary": {
+                        "tasks_count": len(agent_requirements.get("key_tasks", [])),
+                        "integrations_count": len(agent_requirements.get("integrations", [])),
+                        "has_monitoring": bool(agent_requirements.get("business_context"))
+                    },
+                    "frontend_actions": {
+                        "load_blueprint": f"/org-agents/{agent.id}/blueprint",
+                        "load_agent_details": f"/org-agents/{agent.id}",
+                        "suggested_api_calls": [
+                            {"method": "GET", "endpoint": f"/org-agents/{agent.id}/blueprint", "purpose": "Load full blueprint details"},
+                            {"method": "GET", "endpoint": f"/org-agents/{agent.id}", "purpose": "Load agent configuration"}
+                        ]
+                    }
+                },
+                next_actions=contextual_suggestions
+            )
+            
+        except Exception as e:
+            collab_logger.error(f"Agent creation from conversation failed: {e}")
+            return CollaborativeAgentResponse(
+                success=False,
+                conversation_id=request.conversation_id or "unknown",
+                current_state=ConversationState.INITIAL_IDEA,
+                ami_message="I had trouble creating the agent. Let's continue our conversation to clarify the requirements.",
+                error=str(e)
+            )
+    
+    def _log_response_for_debugging(self, request: CollaborativeAgentRequest, ami_message: str):
+        """Log AMI's response for debugging (frontend handles saving to chat)"""
+        collab_logger.info(f"AMI response for conversation {request.conversation_id}: {ami_message[:100]}...")
+        # Note: Frontend handles saving messages to chat sessions
+    
+    async def _analyze_conversation_for_agent_creation(self, conversation_context: list, latest_input: str, request: CollaborativeAgentRequest) -> dict:
+        """Analyze conversation to extract agent creation requirements"""
+        try:
+            # Format conversation for analysis
+            conversation_text = ""
+            if conversation_context:
+                conversation_text = "\n".join([
+                    f"{msg['role']}: {msg['content']}" for msg in conversation_context
+                ])
+            
+            analysis_prompt = f"""
+You are analyzing a conversation to extract requirements for creating an AI agent.
+
+Conversation History:
+{conversation_text}
+
+Latest User Input: "{latest_input}"
+
+IMPORTANT: The user has requested agent creation. Create a functional agent based on available information.
+
+Extract the following information from the conversation:
+
+RESPONSE FORMAT (JSON):
+{{
+    "agent_name": "Suggested name for the agent",
+    "agent_type": "Type of agent (e.g., assistant, analyst, support)",
+    "purpose": "Clear description of what the agent should do",
+    "key_tasks": ["List of main tasks the agent should handle"],
+    "integrations": ["Required tools/systems (e.g., Gmail, Slack, CRM)"],
+    "knowledge_domains": ["Areas of expertise needed"],
+    "target_users": "Who will use this agent",
+    "business_context": "What problem it solves",
+    "concept": "One-sentence summary of the agent"
+}}
+
+GUIDELINES:
+- If limited information is provided, infer reasonable capabilities from context
+- Create a working agent that can be refined later
+- Don't leave fields empty - provide sensible defaults
+- Focus on what the user has expressed interest in
+
+Analyze the conversation and create agent requirements now.
+"""
+            
+            if request.llm_provider == "anthropic":
+                response = await self.anthropic_executor.call_anthropic_direct(
+                    model="claude-3-5-sonnet-20241022",
+                    messages=[{"role": "user", "content": analysis_prompt}],
+                    max_tokens=1000,
+                    temperature=0.3
+                )
+                raw_response = response.content[0].text
+            else:
+                response = await self.openai_executor.call_openai_direct(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": analysis_prompt}],
+                    max_tokens=1000,
+                    temperature=0.3
+                )
+                raw_response = response.choices[0].message.content
+            
+            # Parse the analysis
+            requirements = self._extract_and_parse_json(raw_response, "requirements")
+            
+            if not requirements:
+                # Fallback requirements
+                requirements = {
+                    "agent_name": "Custom Agent",
+                    "agent_type": "assistant",
+                    "purpose": latest_input[:200],
+                    "key_tasks": ["To be defined"],
+                    "integrations": [],
+                    "knowledge_domains": [],
+                    "target_users": "Team members",
+                    "business_context": "Automation and assistance",
+                    "concept": "AI assistant for custom tasks"
+                }
+            
+            collab_logger.info(f"Analyzed conversation for agent: {requirements.get('agent_name', 'Unknown')}")
+            return requirements
+            
+        except Exception as e:
+            collab_logger.error(f"Conversation analysis failed: {e}")
+            return {
+                "agent_name": "Custom Agent",
+                "agent_type": "assistant", 
+                "purpose": latest_input[:200],
+                "key_tasks": ["Custom tasks"],
+                "integrations": [],
+                "knowledge_domains": [],
+                "target_users": "Users",
+                "business_context": "Automation",
+                "concept": "Custom AI agent"
+            }
+    
+    async def _create_agent_from_requirements(self, requirements: dict, request: CollaborativeAgentRequest):
+        """Create agent and blueprint from analyzed requirements"""
+        try:
+            agent_name = requirements.get("agent_name", "Custom Agent")
+            
+            # Create rich blueprint from conversation requirements
+            initial_blueprint = {
+                "identity": {
+                    "name": agent_name,
+                    "purpose": requirements.get("purpose", "Custom AI agent"),
+                    "type": requirements.get("agent_type", "assistant"),
+                    "language": "english",
+                    "personality": {
+                        "tone": "professional",
+                        "style": "helpful",
+                        "analogy": f"like a {requirements.get('agent_type', 'helpful assistant')}"
+                    }
+                },
+                "capabilities": {
+                    "tasks": [
+                        {"task": task, "description": f"Handle {task}"} 
+                        for task in requirements.get("key_tasks", ["Custom tasks"])
+                    ],
+                    "knowledge_sources": [
+                        {"domain": domain, "description": f"Expertise in {domain}"}
+                        for domain in requirements.get("knowledge_domains", [])
+                    ],
+                    "integrations": [
+                        {"tool": integration, "purpose": f"Connect with {integration}"}
+                        for integration in requirements.get("integrations", [])
+                    ],
+                    "tools": []
+                },
+                "configuration": {
+                    "communication_style": "conversational",
+                    "response_length": "appropriate",
+                    "confidence_level": "balanced",
+                    "escalation_method": "To be defined"
+                },
+                "business_context": {
+                    "problem_solved": requirements.get("business_context", "Automation and assistance"),
+                    "target_users": requirements.get("target_users", "Team members"),
+                    "success_metrics": ["User satisfaction", "Task completion rate"]
+                },
+                "test_scenarios": [],
+                "workflow_steps": ["To be refined during collaboration"],
+                "visual_flow": "To be defined",
+                "success_criteria": ["Successfully complete assigned tasks"],
+                "potential_challenges": ["To be identified"],
+                "created_from_conversation": True,
+                "conversation_requirements": requirements,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Create agent with conversation-derived blueprint
+            from orgdb import create_agent_with_blueprint
+            agent, blueprint = create_agent_with_blueprint(
+                org_id=request.org_id,
+                created_by=request.user_id,
+                name=agent_name,
+                blueprint_data=initial_blueprint,
+                description=f"Agent created from conversation: {requirements.get('concept', 'Custom agent')}",
+                conversation_id=request.conversation_id
+            )
+            
+            collab_logger.info(f"Created agent from conversation: {agent.name} (ID: {agent.id})")
+            return agent, blueprint
+            
+        except Exception as e:
+            collab_logger.error(f"Agent creation from requirements failed: {e}")
+            raise Exception(f"Failed to create agent from conversation: {str(e)}")
     
     async def _handle_blueprint_refinement(self, request: CollaborativeAgentRequest, agent, blueprint) -> CollaborativeAgentResponse:
         """
@@ -528,8 +1081,9 @@ class CollaborativeCreator:
         2. Use your deep understanding of {agent_name}'s current state and our discussions
         3. Analyze the human's feedback in context of previous refinements and agent purpose
         4. Make intelligent updates that build on existing strengths and previous feedback
-        5. Explain changes using the agent's name, context, and conversation history
-        6. Avoid repeating suggestions or changes we've already discussed
+        5. You CAN change the agent name (identity.name) if requested - this will update both blueprint and agent records
+        6. Explain changes using the agent's name, context, and conversation history
+        7. Avoid repeating suggestions or changes we've already discussed
         
         Return a JSON response with:
         {{
@@ -549,7 +1103,6 @@ class CollaborativeCreator:
                 response = await self.anthropic_executor.call_anthropic_direct(
                     model=request.model or "claude-3-5-sonnet-20241022",
                     messages=[
-                        {"role": "system", "content": "You are an expert agent blueprint designer."},
                         {"role": "user", "content": refinement_prompt}
                     ],
                     max_tokens=3000,
@@ -577,12 +1130,24 @@ class CollaborativeCreator:
                 raise ValueError("Invalid refinement response format")
             
             # Update the blueprint in the database
-            from orgdb import update_blueprint
+            from orgdb import update_blueprint, update_agent
             updated_blueprint_data = refinement_result["updated_blueprint"]
             updated_blueprint = update_blueprint(blueprint.id, updated_blueprint_data)
             
             if updated_blueprint:
                 collab_logger.info(f"Blueprint updated successfully: {blueprint.id}")
+                
+                # ✅ NEW: Check if agent name was changed and sync with agent table
+                new_agent_name = updated_blueprint_data.get("identity", {}).get("name")
+                if new_agent_name and new_agent_name != agent.name:
+                    collab_logger.info(f"Agent name changed from '{agent.name}' to '{new_agent_name}' - syncing agent table")
+                    updated_agent = update_agent(agent.id, name=new_agent_name)
+                    if updated_agent:
+                        collab_logger.info(f"Agent table updated successfully with new name: {new_agent_name}")
+                        agent.name = new_agent_name  # Update local object for response
+                    else:
+                        collab_logger.warning(f"Failed to update agent table with new name: {new_agent_name}")
+                        # Continue anyway - blueprint was updated successfully
                 
                 # Prepare context-rich response
                 changes_made = refinement_result.get("changes_made", [])
@@ -1257,6 +1822,7 @@ class CollaborativeCreator:
             json_block_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
             if json_block_match:
                 json_text = json_block_match.group(1)
+                json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning
                 collab_logger.info(f"[{context}] Found JSON block, attempting to parse...")
                 collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
                 return json.loads(json_text)
@@ -1264,6 +1830,7 @@ class CollaborativeCreator:
             # Method 2: Find JSON object by balancing braces
             json_text = self._extract_balanced_json(response)
             if json_text:
+                json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning - THIS WAS MISSING!
                 collab_logger.info(f"[{context}] Found balanced JSON, attempting to parse...")
                 collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
                 return json.loads(json_text)
@@ -1283,7 +1850,16 @@ class CollaborativeCreator:
             
         except json.JSONDecodeError as e:
             collab_logger.error(f"[{context}] JSON decode error: {e}")
-            collab_logger.error(f"[{context}] Problematic JSON: {json_text[:200] if 'json_text' in locals() else 'N/A'}...")
+            if 'json_text' in locals():
+                collab_logger.error(f"[{context}] Error at position: {getattr(e, 'pos', 'unknown')}")
+                collab_logger.error(f"[{context}] Problematic JSON (first 400 chars): {json_text[:400]}...")
+                # Show the character at the error position
+                if hasattr(e, 'pos') and e.pos < len(json_text):
+                    error_char = json_text[e.pos] if e.pos < len(json_text) else 'EOF'
+                    error_code = ord(error_char) if error_char != 'EOF' else 'N/A'
+                    collab_logger.error(f"[{context}] Character at error position {e.pos}: '{error_char}' (ASCII: {error_code})")
+            else:
+                collab_logger.error(f"[{context}] No json_text available for debugging")
             return None
         except Exception as e:
             collab_logger.error(f"[{context}] JSON extraction error: {e}")
@@ -1326,15 +1902,114 @@ class CollaborativeCreator:
             return None
     
     def _clean_json_text(self, json_text: str) -> str:
-        """Clean common JSON formatting issues"""
+        """Clean common JSON formatting issues and control characters"""
         try:
-            # Remove trailing commas before closing braces/brackets
+            # Step 1: Remove trailing commas before closing braces/brackets
             json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
             
-            # Fix unescaped quotes in strings (basic attempt)
-            # This is a simplified approach - more complex cases might need additional handling
-            json_text = re.sub(r'(?<!\\)"(?![,}\]:])(?![^"]*"[,}\]:])', r'\\"', json_text)
+            # Step 2: Handle control characters more carefully
+            # We need to escape control characters that appear INSIDE string values
+            # but preserve JSON structure newlines outside of strings
+            
+            # Replace control characters with their escaped equivalents
+            # Do this character by character to avoid issues
+            cleaned_chars = []
+            in_string = False
+            i = 0
+            
+            while i < len(json_text):
+                char = json_text[i]
+                
+                # Track if we're inside a string value
+                if char == '"' and (i == 0 or json_text[i-1] != '\\'):
+                    in_string = not in_string
+                    cleaned_chars.append(char)
+                elif in_string:
+                    # Inside a string - escape control characters
+                    if char == '\n':
+                        cleaned_chars.append('\\n')
+                    elif char == '\r':
+                        cleaned_chars.append('\\r')
+                    elif char == '\t':
+                        cleaned_chars.append('\\t')
+                    elif char == '\b':
+                        cleaned_chars.append('\\b')
+                    elif char == '\f':
+                        cleaned_chars.append('\\f')
+                    elif ord(char) < 32 or ord(char) == 127:
+                        # Skip other control characters
+                        pass
+                    else:
+                        cleaned_chars.append(char)
+                else:
+                    # Outside string - keep structural characters, clean others
+                    if ord(char) < 32 and char not in ['\n', '\r', '\t', ' ']:
+                        # Remove problematic control chars but keep whitespace
+                        pass
+                    else:
+                        cleaned_chars.append(char)
+                
+                i += 1
+            
+            json_text = ''.join(cleaned_chars)
             
             return json_text
-        except Exception:
+        except Exception as e:
+            collab_logger.warning(f"JSON cleaning failed: {e}, returning original text")
             return json_text
+    
+    def _generate_contextual_refinement_suggestions(self, agent_requirements: dict, agent_name: str) -> list:
+        """Generate specific refinement suggestions based on what was created"""
+        suggestions = []
+        
+        # Analyze what was created and suggest improvements
+        agent_type = agent_requirements.get("agent_type", "assistant")
+        key_tasks = agent_requirements.get("key_tasks", [])
+        integrations = agent_requirements.get("integrations", [])
+        purpose = agent_requirements.get("purpose", "")
+        
+        # Task-specific suggestions
+        if "log" in purpose.lower() or any("log" in task.lower() for task in key_tasks):
+            suggestions.extend([
+                "Configure specific log file paths and formats to monitor",
+                "Define critical error patterns and alert thresholds"
+            ])
+        
+        if "slack" in purpose.lower() or any("slack" in integration.lower() for integration in integrations):
+            suggestions.extend([
+                "Set up Slack channel and notification preferences",
+                "Configure message templates for different alert types"
+            ])
+        
+        # Integration-based suggestions
+        if len(integrations) == 0:
+            suggestions.append("Add integrations with tools your team uses")
+        elif len(integrations) < 3:
+            suggestions.append("Consider additional integrations for complete workflow")
+        
+        # Task-based suggestions  
+        if len(key_tasks) <= 2:
+            suggestions.append("Define more specific tasks and responsibilities")
+        
+        # Type-specific suggestions
+        if agent_type == "support":
+            suggestions.extend([
+                "Set up escalation procedures for critical issues",
+                "Define response time expectations"
+            ])
+        
+        # Generic fallbacks if no specific suggestions
+        if not suggestions:
+            suggestions = [
+                f"Review {agent_name}'s task priorities and capabilities",
+                "Add specific integrations for your workflow",
+                "Test the agent with sample scenarios"
+            ]
+        
+        # Always include these
+        suggestions.extend([
+            f"Preview {agent_name}'s full blueprint configuration",
+            "Test and approve the agent for production use"
+        ])
+        
+        return suggestions[:6]  # Limit to 6 suggestions

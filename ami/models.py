@@ -80,16 +80,19 @@ class AgentSkeleton:
 
 @dataclass
 class CollaborativeAgentRequest:
-    """Request for collaborative agent creation - now works with existing agent/blueprint"""
+    """Request for collaborative agent creation - supports both first call and refinement"""
     user_input: str                        # Human input at any stage
-    agent_id: str                          # Agent ID to collaborate on
-    blueprint_id: str                      # Blueprint ID to modify
+    agent_id: Optional[str] = None         # Optional for first call, required for refinement
+    blueprint_id: Optional[str] = None     # Optional for first call, required for refinement
     conversation_id: Optional[str] = None  # Existing conversation ID
     org_id: str = ""
     user_id: str = ""
     llm_provider: str = "anthropic"
     model: Optional[str] = None
     current_state: ConversationState = ConversationState.INITIAL_IDEA
+    # Conversation history support (following exec_tool.py pattern)
+    conversation_history: Optional[List[Dict[str, Any]]] = None  # Previous messages from frontend
+    max_history_messages: Optional[int] = 25  # Maximum number of history messages to include
 
 
 @dataclass
@@ -99,6 +102,8 @@ class CollaborativeAgentResponse:
     conversation_id: str
     current_state: ConversationState
     ami_message: str                       # Ami's response to human
+    agent_id: Optional[str] = None         # Include for frontend to use in follow-ups
+    blueprint_id: Optional[str] = None     # Include for frontend to use in follow-ups
     data: Optional[Dict[str, Any]] = None  # State-specific data
     next_actions: List[str] = None         # What human can do next
     error: Optional[str] = None
@@ -146,14 +151,17 @@ class CreateAgentAPIRequest(BaseModel):
 
 
 class CollaborativeAgentAPIRequest(BaseModel):
-    """API request model for collaborative agent creation - works with existing agent/blueprint"""
+    """API request model for collaborative agent creation - supports conversation-first flow"""
     user_input: str = Field(..., description="Human input at any stage of conversation", min_length=5, max_length=2000)
-    agent_id: str = Field(..., description="Agent ID to collaborate on")
-    blueprint_id: str = Field(..., description="Blueprint ID to modify")
-    conversation_id: Optional[str] = Field(None, description="Existing conversation ID (for continuing conversations)")
-    current_state: Optional[str] = Field("refinement", description="Current conversation state")
+    agent_id: Optional[str] = Field(None, description="Agent ID to collaborate on (only for refinement)")
+    blueprint_id: Optional[str] = Field(None, description="Blueprint ID to modify (only for refinement)")
+    conversation_id: Optional[str] = Field(None, description="Chat conversation ID for context and message saving")
+    current_state: Optional[str] = Field("initial_idea", description="Current conversation state")
     llm_provider: str = Field("anthropic", description="LLM provider to use")
     model: Optional[str] = Field(None, description="Specific model to use")
+    # Conversation history support (following exec_tool.py pattern)
+    conversation_history: Optional[List[Dict[str, Any]]] = Field(None, description="Previous conversation messages from frontend")
+    max_history_messages: Optional[int] = Field(25, description="Maximum number of history messages to include")
 
 
 class CollaborativeAgentAPIResponse(BaseModel):
@@ -162,6 +170,8 @@ class CollaborativeAgentAPIResponse(BaseModel):
     conversation_id: str
     current_state: str
     ami_message: str
+    agent_id: Optional[str] = None         # Include for frontend refinement
+    blueprint_id: Optional[str] = None     # Include for frontend refinement
     data: Optional[Dict[str, Any]] = None
     next_actions: Optional[List[str]] = None
     error: Optional[str] = None

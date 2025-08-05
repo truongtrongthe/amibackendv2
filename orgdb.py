@@ -2111,8 +2111,8 @@ def update_blueprint(blueprint_id: str, updated_blueprint_data: dict) -> Optiona
     """
     try:
         response = supabase.table("agent_blueprints").update({
-            "agent_blueprint": updated_blueprint_data,
-            "updated_at": datetime.now(timezone.utc).isoformat()
+            "agent_blueprint": updated_blueprint_data
+            # Note: updated_at column doesn't exist yet - run migration to add it
         }).eq("id", blueprint_id).execute()
         
         if response.data and len(response.data) > 0:

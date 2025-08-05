@@ -27,6 +27,7 @@ from waitlist import router as waitlist_router
 from login import router as login_router
 from organization import router as organization_router
 from org_agent import router as org_agent_router
+from blueprint_routes import router as blueprint_router
 from google_drive_routes import router as google_drive_router
 from chat_routes import router as chat_router
 from supabase import create_client, Client
@@ -79,6 +80,7 @@ app.include_router(waitlist_router)
 app.include_router(login_router)
 app.include_router(organization_router)
 app.include_router(org_agent_router)
+app.include_router(blueprint_router)
 app.include_router(google_drive_router)
 app.include_router(chat_router)
 
