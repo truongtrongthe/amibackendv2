@@ -401,6 +401,7 @@ async def create_agent_with_blueprint_endpoint(
         raise HTTPException(status_code=500, detail="Failed to create agent with blueprint")
 
 @router.get("/", response_model=List[AgentResponse])
+@router.get("", response_model=List[AgentResponse])
 async def get_agents_endpoint(
     status: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
