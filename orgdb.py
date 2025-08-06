@@ -1583,6 +1583,8 @@ def _generate_todos_with_ami_reasoning(blueprint_data: dict) -> list:
     """
     Use Ami's LLM reasoning to analyze blueprint and generate intelligent todos
     """
+    import json  # Import at function level to avoid scope issues
+    
     # Create comprehensive analysis prompt for Ami
     analysis_prompt = f"""
 You are Ami, an expert AI agent architect. You've been given an approved agent blueprint and need to generate specific implementation todos that will help the human properly configure this agent for production use.
@@ -1645,20 +1647,25 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
 """
 
     try:
-        # Import the LLM calling capability from ami module
+        # Use simple direct LLM call to avoid re-initialization issues
         import asyncio
-        from ami.orchestrator import AmiOrchestrator
+        import re
+        import anthropic
+        import os
         
-        # Create orchestrator for LLM access
-        orchestrator = AmiOrchestrator()
+        # Direct Anthropic API call without creating new orchestrator
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         
-        # Call Ami's reasoning
-        response = asyncio.run(orchestrator._call_llm(analysis_prompt, "anthropic"))
+        # Direct synchronous call since we're already in async context
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": analysis_prompt}]
+        )
+        response_text = response.content[0].text
         
         # Parse the structured response
-        import re
-        import json
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
             
@@ -1669,7 +1676,7 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
             todos = data.get('todos', [])
             
             # Add metadata to each todo
-            from datetime import datetime, timezone as UTC
+            from datetime import datetime, timezone
             for i, todo in enumerate(todos):
                 todo['created_at'] = datetime.now(timezone.utc).isoformat()
                 todo['collected_inputs'] = {}
@@ -1692,7 +1699,7 @@ def _generate_basic_todos_fallback(blueprint_data: dict) -> list:
     """
     todos = []
     todo_id_counter = 1
-    from datetime import datetime, timezone as UTC
+    from datetime import datetime, timezone
     
     # Basic fallback todos - generic and simple
     base_todos = [

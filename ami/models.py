@@ -152,7 +152,7 @@ class CreateAgentAPIRequest(BaseModel):
 
 class CollaborativeAgentAPIRequest(BaseModel):
     """API request model for collaborative agent creation - supports conversation-first flow"""
-    user_input: str = Field(..., description="Human input at any stage of conversation", min_length=5, max_length=2000)
+    user_input: str = Field(..., description="Human input at any stage of conversation", min_length=1, max_length=2000)
     agent_id: Optional[str] = Field(None, description="Agent ID to collaborate on (only for refinement)")
     blueprint_id: Optional[str] = Field(None, description="Blueprint ID to modify (only for refinement)")
     conversation_id: Optional[str] = Field(None, description="Chat conversation ID for context and message saving")

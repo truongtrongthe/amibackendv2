@@ -74,13 +74,83 @@ class AmiOrchestrator:
         """
         ami_logger.info(f"Collaborative session: {request.current_state.value}")
         
-        # Handle collaborative request
-        if request.current_state != ConversationState.APPROVED:
-            return await self.collaborative_creator.handle_collaborative_request(request)
-        
-        # If approved, build the agent
-        else:
+        # Handle collaborative request based on state
+        if request.current_state == ConversationState.APPROVED:
+            # Final compilation phase (Steps 6-8) - all inputs collected
             return await self._build_approved_agent(request)
+        else:
+            # All other states (conversation, creation, refinement, building/input collection)
+            return await self.collaborative_creator.handle_collaborative_request(request)
+    
+    async def _start_input_collection_phase(self, request: CollaborativeAgentRequest, skeleton, conversation: dict) -> CollaborativeAgentResponse:
+        """
+        Start the input collection phase (Step 4-5 of the 8-step process)
+        Generate todos for input collection instead of building immediately
+        """
+        ami_logger.info(f"Starting input collection phase for: {skeleton.agent_name}")
+        
+        try:
+            # Convert skeleton to blueprint format first (needed for todo generation)
+            blueprint_data = await self._convert_skeleton_to_blueprint(skeleton)
+            
+            # Create agent with blueprint but don't complete yet
+            agent_id, blueprint_id = await self._create_agent_with_blueprint(
+                name=skeleton.agent_name,
+                description=skeleton.agent_purpose,
+                blueprint_data=blueprint_data,
+                org_id=conversation["org_id"],
+                user_id=conversation["user_id"],
+                conversation_id=request.conversation_id
+            )
+            
+            # Generate input collection todos
+            ami_logger.info("🔧 Generating input collection todos...")
+            todos_result = await self._generate_implementation_todos(
+                blueprint_id=blueprint_id,
+                user_id=conversation["user_id"]
+            )
+            
+            # Update conversation with agent/blueprint IDs for next phase
+            conversation["agent_id"] = agent_id
+            conversation["blueprint_id"] = blueprint_id
+            self.collaborative_creator.conversations[request.conversation_id] = conversation
+            
+            # Return response with todos for input collection
+            return CollaborativeAgentResponse(
+                success=True,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.BUILDING,
+                ami_message=f"🎉 Great! I've approved **{skeleton.agent_name}** and created the blueprint!\n\n**Now I need some information to set up the integrations:**\n\n✅ **Agent Blueprint**: Created and ready\n✅ **Implementation Todos**: {todos_result.get('todos_generated', 0)} tasks generated\n\n**Next Steps (Steps 4-5):**\n1. **Review the todos** - I've analyzed what integrations and configurations are needed\n2. **Provide required information** - API keys, credentials, and configuration details\n3. **Complete setup tasks** - Follow the guided steps for each integration\n\n**Once you provide the required information, I'll compile everything into your production-ready agent!**\n\nWhich todo would you like to start with?",
+                agent_id=agent_id,
+                blueprint_id=blueprint_id,
+                data={
+                    "agent_id": agent_id,
+                    "blueprint_id": blueprint_id,
+                    "agent_name": skeleton.agent_name,
+                    "phase": "input_collection",
+                    "todos_generated": todos_result.get('todos_generated', 0),
+                    "implementation_todos": todos_result.get('todos', []),
+                    "next_step": "collect_inputs",
+                    "completion_status": "todos_pending"
+                },
+                next_actions=[
+                    "Review implementation todos",
+                    "Provide required API keys and credentials", 
+                    "Complete integration setup tasks",
+                    "Compile agent once all inputs are collected"
+                ]
+            )
+            
+        except Exception as e:
+            ami_logger.error(f"Failed to start input collection phase: {e}")
+            return CollaborativeAgentResponse(
+                success=False,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.SKELETON_REVIEW,
+                ami_message=f"I had trouble setting up the input collection phase for {skeleton.agent_name}. Please try again.",
+                error=str(e),
+                next_actions=["Try again", "Start a new conversation"]
+            )
     
     async def _build_approved_agent(self, request: CollaborativeAgentRequest) -> CollaborativeAgentResponse:
         """

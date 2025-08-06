@@ -43,6 +43,7 @@ class CollaborativeCreator:
         self.openai_executor = openai_executor
         self.knowledge_manager = knowledge_manager
         self.orchestrator = orchestrator
+        self.conversations = {}  # Store conversation states for input collection phase
         
         collab_logger.info("Collaborative Creator initialized - now works with database records")
     
@@ -116,8 +117,13 @@ class CollaborativeCreator:
                 request.conversation_id = str(uuid4())
                 collab_logger.info(f"Started new collaborative session: {request.conversation_id}")
             
-            # Route to appropriate handler - now always refinement since agent exists
-            response = await self._handle_blueprint_refinement(request, agent, blueprint)
+            # Route to appropriate handler based on current state
+            if request.current_state == ConversationState.BUILDING:
+                # Handle input collection phase (Steps 4-5)
+                response = await self._handle_input_collection(request, agent, blueprint)
+            else:
+                # Default to refinement mode (SKELETON_REVIEW, etc.)
+                response = await self._handle_blueprint_refinement(request, agent, blueprint)
             
             # Always include agent_id and blueprint_id in response for frontend
             response.agent_id = agent.id
@@ -659,6 +665,233 @@ Analyze the conversation and create agent requirements now.
             collab_logger.error(f"Agent creation from requirements failed: {e}")
             raise Exception(f"Failed to create agent from conversation: {str(e)}")
     
+    async def _handle_input_collection(self, request: CollaborativeAgentRequest, agent, blueprint) -> CollaborativeAgentResponse:
+        """
+        Handle input collection phase (Steps 4-5 of the 8-step process)
+        - User provides API keys, credentials, configuration details
+        - System validates inputs and updates blueprint
+        - When all inputs collected, allows compilation to final agent
+        """
+        collab_logger.info(f"Input collection phase for agent {agent.name} (Blueprint: {blueprint.id})")
+        
+        # Check if user wants to compile (all inputs collected)
+        compile_intent = self._detect_compile_intent(request.user_input)
+        
+        if compile_intent:
+            # Check if all required todos are completed
+            todos_complete = self._check_todos_completion(blueprint)
+            
+            if todos_complete:
+                # All inputs collected - proceed to final compilation (Steps 6-8)
+                collab_logger.info(f"All inputs collected for {agent.name} - proceeding to final compilation")
+                
+                # Create approved request for final building
+                approved_request = CollaborativeAgentRequest(
+                    user_input=request.user_input,
+                    conversation_id=request.conversation_id,
+                    org_id=request.org_id,
+                    user_id=request.user_id,
+                    agent_id=request.agent_id,
+                    blueprint_id=request.blueprint_id,
+                    llm_provider=request.llm_provider,
+                    model=request.model,
+                    current_state=ConversationState.APPROVED
+                )
+                
+                # Final compilation
+                return await self.orchestrator._build_approved_agent(approved_request)
+            else:
+                # Not all inputs collected yet
+                pending_todos = self._get_pending_todos(blueprint)
+                return CollaborativeAgentResponse(
+                    success=True,
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.BUILDING,
+                    ami_message=f"I'd love to compile **{agent.name}** for you! However, I still need some information to complete the setup.\n\n**Pending todos:** {len(pending_todos)} remaining\n\nPlease provide the required inputs for the pending todos, then I can compile your agent.",
+                    agent_id=agent.id,
+                    blueprint_id=blueprint.id,
+                    data={
+                        "pending_todos": pending_todos,
+                        "completion_status": "inputs_pending"
+                    },
+                    next_actions=[
+                        "Complete pending todos",
+                        "Provide required API keys and credentials",
+                        "Try compiling again once inputs are provided"
+                    ]
+                )
+        else:
+            # Handle input provision or todo updates
+            # Parse user input for todo completion
+            todo_updated = await self._parse_and_update_todo_completion(request, blueprint)
+            
+            if todo_updated:
+                # Reload blueprint to get updated todos
+                from orgdb import get_agent_blueprint
+                blueprint = get_agent_blueprint(blueprint.id)
+                
+                # Check if all todos are now complete
+                todos_complete = self._check_todos_completion(blueprint)
+                
+                if todos_complete:
+                    # All inputs collected - proceed to final compilation
+                    collab_logger.info(f"All inputs collected for {agent.name} after todo update - proceeding to final compilation")
+                    
+                    # Create approved request for final building
+                    approved_request = CollaborativeAgentRequest(
+                        user_input=request.user_input,
+                        conversation_id=request.conversation_id,
+                        org_id=request.org_id,
+                        user_id=request.user_id,
+                        agent_id=request.agent_id,
+                        blueprint_id=request.blueprint_id,
+                        llm_provider=request.llm_provider,
+                        model=request.model,
+                        current_state=ConversationState.APPROVED
+                    )
+                    
+                    # Final compilation
+                    return await self.orchestrator._build_approved_agent(approved_request)
+            
+            # Get current todos status
+            todos = blueprint.implementation_todos if blueprint.implementation_todos else []
+            pending_todos = [todo for todo in todos if todo.get('status') != 'completed']
+            
+            return CollaborativeAgentResponse(
+                success=True,
+                conversation_id=request.conversation_id,
+                current_state=ConversationState.BUILDING,
+                ami_message=f"Great! I'm ready to help you set up **{agent.name}**.\n\n**Current Status:**\n✅ Blueprint approved and created\n📋 {len(todos)} implementation todos generated\n⏳ {len(pending_todos)} todos pending completion\n\n**Next Steps:**\n1. Complete the implementation todos by providing required information\n2. Once all todos are done, say 'compile' to build your final agent\n\nWhich todo would you like to work on first?",
+                agent_id=agent.id,
+                blueprint_id=blueprint.id,
+                data={
+                    "todos": todos,
+                    "pending_todos": pending_todos,
+                    "phase": "input_collection"
+                },
+                next_actions=[
+                    "Complete implementation todos",
+                    "Provide API keys and credentials",
+                    "Say 'compile' when ready to build final agent"
+                ]
+            )
+    
+    def _detect_compile_intent(self, user_input: str) -> bool:
+        """Detect if user wants to compile/finalize the agent"""
+        user_input_lower = user_input.lower().strip()
+        compile_keywords = [
+            'compile', 'build', 'finalize', 'complete', 'activate', 'deploy',
+            'ready', 'go', 'finish', 'done', 'create final', 'make it live'
+        ]
+        return any(keyword in user_input_lower for keyword in compile_keywords)
+    
+    def _check_todos_completion(self, blueprint) -> bool:
+        """Check if all required todos are completed"""
+        if not blueprint.implementation_todos:
+            return True  # No todos means ready to compile
+        
+        required_todos = [todo for todo in blueprint.implementation_todos 
+                         if todo.get('priority') in ['high', 'critical']]
+        
+        if not required_todos:
+            return True  # No high/critical todos
+        
+        completed_todos = [todo for todo in required_todos 
+                          if todo.get('status') == 'completed']
+        
+        return len(completed_todos) == len(required_todos)
+    
+    async def _parse_and_update_todo_completion(self, request: CollaborativeAgentRequest, blueprint) -> bool:
+        """
+        Parse user input for todo completion and update the blueprint
+        Returns True if a todo was updated, False otherwise
+        """
+        user_input = request.user_input.lower()
+        
+        # Check if user is providing todo completion
+        if "completed" in user_input and ("task" in user_input or "todo" in user_input):
+            # Extract todo information using simple parsing
+            lines = request.user_input.split('\n')
+            
+            todo_title = None
+            notes = None
+            
+            for line in lines:
+                if 'review agent configuration' in line.lower():
+                    todo_title = "Review Agent Configuration"
+                elif 'configure required tools' in line.lower():
+                    todo_title = "Configure Required Tools"  
+                elif 'validate agent setup' in line.lower():
+                    todo_title = "Validate Agent Setup"
+                elif line.strip().startswith('notes:'):
+                    notes = line.split('notes:', 1)[1].strip()
+            
+            if todo_title:
+                # Update the todo in the blueprint
+                updated = self._update_blueprint_todo(blueprint, todo_title, notes or "Completed")
+                if updated:
+                    collab_logger.info(f"Updated todo '{todo_title}' to completed for blueprint {blueprint.id}")
+                    return True
+        
+        return False
+    
+    def _update_blueprint_todo(self, blueprint, todo_title: str, notes: str) -> bool:
+        """Update a specific todo in the blueprint"""
+        if not blueprint.implementation_todos:
+            return False
+            
+        # Find and update the todo
+        for todo in blueprint.implementation_todos:
+            if todo.get('title') == todo_title:
+                todo['status'] = 'completed'
+                todo['collected_inputs'] = {'notes': notes}
+                
+                # Update in database
+                from orgdb import update_agent_blueprint
+                update_agent_blueprint(blueprint.id, {'implementation_todos': blueprint.implementation_todos})
+                return True
+        
+        return False
+
+    def _get_pending_todos(self, blueprint) -> list:
+        """Get list of pending todos"""
+        if not blueprint.implementation_todos:
+            return []
+        
+        return [todo for todo in blueprint.implementation_todos 
+                if todo.get('status') != 'completed']
+    
+    def _convert_blueprint_to_skeleton(self, blueprint):
+        """Convert blueprint back to skeleton format for input collection phase"""
+        from .models import AgentSkeleton
+        from datetime import datetime
+        
+        blueprint_data = blueprint.agent_blueprint
+        
+        return AgentSkeleton(
+            conversation_id=blueprint.conversation_id or "unknown",
+            agent_name=blueprint_data.get("identity", {}).get("name", "Unknown Agent"),
+            agent_purpose=blueprint_data.get("identity", {}).get("purpose", ""),
+            target_users=blueprint_data.get("business_context", {}).get("target_users", ""),
+            agent_type=blueprint_data.get("identity", {}).get("type", "assistant"),
+            language=blueprint_data.get("identity", {}).get("language", "english"),
+            meet_me={"introduction": "AI Agent", "value_proposition": "Helpful assistant"},
+            what_i_do={
+                "primary_tasks": blueprint_data.get("capabilities", {}).get("tasks", []),
+                "personality": blueprint_data.get("identity", {}).get("personality", {}),
+                "sample_conversation": "Sample conversation"
+            },
+            knowledge_sources=blueprint_data.get("capabilities", {}).get("knowledge_sources", []),
+            integrations=blueprint_data.get("capabilities", {}).get("integrations", []),
+            monitoring={"reporting_method": "standard", "metrics_tracked": [], "fallback_response": "standard", "escalation_method": "standard"},
+            test_scenarios=[],
+            workflow_steps=blueprint_data.get("workflow_steps", []),
+            visual_flow="Standard workflow",
+            success_criteria=blueprint_data.get("success_criteria", []),
+            potential_challenges=blueprint_data.get("potential_challenges", []),
+            created_at=datetime.now()
+        )
+
     async def _handle_blueprint_refinement(self, request: CollaborativeAgentRequest, agent, blueprint) -> CollaborativeAgentResponse:
         """
         New unified method for handling blueprint refinement
@@ -677,8 +910,37 @@ Analyze the conversation and create agent requirements now.
         collab_logger.info(f"Checking approval for input: '{request.user_input}' → is_approval: {is_approval}")
         
         if is_approval:
-            # Handle approval - trigger compilation
-            return await self._handle_blueprint_approval(request, agent, blueprint, context, conversation_history)
+            # Handle approval - start input collection phase instead of immediate compilation
+            collab_logger.info(f"Blueprint approved! Starting input collection phase for {agent.name}")
+            
+            # Create skeleton from blueprint for input collection
+            skeleton = self._convert_blueprint_to_skeleton(blueprint)
+            
+            # Store conversation state for input collection
+            conversation = {
+                "skeleton": skeleton,
+                "state": ConversationState.BUILDING,
+                "org_id": request.org_id,
+                "user_id": request.user_id,
+                "agent_id": agent.id,
+                "blueprint_id": blueprint.id
+            }
+            
+            # Start input collection phase
+            if self.orchestrator:
+                return await self.orchestrator._start_input_collection_phase(
+                    request, skeleton, conversation
+                )
+            else:
+                collab_logger.error("Orchestrator not available for input collection")
+                return CollaborativeAgentResponse(
+                    success=False,
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.SKELETON_REVIEW,
+                    ami_message="I had trouble starting the input collection phase. Please try again.",
+                    error="Orchestrator not available",
+                    next_actions=["Try again", "Start a new conversation"]
+                )
         else:
             # Handle refinement request
             return await self._refine_blueprint_with_feedback(request, agent, blueprint, context, conversation_history)
@@ -1127,7 +1389,13 @@ Analyze the conversation and create agent requirements now.
             refinement_result = self._extract_and_parse_json(raw_response)
             
             if not refinement_result or "updated_blueprint" not in refinement_result:
-                raise ValueError("Invalid refinement response format")
+                # More specific error for JSON parsing failures
+                if not refinement_result:
+                    collab_logger.error("JSON parsing completely failed - LLM returned unparseable response")
+                    raise ValueError("The AI response couldn't be parsed - please try a simpler request")
+                else:
+                    collab_logger.error(f"Missing updated_blueprint in response: {list(refinement_result.keys())}")
+                    raise ValueError("Invalid refinement response format")
             
             # Update the blueprint in the database
             from orgdb import update_blueprint, update_agent
@@ -1507,37 +1775,28 @@ Analyze the conversation and create agent requirements now.
         collab_logger.info(f"Checking approval for input: '{request.user_input}' → is_approval: {is_approval}")
         
         if is_approval:
-            # Update state to approved
-            conversation["state"] = ConversationState.APPROVED
+            # Update state to building (not approved - we need input collection first)
+            conversation["state"] = ConversationState.BUILDING
             self.conversations[request.conversation_id] = conversation
             
-            collab_logger.info(f"Agent approved! Triggering build process for '{skeleton.agent_name}'")
+            collab_logger.info(f"Agent approved! Starting input collection phase for '{skeleton.agent_name}'")
             
-            # Create an approved request to trigger the actual building
-            approved_request = CollaborativeAgentRequest(
-                user_input=request.user_input,
-                conversation_id=request.conversation_id,
-                org_id=request.org_id,
-                user_id=request.user_id,
-                llm_provider=request.llm_provider,
-                model=request.model,
-                current_state=ConversationState.APPROVED
-            )
-            
-            # Trigger the actual agent building process using the orchestrator instance
+            # Generate todos for input collection instead of building immediately
             if self.orchestrator:
-                return await self.orchestrator._build_approved_agent(approved_request)
+                return await self.orchestrator._start_input_collection_phase(
+                    request, skeleton, conversation
+                )
             else:
                 # Fallback if orchestrator not available
-                collab_logger.error("Orchestrator not available for building agent")
-            return CollaborativeAgentResponse(
+                collab_logger.error("Orchestrator not available for input collection")
+                return CollaborativeAgentResponse(
                     success=False,
-                conversation_id=request.conversation_id,
-                current_state=ConversationState.APPROVED,
-                    ami_message="I had trouble building the agent. Please try again.",
+                    conversation_id=request.conversation_id,
+                    current_state=ConversationState.SKELETON_REVIEW,
+                    ami_message="I had trouble starting the input collection phase. Please try again.",
                     error="Orchestrator not available",
                     next_actions=["Try again", "Start a new conversation"]
-            )
+                )
         
         # Handle refinement request
         refinement_prompt = f"""
@@ -1825,7 +2084,9 @@ Analyze the conversation and create agent requirements now.
                 json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning
                 collab_logger.info(f"[{context}] Found JSON block, attempting to parse...")
                 collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
-                return json.loads(json_text)
+                
+                # Use fallback parsing instead of direct json.loads
+                return self._parse_json_with_fallbacks(json_text, context)
             
             # Method 2: Find JSON object by balancing braces
             json_text = self._extract_balanced_json(response)
@@ -1833,7 +2094,9 @@ Analyze the conversation and create agent requirements now.
                 json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning - THIS WAS MISSING!
                 collab_logger.info(f"[{context}] Found balanced JSON, attempting to parse...")
                 collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
-                return json.loads(json_text)
+                
+                # Use fallback parsing instead of direct json.loads
+                return self._parse_json_with_fallbacks(json_text, context)
             
             # Method 3: Try regex extraction (fallback)
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
@@ -1843,7 +2106,9 @@ Analyze the conversation and create agent requirements now.
                 json_text = self._clean_json_text(json_text)
                 collab_logger.info(f"[{context}] Found regex JSON, attempting to parse...")
                 collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
-                return json.loads(json_text)
+                
+                # Try multiple parsing approaches for better error recovery
+                return self._parse_json_with_fallbacks(json_text, context)
             
             collab_logger.error(f"[{context}] No JSON found in response")
             return None
@@ -1907,6 +2172,34 @@ Analyze the conversation and create agent requirements now.
             # Step 1: Remove trailing commas before closing braces/brackets
             json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
             
+            # Step 1.5: Fix common JSON issues before character-by-character cleaning
+            # Fix unescaped forward slashes in strings (common LLM issue)
+            json_text = self._fix_unescaped_slashes(json_text)
+            
+            # Step 1.6: Additional common LLM JSON fixes
+            # Fix missing quotes around property names (but not for already quoted ones)
+            json_text = re.sub(r'([^"])\b(\w+)(\s*:\s*)', r'\1"\2"\3', json_text)
+            # Fix already quoted properties (avoid double quotes)
+            json_text = re.sub(r'""(\w+)""(\s*:\s*)', r'"\1"\2', json_text)
+            
+            # Step 1.7: Fix missing commas between properties
+            # Look for patterns like: "value" "nextprop": or } "nextprop":
+            json_text = re.sub(r'(["}])\s*\n\s*(["{])', r'\1,\n\2', json_text)
+            json_text = re.sub(r'(["}])\s+(["{])', r'\1, \2', json_text)
+            
+            # Step 1.8: Fix malformed datetime strings (common LLM issue)
+            # Fix: "2025-08-"06T11":36:26.438015+"00":00" → "2025-08-06T11:36:26.438015+00:00"
+            json_text = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})\.(\d+)\+"(\d{2})":(\d{2})"', 
+                              r'"\1-\2-\3T\4:\5:\6.\7+\8:\9"', json_text)
+            
+            # Also handle simpler datetime malformations
+            json_text = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})"', 
+                              r'"\1-\2-\3T\4:\5:\6"', json_text)
+            
+            # Log if we found and fixed datetime issues (use json_text since we already extracted it)
+            if '"06T11"' in json_text or '"00":00' in json_text:
+                collab_logger.info(f"Fixed malformed datetime strings in JSON")
+            
             # Step 2: Handle control characters more carefully
             # We need to escape control characters that appear INSIDE string values
             # but preserve JSON structure newlines outside of strings
@@ -1925,7 +2218,7 @@ Analyze the conversation and create agent requirements now.
                     in_string = not in_string
                     cleaned_chars.append(char)
                 elif in_string:
-                    # Inside a string - escape control characters
+                    # Inside a string - escape control characters and special JSON chars
                     if char == '\n':
                         cleaned_chars.append('\\n')
                     elif char == '\r':
@@ -1936,6 +2229,12 @@ Analyze the conversation and create agent requirements now.
                         cleaned_chars.append('\\b')
                     elif char == '\f':
                         cleaned_chars.append('\\f')
+                    elif char == '\\' and i + 1 < len(json_text) and json_text[i + 1] not in ['n', 'r', 't', 'b', 'f', '"', '\\', '/']:
+                        # Escape backslashes that aren't already valid escape sequences
+                        cleaned_chars.append('\\\\')
+                    elif char == '"' and (i == 0 or json_text[i-1] != '\\'):
+                        # Escape unescaped quotes inside strings
+                        cleaned_chars.append('\\"')
                     elif ord(char) < 32 or ord(char) == 127:
                         # Skip other control characters
                         pass
@@ -1957,6 +2256,147 @@ Analyze the conversation and create agent requirements now.
         except Exception as e:
             collab_logger.warning(f"JSON cleaning failed: {e}, returning original text")
             return json_text
+    
+    def _fix_unescaped_slashes(self, json_text: str) -> str:
+        """Fix unescaped forward slashes in JSON strings that break parsing"""
+        try:
+            # Pattern to find strings with unescaped forward slashes
+            # This is a common issue where LLMs put paths like "/Product" without escaping
+            result = []
+            in_string = False
+            i = 0
+            
+            while i < len(json_text):
+                char = json_text[i]
+                
+                if char == '"' and (i == 0 or json_text[i-1] != '\\'):
+                    in_string = not in_string
+                    result.append(char)
+                elif in_string and char == '/' and (i == 0 or json_text[i-1] != '\\'):
+                    # Forward slash in string that's not escaped - escape it for strict parsers
+                    result.append('\\/')
+                else:
+                    result.append(char)
+                
+                i += 1
+            
+            return ''.join(result)
+            
+        except Exception as e:
+            collab_logger.error(f"Failed to fix unescaped slashes: {e}")
+            return json_text
+    
+    def _parse_json_with_fallbacks(self, json_text: str, context: str):
+        """Try multiple JSON parsing approaches with progressively more aggressive fixes"""
+        
+        # Approach 1: Direct parsing
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError as e:
+            collab_logger.warning(f"[{context}] Direct JSON parse failed: {e}")
+            
+            # Show problematic area for datetime issues
+            if hasattr(e, 'pos') and e.pos < len(json_text):
+                error_context = json_text[max(0, e.pos-30):e.pos+30]
+                collab_logger.warning(f"[{context}] Direct parse error context: ...{error_context}...")
+        
+        # Approach 2: Try with additional cleaning
+        try:
+            # More aggressive cleaning
+            cleaned = json_text
+            # Remove any trailing text after the last }
+            last_brace = cleaned.rfind('}')
+            if last_brace != -1:
+                cleaned = cleaned[:last_brace + 1]
+            
+            # Fix common issues
+            cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)  # Remove trailing commas
+            cleaned = re.sub(r'(["\w])\s*\n\s*(["\w])', r'\1, \2', cleaned)  # Fix missing commas between lines
+            
+            # Fix missing commas after numbers/booleans
+            cleaned = re.sub(r'(\d|true|false|null)\s*\n\s*"', r'\1,\n"', cleaned)
+            
+            # Fix missing commas between object properties
+            cleaned = re.sub(r'}\s*\n\s*"', r'},\n"', cleaned)
+            cleaned = re.sub(r']\s*\n\s*"', r'],\n"', cleaned)
+            
+            # Fix malformed datetime strings in aggressive cleaning too
+            cleaned = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})\.(\d+)\+"(\d{2})":(\d{2})"', 
+                           r'"\1-\2-\3T\4:\5:\6.\7+\8:\9"', cleaned)
+            cleaned = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})"', 
+                           r'"\1-\2-\3T\4:\5:\6"', cleaned)
+            
+            return json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            collab_logger.warning(f"[{context}] Cleaned JSON parse failed: {e}")
+            
+            # Try to show what's wrong at the error position
+            if hasattr(e, 'pos') and e.pos < len(cleaned):
+                error_context = cleaned[max(0, e.pos-50):e.pos+50]
+                collab_logger.warning(f"[{context}] Error context: ...{error_context}...")
+                error_char = cleaned[e.pos] if e.pos < len(cleaned) else 'EOF'
+                collab_logger.warning(f"[{context}] Problem at position {e.pos}: '{error_char}'")
+        
+        # Approach 3: Try to extract just the core data we need
+        try:
+            # Look for specific patterns we know we need
+            if 'updated_blueprint' in json_text:
+                # Try to extract just the updated_blueprint part with more flexible matching
+                # First try to find the complete updated_blueprint object
+                start_pattern = r'"updated_blueprint"\s*:\s*\{'
+                start_match = re.search(start_pattern, json_text)
+                if start_match:
+                    start_pos = start_match.start()
+                    # Find the matching closing brace for updated_blueprint
+                    brace_count = 0
+                    blueprint_start = json_text.find('{', start_match.end() - 1)
+                    if blueprint_start != -1:
+                        for i, char in enumerate(json_text[blueprint_start:], blueprint_start):
+                            if char == '{':
+                                brace_count += 1
+                            elif char == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    blueprint_content = json_text[blueprint_start:i+1]
+                                    blueprint_json = '{"updated_blueprint": ' + blueprint_content + '}'
+                                    collab_logger.info(f"[{context}] Extracted blueprint JSON: {blueprint_json[:200]}...")
+                                    return json.loads(blueprint_json)
+        except Exception as e:
+            collab_logger.warning(f"[{context}] Blueprint extraction failed: {e}")
+        
+        # Approach 4: Try to fix the JSON by finding and fixing the specific error
+        try:
+            # If we know the error position, try to fix it
+            lines = json_text.split('\n')
+            collab_logger.info(f"[{context}] Attempting line-by-line JSON repair on {len(lines)} lines")
+            
+            # Try to reconstruct valid JSON by cleaning each line
+            fixed_lines = []
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Add comma if needed (not for last property or closing braces)
+                if (line.endswith('"') or line.endswith(']') or line.endswith('}')) and \
+                   i < len(lines) - 1 and lines[i+1].strip() and \
+                   not lines[i+1].strip().startswith('}') and \
+                   not lines[i+1].strip().startswith(']') and \
+                   not line.endswith(','):
+                    line += ','
+                    
+                fixed_lines.append(line)
+            
+            fixed_json = '\n'.join(fixed_lines)
+            collab_logger.info(f"[{context}] Fixed JSON attempt: {fixed_json[:300]}...")
+            return json.loads(fixed_json)
+            
+        except Exception as e:
+            collab_logger.warning(f"[{context}] Line-by-line repair failed: {e}")
+        
+        # If all else fails, return None
+        collab_logger.error(f"[{context}] All JSON parsing approaches failed")
+        return None
     
     def _generate_contextual_refinement_suggestions(self, agent_requirements: dict, agent_name: str) -> list:
         """Generate specific refinement suggestions based on what was created"""
