@@ -1346,7 +1346,7 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
                             prompt_parts.append(f"  Use when: {', '.join(triggers)}")
                     else:
                         prompt_parts.append(f"- {tool}")
-                prompt_parts.append("")
+            prompt_parts.append("")
         
         # 4. Knowledge sources - Where to get information
         knowledge_sources = None
@@ -1373,8 +1373,8 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
                         
                         if description:
                             prompt_parts.append(f"  {description}")
-                        if update_freq:
-                            prompt_parts.append(f"  Updated: {update_freq}")
+                    if update_freq:
+                        prompt_parts.append(f"  Updated: {update_freq}")
                 else:
                     prompt_parts.append(f"- {source}")
             prompt_parts.append("")
@@ -1445,9 +1445,9 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
                                     prompt_parts.append(f"**Channel:** {value}")
                                 elif key == "email_address":
                                     prompt_parts.append(f"**Email:** {value}")
-                                else:
-                                    prompt_parts.append(f"**{key.replace('_', ' ').title()}:** {value}")
                             else:
+                                prompt_parts.append(f"**{key.replace('_', ' ').title()}:** {value}")
+                        else:
                                 # Hide sensitive information but confirm it's configured
                                 prompt_parts.append(f"**{key.replace('_', ' ').title()}:** [SECURELY CONFIGURED]")
             
@@ -1758,13 +1758,9 @@ Use this research to generate more accurate and specific todos that reflect prop
         tools = [{
             "type": "web_search_20250305",
             "name": "web_search",
-            "max_uses": 5,  # Limit searches during todo generation
-            "allowed_domains": [  # Focus on official documentation
-                "docs.microsoft.com", "developers.google.com", 
-                "api.slack.com", "developer.salesforce.com",
-                "docs.github.com", "developer.atlassian.com",
-                "help.shopify.com", "developers.hubspot.com"
-            ]
+            "max_uses": 5  # Limit searches during todo generation
+            # No domain restrictions - Claude can research ANY business software!
+            # This enables research of Vietnamese software like misa.vn, 1office.vn, etc.
         }]
         
         # API call with web search enabled
@@ -1925,7 +1921,7 @@ Return ONLY a JSON array of important terms that need research:
 If no important terms are found, return: []"""
 
         response = client.messages.create(
-            model="claude-3-haiku-20240307",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=500,
             messages=[{"role": "user", "content": analysis_prompt}]
         )

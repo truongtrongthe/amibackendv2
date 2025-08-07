@@ -361,20 +361,35 @@ Human's Latest Input: "{request.user_input}"
 
 {research_context}
 
-GUIDELINES:
-1. **Explore their vision** - Ask about specific tasks, workflows, integrations
-2. **Understand context** - What problem are they solving? Who will use it?
-3. **Clarify requirements** - What tools, data sources, or systems are needed?
-4. **Build excitement** - Help them envision how the agent will work
-5. **Don't create yet** - You're still gathering requirements
-6. **Use research** - If you researched any tools, reference that knowledge in your questions
+GUIDELINES FOR IDEATION PHASE:
+1. **SHOW UNDERSTANDING FIRST** - Demonstrate you researched their tools by mentioning specific capabilities you discovered
+2. **PROVIDE CREATIVE IDEAS** - Based on research, suggest innovative ways the agent could work beyond basic requirements
+3. **EXPAND THEIR VISION** - Use research insights to propose features they might not have considered
+4. **BE INSPIRATIONAL** - Help them see the full potential of what's possible with these tools
+5. **ASK EXPLORATORY QUESTIONS** - Focus on "What if we could..." rather than technical implementation details
+6. **REFERENCE SPECIFIC CAPABILITIES** - Show you understand their business context by mentioning researched features
+
+EXAMPLE IDEATION RESPONSES:
+- SHOW UNDERSTANDING: "I see you're using 1Office.vn - that's Vietnam's comprehensive enterprise management platform with automated reporting capabilities, and Shopee, the largest e-commerce platform in Southeast Asia with $47.9B GMV..."
+
+- EXPAND VISION: "What if your agent could go beyond basic reconciliation? Since 1Office.vn has automated Excel formulas, we could create predictive analytics to flag potential issues before they happen..."
+
+- CREATIVE IDEAS: "Given Shopee's escrow service and 1Office.vn's flexible integrations, we could build an intelligent agent that not only reconciles but also predicts cash flow patterns and suggests optimal inventory levels..."
 
 RESPONSE FORMAT:
+You MUST return a valid JSON object with these exact fields:
 {{
-    "ami_message": "Your conversational response with 2-3 follow-up questions",
-    "suggestions": ["2-3 specific suggestions or questions"],
-    "agent_concept": "Brief summary of the agent concept so far (if any)"
+    "ami_message": "Start by showing understanding of their researched tools, then provide 2-3 creative ideas or 'What if we could...' questions to expand their vision",
+    "suggestions": ["2-3 innovative suggestions based on research insights, not basic technical questions"],
+    "agent_concept": "Enhanced concept summary that incorporates research findings and suggests advanced capabilities"
 }}
+
+CRITICAL: 
+- Return ONLY valid JSON - no markdown, no extra text
+- Properly escape all quotes in strings using \"
+- Ensure all strings are properly quoted
+- No trailing commas
+- Test your JSON before responding
 
 Be conversational, curious, and helpful. Focus on understanding their vision deeply.
 """
@@ -396,8 +411,13 @@ Be conversational, curious, and helpful. Focus on understanding their vision dee
                 )
                 raw_response = response.choices[0].message.content
             
-            # Parse LLM response
-            conversation_result = self._extract_and_parse_json(raw_response, "conversation")
+            # Parse LLM response - should be clean JSON now!
+            import json
+            try:
+                conversation_result = json.loads(raw_response)
+            except json.JSONDecodeError as e:
+                collab_logger.error(f"LLM returned invalid JSON: {e}")
+                conversation_result = None
             
             if not conversation_result:
                 # Fallback response
@@ -489,38 +509,56 @@ Format as:
 **Term**: Brief description, business context, technical details, implementation notes."""
 
             response = client.messages.create(
-                model="claude-3-haiku-20240307",
+                model="claude-3-5-sonnet-20241022",
                 max_tokens=1000,
                 tools=[{
                     "type": "web_search_20250305",
-                    "web_search": {
-                        "max_uses": 5,
-                        "allowed_domains": [
-                            "docs.microsoft.com",
-                            "developers.google.com", 
-                            "api.slack.com",
-                            "developer.salesforce.com",
-                            "docs.github.com",
-                            "help.shopify.com",
-                            "developers.hubspot.com"
-                        ]
-                    }
+                    "name": "web_search",
+                    "max_uses": 5
+                    # No domain restrictions - Claude can search the entire web!
+                    # This allows research of any business software: misa.vn, 1office.vn, etc.
                 }],
                 messages=[{"role": "user", "content": research_prompt}]
             )
             
-            research_results = response.content[0].text
+            # 🚨 DEBUG: Log the full response structure to understand what we got
+            collab_logger.info(f"🔍 ANTHROPIC RESPONSE STRUCTURE:")
+            collab_logger.info(f"   Response type: {type(response)}")
+            collab_logger.info(f"   Content blocks: {len(response.content)}")
+            for i, block in enumerate(response.content):
+                collab_logger.info(f"   Block {i}: type={getattr(block, 'type', 'unknown')}")
+                if hasattr(block, 'text'):
+                    collab_logger.info(f"   Block {i}: text_length={len(block.text)}")
+            
+            # Extract ALL text content from the response, not just the first block
+            research_results = ""
+            for i, block in enumerate(response.content):
+                if hasattr(block, 'text') and block.text:
+                    research_results += block.text
+                    collab_logger.info(f"   Block {i} text: {block.text[:100]}...")
+                elif hasattr(block, 'type'):
+                    collab_logger.info(f"   Block {i}: {block.type} (no text content)")
+            
+            # If no text found, use a fallback
+            if not research_results.strip():
+                research_results = "Research completed but no detailed results were extracted."
             
             collab_logger.info(f"🌐 Research completed for conversation terms")
             collab_logger.info(f"   Terms researched: {', '.join(important_terms)}")
+            collab_logger.info(f"🔍 RESEARCH RESULTS:")
+            collab_logger.info(f"{research_results}")
+            collab_logger.info(f"🔍 END RESEARCH RESULTS")
             
             # Return formatted research context
             return f"""
-RESEARCH CONTEXT (for your reference):
-I've researched the important business terms/concepts the user mentioned:
+RESEARCH INSIGHTS (use this to ask specific questions):
 {research_results}
 
-Use this knowledge to ask more informed questions about their specific business needs and technical requirements.
+ACTIONABLE GUIDANCE:
+- Reference specific API capabilities, rate limits, or data formats you learned
+- Ask about integration patterns mentioned in the research
+- Suggest implementation approaches based on discovered technical details
+- Show you understand their business context from the research findings
 """
             
         except Exception as e:
@@ -2161,614 +2199,5 @@ Analyze the conversation and create agent requirements now.
             collab_logger.error(f"LLM call failed: {e}")
             raise Exception(f"LLM call failed: {str(e)}")
     
-    def _extract_and_parse_json(self, response: str, context: str = "unknown") -> Optional[Dict[str, Any]]:
-        """
-        Robust JSON extraction and parsing from LLM responses
-        """
-        import re
-        import json
-        
-        # 🚨 CRITICAL DEBUG: Log the FULL LLM response to understand JSON issues
-        collab_logger.info(f"[{context}] 🚨 FULL LLM RESPONSE DEBUG:")
-        collab_logger.info(f"[{context}] Starting JSON extraction from response length: {len(response)}")
-        collab_logger.info(f"[{context}] Response preview: {response[:200]}...")
-        collab_logger.info(f"[{context}] ===== RAW RESPONSE START =====")
-        collab_logger.info(f"[{context}] {repr(response)}")
-        collab_logger.info(f"[{context}] ===== RAW RESPONSE END =====")
-        collab_logger.info(f"[{context}] ===== VISIBLE RESPONSE START =====")
-        collab_logger.info(f"[{context}] {response}")
-        collab_logger.info(f"[{context}] ===== VISIBLE RESPONSE END =====")
-        
-        try:
-            # Method 1: Try to find JSON block with ```json markers
-            json_block_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
-            if json_block_match:
-                json_text = json_block_match.group(1)
-                json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning
-                collab_logger.info(f"[{context}] Found JSON block, attempting to parse...")
-                collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
-                
-                # Use fallback parsing instead of direct json.loads
-                return self._parse_json_with_fallbacks(json_text, context)
-            
-            # Method 2: Find JSON object by balancing braces
-            json_text = self._extract_balanced_json(response)
-            if json_text:
-                collab_logger.info(f"[{context}] 🔍 EXTRACTED BALANCED JSON (raw):")
-                collab_logger.info(f"[{context}] {repr(json_text)}")
-                collab_logger.info(f"[{context}] 🔍 EXTRACTED BALANCED JSON (visible):")
-                collab_logger.info(f"[{context}] {json_text}")
-                
-                json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning - THIS WAS MISSING!
-                collab_logger.info(f"[{context}] Found balanced JSON, attempting to parse...")
-                collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
-                
-                # Use fallback parsing instead of direct json.loads
-                return self._parse_json_with_fallbacks(json_text, context)
-            
-            # Method 3: Try regex extraction (fallback)
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                json_text = json_match.group(0)
-                # Clean up common JSON issues
-                json_text = self._clean_json_text(json_text)
-                collab_logger.info(f"[{context}] Found regex JSON, attempting to parse...")
-                collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
-                
-                # Try multiple parsing approaches for better error recovery
-                return self._parse_json_with_fallbacks(json_text, context)
-            
-            collab_logger.error(f"[{context}] No JSON found in response")
-            return None
-            
-        except json.JSONDecodeError as e:
-            collab_logger.error(f"[{context}] JSON decode error: {e}")
-            if 'json_text' in locals():
-                collab_logger.error(f"[{context}] Error at position: {getattr(e, 'pos', 'unknown')}")
-                collab_logger.error(f"[{context}] Problematic JSON (first 400 chars): {json_text[:400]}...")
-                # Show the character at the error position
-                if hasattr(e, 'pos') and e.pos < len(json_text):
-                    error_char = json_text[e.pos] if e.pos < len(json_text) else 'EOF'
-                    error_code = ord(error_char) if error_char != 'EOF' else 'N/A'
-                    collab_logger.error(f"[{context}] Character at error position {e.pos}: '{error_char}' (ASCII: {error_code})")
-            else:
-                collab_logger.error(f"[{context}] No json_text available for debugging")
-            return None
-        except Exception as e:
-            collab_logger.error(f"[{context}] JSON extraction error: {e}")
-            return None
-    
-    def _extract_balanced_json(self, text: str) -> Optional[str]:
-        """Extract JSON by balancing braces"""
-        try:
-            start_idx = text.find('{')
-            if start_idx == -1:
-                return None
-            
-            brace_count = 0
-            in_string = False
-            escape_next = False
-            
-            for i, char in enumerate(text[start_idx:], start_idx):
-                if escape_next:
-                    escape_next = False
-                    continue
-                    
-                if char == '\\':
-                    escape_next = True
-                    continue
-                    
-                if char == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                    
-                if not in_string:
-                    if char == '{':
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            return text[start_idx:i+1]
-            
-            return None
-        except Exception:
-            return None
-    
-    def _clean_json_text(self, json_text: str) -> str:
-        """Clean common JSON formatting issues and control characters"""
-        try:
-            # Save original input for comparison at the end
-            original_input = json_text
-            
-            # DEBUG: Log that we're entering the cleaning function
-            collab_logger.info(f"🧹 JSON cleaning started - input length: {len(json_text)}")
-            if '\\' in json_text:
-                collab_logger.info(f"🔍 Found backslashes in JSON - investigating...")
-                backslash_count = json_text.count('\\')
-                collab_logger.info(f"   Backslash count: {backslash_count}")
-                # Show first occurrence
-                first_backslash = json_text.find('\\')
-                if first_backslash >= 0:
-                    start = max(0, first_backslash - 10)
-                    end = min(len(json_text), first_backslash + 30)
-                    collab_logger.info(f"   First backslash context: {repr(json_text[start:end])}")
-            else:
-                collab_logger.info(f"🔍 No backslashes found in JSON input")
-            # Step 1: Remove trailing commas before closing braces/brackets
-            json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
-            
-            # Step 1.5: Fix common JSON issues before character-by-character cleaning
-            # Fix unescaped forward slashes in strings (common LLM issue)
-            json_text = self._fix_unescaped_slashes(json_text)
-            
-            # Step 1.6: Additional common LLM JSON fixes
-            # Fix missing quotes around property names (but not for already quoted ones)
-            json_text = re.sub(r'([^"])\b(\w+)(\s*:\s*)', r'\1"\2"\3', json_text)
-            # Fix already quoted properties (avoid double quotes)
-            json_text = re.sub(r'""(\w+)""(\s*:\s*)', r'"\1"\2', json_text)
-            
-            # Fix escaped quotes in property names (LLM error)
-            # From logs: \"suggestions\": appears as literal backslash-quote in JSON
-            original_text = json_text
-            
-            # Debug: Check if we have the problematic pattern
-            # Look for both single and double backslash patterns AND any other patterns
-            has_single_backslash_quote = '\\\"' in json_text
-            has_double_backslash_quote = '\\\\\"' in json_text
-            has_any_backslash = '\\' in json_text
-            
-            # Check for the specific patterns that cause issues
-            has_suggestions_pattern = '\"suggestions\"' in json_text and '\\' in json_text
-            
-            collab_logger.info(f"🚨 DETAILED BACKSLASH ANALYSIS:")
-            collab_logger.info(f"   Has any backslash: {has_any_backslash}")
-            collab_logger.info(f"   Single backslash pattern (\\\"): {has_single_backslash_quote}")
-            collab_logger.info(f"   Double backslash pattern (\\\\\"): {has_double_backslash_quote}")
-            collab_logger.info(f"   Suggestions with backslash: {has_suggestions_pattern}")
-            
-            if has_any_backslash:
-                # Find all backslash positions
-                backslash_positions = [i for i, c in enumerate(json_text) if c == '\\']
-                collab_logger.info(f"   Backslash positions: {backslash_positions[:10]}")  # Show first 10
-                
-                # Show context around each backslash
-                for i, pos in enumerate(backslash_positions[:3]):  # Show first 3
-                    start = max(0, pos - 15)
-                    end = min(len(json_text), pos + 15)
-                    context = json_text[start:end]
-                    collab_logger.info(f"   Backslash {i+1} context: {repr(context)}")
-            
-            if has_single_backslash_quote or has_double_backslash_quote or has_suggestions_pattern:
-                collab_logger.info(f"   🔧 Applying backslash fixes...")
-            
-            # Handle various forms of incorrectly escaped property names
-            # Pattern 1: \"property\": -> "property": (single backslash before)
-            before_p1 = json_text
-            json_text = re.sub(r'\\\"(\w+)\"(\s*:\s*)', r'"\1"\2', json_text)
-            if json_text != before_p1:
-                collab_logger.info(f"Pattern 1 (\\\"word\":) applied fix")
-            
-            # Pattern 2: \"property\": -> "property": (single backslash both sides)
-            before_p2 = json_text
-            json_text = re.sub(r'\\\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', json_text)
-            if json_text != before_p2:
-                collab_logger.info(f"Pattern 2 (\\\"word\\\":) applied fix - CRITICAL PATTERN")
-            
-            # Pattern 3: "property\": -> "property": (single backslash after)
-            before_p3 = json_text
-            json_text = re.sub(r'\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', json_text)
-            if json_text != before_p3:
-                collab_logger.info(f"Pattern 3 (\"word\\\":) applied fix")
-            
-            # Pattern 4: \"property\\": -> "property": (double backslash after) - NEW FROM LOGS
-            before_p4 = json_text
-            json_text = re.sub(r'\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', json_text)
-            if json_text != before_p4:
-                collab_logger.info(f"Pattern 4 (\\\"word\\\\\":) applied fix - NEW PATTERN")
-            
-            # Pattern 5: \\\"property\\\": -> "property": (double backslashes both sides)
-            before_p5 = json_text
-            json_text = re.sub(r'\\\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', json_text)
-            if json_text != before_p5:
-                collab_logger.info(f"Pattern 5 (\\\\\"word\\\\\":) applied fix")
-            
-            # Pattern 6: More aggressive - any combination of backslashes around property names
-            before_p6 = json_text
-            json_text = re.sub(r'\\*\"(\w+)\\*\"(\s*:\s*)', r'"\1"\2', json_text)
-            if json_text != before_p6:
-                collab_logger.info(f"Pattern 6 (aggressive backslash cleanup) applied fix")
-            
-            # CRITICAL: Fix backslashes in JSON VALUES too (not just property names)
-            before_values = json_text
-            
-            # Pattern: "property": \"value" -> "property": "value"
-            json_text = re.sub(r'(\"\s*:\s*)\\\"([^"]*)"', r'\1"\2"', json_text)
-            
-            # Pattern: "property": "value\" -> "property": "value"  
-            json_text = re.sub(r'(\"\s*:\s*\"[^"]*)\\\"', r'\1"', json_text)
-            
-            # More aggressive value cleaning - remove any backslashes before quotes in values
-            json_text = re.sub(r'(\"\s*:\s*)\\+\"', r'\1"', json_text)
-            
-            if json_text != before_values:
-                collab_logger.info(f"Pattern 7 (JSON value backslash fixes) applied fix")
-            
-            # Log if we fixed escaped property names or values
-            if original_text != json_text:
-                collab_logger.info(f"✅ Successfully fixed escaped quotes in JSON (properties + values)")
-            else:
-                if '\\\"' in original_text:
-                    collab_logger.warning(f"❌ Found backslash-quote pattern but no fixes were applied!")
-            
-            # Step 1.7: Fix missing commas between properties
-            # Look for patterns like: "value" "nextprop": or } "nextprop":
-            json_text = re.sub(r'(["}])\s*\n\s*(["{])', r'\1,\n\2', json_text)
-            json_text = re.sub(r'(["}])\s+(["{])', r'\1, \2', json_text)
-            
-            # Step 1.8: Fix malformed datetime strings (common LLM issue)
-            # Fix: "2025-08-"06T11":36:26.438015+"00":00" → "2025-08-06T11:36:26.438015+00:00"
-            json_text = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})\.(\d+)\+"(\d{2})":(\d{2})"', 
-                              r'"\1-\2-\3T\4:\5:\6.\7+\8:\9"', json_text)
-            
-            # Also handle simpler datetime malformations
-            json_text = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})"', 
-                              r'"\1-\2-\3T\4:\5:\6"', json_text)
-            
-            # Log if we found and fixed datetime issues (use json_text since we already extracted it)
-            if '"06T11"' in json_text or '"00":00' in json_text:
-                collab_logger.info(f"Fixed malformed datetime strings in JSON")
-            
-            # Step 1.9: Fix unescaped quotes in test scenarios (common LLM issue)
-            # Fix: "Scenario "1": Success..." → "Scenario \"1\": Success..."
-            
-            # First, handle the specific case from the logs: 'Scenario "1": text'
-            # This pattern matches: "Scenario "NUMBER": anything" 
-            json_text = re.sub(r'"(Scenario\s+)"(\d+)"\s*:\s*([^"]+)"', r'"\1\"\2\": \3"', json_text)
-            
-            # Handle similar patterns with other quoted identifiers in strings
-            # Pattern: "prefix "identifier": suffix" → "prefix \"identifier\": suffix"
-            json_text = re.sub(r'"([^"]*)\s+"([^"]+)"\s*:\s*([^"]*)"', r'"\1 \"\2\": \3"', json_text)
-            
-            # More general fix for strings with embedded quotes (but be careful not to break valid JSON)
-            # This handles cases where there are unescaped quotes within a JSON string value
-            def fix_embedded_quotes_safe(text):
-                # Split by lines and process each line to avoid breaking JSON structure
-                lines = text.split('\n')
-                fixed_lines = []
-                
-                for line in lines:
-                    # Look for lines that have the pattern: "text with "embedded" quotes"
-                    # But avoid breaking valid JSON structure
-                    if line.strip().endswith('"') and line.count('"') > 2:
-                        # Count quotes to see if we have an odd number (indicating unescaped quotes)
-                        quote_count = line.count('"')
-                        if quote_count % 2 == 0 and quote_count > 2:
-                            # Likely has unescaped quotes - fix them
-                            # Find the first and last quote (these should remain)
-                            first_quote = line.find('"')
-                            last_quote = line.rfind('"')
-                            if first_quote != last_quote:
-                                # Get the content between first and last quote
-                                prefix = line[:first_quote+1]
-                                content = line[first_quote+1:last_quote]
-                                suffix = line[last_quote:]
-                                # Escape internal quotes in the content
-                                fixed_content = content.replace('"', '\\"')
-                                line = prefix + fixed_content + suffix
-                    fixed_lines.append(line)
-                
-                return '\n'.join(fixed_lines)
-            
-            # DISABLED: This function was incorrectly "fixing" valid JSON by adding backslashes
-            # The OpenAI JSON is already valid - no need to process it
-            # json_text = fix_embedded_quotes_safe(json_text)
-            
-            # Log if we found and fixed quote issues (now disabled)
-            # if '\\"' in json_text:
-            #     collab_logger.info(f"Fixed unescaped quotes in JSON strings")
-            
-            collab_logger.info(f"Skipped quote fixing - JSON is already valid from OpenAI")
-            
-            # Step 2: Handle control characters more carefully
-            # We need to escape control characters that appear INSIDE string values
-            # but preserve JSON structure newlines outside of strings
-            
-            # Replace control characters with their escaped equivalents
-            # Do this character by character to avoid issues
-            cleaned_chars = []
-            in_string = False
-            i = 0
-            
-            while i < len(json_text):
-                char = json_text[i]
-                
-                # Track if we're inside a string value
-                if char == '"' and (i == 0 or json_text[i-1] != '\\'):
-                    in_string = not in_string
-                    cleaned_chars.append(char)
-                elif in_string:
-                    # Inside a string - escape control characters and special JSON chars
-                    if char == '\n':
-                        cleaned_chars.append('\\n')
-                    elif char == '\r':
-                        cleaned_chars.append('\\r')
-                    elif char == '\t':
-                        cleaned_chars.append('\\t')
-                    elif char == '\b':
-                        cleaned_chars.append('\\b')
-                    elif char == '\f':
-                        cleaned_chars.append('\\f')
-                    elif char == '\\' and i + 1 < len(json_text) and json_text[i + 1] not in ['n', 'r', 't', 'b', 'f', '"', '\\', '/']:
-                        # Escape backslashes that aren't already valid escape sequences
-                        cleaned_chars.append('\\\\')
-                    elif char == '"' and (i == 0 or json_text[i-1] != '\\'):
-                        # Escape unescaped quotes inside strings
-                        cleaned_chars.append('\\"')
-                    elif ord(char) < 32 or ord(char) == 127:
-                        # Skip other control characters
-                        pass
-                    else:
-                        cleaned_chars.append(char)
-                else:
-                    # Outside string - keep structural characters, clean others
-                    if ord(char) < 32 and char not in ['\n', '\r', '\t', ' ']:
-                        # Remove problematic control chars but keep whitespace
-                        pass
-                    else:
-                        cleaned_chars.append(char)
-                
-                i += 1
-            
-            final_result = ''.join(cleaned_chars)
-            
-            # DEBUG: Log the final result
-            collab_logger.info(f"🧹 JSON cleaning completed")
-            if final_result != original_input:
-                collab_logger.info(f"   ✅ Changes made during cleaning")
-                # Show a diff sample
-                if len(original_input) > 100:
-                    collab_logger.info(f"   Before: {repr(original_input[:100])}...")
-                    collab_logger.info(f"   After:  {repr(final_result[:100])}...")
-            else:
-                collab_logger.info(f"   ℹ️  No changes made during cleaning")
-            
-            return final_result
-        except Exception as e:
-            collab_logger.warning(f"JSON cleaning failed: {e}, returning original text")
-            return json_text
-    
-    def _fix_unescaped_slashes(self, json_text: str) -> str:
-        """Fix unescaped forward slashes in JSON strings that break parsing"""
-        try:
-            # Pattern to find strings with unescaped forward slashes
-            # This is a common issue where LLMs put paths like "/Product" without escaping
-            result = []
-            in_string = False
-            i = 0
-            
-            while i < len(json_text):
-                char = json_text[i]
-                
-                if char == '"' and (i == 0 or json_text[i-1] != '\\'):
-                    in_string = not in_string
-                    result.append(char)
-                elif in_string and char == '/' and (i == 0 or json_text[i-1] != '\\'):
-                    # Forward slash in string that's not escaped - escape it for strict parsers
-                    result.append('\\/')
-                else:
-                    result.append(char)
-                
-                i += 1
-            
-            return ''.join(result)
-            
-        except Exception as e:
-            collab_logger.error(f"Failed to fix unescaped slashes: {e}")
-            return json_text
-    
-    def _parse_json_with_fallbacks(self, json_text: str, context: str):
-        """Try multiple JSON parsing approaches with progressively more aggressive fixes"""
-        
-        # 🚨 DEBUG: Log what we're actually trying to parse
-        collab_logger.info(f"[{context}] 🚨 FALLBACK PARSER INPUT:")
-        collab_logger.info(f"[{context}] Input length: {len(json_text)}")
-        collab_logger.info(f"[{context}] Input (raw): {repr(json_text[:500])}...")
-        collab_logger.info(f"[{context}] Input (visible): {json_text[:500]}...")
-        
-        # Approach 1: Direct parsing
-        try:
-            return json.loads(json_text)
-        except json.JSONDecodeError as e:
-            collab_logger.warning(f"[{context}] Direct JSON parse failed: {e}")
-            
-            # Show problematic area for datetime issues
-            if hasattr(e, 'pos') and e.pos < len(json_text):
-                error_context = json_text[max(0, e.pos-30):e.pos+30]
-                collab_logger.warning(f"[{context}] Direct parse error context: ...{error_context}...")
-        
-        # Approach 2: Try with additional cleaning
-        try:
-            # More aggressive cleaning
-            cleaned = json_text
-            # Remove any trailing text after the last }
-            last_brace = cleaned.rfind('}')
-            if last_brace != -1:
-                cleaned = cleaned[:last_brace + 1]
-            
-            # Fix common issues
-            cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)  # Remove trailing commas
-            cleaned = re.sub(r'(["\w])\s*\n\s*(["\w])', r'\1, \2', cleaned)  # Fix missing commas between lines
-            
-            # Fix missing commas after numbers/booleans
-            cleaned = re.sub(r'(\d|true|false|null)\s*\n\s*"', r'\1,\n"', cleaned)
-            
-            # Fix missing commas between object properties
-            cleaned = re.sub(r'}\s*\n\s*"', r'},\n"', cleaned)
-            cleaned = re.sub(r']\s*\n\s*"', r'],\n"', cleaned)
-            
-            # Fix malformed datetime strings in aggressive cleaning too
-            cleaned = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})\.(\d+)\+"(\d{2})":(\d{2})"', 
-                           r'"\1-\2-\3T\4:\5:\6.\7+\8:\9"', cleaned)
-            cleaned = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})"', 
-                           r'"\1-\2-\3T\4:\5:\6"', cleaned)
-            
-            # CRITICAL FIX: Add backslash quote fixes to fallback parsing
-            # Fix escaped quotes in property names (the main issue from logs)
-            
-            # Pattern 1: \"word": -> "word": (single backslash before)
-            cleaned = re.sub(r'\\\"(\w+)\"(\s*:\s*)', r'"\1"\2', cleaned)
-            
-            # Pattern 2: \"word\": -> "word": (single backslash both sides)  
-            cleaned = re.sub(r'\\\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', cleaned)
-            
-            # Pattern 3: "word\": -> "word": (single backslash after)
-            cleaned = re.sub(r'\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', cleaned)
-            
-            # Pattern 4: \"word\\": -> "word": (double backslash after) - NEW FROM LOGS
-            cleaned = re.sub(r'\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', cleaned)
-            
-            # Pattern 5: \\\"word\\\": -> "word": (double backslashes both sides)
-            cleaned = re.sub(r'\\\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', cleaned)
-            
-            # Pattern 6: More aggressive - any combination of backslashes around property names
-            cleaned = re.sub(r'\\*\"(\w+)\\*\"(\s*:\s*)', r'"\1"\2', cleaned)
-            
-            # CRITICAL: Fix backslashes in JSON VALUES too (not just property names)
-            # Pattern: "property": \"value" -> "property": "value"
-            cleaned = re.sub(r'(\"\s*:\s*)\\\"([^"]*)"', r'\1"\2"', cleaned)
-            
-            # Pattern: "property": "value\" -> "property": "value"  
-            cleaned = re.sub(r'(\"\s*:\s*\"[^"]*)\\\"', r'\1"', cleaned)
-            
-            # More aggressive value cleaning - remove any backslashes before quotes in values
-            cleaned = re.sub(r'(\"\s*:\s*)\\+\"', r'\1"', cleaned)
-            
-            collab_logger.info(f"[{context}] Applied comprehensive backslash fixes (properties + values) in fallback parsing")
-            
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            collab_logger.warning(f"[{context}] Cleaned JSON parse failed: {e}")
-            
-            # Try to show what's wrong at the error position
-            if hasattr(e, 'pos') and e.pos < len(cleaned):
-                error_context = cleaned[max(0, e.pos-50):e.pos+50]
-                collab_logger.warning(f"[{context}] Error context: ...{error_context}...")
-                error_char = cleaned[e.pos] if e.pos < len(cleaned) else 'EOF'
-                collab_logger.warning(f"[{context}] Problem at position {e.pos}: '{error_char}'")
-        
-        # Approach 3: Try to extract just the core data we need
-        try:
-            # Look for specific patterns we know we need
-            if 'updated_blueprint' in json_text:
-                # Try to extract just the updated_blueprint part with more flexible matching
-                # First try to find the complete updated_blueprint object
-                start_pattern = r'"updated_blueprint"\s*:\s*\{'
-                start_match = re.search(start_pattern, json_text)
-                if start_match:
-                    start_pos = start_match.start()
-                    # Find the matching closing brace for updated_blueprint
-                    brace_count = 0
-                    blueprint_start = json_text.find('{', start_match.end() - 1)
-                    if blueprint_start != -1:
-                        for i, char in enumerate(json_text[blueprint_start:], blueprint_start):
-                            if char == '{':
-                                brace_count += 1
-                            elif char == '}':
-                                brace_count -= 1
-                                if brace_count == 0:
-                                    blueprint_content = json_text[blueprint_start:i+1]
-                                    blueprint_json = '{"updated_blueprint": ' + blueprint_content + '}'
-                                    collab_logger.info(f"[{context}] Extracted blueprint JSON: {blueprint_json[:200]}...")
-                                    return json.loads(blueprint_json)
-        except Exception as e:
-            collab_logger.warning(f"[{context}] Blueprint extraction failed: {e}")
-        
-        # Approach 4: Try to fix the JSON by finding and fixing the specific error
-        try:
-            # If we know the error position, try to fix it
-            lines = json_text.split('\n')
-            collab_logger.info(f"[{context}] Attempting line-by-line JSON repair on {len(lines)} lines")
-            
-            # Try to reconstruct valid JSON by cleaning each line
-            fixed_lines = []
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                # Add comma if needed (not for last property or closing braces)
-                if (line.endswith('"') or line.endswith(']') or line.endswith('}')) and \
-                   i < len(lines) - 1 and lines[i+1].strip() and \
-                   not lines[i+1].strip().startswith('}') and \
-                   not lines[i+1].strip().startswith(']') and \
-                   not line.endswith(','):
-                    line += ','
-                    
-                fixed_lines.append(line)
-            
-            fixed_json = '\n'.join(fixed_lines)
-            collab_logger.info(f"[{context}] Fixed JSON attempt: {fixed_json[:300]}...")
-            return json.loads(fixed_json)
-            
-        except Exception as e:
-            collab_logger.warning(f"[{context}] Line-by-line repair failed: {e}")
-        
-        # If all else fails, return None
-        collab_logger.error(f"[{context}] All JSON parsing approaches failed")
-        return None
-    
-    def _generate_contextual_refinement_suggestions(self, agent_requirements: dict, agent_name: str) -> list:
-        """Generate specific refinement suggestions based on what was created"""
-        suggestions = []
-        
-        # Analyze what was created and suggest improvements
-        agent_type = agent_requirements.get("agent_type", "assistant")
-        key_tasks = agent_requirements.get("key_tasks", [])
-        integrations = agent_requirements.get("integrations", [])
-        purpose = agent_requirements.get("purpose", "")
-        
-        # Task-specific suggestions
-        if "log" in purpose.lower() or any("log" in task.lower() for task in key_tasks):
-            suggestions.extend([
-                "Configure specific log file paths and formats to monitor",
-                "Define critical error patterns and alert thresholds"
-            ])
-        
-        if "slack" in purpose.lower() or any("slack" in integration.lower() for integration in integrations):
-            suggestions.extend([
-                "Set up Slack channel and notification preferences",
-                "Configure message templates for different alert types"
-            ])
-        
-        # Integration-based suggestions
-        if len(integrations) == 0:
-            suggestions.append("Add integrations with tools your team uses")
-        elif len(integrations) < 3:
-            suggestions.append("Consider additional integrations for complete workflow")
-        
-        # Task-based suggestions  
-        if len(key_tasks) <= 2:
-            suggestions.append("Define more specific tasks and responsibilities")
-        
-        # Type-specific suggestions
-        if agent_type == "support":
-            suggestions.extend([
-                "Set up escalation procedures for critical issues",
-                "Define response time expectations"
-            ])
-        
-        # Generic fallbacks if no specific suggestions
-        if not suggestions:
-            suggestions = [
-                f"Review {agent_name}'s task priorities and capabilities",
-                "Add specific integrations for your workflow",
-                "Test the agent with sample scenarios"
-            ]
-        
-        # Always include these
-        suggestions.extend([
-            f"Preview {agent_name}'s full blueprint configuration",
-            "Test and approve the agent for production use"
-        ])
-        
-        return suggestions[:6]  # Limit to 6 suggestions
+    # DELETED: All JSON cleanup functions - no longer needed!
+    # The LLM now returns proper JSON from the start.
