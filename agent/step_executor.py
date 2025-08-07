@@ -138,40 +138,40 @@ class StepExecutor:
                         if chunk.get("type") == "response_chunk":
                             step_response_chunks.append(chunk.get("content", ""))
                 
-                                        # Combine response with logging
-                        step_response = "".join(step_response_chunks)
-                        step_execution_time = (datetime.now() - step_start_time).total_seconds()
-                        
-                        logger.info(f"   📊 Step execution completed:")
-                        logger.info(f"      ⏱️  Execution time: {step_execution_time:.2f}s")
-                        logger.info(f"      🔧 Tools used: {list(set(tool_calls_made))}")
-                        logger.info(f"      📄 Response length: {len(step_response)} chars")
-                        logger.info(f"      📦 Chunks received: {len(step_response_chunks)}")
+                # Combine response with logging
+                step_response = "".join(step_response_chunks)
+                step_execution_time = (datetime.now() - step_start_time).total_seconds()
+                
+                logger.info(f"   📊 Step execution completed:")
+                logger.info(f"      ⏱️  Execution time: {step_execution_time:.2f}s")
+                logger.info(f"      🔧 Tools used: {list(set(tool_calls_made))}")
+                logger.info(f"      📄 Response length: {len(step_response)} chars")
+                logger.info(f"      📦 Chunks received: {len(step_response_chunks)}")
 
-                        # Validate step success criteria
-                        success_criteria_met = len(step_response.strip()) > 0  # Basic validation: non-empty response
-                        step_status = "completed" if success_criteria_met else "failed"
-                        
-                        if not success_criteria_met:
-                            logger.warning(f"   ⚠️  Step {step.step_number} completed but failed success criteria:")
-                            logger.warning(f"      📄 Response empty: {len(step_response)} chars")
-                            logger.warning(f"      📦 No chunks received: {len(step_response_chunks)} chunks")
-                            logger.warning(f"      🔧 Tools used: {list(set(tool_calls_made))}")
-                        
-                        # Create step result
-                        step_result = StepExecutionResult(
-                            step_number=step.step_number,
-                            status=step_status,
-                            deliverable={
-                                "response": step_response,
-                                "summary": f"Step {step.step_number} {step_status}: {step.name}"
-                            },
-                            tools_used=list(set(tool_calls_made)),
-                            execution_time=step_execution_time,
-                            success_criteria_met=success_criteria_met,
-                            validation_results=["Response content validation"],
-                            next_actions=[] if success_criteria_met else ["Retry step", "Check LLM response flow"]
-                        )
+                # Validate step success criteria
+                success_criteria_met = len(step_response.strip()) > 0  # Basic validation: non-empty response
+                step_status = "completed" if success_criteria_met else "failed"
+                
+                if not success_criteria_met:
+                    logger.warning(f"   ⚠️  Step {step.step_number} completed but failed success criteria:")
+                    logger.warning(f"      📄 Response empty: {len(step_response)} chars")
+                    logger.warning(f"      📦 No chunks received: {len(step_response_chunks)} chunks")
+                    logger.warning(f"      🔧 Tools used: {list(set(tool_calls_made))}")
+                
+                # Create step result
+                step_result = StepExecutionResult(
+                    step_number=step.step_number,
+                    status=step_status,
+                    deliverable={
+                        "response": step_response,
+                        "summary": f"Step {step.step_number} {step_status}: {step.name}"
+                    },
+                    tools_used=list(set(tool_calls_made)),
+                    execution_time=step_execution_time,
+                    success_criteria_met=success_criteria_met,
+                    validation_results=["Response content validation"],
+                    next_actions=[] if success_criteria_met else ["Retry step", "Check LLM response flow"]
+                )
                 
                 step_results[step.step_number] = step_result
                 

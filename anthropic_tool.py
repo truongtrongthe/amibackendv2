@@ -46,9 +46,9 @@ class AnthropicTool:
         """Get appropriate max_tokens based on model"""
         # Claude-3-5-haiku has a lower limit
         if "haiku" in self.model.lower():
-            return 8192  # Haiku model limit
-        # All other models support higher limits
-        return 10000
+            return 4096  # Haiku model limit
+        # All other models support Sonnet limits
+        return 8192  # Sonnet model limit
     
     def supports_web_search(self) -> bool:
         """Check if current model supports native web search"""
@@ -165,7 +165,9 @@ class AnthropicTool:
             return response.content[0].text
                 
         except Exception as e:
-            return f"Error with Anthropic API: {str(e)}"
+            logger.error(f"Anthropic API call failed in process_query: {str(e)}")
+            # Re-raise the exception so calling code can handle it properly
+            raise e
     
     async def process_with_tools_stream(self, user_query: str, available_tools: List[Any], system_prompt: str = None, force_tools: bool = False, conversation_history: List[Dict[str, Any]] = None, max_history_messages: int = 25, max_history_tokens: int = 6000) -> AsyncGenerator[Dict[str, Any], None]:
         """

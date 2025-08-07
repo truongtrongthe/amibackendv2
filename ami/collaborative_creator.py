@@ -346,6 +346,9 @@ Return ONLY "true" or "false".
                     f"{msg['role']}: {msg['content']}" for msg in recent_messages
                 ])
             
+            # 🚀 BOLD MOVE: Research unknown tools IMMEDIATELY!
+            research_context = await self._research_tools_in_conversation(request.user_input, conversation_text)
+            
             conversation_prompt = f"""
 You are AMI, an expert AI agent designer. You're having a conversation with a human to understand what kind of agent they want to build.
 
@@ -356,12 +359,15 @@ Conversation History:
 
 Human's Latest Input: "{request.user_input}"
 
+{research_context}
+
 GUIDELINES:
 1. **Explore their vision** - Ask about specific tasks, workflows, integrations
 2. **Understand context** - What problem are they solving? Who will use it?
 3. **Clarify requirements** - What tools, data sources, or systems are needed?
 4. **Build excitement** - Help them envision how the agent will work
 5. **Don't create yet** - You're still gathering requirements
+6. **Use research** - If you researched any tools, reference that knowledge in your questions
 
 RESPONSE FORMAT:
 {{
@@ -431,6 +437,95 @@ Be conversational, curious, and helpful. Focus on understanding their vision dee
                 ami_message="I'm having trouble processing that. Could you tell me more about what kind of agent you'd like to build?",
                 error=str(e)
             )
+    
+    async def _research_tools_in_conversation(self, user_input: str, conversation_text: str) -> str:
+        """
+        🚀 BOLD MOVE: Research unknown tools immediately when user mentions them
+        Returns research context to inject into the conversation prompt
+        """
+        try:
+            # Create a mini blueprint from conversation to detect tools
+            combined_text = f"{conversation_text}\n{user_input}"
+            
+            # Use the same LLM-based detection from orgdb.py
+            from orgdb import _identify_important_terms
+            
+            # Create a mock blueprint structure for tool detection
+            mock_blueprint = {
+                'conversation_requirements': {
+                    'concept': combined_text,
+                    'purpose': user_input,
+                    'key_tasks': [user_input]
+                }
+            }
+            
+            important_terms = _identify_important_terms(mock_blueprint)
+            
+            if not important_terms:
+                collab_logger.info("🔍 No important terms detected in conversation - no research needed")
+                return ""
+            
+            collab_logger.info(f"🚀 BOLD MOVE: Detected important terms in conversation: {important_terms}")
+            collab_logger.info(f"   Starting immediate research for better conversation...")
+            
+            # Use Anthropic's native web search to research these tools
+            import anthropic
+            import os
+            
+            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            
+            research_prompt = f"""Research these important business terms/concepts that the user mentioned: {', '.join(important_terms)}
+
+For each term, find:
+1. What it is (brief description and business context)
+2. Main use cases and industry applications
+3. Technical requirements or integration methods (if applicable)
+4. Common implementation approaches
+5. Typical setup or configuration needs
+
+Keep each term summary to 2-3 sentences. Focus on information relevant to building AI agents.
+
+Format as:
+**Term**: Brief description, business context, technical details, implementation notes."""
+
+            response = client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=1000,
+                tools=[{
+                    "type": "web_search_20250305",
+                    "web_search": {
+                        "max_uses": 5,
+                        "allowed_domains": [
+                            "docs.microsoft.com",
+                            "developers.google.com", 
+                            "api.slack.com",
+                            "developer.salesforce.com",
+                            "docs.github.com",
+                            "help.shopify.com",
+                            "developers.hubspot.com"
+                        ]
+                    }
+                }],
+                messages=[{"role": "user", "content": research_prompt}]
+            )
+            
+            research_results = response.content[0].text
+            
+            collab_logger.info(f"🌐 Research completed for conversation terms")
+            collab_logger.info(f"   Terms researched: {', '.join(important_terms)}")
+            
+            # Return formatted research context
+            return f"""
+RESEARCH CONTEXT (for your reference):
+I've researched the important business terms/concepts the user mentioned:
+{research_results}
+
+Use this knowledge to ask more informed questions about their specific business needs and technical requirements.
+"""
+            
+        except Exception as e:
+            collab_logger.warning(f"Conversation research failed: {e}")
+            return ""  # Fail gracefully - conversation continues without research
     
     async def _create_agent_from_conversation(self, request: CollaborativeAgentRequest, conversation_context: list) -> CollaborativeAgentResponse:
         """Create agent when user approves after conversation"""
@@ -2073,8 +2168,16 @@ Analyze the conversation and create agent requirements now.
         import re
         import json
         
+        # 🚨 CRITICAL DEBUG: Log the FULL LLM response to understand JSON issues
+        collab_logger.info(f"[{context}] 🚨 FULL LLM RESPONSE DEBUG:")
         collab_logger.info(f"[{context}] Starting JSON extraction from response length: {len(response)}")
         collab_logger.info(f"[{context}] Response preview: {response[:200]}...")
+        collab_logger.info(f"[{context}] ===== RAW RESPONSE START =====")
+        collab_logger.info(f"[{context}] {repr(response)}")
+        collab_logger.info(f"[{context}] ===== RAW RESPONSE END =====")
+        collab_logger.info(f"[{context}] ===== VISIBLE RESPONSE START =====")
+        collab_logger.info(f"[{context}] {response}")
+        collab_logger.info(f"[{context}] ===== VISIBLE RESPONSE END =====")
         
         try:
             # Method 1: Try to find JSON block with ```json markers
@@ -2091,6 +2194,11 @@ Analyze the conversation and create agent requirements now.
             # Method 2: Find JSON object by balancing braces
             json_text = self._extract_balanced_json(response)
             if json_text:
+                collab_logger.info(f"[{context}] 🔍 EXTRACTED BALANCED JSON (raw):")
+                collab_logger.info(f"[{context}] {repr(json_text)}")
+                collab_logger.info(f"[{context}] 🔍 EXTRACTED BALANCED JSON (visible):")
+                collab_logger.info(f"[{context}] {json_text}")
+                
                 json_text = self._clean_json_text(json_text)  # ✅ Apply cleaning - THIS WAS MISSING!
                 collab_logger.info(f"[{context}] Found balanced JSON, attempting to parse...")
                 collab_logger.info(f"[{context}] JSON text: {json_text[:300]}...")
@@ -2169,6 +2277,23 @@ Analyze the conversation and create agent requirements now.
     def _clean_json_text(self, json_text: str) -> str:
         """Clean common JSON formatting issues and control characters"""
         try:
+            # Save original input for comparison at the end
+            original_input = json_text
+            
+            # DEBUG: Log that we're entering the cleaning function
+            collab_logger.info(f"🧹 JSON cleaning started - input length: {len(json_text)}")
+            if '\\' in json_text:
+                collab_logger.info(f"🔍 Found backslashes in JSON - investigating...")
+                backslash_count = json_text.count('\\')
+                collab_logger.info(f"   Backslash count: {backslash_count}")
+                # Show first occurrence
+                first_backslash = json_text.find('\\')
+                if first_backslash >= 0:
+                    start = max(0, first_backslash - 10)
+                    end = min(len(json_text), first_backslash + 30)
+                    collab_logger.info(f"   First backslash context: {repr(json_text[start:end])}")
+            else:
+                collab_logger.info(f"🔍 No backslashes found in JSON input")
             # Step 1: Remove trailing commas before closing braces/brackets
             json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
             
@@ -2181,6 +2306,99 @@ Analyze the conversation and create agent requirements now.
             json_text = re.sub(r'([^"])\b(\w+)(\s*:\s*)', r'\1"\2"\3', json_text)
             # Fix already quoted properties (avoid double quotes)
             json_text = re.sub(r'""(\w+)""(\s*:\s*)', r'"\1"\2', json_text)
+            
+            # Fix escaped quotes in property names (LLM error)
+            # From logs: \"suggestions\": appears as literal backslash-quote in JSON
+            original_text = json_text
+            
+            # Debug: Check if we have the problematic pattern
+            # Look for both single and double backslash patterns AND any other patterns
+            has_single_backslash_quote = '\\\"' in json_text
+            has_double_backslash_quote = '\\\\\"' in json_text
+            has_any_backslash = '\\' in json_text
+            
+            # Check for the specific patterns that cause issues
+            has_suggestions_pattern = '\"suggestions\"' in json_text and '\\' in json_text
+            
+            collab_logger.info(f"🚨 DETAILED BACKSLASH ANALYSIS:")
+            collab_logger.info(f"   Has any backslash: {has_any_backslash}")
+            collab_logger.info(f"   Single backslash pattern (\\\"): {has_single_backslash_quote}")
+            collab_logger.info(f"   Double backslash pattern (\\\\\"): {has_double_backslash_quote}")
+            collab_logger.info(f"   Suggestions with backslash: {has_suggestions_pattern}")
+            
+            if has_any_backslash:
+                # Find all backslash positions
+                backslash_positions = [i for i, c in enumerate(json_text) if c == '\\']
+                collab_logger.info(f"   Backslash positions: {backslash_positions[:10]}")  # Show first 10
+                
+                # Show context around each backslash
+                for i, pos in enumerate(backslash_positions[:3]):  # Show first 3
+                    start = max(0, pos - 15)
+                    end = min(len(json_text), pos + 15)
+                    context = json_text[start:end]
+                    collab_logger.info(f"   Backslash {i+1} context: {repr(context)}")
+            
+            if has_single_backslash_quote or has_double_backslash_quote or has_suggestions_pattern:
+                collab_logger.info(f"   🔧 Applying backslash fixes...")
+            
+            # Handle various forms of incorrectly escaped property names
+            # Pattern 1: \"property\": -> "property": (single backslash before)
+            before_p1 = json_text
+            json_text = re.sub(r'\\\"(\w+)\"(\s*:\s*)', r'"\1"\2', json_text)
+            if json_text != before_p1:
+                collab_logger.info(f"Pattern 1 (\\\"word\":) applied fix")
+            
+            # Pattern 2: \"property\": -> "property": (single backslash both sides)
+            before_p2 = json_text
+            json_text = re.sub(r'\\\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', json_text)
+            if json_text != before_p2:
+                collab_logger.info(f"Pattern 2 (\\\"word\\\":) applied fix - CRITICAL PATTERN")
+            
+            # Pattern 3: "property\": -> "property": (single backslash after)
+            before_p3 = json_text
+            json_text = re.sub(r'\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', json_text)
+            if json_text != before_p3:
+                collab_logger.info(f"Pattern 3 (\"word\\\":) applied fix")
+            
+            # Pattern 4: \"property\\": -> "property": (double backslash after) - NEW FROM LOGS
+            before_p4 = json_text
+            json_text = re.sub(r'\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', json_text)
+            if json_text != before_p4:
+                collab_logger.info(f"Pattern 4 (\\\"word\\\\\":) applied fix - NEW PATTERN")
+            
+            # Pattern 5: \\\"property\\\": -> "property": (double backslashes both sides)
+            before_p5 = json_text
+            json_text = re.sub(r'\\\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', json_text)
+            if json_text != before_p5:
+                collab_logger.info(f"Pattern 5 (\\\\\"word\\\\\":) applied fix")
+            
+            # Pattern 6: More aggressive - any combination of backslashes around property names
+            before_p6 = json_text
+            json_text = re.sub(r'\\*\"(\w+)\\*\"(\s*:\s*)', r'"\1"\2', json_text)
+            if json_text != before_p6:
+                collab_logger.info(f"Pattern 6 (aggressive backslash cleanup) applied fix")
+            
+            # CRITICAL: Fix backslashes in JSON VALUES too (not just property names)
+            before_values = json_text
+            
+            # Pattern: "property": \"value" -> "property": "value"
+            json_text = re.sub(r'(\"\s*:\s*)\\\"([^"]*)"', r'\1"\2"', json_text)
+            
+            # Pattern: "property": "value\" -> "property": "value"  
+            json_text = re.sub(r'(\"\s*:\s*\"[^"]*)\\\"', r'\1"', json_text)
+            
+            # More aggressive value cleaning - remove any backslashes before quotes in values
+            json_text = re.sub(r'(\"\s*:\s*)\\+\"', r'\1"', json_text)
+            
+            if json_text != before_values:
+                collab_logger.info(f"Pattern 7 (JSON value backslash fixes) applied fix")
+            
+            # Log if we fixed escaped property names or values
+            if original_text != json_text:
+                collab_logger.info(f"✅ Successfully fixed escaped quotes in JSON (properties + values)")
+            else:
+                if '\\\"' in original_text:
+                    collab_logger.warning(f"❌ Found backslash-quote pattern but no fixes were applied!")
             
             # Step 1.7: Fix missing commas between properties
             # Look for patterns like: "value" "nextprop": or } "nextprop":
@@ -2199,6 +2417,57 @@ Analyze the conversation and create agent requirements now.
             # Log if we found and fixed datetime issues (use json_text since we already extracted it)
             if '"06T11"' in json_text or '"00":00' in json_text:
                 collab_logger.info(f"Fixed malformed datetime strings in JSON")
+            
+            # Step 1.9: Fix unescaped quotes in test scenarios (common LLM issue)
+            # Fix: "Scenario "1": Success..." → "Scenario \"1\": Success..."
+            
+            # First, handle the specific case from the logs: 'Scenario "1": text'
+            # This pattern matches: "Scenario "NUMBER": anything" 
+            json_text = re.sub(r'"(Scenario\s+)"(\d+)"\s*:\s*([^"]+)"', r'"\1\"\2\": \3"', json_text)
+            
+            # Handle similar patterns with other quoted identifiers in strings
+            # Pattern: "prefix "identifier": suffix" → "prefix \"identifier\": suffix"
+            json_text = re.sub(r'"([^"]*)\s+"([^"]+)"\s*:\s*([^"]*)"', r'"\1 \"\2\": \3"', json_text)
+            
+            # More general fix for strings with embedded quotes (but be careful not to break valid JSON)
+            # This handles cases where there are unescaped quotes within a JSON string value
+            def fix_embedded_quotes_safe(text):
+                # Split by lines and process each line to avoid breaking JSON structure
+                lines = text.split('\n')
+                fixed_lines = []
+                
+                for line in lines:
+                    # Look for lines that have the pattern: "text with "embedded" quotes"
+                    # But avoid breaking valid JSON structure
+                    if line.strip().endswith('"') and line.count('"') > 2:
+                        # Count quotes to see if we have an odd number (indicating unescaped quotes)
+                        quote_count = line.count('"')
+                        if quote_count % 2 == 0 and quote_count > 2:
+                            # Likely has unescaped quotes - fix them
+                            # Find the first and last quote (these should remain)
+                            first_quote = line.find('"')
+                            last_quote = line.rfind('"')
+                            if first_quote != last_quote:
+                                # Get the content between first and last quote
+                                prefix = line[:first_quote+1]
+                                content = line[first_quote+1:last_quote]
+                                suffix = line[last_quote:]
+                                # Escape internal quotes in the content
+                                fixed_content = content.replace('"', '\\"')
+                                line = prefix + fixed_content + suffix
+                    fixed_lines.append(line)
+                
+                return '\n'.join(fixed_lines)
+            
+            # DISABLED: This function was incorrectly "fixing" valid JSON by adding backslashes
+            # The OpenAI JSON is already valid - no need to process it
+            # json_text = fix_embedded_quotes_safe(json_text)
+            
+            # Log if we found and fixed quote issues (now disabled)
+            # if '\\"' in json_text:
+            #     collab_logger.info(f"Fixed unescaped quotes in JSON strings")
+            
+            collab_logger.info(f"Skipped quote fixing - JSON is already valid from OpenAI")
             
             # Step 2: Handle control characters more carefully
             # We need to escape control characters that appear INSIDE string values
@@ -2250,9 +2519,20 @@ Analyze the conversation and create agent requirements now.
                 
                 i += 1
             
-            json_text = ''.join(cleaned_chars)
+            final_result = ''.join(cleaned_chars)
             
-            return json_text
+            # DEBUG: Log the final result
+            collab_logger.info(f"🧹 JSON cleaning completed")
+            if final_result != original_input:
+                collab_logger.info(f"   ✅ Changes made during cleaning")
+                # Show a diff sample
+                if len(original_input) > 100:
+                    collab_logger.info(f"   Before: {repr(original_input[:100])}...")
+                    collab_logger.info(f"   After:  {repr(final_result[:100])}...")
+            else:
+                collab_logger.info(f"   ℹ️  No changes made during cleaning")
+            
+            return final_result
         except Exception as e:
             collab_logger.warning(f"JSON cleaning failed: {e}, returning original text")
             return json_text
@@ -2288,6 +2568,12 @@ Analyze the conversation and create agent requirements now.
     
     def _parse_json_with_fallbacks(self, json_text: str, context: str):
         """Try multiple JSON parsing approaches with progressively more aggressive fixes"""
+        
+        # 🚨 DEBUG: Log what we're actually trying to parse
+        collab_logger.info(f"[{context}] 🚨 FALLBACK PARSER INPUT:")
+        collab_logger.info(f"[{context}] Input length: {len(json_text)}")
+        collab_logger.info(f"[{context}] Input (raw): {repr(json_text[:500])}...")
+        collab_logger.info(f"[{context}] Input (visible): {json_text[:500]}...")
         
         # Approach 1: Direct parsing
         try:
@@ -2325,6 +2611,39 @@ Analyze the conversation and create agent requirements now.
                            r'"\1-\2-\3T\4:\5:\6.\7+\8:\9"', cleaned)
             cleaned = re.sub(r'"(\d{4})-(\d{2})-"(\d{2})T(\d{2})":(\d{2}):(\d{2})"', 
                            r'"\1-\2-\3T\4:\5:\6"', cleaned)
+            
+            # CRITICAL FIX: Add backslash quote fixes to fallback parsing
+            # Fix escaped quotes in property names (the main issue from logs)
+            
+            # Pattern 1: \"word": -> "word": (single backslash before)
+            cleaned = re.sub(r'\\\"(\w+)\"(\s*:\s*)', r'"\1"\2', cleaned)
+            
+            # Pattern 2: \"word\": -> "word": (single backslash both sides)  
+            cleaned = re.sub(r'\\\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', cleaned)
+            
+            # Pattern 3: "word\": -> "word": (single backslash after)
+            cleaned = re.sub(r'\"(\w+)\\\"(\s*:\s*)', r'"\1"\2', cleaned)
+            
+            # Pattern 4: \"word\\": -> "word": (double backslash after) - NEW FROM LOGS
+            cleaned = re.sub(r'\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', cleaned)
+            
+            # Pattern 5: \\\"word\\\": -> "word": (double backslashes both sides)
+            cleaned = re.sub(r'\\\\\"(\w+)\\\\\"(\s*:\s*)', r'"\1"\2', cleaned)
+            
+            # Pattern 6: More aggressive - any combination of backslashes around property names
+            cleaned = re.sub(r'\\*\"(\w+)\\*\"(\s*:\s*)', r'"\1"\2', cleaned)
+            
+            # CRITICAL: Fix backslashes in JSON VALUES too (not just property names)
+            # Pattern: "property": \"value" -> "property": "value"
+            cleaned = re.sub(r'(\"\s*:\s*)\\\"([^"]*)"', r'\1"\2"', cleaned)
+            
+            # Pattern: "property": "value\" -> "property": "value"  
+            cleaned = re.sub(r'(\"\s*:\s*\"[^"]*)\\\"', r'\1"', cleaned)
+            
+            # More aggressive value cleaning - remove any backslashes before quotes in values
+            cleaned = re.sub(r'(\"\s*:\s*)\\+\"', r'\1"', cleaned)
+            
+            collab_logger.info(f"[{context}] Applied comprehensive backslash fixes (properties + values) in fallback parsing")
             
             return json.loads(cleaned)
         except json.JSONDecodeError as e:

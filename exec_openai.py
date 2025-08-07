@@ -863,10 +863,11 @@ Examples:
             async for reasoning_chunk in self._execute_deep_reasoning_chain(request, request_analysis):
                 yield reasoning_chunk
         
-        # CRITICAL: Knowledge extraction BEFORE LLM response (for teaching scenarios)
-        teaching_detected = await self._contains_teaching_content(request.user_query)
-        logger.info(f"Teaching content detection result: {teaching_detected} for query: {request.user_query[:50]}...")
-        if teaching_detected:
+        # REMOVED: Teaching content detection is not needed for agent module
+        # Focus on direct task execution instead of knowledge extraction
+        
+        # Skip knowledge extraction for agent execution - agents should use their compiled blueprints
+        if False:  # Disabled teaching detection
             yield {
                 "type": "thinking",
                 "content": f"🔍 Teaching content detected in query: '{request.user_query[:50]}...' - Extracting actionable knowledge pieces from your input...",

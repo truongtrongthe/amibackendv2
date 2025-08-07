@@ -1723,37 +1723,96 @@ Respond with this EXACT JSON format:
         import anthropic
         import os
         
-        # First, check if blueprint mentions any tools/services that might need external research
-        tools_needing_research = _identify_unknown_tools(blueprint_data)
+        # Identify important terms that might need web research for better todo generation
+        terms_needing_research = _identify_important_terms(blueprint_data)
         
-        # If unknown tools found, search for technical information
-        external_context = ""
-        if tools_needing_research:
-            logger.info(f"Researching unknown tools: {tools_needing_research}")
-            external_context = _research_tools_requirements_sync(tools_needing_research)
-            
-        # Enhance the analysis prompt with external research context
+        # Log analysis results
+        if terms_needing_research:
+            logger.info(f"🔍 Important terms detected for web research: {terms_needing_research}")
+            logger.info(f"   Will enable web search to research: {', '.join(terms_needing_research)}")
+        else:
+            logger.info("🔍 No important terms detected - web search may not be needed")
+        
+        # Enhanced prompt that instructs Claude to use web search for important terms
         enhanced_prompt = analysis_prompt
-        if external_context:
+        if terms_needing_research:
             enhanced_prompt += f"""
 
-**ADDITIONAL RESEARCH CONTEXT:**
-I've researched the following tools/services mentioned in your blueprint and found this technical information:
+**RESEARCH REQUIREMENT:**
+I've detected these important business terms/concepts in the blueprint: {', '.join(terms_needing_research)}
 
-{external_context}
+Please use web search to research any terms you're not familiar with to understand their:
+- Business context and industry meaning
+- Technical requirements and implementation details
+- API documentation and integration methods (if applicable)
+- Common setup steps and configuration requirements
+- Typical credentials, access keys, or prerequisites needed
 
-Please use this research to generate more accurate and specific todos for these tools.
+Use this research to generate more accurate and specific todos that reflect proper understanding of the domain.
 """
 
-        # Direct Anthropic API call without creating new orchestrator
+        # Direct Anthropic API call with native web search enabled
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         
-        # Direct synchronous call since we're already in async context
+        # Enable web search tool for researching important terms
+        tools = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,  # Limit searches during todo generation
+            "allowed_domains": [  # Focus on official documentation
+                "docs.microsoft.com", "developers.google.com", 
+                "api.slack.com", "developer.salesforce.com",
+                "docs.github.com", "developer.atlassian.com",
+                "help.shopify.com", "developers.hubspot.com"
+            ]
+        }]
+        
+        # API call with web search enabled
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=4000,
-            messages=[{"role": "user", "content": enhanced_prompt}]
+            messages=[{"role": "user", "content": enhanced_prompt}],
+            tools=tools  # Enable native web search
         )
+        
+        # Log web search usage and results
+        web_search_requests = 0
+        search_results_found = []
+        
+        if hasattr(response, 'usage') and response.usage:
+            server_tool_use = getattr(response.usage, 'server_tool_use', None)
+            if server_tool_use:
+                web_search_requests = getattr(server_tool_use, 'web_search_requests', 0)
+        
+        # Extract and log web search results from response content
+        for content_block in response.content:
+            if hasattr(content_block, 'type'):
+                if content_block.type == 'web_search_tool_result':
+                    # Found web search results
+                    if hasattr(content_block, 'content') and content_block.content:
+                        for result in content_block.content:
+                            if hasattr(result, 'url') and hasattr(result, 'title'):
+                                search_results_found.append({
+                                    'url': result.url,
+                                    'title': result.title,
+                                    'page_age': getattr(result, 'page_age', 'unknown')
+                                })
+        
+        # Log web search activity
+        if web_search_requests > 0:
+            logger.info(f"🌐 Web search activity during todo generation:")
+            logger.info(f"   🔍 Search requests made: {web_search_requests}")
+            logger.info(f"   📄 Results found: {len(search_results_found)}")
+            if search_results_found:
+                logger.info(f"   📋 Sources researched:")
+                for i, result in enumerate(search_results_found[:5], 1):  # Log first 5 results
+                    logger.info(f"      {i}. {result['title']}")
+                    logger.info(f"         URL: {result['url']}")
+                    logger.info(f"         Age: {result['page_age']}")
+            logger.info(f"   💰 Estimated cost: ${web_search_requests * 0.01:.3f} (at $10/1000 searches)")
+        else:
+            logger.info("🌐 No web searches performed - all terms were recognized")
+        
         response_text = response.content[0].text
         
         # Parse the structured response
@@ -1761,8 +1820,9 @@ Please use this research to generate more accurate and specific todos for these 
         if json_match:
             data = json.loads(json_match.group(0))
             
-            # Log Ami's reasoning
-            logger.info(f"Ami's todo generation reasoning: {data.get('reasoning', 'No reasoning provided')}")
+            # Log Ami's reasoning and web search impact
+            reasoning = data.get('reasoning', 'No reasoning provided')
+            logger.info(f"📝 Ami's todo generation reasoning: {reasoning}")
             
             # Return the generated todos
             todos = data.get('todos', [])
@@ -1775,7 +1835,11 @@ Please use this research to generate more accurate and specific todos for these 
                 if 'id' not in todo:
                     todo['id'] = f"todo_{i+1}"
             
-            logger.info(f"Ami generated {len(todos)} intelligent todos for blueprint")
+            logger.info(f"✅ Todo generation complete:")
+            logger.info(f"   📋 Generated {len(todos)} intelligent todos for blueprint")
+            if web_search_requests > 0:
+                logger.info(f"   🌐 Enhanced with {web_search_requests} web searches")
+            logger.info(f"   🎯 Todos created with {'web-researched' if web_search_requests > 0 else 'existing'} knowledge")
             return todos
         else:
             raise ValueError("Could not parse Ami's response as JSON")
@@ -1784,146 +1848,131 @@ Please use this research to generate more accurate and specific todos for these 
         logger.error(f"Ami LLM reasoning failed: {str(e)}")
         raise
 
-def _identify_unknown_tools(blueprint_data: dict) -> list:
+def _identify_important_terms(blueprint_data: dict) -> list:
     """
-    Identify tools/services mentioned in blueprint that might need external research
+    Use LLM to intelligently identify important business terms, concepts, processes, 
+    or entities that need web research for better understanding.
+    Much broader and more useful than just "unknown tools".
     """
-    import re
+    import anthropic
+    import os
+    import json
     
-    # Common tools that Claude should know about - no research needed
-    known_tools = {
-        'google drive', 'google workspace', 'gmail', 'google calendar', 'google docs', 'google sheets',
-        'microsoft office', 'outlook', 'onedrive', 'microsoft teams', 'excel', 'word', 'powerpoint',
-        'slack', 'discord', 'telegram', 'whatsapp',
-        'salesforce', 'hubspot', 'pipedrive', 'zoho',
-        'jira', 'confluence', 'trello', 'asana', 'monday.com', 'notion',
-        'shopify', 'woocommerce', 'magento', 'squarespace', 'wordpress',
-        'airtable', 'mysql', 'postgresql', 'mongodb', 'redis',
-        'aws', 'azure', 'google cloud', 'heroku', 'vercel',
-        'stripe', 'paypal', 'square',
-        'mailchimp', 'sendgrid', 'twilio',
-        'zapier', 'make.com', 'ifttt'
-    }
+    # Collect all relevant text from blueprint
     
-    # Extract text from blueprint to search for tool mentions
-    blueprint_text = str(blueprint_data).lower()
+    text_fields = []
     
-    # Look for potential tool/service names
-    # Pattern: words that might be software/service names
-    potential_tools = []
+    # Add purpose and identity fields
+    if 'identity' in blueprint_data:
+        text_fields.append(blueprint_data['identity'].get('purpose', ''))
+        text_fields.append(blueprint_data['identity'].get('name', ''))
     
-    # Check integrations field specifically
-    if 'integrations' in blueprint_data:
-        for integration in blueprint_data['integrations']:
-            tool_name = integration.get('tool', '').lower().strip()
-            if tool_name and tool_name not in known_tools:
-                # Check if it looks like a specific software name
-                if len(tool_name.split()) <= 3 and not any(generic in tool_name for generic in ['system', 'software', 'platform', 'tool', 'service']):
-                    potential_tools.append(tool_name)
+    # Add conversation requirements (from user input)
+    if 'conversation_requirements' in blueprint_data:
+        text_fields.append(blueprint_data['conversation_requirements'].get('concept', ''))
+        text_fields.append(blueprint_data['conversation_requirements'].get('purpose', ''))
+        text_fields.extend(blueprint_data['conversation_requirements'].get('key_tasks', []))
     
-    # Check capabilities/tasks for software mentions
-    if 'capabilities' in blueprint_data and 'tasks' in blueprint_data['capabilities']:
-        for task in blueprint_data['capabilities']['tasks']:
-            task_desc = task.get('description', '').lower()
-            # Look for patterns like "connect to X", "integrate with Y", "use Z software"
-            patterns = [
-                r'connect to ([a-zA-Z0-9\s]+?)(?:\s|$|,|\.|;)',
-                r'integrate with ([a-zA-Z0-9\s]+?)(?:\s|$|,|\.|;)',
-                r'use ([a-zA-Z0-9\s]+?)\s+(?:software|system|platform|tool)',
-                r'access ([a-zA-Z0-9\s]+?)\s+(?:api|database|system)'
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, task_desc)
-                for match in matches:
-                    tool_name = match.strip().lower()
-                    if tool_name and tool_name not in known_tools and len(tool_name.split()) <= 3:
-                        potential_tools.append(tool_name)
-    
-    # Remove duplicates and return
-    return list(set(potential_tools))
-
-def _research_tools_requirements_sync(tools: list) -> str:
-    """
-    Research technical requirements for unknown tools using web search (synchronous)
-    """
-    try:
-        research_results = []
-        
-        for tool in tools:
-            try:
-                # Use a simple web search to get information about the tool
-                search_query = f"{tool} API integration documentation technical requirements"
-                
-                # Perform web search for this tool
-                search_result = _perform_web_search_sync(search_query)
-                
-                if search_result:
-                    research_results.append(f"**{tool.title()}:**\n{search_result}\n")
-                    logger.info(f"Successfully researched: {tool}")
+    # Add capabilities and tasks
+    if 'capabilities' in blueprint_data:
+        if 'tasks' in blueprint_data['capabilities']:
+            for task in blueprint_data['capabilities']['tasks']:
+                if isinstance(task, dict):
+                    text_fields.append(task.get('task', ''))
+                    text_fields.append(task.get('description', ''))
                 else:
-                    logger.warning(f"No research results found for: {tool}")
-                    
-            except Exception as e:
-                logger.error(f"Failed to research tool {tool}: {str(e)}")
-                continue
-        
-        return "\n".join(research_results) if research_results else ""
-        
-    except Exception as e:
-        logger.error(f"Error during tools research: {str(e)}")
-        return ""
-
-def _perform_web_search_sync(query: str) -> str:
-    """
-    Perform web search for tool information using web research module
-    """
-    try:
-        # Extract tool name from query
-        tool_name = query.split()[0] if query else "unknown tool"
-        
-        # Try to import and use the web research module
-        try:
-            from web_research import search_tool_requirements
-            
-            # Perform actual web search
-            research_result = search_tool_requirements(tool_name)
-            
-            if research_result:
-                logger.info(f"Successfully researched {tool_name} via web search")
-                return research_result
+                    text_fields.append(str(task))
+    
+    # Add integrations
+    if 'capabilities' in blueprint_data and 'integrations' in blueprint_data['capabilities']:
+        integrations = blueprint_data['capabilities']['integrations']
+        for integration in integrations:
+            if isinstance(integration, dict):
+                text_fields.append(integration.get('tool', ''))
+                text_fields.append(integration.get('purpose', ''))
             else:
-                logger.warning(f"Web search returned no results for: {tool_name}")
-                
-        except ImportError:
-            logger.warning("Web research module not available, using fallback")
-        except Exception as e:
-            logger.error(f"Web research module failed: {str(e)}")
+                text_fields.append(str(integration))
+    
+    # Combine all text for analysis
+    combined_text = ' '.join([str(t) for t in text_fields if t])
+    
+    if not combined_text.strip():
+        logger.info("🔍 No text content found for tool analysis")
+        return []
+    
+    # Use LLM to identify unknown tools/services
+    try:
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         
-        # Fallback: Generate comprehensive template based on common patterns
-        research_info = f"""
-Research for {tool_name.title()} (Template-based Analysis):
+        analysis_prompt = f"""Analyze this agent blueprint text and identify important business terms, concepts, processes, software, or entities that would benefit from web research to better understand the domain:
 
-- API Integration: Most enterprise software like {tool_name.title()} provides REST API or SOAP API for integration
-- Authentication: Typically requires API keys, OAuth 2.0 tokens, or basic authentication credentials
-- Base URL: Check official documentation for the correct API base URL/endpoint
-- Required Credentials: May need API key, client ID/secret, access tokens, or username/password
-- Permission Scopes: Often requires specific permission levels for reading/writing data
-- Data Formats: Modern APIs usually use JSON, legacy systems may use XML
-- Rate Limits: Check documentation for API call limits and throttling policies
-- SDK/Libraries: Look for official SDKs in Python, JavaScript, or other languages
-- Webhooks: May support webhooks for real-time data updates and notifications
-- Documentation: Search for official API documentation, developer guides, or integration tutorials
+BLUEPRINT TEXT:
+{combined_text}
 
-Note: This is template-based analysis. For specific technical requirements, consult the official {tool_name.title()} documentation or contact their support team.
-"""
+Please identify terms that are:
+1. **Business software/tools** (like "MISA software", "1Office.vn", "Oceanbank")
+2. **Industry processes** (like "order reconciliation", "inventory management", "KYC compliance")
+3. **Business concepts** (like "dropshipping", "multi-tenant architecture", "real-time analytics") 
+4. **Domain-specific terms** (like "fulfillment", "SKU management", "payment gateway")
+5. **Company/product names** that aren't widely known
+6. **Technical concepts** specific to the business context
+
+IGNORE very common terms like: Google Drive, Microsoft Office, basic web concepts, etc.
+
+Return ONLY a JSON array of important terms that need research:
+["term1", "term2", "term3"]
+
+If no important terms are found, return: []"""
+
+        response = client.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=500,
+            messages=[{"role": "user", "content": analysis_prompt}]
+        )
         
-        logger.info(f"Generated research template for: {tool_name}")
-        return research_info.strip()
+        # Parse the LLM response
+        response_text = response.content[0].text.strip()
         
+        # Extract JSON array from response
+        try:
+            # Try to parse as JSON directly
+            important_terms = json.loads(response_text)
+            if isinstance(important_terms, list):
+                logger.info(f"🧠 LLM detected important terms: {important_terms}")
+                logger.info(f"   Analyzed text: {combined_text[:100]}...")
+                return important_terms
+            else:
+                logger.warning(f"LLM returned non-list: {important_terms}")
+                return []
+        except json.JSONDecodeError:
+            # Try to extract JSON array from response
+            import re
+            json_match = re.search(r'\[(.*?)\]', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    important_terms = json.loads(f"[{json_match.group(1)}]")
+                    logger.info(f"🧠 LLM detected important terms (extracted): {important_terms}")
+                    return important_terms
+                except json.JSONDecodeError:
+                    pass
+            
+            logger.warning(f"Could not parse LLM response: {response_text}")
+            return []
+    
     except Exception as e:
-        logger.error(f"Web search failed: {str(e)}")
-        return ""
+        logger.warning(f"LLM important terms detection failed: {e}")
+        # Fallback to empty list - web search won't be triggered but todos will still generate
+        return []
+    
+
+
+# REMOVED: _research_tools_requirements_sync function
+# This function has been replaced with Anthropic's native web search capabilities
+# in the _generate_todos_with_ami_reasoning function above
+
+# REMOVED: _perform_web_search_sync function  
+# This function has been replaced with Anthropic's native web search capabilities
+# which are automatically used when the web_search tool is enabled in the API call
 
 def _generate_basic_todos_fallback(blueprint_data: dict) -> list:
     """
