@@ -205,12 +205,35 @@ class AgentOrchestrator:
             # Extract configuration from blueprint
             blueprint_data = blueprint.agent_blueprint if blueprint else {}
             
-            # Build configuration dictionary
+            # Check blueprint compilation status
+            if blueprint and blueprint.compilation_status != "compiled":
+                agent_logger.warning(f"Agent {agent.name} blueprint is not compiled (status: {blueprint.compilation_status})")
+                if blueprint.compilation_status == "failed":
+                    raise ValueError(f"Agent blueprint compilation failed - cannot execute agent")
+            
+            # Validate compiled prompt exists for production agents
+            if blueprint and blueprint.compilation_status == "compiled" and not blueprint.compiled_system_prompt:
+                raise ValueError(f"Agent blueprint marked as compiled but missing system prompt")
+            
+            # Extract tool configurations from compiled blueprint
+            blueprint_tool_configs = self._extract_blueprint_tool_configurations(blueprint) if blueprint else {}
+            
+            # Build configuration dictionary with compiled prompt priority
             config = {
                 "id": agent.id,
                 "agent_id": agent.agent_id,
                 "name": agent.name,
                 "description": agent.description,
+                # PRIORITY: Use compiled system prompt if available
+                "compiled_system_prompt": blueprint.compiled_system_prompt if blueprint else None,
+                "compilation_status": blueprint.compilation_status if blueprint else "draft",
+                "compiled_at": blueprint.compiled_at if blueprint else None,
+                # Tool configurations from completed todos
+                "blueprint_tool_configs": blueprint_tool_configs,
+                "blueprint_integrations": blueprint_tool_configs.get("integrations", {}),
+                "blueprint_tools": blueprint_tool_configs.get("tools", {}),
+                "blueprint_credentials": blueprint_tool_configs.get("credentials", {}),
+                # Fallback to raw blueprint data for uncompiled agents
                 "system_prompt": blueprint_data.get("system_prompt", {}),
                 "tools_list": blueprint_data.get("tools_list", []),
                 "knowledge_list": blueprint_data.get("knowledge_list", []),
@@ -228,6 +251,79 @@ class AgentOrchestrator:
         except Exception as e:
             agent_logger.error(f"Failed to load agent config for {agent_id}: {str(e)}")
             raise Exception(f"Failed to load agent configuration: {str(e)}")
+    
+    def _extract_blueprint_tool_configurations(self, blueprint) -> Dict[str, Any]:
+        """
+        Extract tool configurations from compiled blueprint todos
+        
+        Args:
+            blueprint: AgentBlueprint object
+            
+        Returns:
+            Dict with tool configurations organized by category
+        """
+        try:
+            if not blueprint or not blueprint.implementation_todos:
+                return {}
+            
+            # Import here to avoid circular imports
+            from orgdb import get_all_collected_inputs
+            
+            # Get all collected inputs from completed todos
+            collected_inputs = get_all_collected_inputs(blueprint.id)
+            
+            # Extract tool mappings from blueprint integrations
+            blueprint_data = blueprint.agent_blueprint
+            tool_mappings = {}
+            
+            # Map integrations to tool categories
+            if "capabilities" in blueprint_data and "integrations" in blueprint_data["capabilities"]:
+                for integration in blueprint_data["capabilities"]["integrations"]:
+                    if isinstance(integration, dict):
+                        tool_name = integration.get("tool", "")
+                        purpose = integration.get("purpose", "")
+                        
+                        # Map common integrations to tool categories
+                        if "google drive" in tool_name.lower() or "gdrive" in tool_name.lower():
+                            tool_mappings["file_access"] = {
+                                "integration_name": tool_name,
+                                "purpose": purpose,
+                                "tool_category": "file_access"
+                            }
+                        elif "slack" in tool_name.lower():
+                            tool_mappings["communication"] = {
+                                "integration_name": tool_name, 
+                                "purpose": purpose,
+                                "tool_category": "communication"
+                            }
+                        elif "email" in tool_name.lower():
+                            tool_mappings["email"] = {
+                                "integration_name": tool_name,
+                                "purpose": purpose, 
+                                "tool_category": "communication"
+                            }
+                        elif "database" in tool_name.lower() or "crm" in tool_name.lower():
+                            tool_mappings["business_logic"] = {
+                                "integration_name": tool_name,
+                                "purpose": purpose,
+                                "tool_category": "business_logic"
+                            }
+            
+            # Combine collected inputs with tool mappings
+            blueprint_configs = {
+                "integrations": collected_inputs.get("integrations", {}),
+                "tools": collected_inputs.get("tools", {}),
+                "credentials": collected_inputs.get("credentials", {}),
+                "configurations": collected_inputs.get("configurations", {}),
+                "tool_mappings": tool_mappings
+            }
+            
+            agent_logger.info(f"Extracted tool configurations: {len(tool_mappings)} mappings, {len(collected_inputs.get('integrations', {}))} integrations")
+            return blueprint_configs
+            
+        except Exception as e:
+            agent_logger.error(f"Failed to extract blueprint tool configurations: {str(e)}")
+            return {}
     
     async def resolve_agent_identifier(self, agent_identifier: str, org_id: str) -> str:
         """Resolve agent identifier (ID, name, or description) to agent ID"""
@@ -381,6 +477,30 @@ class AgentOrchestrator:
         resolved_agent_id = await self.resolve_agent_identifier(request.agent_id, request.org_id)
         agent_config = await self.load_agent_config(resolved_agent_id, request.org_id)
         
+        # Validate blueprint compilation status
+        compilation_status = agent_config.get("compilation_status", "unknown")
+        if compilation_status == "compiled" and agent_config.get("compiled_system_prompt"):
+            yield {
+                "type": "status", 
+                "content": f"🎯 Using compiled blueprint (compiled: {agent_config.get('compiled_at', 'unknown')})",
+                "status": "compiled_blueprint_loaded"
+            }
+            execution_logger.info(f"[{execution_id}] Agent using compiled blueprint with full integration configurations")
+        elif compilation_status in ["draft", "ready_for_compilation"]:
+            yield {
+                "type": "status",
+                "content": f"⚠️ Using uncompiled blueprint - some features may be limited",
+                "status": "uncompiled_blueprint_loaded"
+            }
+            execution_logger.warning(f"[{execution_id}] Agent using uncompiled blueprint (status: {compilation_status})")
+        else:
+            yield {
+                "type": "status",
+                "content": f"❌ Blueprint compilation status: {compilation_status}",
+                "status": "blueprint_status_warning"
+            }
+            execution_logger.warning(f"[{execution_id}] Unusual blueprint status: {compilation_status}")
+        
         # Store configuration for other components
         request.agent_id = resolved_agent_id
         self._current_agent_config = agent_config
@@ -522,12 +642,16 @@ class AgentOrchestrator:
             agent_config, agent_request.user_request
         )
         
+        # Get blueprint tool configurations for credential injection
+        blueprint_tool_configs = self.tool_manager.get_blueprint_tool_configurations(agent_config)
+        
         return ToolExecutionRequest(
             llm_provider=agent_request.llm_provider,
             user_query=agent_request.user_request,
             system_prompt=dynamic_system_prompt,
             model=agent_request.model,
             model_params=agent_request.model_params,
+            tools_config=blueprint_tool_configs,  # Pass blueprint tool configurations
             org_id=agent_request.org_id,
             user_id=agent_request.user_id,
             enable_tools=agent_request.enable_tools,

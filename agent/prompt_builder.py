@@ -31,6 +31,8 @@ class PromptBuilder:
         """
         Build dynamic system prompt from agent configuration with mode support
         
+        PRIORITY: Uses compiled system prompt if available, falls back to template building
+        
         Args:
             agent_config: Loaded agent configuration
             user_request: User's request for context
@@ -40,15 +42,101 @@ class PromptBuilder:
             Mode-specific system prompt string
         """
         try:
-            if agent_mode.lower() == "collaborate":
-                return self._build_collaborate_prompt(agent_config, user_request)
+            # PRIORITY: Use compiled system prompt if available
+            if (agent_config.get("compiled_system_prompt") and 
+                agent_config.get("compilation_status") == "compiled"):
+                
+                logger.info(f"Using compiled system prompt for agent {agent_config.get('name')}")
+                base_prompt = agent_config["compiled_system_prompt"]
+                
+                # Add mode-specific enhancements to compiled prompt
+                if agent_mode.lower() == "collaborate":
+                    return self._enhance_compiled_for_collaborate_mode(base_prompt, user_request, agent_config)
+                else:
+                    return self._enhance_compiled_for_execute_mode(base_prompt, user_request, agent_config)
+            
+            # FALLBACK: Use template building for uncompiled blueprints
             else:
-                return self._build_execute_prompt(agent_config, user_request)
+                logger.warning(f"Using fallback prompt building for agent {agent_config.get('name')} - blueprint not compiled (status: {agent_config.get('compilation_status', 'unknown')})")
+                if agent_mode.lower() == "collaborate":
+                    return self._build_collaborate_prompt(agent_config, user_request)
+                else:
+                    return self._build_execute_prompt(agent_config, user_request)
                 
         except Exception as e:
             logger.error(f"Failed to build dynamic system prompt: {e}")
             # Fallback to basic prompt
             return f"You are {agent_config.get('name', 'AI Agent')}, a specialized AI assistant. {agent_config.get('description', 'I help with various tasks.')} Use your available tools to provide helpful assistance."
+    
+    def _enhance_compiled_for_collaborate_mode(self, compiled_prompt: str, user_request: str, agent_config: Dict[str, Any]) -> str:
+        """
+        Enhance compiled system prompt for COLLABORATE mode
+        
+        Args:
+            compiled_prompt: The fully compiled system prompt from blueprint
+            user_request: User's request for context
+            agent_config: Agent configuration
+            
+        Returns:
+            Enhanced prompt for collaboration mode
+        """
+        collaborate_enhancement = f"""
+
+# COLLABORATION MODE ACTIVE
+You are now operating in COLLABORATE mode - focus on interactive discussion and guidance.
+
+COLLABORATION APPROACH:
+- Engage in thoughtful dialogue about the request
+- Ask clarifying questions when needed
+- Provide step-by-step guidance and explanations
+- Share your reasoning process openly
+- Encourage user participation in problem-solving
+- Be patient and educational in your responses
+
+CURRENT USER REQUEST: "{user_request}"
+
+Remember: You have access to all your configured integrations, tools, and domain knowledge as specified above. Use them to provide comprehensive collaborative assistance.
+"""
+        return compiled_prompt + collaborate_enhancement
+    
+    def _enhance_compiled_for_execute_mode(self, compiled_prompt: str, user_request: str, agent_config: Dict[str, Any]) -> str:
+        """
+        Enhance compiled system prompt for EXECUTE mode
+        
+        Args:
+            compiled_prompt: The fully compiled system prompt from blueprint
+            user_request: User's request for context
+            agent_config: Agent configuration
+            
+        Returns:
+            Enhanced prompt for execution mode
+        """
+        execute_enhancement = f"""
+
+# EXECUTION MODE ACTIVE
+You are now operating in EXECUTE mode - focus on efficient task completion.
+
+EXECUTION APPROACH:
+⚡ EXECUTION PRINCIPLES:
+- Focus on completing the requested task efficiently
+- Use your configured tools and integrations directly when needed
+- Provide thorough, actionable results
+- Minimize unnecessary back-and-forth questions
+- Be direct and solution-focused
+- Deliver comprehensive outputs that address the full request
+- Take initiative to gather needed information using your available tools
+
+CURRENT USER REQUEST: "{user_request}"
+
+CRITICAL REMINDERS:
+- PRIORITY: If the user provides a Google Drive link (docs.google.com), ALWAYS use the appropriate read tool FIRST
+- Use your configured integrations and credentials as specified in your integration configurations above
+- Follow your workflow steps and business context as defined in your blueprint
+- Apply your domain knowledge and tool usage instructions as configured
+
+Remember: All your credentials, API keys, and integration details have been securely configured and are ready to use.
+"""
+        return compiled_prompt + execute_enhancement
     
     def _build_collaborate_prompt(self, agent_config: Dict[str, Any], user_request: str) -> str:
         """

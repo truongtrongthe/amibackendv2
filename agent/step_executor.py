@@ -312,7 +312,7 @@ class StepExecutor:
         return step_prompt
     
     def _create_step_tool_request(self, request: AgentExecutionRequest, agent_config: Dict[str, Any], 
-                                step_prompt: str, step_tools: List[str]):
+                                step_prompt: str, step_tools: List[str], blueprint_tool_configs: Dict[str, Any] = None):
         """Create tool request for a specific step"""
         from exec_tool import ToolExecutionRequest
         
@@ -326,6 +326,7 @@ class StepExecutor:
             system_prompt=step_prompt,
             model=request.model,
             model_params=request.model_params,
+            tools_config=blueprint_tool_configs or {},  # Pass blueprint tool configurations
             org_id=request.org_id,
             user_id=request.user_id,
             enable_tools=True,

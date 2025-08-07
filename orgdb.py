@@ -1313,7 +1313,11 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
             capabilities = blueprint_data["capabilities"]
             prompt_parts.append("# CAPABILITIES")
             prompt_parts.append("You are designed to handle the following tasks:")
-            for i, capability in enumerate(capabilities, 1):
+            
+            # Handle both old format (list) and new format (dict with tasks)
+            tasks = capabilities.get("tasks", capabilities) if isinstance(capabilities, dict) else capabilities
+            
+            for i, capability in enumerate(tasks, 1):
                 if isinstance(capability, dict):
                     task = capability.get("task", "")
                     description = capability.get("description", "")
@@ -1327,35 +1331,50 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
             prompt_parts.append("")
         
         # 3. Tools section - Available tools and when to use them
-        if "tools" in blueprint_data:
-            tools = blueprint_data["tools"]
-            prompt_parts.append("# AVAILABLE TOOLS")
-            prompt_parts.append("You have access to the following tools:")
-            for tool in tools:
-                if isinstance(tool, dict):
-                    name = tool.get("name", "")
-                    purpose = tool.get("purpose", "")
-                    triggers = tool.get("triggers", [])
-                    prompt_parts.append(f"- {name}: {purpose}")
-                    if triggers:
-                        prompt_parts.append(f"  Use when: {', '.join(triggers)}")
-                else:
-                    prompt_parts.append(f"- {tool}")
-            prompt_parts.append("")
+        if "capabilities" in blueprint_data and "tools" in blueprint_data["capabilities"]:
+            tools = blueprint_data["capabilities"]["tools"]
+            if tools:
+                prompt_parts.append("# AVAILABLE TOOLS")
+                prompt_parts.append("You have access to the following tools:")
+                for tool in tools:
+                    if isinstance(tool, dict):
+                        name = tool.get("name", tool.get("tool", ""))
+                        purpose = tool.get("purpose", tool.get("description", ""))
+                        triggers = tool.get("triggers", [])
+                        prompt_parts.append(f"- {name}: {purpose}")
+                        if triggers:
+                            prompt_parts.append(f"  Use when: {', '.join(triggers)}")
+                    else:
+                        prompt_parts.append(f"- {tool}")
+                prompt_parts.append("")
         
         # 4. Knowledge sources - Where to get information
-        if "knowledge_sources" in blueprint_data:
-            knowledge = blueprint_data["knowledge_sources"]
+        knowledge_sources = None
+        if "capabilities" in blueprint_data and "knowledge_sources" in blueprint_data["capabilities"]:
+            knowledge_sources = blueprint_data["capabilities"]["knowledge_sources"]
+        elif "knowledge_sources" in blueprint_data:
+            knowledge_sources = blueprint_data["knowledge_sources"]
+            
+        if knowledge_sources:
             prompt_parts.append("# KNOWLEDGE SOURCES")
             prompt_parts.append("Your knowledge comes from:")
-            for source in knowledge:
+            for source in knowledge_sources:
                 if isinstance(source, dict):
-                    source_name = source.get("source", "")
+                    source_name = source.get("source", source.get("domain", ""))
                     source_type = source.get("type", "")
+                    description = source.get("description", "")
                     update_freq = source.get("update_frequency", "")
-                    prompt_parts.append(f"- {source_name} ({source_type})")
-                    if update_freq:
-                        prompt_parts.append(f"  Updated: {update_freq}")
+                    
+                    if source_name:
+                        if source_type:
+                            prompt_parts.append(f"- {source_name} ({source_type})")
+                        else:
+                            prompt_parts.append(f"- {source_name}")
+                        
+                        if description:
+                            prompt_parts.append(f"  {description}")
+                        if update_freq:
+                            prompt_parts.append(f"  Updated: {update_freq}")
                 else:
                     prompt_parts.append(f"- {source}")
             prompt_parts.append("")
@@ -1371,13 +1390,17 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
             prompt_parts.append("")
         
         # 6. Workflow - How to process requests
-        if "workflow" in blueprint_data:
-            workflow = blueprint_data["workflow"]
+        workflow_steps = None
+        if "workflow" in blueprint_data and "steps" in blueprint_data["workflow"]:
+            workflow_steps = blueprint_data["workflow"]["steps"]
+        elif "workflow_steps" in blueprint_data:
+            workflow_steps = blueprint_data["workflow_steps"]
+            
+        if workflow_steps and workflow_steps != ["To be defined during collaboration"] and workflow_steps != ["To be refined during collaboration"]:
             prompt_parts.append("# WORKFLOW")
-            if "steps" in workflow:
-                steps = workflow["steps"]
-                prompt_parts.append("Follow this process:")
-                for i, step in enumerate(steps, 1):
+            prompt_parts.append("Follow this process when handling requests:")
+            for i, step in enumerate(workflow_steps, 1):
+                if step and step.strip() and "to be" not in step.lower():
                     prompt_parts.append(f"{i}. {step}")
             prompt_parts.append("")
         
@@ -1398,27 +1421,59 @@ def generate_system_prompt_from_blueprint(blueprint_data: dict, collected_inputs
             prompt_parts.append("# INTEGRATION CONFIGURATIONS")
             prompt_parts.append("You have access to the following configured integrations:")
             
-            # Add integration configurations
+            # Add integration configurations with more specific details
             if collected_inputs.get("integrations"):
                 for todo_id, inputs in collected_inputs["integrations"].items():
                     if inputs:
-                        prompt_parts.append(f"- Integration Setup: {todo_id}")
+                        # Try to extract service name from todo_id or inputs
+                        service_name = inputs.get("service_name", todo_id.replace("_", " ").title())
+                        prompt_parts.append(f"\n## {service_name}")
+                        
+                        # Add configuration details
                         for key, value in inputs.items():
-                            if "password" not in key.lower() and "secret" not in key.lower() and "key" not in key.lower():
-                                prompt_parts.append(f"  {key}: {value}")
+                            if key == "service_name":
+                                continue
+                            elif "password" not in key.lower() and "secret" not in key.lower() and "key" not in key.lower() and "token" not in key.lower():
+                                # Show non-sensitive configuration
+                                if key == "folder_name":
+                                    prompt_parts.append(f"**Folder Access:** {value}")
+                                elif key == "file_types":
+                                    prompt_parts.append(f"**File Types:** {value}")
+                                elif key == "access_level":
+                                    prompt_parts.append(f"**Access Level:** {value}")
+                                elif key == "channel_name":
+                                    prompt_parts.append(f"**Channel:** {value}")
+                                elif key == "email_address":
+                                    prompt_parts.append(f"**Email:** {value}")
+                                else:
+                                    prompt_parts.append(f"**{key.replace('_', ' ').title()}:** {value}")
                             else:
-                                prompt_parts.append(f"  {key}: [CONFIGURED]")
+                                # Hide sensitive information but confirm it's configured
+                                prompt_parts.append(f"**{key.replace('_', ' ').title()}:** [SECURELY CONFIGURED]")
             
             # Add tool configurations
             if collected_inputs.get("tools"):
                 for todo_id, inputs in collected_inputs["tools"].items():
                     if inputs:
-                        prompt_parts.append(f"- Tool Configuration: {todo_id}")
+                        tool_name = inputs.get("tool_name", todo_id.replace("_", " ").title())
+                        prompt_parts.append(f"\n## {tool_name}")
                         for key, value in inputs.items():
-                            if "password" not in key.lower() and "secret" not in key.lower() and "key" not in key.lower():
-                                prompt_parts.append(f"  {key}: {value}")  
+                            if key == "tool_name":
+                                continue
+                            elif "password" not in key.lower() and "secret" not in key.lower() and "key" not in key.lower() and "token" not in key.lower():
+                                prompt_parts.append(f"**{key.replace('_', ' ').title()}:** {value}")
                             else:
-                                prompt_parts.append(f"  {key}: [CONFIGURED]")
+                                prompt_parts.append(f"**{key.replace('_', ' ').title()}:** [SECURELY CONFIGURED]")
+            
+            # Add general configurations
+            if collected_inputs.get("configurations"):
+                for todo_id, inputs in collected_inputs["configurations"].items():
+                    if inputs:
+                        config_name = inputs.get("config_name", todo_id.replace("_", " ").title())
+                        prompt_parts.append(f"\n## {config_name}")
+                        for key, value in inputs.items():
+                            if key != "config_name":
+                                prompt_parts.append(f"**{key.replace('_', ' ').title()}:** {value}")
             
             prompt_parts.append("")
         
@@ -1585,65 +1640,80 @@ def _generate_todos_with_ami_reasoning(blueprint_data: dict) -> list:
     """
     import json  # Import at function level to avoid scope issues
     
-    # Create comprehensive analysis prompt for Ami
+    # Create comprehensive analysis prompt - think like a thorough project manager
     analysis_prompt = f"""
-You are Ami, an expert AI agent architect. You've been given an approved agent blueprint and need to generate specific implementation todos that will help the human properly configure this agent for production use.
+You are Ami, an experienced project manager who helps people set up their AI agents properly. You've seen many agents fail because important details were missed during setup. Your job is to review this agent blueprint and create a checklist of everything that needs to be configured before the agent can work.
 
-AGENT BLUEPRINT TO ANALYZE:
+AGENT BLUEPRINT TO REVIEW:
 {json.dumps(blueprint_data, indent=2)}
 
-Your task is to analyze this blueprint and reason about what specific todos are needed to make this agent production-ready. Consider:
+**YOUR MISSION:**
+Look at this blueprint like a careful project manager who wants everything to work perfectly. Think about what specific information and setup steps are missing that could cause problems later.
 
-1. **TOOL INTEGRATION TODOS**: What tools does this agent need? How should they be configured? What credentials/inputs are required?
+**WHAT TO LOOK FOR:**
 
-2. **KNOWLEDGE COLLECTION TODOS**: What specific knowledge, data, or context does the human need to provide for this agent to work effectively?
+🔍 **1. MISSING CONNECTION DETAILS**
+- For any app or service mentioned (Google Drive, Slack, email, etc.), what specific details are missing?
+- Where exactly should the agent connect? Which accounts, folders, or channels?
+- What login information does the agent need to access these services?
 
-3. **SETUP & CONFIGURATION TODOS**: What integrations, API connections, or system configurations are needed?
+🔍 **2. MISSING LOGIN INFORMATION**
+- What usernames, passwords, or access codes does the agent need?
+- Should the agent have permission to just read information, or also make changes?
+- Are there specific accounts that need to be set up first?
 
-4. **TESTING & VALIDATION TODOS**: What should be tested to ensure the agent works properly?
+🔍 **3. MISSING FILE AND DATA DETAILS**
+- If the agent needs to read files or information, what exactly should it look for?
+- What types of files should it work with? Where are these files located?
+- How often should the agent check for new information?
 
-For each todo, provide:
-- Specific actionable title
-- Detailed description of what needs to be done
-- Category (integration, knowledge_collection, tool_configuration, testing, setup)
-- Priority (high, medium, low)
-- Required inputs from human (if any)
-- Tool usage instructions (if applicable)
+🔍 **4. MISSING WORK RULES**
+- What should the agent do in different situations?
+- Are there specific steps or approval processes it should follow?
+- What should the agent NOT do? What are its limits?
+
+🔍 **5. MISSING TESTING STEPS**
+- How can we make sure the agent is working correctly?
+- What situations should we test before the agent starts working?
+- What should happen if something goes wrong?
+
+**EXAMPLES OF GOOD THINKING:**
+- Blueprint mentions "Google Drive" → Ask: "Which specific folder should I access? What's the exact folder name or path? What types of files should I look for? Do I need read-only or editing access?"
+- Blueprint mentions "send notifications" → Ask: "Where should I send notifications? Which Slack channel or email addresses? What should the message look like? When should I send them?"
+- Blueprint mentions "read reports" → Ask: "What reports specifically? Where are they stored? What format are they in? How do I know which reports are new?"
+
+**FOR EACH MISSING PIECE, CREATE A SIMPLE TODO:**
+- Use friendly, non-technical language that anyone can understand
+- Explain why this information is needed in simple terms
+- Ask for specific details, not vague descriptions
+- Make it clear what the person needs to provide
 
 Respond with this EXACT JSON format:
 {{
-  "reasoning": "Your analysis of what this agent needs to be production-ready...",
+  "reasoning": "I've reviewed your agent blueprint and found several important details that need to be specified before your agent can work properly. Each of these items represents information that's missing and could cause your agent to fail or not work as expected...",
   "todos": [
     {{
       "id": "todo_1",
-      "title": "Specific actionable title",
-      "description": "Detailed description of what needs to be done and why",
-      "category": "integration|knowledge_collection|tool_configuration|testing|setup",
-      "priority": "high|medium|low",
-      "estimated_effort": "1-2 hours",
+      "title": "Specify Which Google Drive Folder to Use",
+      "description": "Your agent needs to access Google Drive, but I need to know exactly which folder to look in. Without this specific information, your agent won't know where to find the files it needs to work with.",
+      "category": "setup",
+      "priority": "high", 
       "status": "pending",
-      "tool_instructions": {{
-        "tool_name": "name_of_tool_if_applicable",
-        "how_to_call": "Instructions on how to call this tool",
-        "when_to_use": "When the agent should use this tool",
-        "expected_output": "What output to expect"
-      }},
+      "why_needed": "Your agent needs to know exactly where to look for files so it can find the right information and won't get confused",
       "input_required": {{
-        "type": "credentials|knowledge|configuration",
+        "type": "setup_info",
         "fields": [
-          {{"name": "field_name", "type": "string|password|url|text", "required": true, "description": "Clear description of what this input is for"}}
+          {{"name": "folder_name", "type": "text", "required": true, "description": "What's the exact name of the Google Drive folder? (for example: 'Company Reports' or 'Sales Data')"}},
+          {{"name": "file_types", "type": "text", "required": true, "description": "What types of files should I look for? (for example: 'Excel spreadsheets', 'PDF documents', 'Word documents')"}},
+          {{"name": "access_level", "type": "select", "options": ["Just read files", "Read and edit files", "Full access"], "required": true, "description": "What should your agent be allowed to do with these files?"}},
+          {{"name": "google_account", "type": "text", "required": false, "description": "Which Google account should I use? (you can leave this blank to use your main account)"}}
         ]
-      }},
-      "knowledge_to_collect": {{
-        "type": "domain_expertise|business_rules|data_context|user_preferences",
-        "description": "What knowledge the human needs to provide",
-        "examples": ["Example 1", "Example 2"]
       }}
     }}
   ]
 }}
 
-Generate 3-8 todos based on the complexity of the blueprint. Be specific and actionable.
+**IMPORTANT:** Generate 4-8 todos based on what's missing in the blueprint. Focus on the most common tools and services (Google Workspace, Microsoft Office, Slack, email, databases, file storage, etc.). Use simple language that non-technical people can easily understand.
 """
 
     try:
@@ -1653,6 +1723,28 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
         import anthropic
         import os
         
+        # First, check if blueprint mentions any tools/services that might need external research
+        tools_needing_research = _identify_unknown_tools(blueprint_data)
+        
+        # If unknown tools found, search for technical information
+        external_context = ""
+        if tools_needing_research:
+            logger.info(f"Researching unknown tools: {tools_needing_research}")
+            external_context = _research_tools_requirements_sync(tools_needing_research)
+            
+        # Enhance the analysis prompt with external research context
+        enhanced_prompt = analysis_prompt
+        if external_context:
+            enhanced_prompt += f"""
+
+**ADDITIONAL RESEARCH CONTEXT:**
+I've researched the following tools/services mentioned in your blueprint and found this technical information:
+
+{external_context}
+
+Please use this research to generate more accurate and specific todos for these tools.
+"""
+
         # Direct Anthropic API call without creating new orchestrator
         client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         
@@ -1660,7 +1752,7 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
             max_tokens=4000,
-            messages=[{"role": "user", "content": analysis_prompt}]
+            messages=[{"role": "user", "content": enhanced_prompt}]
         )
         response_text = response.content[0].text
         
@@ -1691,6 +1783,147 @@ Generate 3-8 todos based on the complexity of the blueprint. Be specific and act
     except Exception as e:
         logger.error(f"Ami LLM reasoning failed: {str(e)}")
         raise
+
+def _identify_unknown_tools(blueprint_data: dict) -> list:
+    """
+    Identify tools/services mentioned in blueprint that might need external research
+    """
+    import re
+    
+    # Common tools that Claude should know about - no research needed
+    known_tools = {
+        'google drive', 'google workspace', 'gmail', 'google calendar', 'google docs', 'google sheets',
+        'microsoft office', 'outlook', 'onedrive', 'microsoft teams', 'excel', 'word', 'powerpoint',
+        'slack', 'discord', 'telegram', 'whatsapp',
+        'salesforce', 'hubspot', 'pipedrive', 'zoho',
+        'jira', 'confluence', 'trello', 'asana', 'monday.com', 'notion',
+        'shopify', 'woocommerce', 'magento', 'squarespace', 'wordpress',
+        'airtable', 'mysql', 'postgresql', 'mongodb', 'redis',
+        'aws', 'azure', 'google cloud', 'heroku', 'vercel',
+        'stripe', 'paypal', 'square',
+        'mailchimp', 'sendgrid', 'twilio',
+        'zapier', 'make.com', 'ifttt'
+    }
+    
+    # Extract text from blueprint to search for tool mentions
+    blueprint_text = str(blueprint_data).lower()
+    
+    # Look for potential tool/service names
+    # Pattern: words that might be software/service names
+    potential_tools = []
+    
+    # Check integrations field specifically
+    if 'integrations' in blueprint_data:
+        for integration in blueprint_data['integrations']:
+            tool_name = integration.get('tool', '').lower().strip()
+            if tool_name and tool_name not in known_tools:
+                # Check if it looks like a specific software name
+                if len(tool_name.split()) <= 3 and not any(generic in tool_name for generic in ['system', 'software', 'platform', 'tool', 'service']):
+                    potential_tools.append(tool_name)
+    
+    # Check capabilities/tasks for software mentions
+    if 'capabilities' in blueprint_data and 'tasks' in blueprint_data['capabilities']:
+        for task in blueprint_data['capabilities']['tasks']:
+            task_desc = task.get('description', '').lower()
+            # Look for patterns like "connect to X", "integrate with Y", "use Z software"
+            patterns = [
+                r'connect to ([a-zA-Z0-9\s]+?)(?:\s|$|,|\.|;)',
+                r'integrate with ([a-zA-Z0-9\s]+?)(?:\s|$|,|\.|;)',
+                r'use ([a-zA-Z0-9\s]+?)\s+(?:software|system|platform|tool)',
+                r'access ([a-zA-Z0-9\s]+?)\s+(?:api|database|system)'
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, task_desc)
+                for match in matches:
+                    tool_name = match.strip().lower()
+                    if tool_name and tool_name not in known_tools and len(tool_name.split()) <= 3:
+                        potential_tools.append(tool_name)
+    
+    # Remove duplicates and return
+    return list(set(potential_tools))
+
+def _research_tools_requirements_sync(tools: list) -> str:
+    """
+    Research technical requirements for unknown tools using web search (synchronous)
+    """
+    try:
+        research_results = []
+        
+        for tool in tools:
+            try:
+                # Use a simple web search to get information about the tool
+                search_query = f"{tool} API integration documentation technical requirements"
+                
+                # Perform web search for this tool
+                search_result = _perform_web_search_sync(search_query)
+                
+                if search_result:
+                    research_results.append(f"**{tool.title()}:**\n{search_result}\n")
+                    logger.info(f"Successfully researched: {tool}")
+                else:
+                    logger.warning(f"No research results found for: {tool}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to research tool {tool}: {str(e)}")
+                continue
+        
+        return "\n".join(research_results) if research_results else ""
+        
+    except Exception as e:
+        logger.error(f"Error during tools research: {str(e)}")
+        return ""
+
+def _perform_web_search_sync(query: str) -> str:
+    """
+    Perform web search for tool information using web research module
+    """
+    try:
+        # Extract tool name from query
+        tool_name = query.split()[0] if query else "unknown tool"
+        
+        # Try to import and use the web research module
+        try:
+            from web_research import search_tool_requirements
+            
+            # Perform actual web search
+            research_result = search_tool_requirements(tool_name)
+            
+            if research_result:
+                logger.info(f"Successfully researched {tool_name} via web search")
+                return research_result
+            else:
+                logger.warning(f"Web search returned no results for: {tool_name}")
+                
+        except ImportError:
+            logger.warning("Web research module not available, using fallback")
+        except Exception as e:
+            logger.error(f"Web research module failed: {str(e)}")
+        
+        # Fallback: Generate comprehensive template based on common patterns
+        research_info = f"""
+Research for {tool_name.title()} (Template-based Analysis):
+
+- API Integration: Most enterprise software like {tool_name.title()} provides REST API or SOAP API for integration
+- Authentication: Typically requires API keys, OAuth 2.0 tokens, or basic authentication credentials
+- Base URL: Check official documentation for the correct API base URL/endpoint
+- Required Credentials: May need API key, client ID/secret, access tokens, or username/password
+- Permission Scopes: Often requires specific permission levels for reading/writing data
+- Data Formats: Modern APIs usually use JSON, legacy systems may use XML
+- Rate Limits: Check documentation for API call limits and throttling policies
+- SDK/Libraries: Look for official SDKs in Python, JavaScript, or other languages
+- Webhooks: May support webhooks for real-time data updates and notifications
+- Documentation: Search for official API documentation, developer guides, or integration tutorials
+
+Note: This is template-based analysis. For specific technical requirements, consult the official {tool_name.title()} documentation or contact their support team.
+"""
+        
+        logger.info(f"Generated research template for: {tool_name}")
+        return research_info.strip()
+        
+    except Exception as e:
+        logger.error(f"Web search failed: {str(e)}")
+        return ""
 
 def _generate_basic_todos_fallback(blueprint_data: dict) -> list:
     """

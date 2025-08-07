@@ -90,29 +90,24 @@ class AmiOrchestrator:
         ami_logger.info(f"Starting input collection phase for: {skeleton.agent_name}")
         
         try:
-            # Convert skeleton to blueprint format first (needed for todo generation)
-            blueprint_data = await self._convert_skeleton_to_blueprint(skeleton)
+            # Use existing agent and blueprint IDs from conversation (don't create duplicates!)
+            agent_id = conversation.get("agent_id")
+            blueprint_id = conversation.get("blueprint_id")
             
-            # Create agent with blueprint but don't complete yet
-            agent_id, blueprint_id = await self._create_agent_with_blueprint(
-                name=skeleton.agent_name,
-                description=skeleton.agent_purpose,
-                blueprint_data=blueprint_data,
-                org_id=conversation["org_id"],
-                user_id=conversation["user_id"],
-                conversation_id=request.conversation_id
-            )
+            if not agent_id or not blueprint_id:
+                ami_logger.error("Missing agent_id or blueprint_id in conversation state")
+                raise Exception("Missing agent or blueprint information from previous steps")
             
-            # Generate input collection todos
+            ami_logger.info(f"Using existing agent {agent_id} and blueprint {blueprint_id}")
+            
+            # Generate input collection todos for the existing blueprint
             ami_logger.info("🔧 Generating input collection todos...")
             todos_result = await self._generate_implementation_todos(
                 blueprint_id=blueprint_id,
                 user_id=conversation["user_id"]
             )
             
-            # Update conversation with agent/blueprint IDs for next phase
-            conversation["agent_id"] = agent_id
-            conversation["blueprint_id"] = blueprint_id
+            # Keep conversation state with existing IDs
             self.collaborative_creator.conversations[request.conversation_id] = conversation
             
             # Return response with todos for input collection
