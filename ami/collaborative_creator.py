@@ -564,6 +564,39 @@ ACTIONABLE GUIDANCE:
         except Exception as e:
             collab_logger.warning(f"Conversation research failed: {e}")
             return ""  # Fail gracefully - conversation continues without research
+
+    def _extract_and_parse_json(self, response_text: str, context: str = "response") -> dict:
+        """
+        Simplified JSON extraction - LLM should return clean JSON now!
+        """
+        import json
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            collab_logger.error(f"LLM returned invalid JSON for {context}: {e}")
+            collab_logger.error(f"Raw response: {response_text}")
+            return None
+
+    def _generate_contextual_refinement_suggestions(self, requirements: dict, agent_name: str) -> list:
+        """
+        Generate contextual suggestions for agent refinement
+        """
+        suggestions = []
+        
+        # Add suggestions based on agent requirements
+        if requirements:
+            if 'integrations' in requirements:
+                suggestions.append("Consider additional integrations for complete workflow")
+            if 'tasks' in requirements:
+                suggestions.append("Define more specific tasks and responsibilities")
+        
+        # Default suggestions
+        suggestions.extend([
+            f"Preview {agent_name}'s full blueprint configuration",
+            f"Test and approve the agent for production use"
+        ])
+        
+        return suggestions
     
     async def _create_agent_from_conversation(self, request: CollaborativeAgentRequest, conversation_context: list) -> CollaborativeAgentResponse:
         """Create agent when user approves after conversation"""
