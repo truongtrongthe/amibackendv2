@@ -567,15 +567,41 @@ ACTIONABLE GUIDANCE:
 
     def _extract_and_parse_json(self, response_text: str, context: str = "response") -> dict:
         """
-        Simplified JSON extraction - LLM should return clean JSON now!
+        Extract and parse JSON from LLM response, handling markdown code blocks
         """
         import json
+        import re
+        
+        # First try direct parsing (for clean JSON)
         try:
             return json.loads(response_text)
-        except json.JSONDecodeError as e:
-            collab_logger.error(f"LLM returned invalid JSON for {context}: {e}")
-            collab_logger.error(f"Raw response: {response_text}")
-            return None
+        except json.JSONDecodeError:
+            pass
+        
+        # Try extracting from markdown code blocks
+        try:
+            # Look for ```json...``` or ```...``` blocks
+            json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', response_text, re.DOTALL)
+            if json_match:
+                json_content = json_match.group(1).strip()
+                return json.loads(json_content)
+        except json.JSONDecodeError:
+            pass
+        
+        # Final attempt: look for JSON-like content between { and }
+        try:
+            # Find the first { and last } to extract JSON object
+            start = response_text.find('{')
+            end = response_text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_content = response_text[start:end+1]
+                return json.loads(json_content)
+        except json.JSONDecodeError:
+            pass
+        
+        collab_logger.error(f"LLM returned unparseable JSON for {context}")
+        collab_logger.error(f"Raw response: {response_text}")
+        return None
 
     def _generate_contextual_refinement_suggestions(self, requirements: dict, agent_name: str) -> list:
         """
@@ -597,6 +623,98 @@ ACTIONABLE GUIDANCE:
         ])
         
         return suggestions
+
+    def _generate_change_deltas(self, original_blueprint: dict, updated_blueprint: dict) -> dict:
+        """
+        Generate change deltas to help frontend highlight what changed
+        """
+        deltas = {
+            "added": {},
+            "modified": {},
+            "removed": {}
+        }
+        
+        # Input validation
+        if original_blueprint is None or updated_blueprint is None:
+            collab_logger.warning("🔄 One of the blueprints is None, returning empty deltas")
+            return deltas
+        
+        try:
+            # Compare tasks
+            original_tasks = original_blueprint.get("capabilities", {}).get("tasks", [])
+            updated_tasks = updated_blueprint.get("capabilities", {}).get("tasks", [])
+            
+            # Find added tasks
+            original_task_names = {task.get("task", "") for task in original_tasks if isinstance(task, dict)}
+            added_tasks = []
+            for i, task in enumerate(updated_tasks):
+                if isinstance(task, dict) and task.get("task", "") not in original_task_names:
+                    added_tasks.append({
+                        "task": task.get("task", ""),
+                        "description": task.get("description", ""),
+                        "position": i
+                    })
+            
+            if added_tasks:
+                deltas["added"]["tasks"] = added_tasks
+            
+            # Compare tools
+            original_tools = original_blueprint.get("capabilities", {}).get("tools", [])
+            updated_tools = updated_blueprint.get("capabilities", {}).get("tools", [])
+            
+            # Find added tools
+            original_tool_set = set(original_tools) if isinstance(original_tools, list) else set()
+            updated_tool_set = set(updated_tools) if isinstance(updated_tools, list) else set()
+            added_tools = list(updated_tool_set - original_tool_set)
+            
+            if added_tools:
+                deltas["added"]["tools"] = added_tools
+            
+            # Compare integrations
+            original_integrations = original_blueprint.get("capabilities", {}).get("integrations", [])
+            updated_integrations = updated_blueprint.get("capabilities", {}).get("integrations", [])
+            
+            original_integration_names = {
+                integration.get("tool", "") if isinstance(integration, dict) else str(integration)
+                for integration in original_integrations
+            }
+            
+            added_integrations = []
+            for integration in updated_integrations:
+                integration_name = integration.get("tool", "") if isinstance(integration, dict) else str(integration)
+                if integration_name not in original_integration_names:
+                    added_integrations.append(integration)
+            
+            if added_integrations:
+                deltas["added"]["integrations"] = added_integrations
+            
+            # Compare knowledge sources
+            original_knowledge = original_blueprint.get("capabilities", {}).get("knowledge_sources", [])
+            updated_knowledge = updated_blueprint.get("capabilities", {}).get("knowledge_sources", [])
+            
+            original_knowledge_domains = {
+                ks.get("domain", "") if isinstance(ks, dict) else str(ks)
+                for ks in original_knowledge
+            }
+            
+            added_knowledge = []
+            for ks in updated_knowledge:
+                domain = ks.get("domain", "") if isinstance(ks, dict) else str(ks)
+                if domain not in original_knowledge_domains:
+                    added_knowledge.append(ks)
+            
+            if added_knowledge:
+                deltas["added"]["knowledge_sources"] = added_knowledge
+                
+        except Exception as e:
+            collab_logger.error(f"❌ Exception in _generate_change_deltas: {e}")
+            collab_logger.error(f"❌ Exception type: {type(e)}")
+            import traceback
+            collab_logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            # Return empty deltas on error
+            pass
+        
+        return deltas
     
     async def _create_agent_from_conversation(self, request: CollaborativeAgentRequest, conversation_context: list) -> CollaborativeAgentResponse:
         """Create agent when user approves after conversation"""
@@ -1566,7 +1684,24 @@ Analyze the conversation and create agent requirements now.
             # Update the blueprint in the database
             from orgdb import update_blueprint, update_agent
             updated_blueprint_data = refinement_result["updated_blueprint"]
+            
+            collab_logger.info(f"🔄 Attempting to update blueprint {blueprint.id} in database...")
+            collab_logger.info(f"🔄 Updated blueprint data keys: {list(updated_blueprint_data.keys())}")
+            
+            # Generate change deltas for frontend highlighting
+            try:
+                change_deltas = self._generate_change_deltas(blueprint.agent_blueprint, updated_blueprint_data)
+                collab_logger.info(f"🔄 Generated change deltas: {len(change_deltas.get('added', {}))} additions, {len(change_deltas.get('modified', {}))} modifications")
+            except Exception as e:
+                collab_logger.error(f"❌ Failed to generate change deltas: {e}")
+                change_deltas = {"added": {}, "modified": {}, "removed": {}}  # Fallback empty deltas
+            
             updated_blueprint = update_blueprint(blueprint.id, updated_blueprint_data)
+            
+            if updated_blueprint:
+                collab_logger.info(f"✅ Blueprint database update successful: {blueprint.id}")
+            else:
+                collab_logger.error(f"❌ Blueprint database update FAILED: {blueprint.id}")
             
             if updated_blueprint:
                 collab_logger.info(f"Blueprint updated successfully: {blueprint.id}")
@@ -1629,21 +1764,27 @@ Analyze the conversation and create agent requirements now.
                     }
                 )
                 
+                # Log the response data for debugging
+                response_data = {
+                    "agent_id": agent.id,
+                    "blueprint_id": blueprint.id,
+                    "changes_made": changes_made,
+                    "change_deltas": change_deltas,  # Frontend highlighting support
+                    "updated_blueprint": updated_blueprint_data,
+                    "context": context,  # Include rich context
+                    "completeness_improvement": updated_completeness - completeness_score,
+                    "suggested_next_steps": suggested_next_steps,
+                    "conversation_aware": True  # Flag indicating this response is conversation-aware
+                }
+                
+                collab_logger.info(f"🔄 Response includes change deltas: {bool(response_data.get('change_deltas'))}")
+                
                 return CollaborativeAgentResponse(
                     success=True,
                     conversation_id=request.conversation_id,
                     current_state=ConversationState.SKELETON_REVIEW,
                     ami_message=ami_message,
-                    data={
-                        "agent_id": agent.id,
-                        "blueprint_id": blueprint.id,  
-                        "changes_made": changes_made,
-                        "updated_blueprint": updated_blueprint_data,
-                        "context": context,  # Include rich context
-                        "completeness_improvement": updated_completeness - completeness_score,
-                        "suggested_next_steps": suggested_next_steps,
-                        "conversation_aware": True  # Flag indicating this response is conversation-aware
-                    },
+                    data=response_data,
                     next_actions=[
                         f"Compile {agent_name}",
                         "Make more refinements",

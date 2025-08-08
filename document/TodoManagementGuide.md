@@ -21,7 +21,7 @@ PUT    /org-agents/{agent_id}/blueprints/{blueprint_id}/todos/{todo_id}
 
 ### Steps 7-8: Final Compilation
 ```bash
-POST /ami/collaborate  # Compile request → completed agent
+POST /org-agents/{agent_id}/blueprints/{blueprint_id}/compile  # Direct compilation endpoint
 ```
 
 ---
@@ -128,6 +128,28 @@ POST /org-agents/{agent_id}/blueprints/{blueprint_id}/todos/{todo_id}/collect-in
 ### 4. Validate Inputs (Optional)
 ```http
 POST /org-agents/{agent_id}/blueprints/{blueprint_id}/todos/{todo_id}/validate-inputs
+```
+
+### 5. Compile Blueprint (Final Step)
+```http
+POST /org-agents/{agent_id}/blueprints/{blueprint_id}/compile
+```
+
+**Request:** No body required
+
+**Response:**
+```json
+{
+  "blueprint": {
+    "id": "blueprint_id",
+    "compilation_status": "compiled",
+    "compiled_system_prompt": "Your complete agent system prompt...",
+    "compiled_at": "2025-01-08T19:26:46.313346+00:00"
+  },
+  "compilation_status": "compiled",
+  "compiled_system_prompt": "Your complete agent system prompt...",
+  "message": "Blueprint compiled successfully"
+}
 ```
 
 ---
@@ -345,7 +367,7 @@ function checkCompilationReadiness(agentId, blueprintId) {
 
 #### B. Trigger Compilation
 ```javascript
-async function compileAgent(conversationId, agentId, blueprintId, conversationHistory) {
+async function compileAgent(agentId, blueprintId, authToken) {
   // First check if ready
   const isReady = await checkCompilationReadiness(agentId, blueprintId);
   
@@ -354,31 +376,27 @@ async function compileAgent(conversationId, agentId, blueprintId, conversationHi
     return;
   }
 
-  // Proceed with compilation
-  const response = await fetch('/ami/collaborate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      user_input: "Compile my agent - all todos are completed",
-      current_state: "building",
-      conversation_id: conversationId,
-      agent_id: agentId,
-      blueprint_id: blueprintId,
-      conversation_history: conversationHistory,
-      llm_provider: "openai",
-      model: "gpt-4o"
-    })
-  });
+  try {
+    // Use the dedicated compilation endpoint
+    const response = await fetch(`/org-agents/${agentId}/blueprints/${blueprintId}/compile`, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+      }
+    });
 
-  const result = await response.json();
-  
-  if (result.current_state === "completed") {
-    showSuccess("🎉 Agent compiled successfully!");
-    navigateToAgentDashboard(agentId);
-  } else if (result.current_state === "building") {
-    // Still has pending todos
-    showWarning(result.ami_message);
-    refreshTodoList();
+    const result = await response.json();
+    
+    if (response.ok) {
+      showSuccess("🎉 Agent compiled successfully!");
+      showSuccess(`Compilation Status: ${result.compilation_status}`);
+      navigateToAgentDashboard(agentId);
+    } else {
+      showError(`Compilation failed: ${result.detail}`);
+    }
+  } catch (error) {
+    showError(`Network error during compilation: ${error.message}`);
   }
 }
 ```
@@ -540,7 +558,8 @@ function AgentTodoManager({ conversationId, agentId, blueprintId, conversationHi
   };
 
   const handleCompile = () => {
-    compileAgent(conversationId, agentId, blueprintId, conversationHistory);
+    const authToken = getAuthToken(); // Get from your auth system
+    compileAgent(agentId, blueprintId, authToken);
   };
 
   if (loading) return <LoadingSpinner />;

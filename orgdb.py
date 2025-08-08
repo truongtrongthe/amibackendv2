@@ -1229,8 +1229,8 @@ def compile_blueprint(blueprint_id: str, compiled_by: str) -> Optional[AgentBlue
             if blueprint.todos_completion_status != "completed":
                 raise ValueError(f"Cannot compile blueprint: implementation todos are not completed. Status: {blueprint.todos_completion_status}")
         
-        # Check compilation status
-        if blueprint.compilation_status not in ["draft", "ready_for_compilation"]:
+        # Check compilation status - allow re-compilation of already compiled blueprints
+        if blueprint.compilation_status not in ["draft", "ready_for_compilation", "compiled"]:
             raise ValueError(f"Blueprint cannot be compiled in status: {blueprint.compilation_status}")
         
         # Get collected inputs from todos
@@ -1811,10 +1811,9 @@ Use this research to generate more accurate and specific todos that reflect prop
         
         response_text = response.content[0].text
         
-        # Parse the structured response
-        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(0))
+        # Parse the structured response using robust JSON extraction
+        data = _extract_and_parse_json_from_response(response_text)
+        if data:
             
             # Log Ami's reasoning and web search impact
             reasoning = data.get('reasoning', 'No reasoning provided')
@@ -1843,6 +1842,44 @@ Use this research to generate more accurate and specific todos that reflect prop
     except Exception as e:
         logger.error(f"Ami LLM reasoning failed: {str(e)}")
         raise
+
+def _extract_and_parse_json_from_response(response_text: str) -> dict:
+    """
+    Extract and parse JSON from LLM response, handling markdown code blocks and malformed JSON
+    """
+    import json
+    import re
+    
+    # First try direct parsing (for clean JSON)
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try extracting from markdown code blocks
+    try:
+        # Look for ```json...``` or ```...``` blocks
+        json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', response_text, re.DOTALL)
+        if json_match:
+            json_content = json_match.group(1).strip()
+            return json.loads(json_content)
+    except json.JSONDecodeError:
+        pass
+    
+    # Final attempt: look for JSON-like content between { and }
+    try:
+        # Find the first { and last } to extract JSON object
+        start = response_text.find('{')
+        end = response_text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            json_content = response_text[start:end+1]
+            return json.loads(json_content)
+    except json.JSONDecodeError:
+        pass
+    
+    logger.error(f"❌ LLM returned unparseable JSON in todo generation")
+    logger.error(f"❌ Raw response: {response_text}")
+    return None
 
 def _identify_important_terms(blueprint_data: dict) -> list:
     """
@@ -2395,10 +2432,20 @@ def update_blueprint(blueprint_id: str, updated_blueprint_data: dict) -> Optiona
         Updated AgentBlueprint object if successful, None otherwise
     """
     try:
+        logger.info(f"🔄 [DB] Updating blueprint {blueprint_id} in Supabase...")
+        logger.info(f"🔄 [DB] Blueprint data size: {len(str(updated_blueprint_data))} chars")
+        
         response = supabase.table("agent_blueprints").update({
             "agent_blueprint": updated_blueprint_data
             # Note: updated_at column doesn't exist yet - run migration to add it
         }).eq("id", blueprint_id).execute()
+        
+        logger.info(f"🔄 [DB] Supabase response: {len(response.data) if response.data else 0} records")
+        
+        if response.data and len(response.data) > 0:
+            logger.info(f"✅ [DB] Blueprint {blueprint_id} updated successfully")
+        else:
+            logger.error(f"❌ [DB] Blueprint {blueprint_id} update returned no data")
         
         if response.data and len(response.data) > 0:
             blueprint_data = response.data[0]
